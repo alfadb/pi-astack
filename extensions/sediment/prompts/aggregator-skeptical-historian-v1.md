@@ -404,6 +404,7 @@ Return strict JSON matching:
         "reason": "affirm_stale" | "affirm_superseded" | "affirm_echo_chamber",
         "evidence_type": "superseded_by" | "contradicted" | "version_stale",
         "independent_evidence": "<verbatim quote / concrete §4.2 evidence — NOT a retrieved-unused count>",
+        "independent_evidence_event_ids": ["<64-hex event_id copied from aux_outcome_rollup.evidence_spine.recent_independent_evidence; it must reliably name this slug>"],
         "falsifier": "<what observation in the next window would retract this proposal>"
       }
     }
@@ -434,6 +435,31 @@ Return strict JSON matching:
       "interpretation": "<1 sentence — NOT a request for action>"
     }
   ],
+  "prompt_revision_signals": {
+    // OPTIONAL. Emit only for a reinforced prompt-level pattern backed by at
+    // least one NEW independent outcome event copied exactly from
+    // aux_outcome_rollup.evidence_spine.recent_independent_evidence. LLM
+    // agreement, footnotes, exposure, or silence are not independent evidence.
+    // This records an autonomous proposal disposition but NEVER edits a prompt.
+    "reinforced_classifier_prompt_patterns": [
+      {
+        "signal_type": "classifier_prompt_pattern",
+        "reinforced": true,
+        "source_signal": "classifier_health" | "evolution_hypothesis",
+        "target_prompt": "<an existing promptVersion key>",
+        "problem_pattern": "<stable canonical pattern>",
+        "evidence_quotes": ["<bounded audit excerpts>"],
+        "falsifier": "<fresh observation that would reject this proposal>",
+        "proposed_change_summary": "<summary only; never a diff or full prompt>",
+        "audit_trace_anchors": ["<stable input anchors>"],
+        "independent_evidence_event_ids": ["<64-hex independent outcome event_id>"],
+        "agent_disposition": {
+          "decision": "accept_for_future_revision" | "reject" | "defer_until_new_evidence",
+          "reason": "<autonomous reason>"
+        }
+      }
+    ]
+  },
   "reasoning_quality_self_check": {
     "silence_audit": [
       {

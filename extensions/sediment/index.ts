@@ -70,6 +70,7 @@ import type { RuleDraft } from "./rule-writer";
 import { replayMultiviewPending, type ReplayBatchResult } from "./multiview-staging-replay";
 import { relevantEntriesForCurator } from "./curator";
 import { appendRuleOutcomeEdgeRows, hasRuleOutcomeEdgeRow, collectOutcomes, writeOutcomeLedger, readProjectOutcomeRows, summarizeEntryActivity, sanitizeSlug, type OutcomeRow, type RuleOutcomeEdgeRow } from "./outcome-collector";
+import { appendNaturalCorrectionOutcomeEvidence, collectAndAppendOutcomeEvidence } from "./outcome-evidence";
 import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
@@ -2652,6 +2653,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // errored assistant messages can contain partial footnotes/tool traces;
       // keep those out of ADR 0026 weighting.
       if (sessionId) {
+        // RM-OUTCOME-001: append immutable L1 exposure/action/outcome/re-judge
+        // events first. The legacy outcome ledger below remains a compatibility
+        // read model; footnotes, silence, and exposure never gain lifecycle
+        // authority from either path.
+        const spine = await collectAndAppendOutcomeEvidence({
+          abrainHome,
+          projectRoot: cwd,
+          sessionId,
+          turnId: getCurrentAnchor()?.turn_id ?? "unknown",
+          branch,
+        }).catch((error) => ({ exposures: [], outcomes: [], rejudges: [], errors: [error instanceof Error ? error.message : String(error)] }));
+        if (spine.errors.length > 0) {
+          appendAudit(cwd, {
+            operation: "outcome_evidence_spine_error",
+            lane: "diagnostic",
+            session_id: sessionId,
+            errors: spine.errors.slice(0, 5),
+          }).catch(() => {});
+        }
         const outcome = collectOutcomes(branch, sessionId);
         if (outcome.rows.length > 0) {
           // R4' delta contract: the live path rescans the FULL session branch
@@ -3400,6 +3420,17 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               advisories: health.advisories,
             });
           }).catch(() => {});
+          if (cr.signal?.signal_found && cr.signal.user_quote) {
+            await appendNaturalCorrectionOutcomeEvidence({
+              abrainHome,
+              projectRoot: cwd,
+              sessionId,
+              turnId: getCurrentAnchor()?.turn_id ?? "unknown",
+              targetSlug: cr.signal.target_entry_slug,
+              userQuote: cr.signal.user_quote,
+              provenance: cr.signal.provenance,
+            }).catch(() => undefined);
+          }
           return cr;
         })());
         // Don't await — tracked in sessionPassTrackedWork so the outer queue

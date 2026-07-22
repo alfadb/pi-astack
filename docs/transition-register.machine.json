@@ -1067,15 +1067,18 @@
       "authorization_status": "authorized",
       "entered": "2026-07-08",
       "review_by": "2026-07-24",
-      "current": "missing-used observation bucket 已拆为 per-source ratio、自述与 derived attribution；等待真实 reinforced proposal disposition。",
+      "current": "RM-OUTCOME-001 已建立 L1 exposure/action-outcome/rejudge evidence spine；unknown attribution 显式保留。lifecycle proposal 按 slug 消费 attributed independent evidence；prompt-revision proposal 额外要求 index proposal_id 精确绑定稳定 proposal_id，普通无 proposal_id 的 outcome 安全 defer；历史人审行迁移为自治终态或 defer_until_new_evidence。",
       "exit": [
-        "per-source ratio 与 derived attribution 稳定可解释",
-        "真实 reinforced pattern 生成 proposal 并完成 operator disposition"
+        "test/lint/build、workflow/tool terminal result、git revert/rewrite 与自然纠正的独立来源可通过 L1/index 稳定重放",
+        "unknown attribution 不伪造 memory join，非独立 self-report/footnote/exposure/沉默不触发 proposal authority",
+        "prompt-revision 仅由匹配 proposal_id 的 attributed independent evidence 解锁/重开，错误或缺失 proposal_id 不能解锁",
+        "真实 production command、自治 rejudge 与机器可读 dossier 的 L1/index 一致性完成验证"
       ],
       "evidence": [
-        "outcome-ledger",
-        "2026-07-08 outcome unknown triage",
-        "prompt-revision-proposals sidecar"
+        "L1 outcome-evidence events",
+        "outcome-evidence-index derived projection",
+        "RM-OUTCOME-001 production evidence dossier",
+        "prompt-revision-proposals and entry-lifecycle-proposals smoke"
       ],
       "owner": "sediment-outcome",
       "consumer": [
@@ -1084,7 +1087,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "medium",
-      "next_action": "跟踪 per-source ratio，等待真实 reinforced pattern 与 operator disposition。"
+      "next_action": "持续观察真实 unknown/corroborated 分布；lifecycle 仅由 attributed independent evidence 重开；prompt-revision 仅由 proposal-bound attributed independent evidence 重开；保留未来专用 producer 扩展点，不自动改 prompt，不建立 human/operator queue。"
     },
     {
       "id": "memory.p7-low-frequency-three-arm-gate",

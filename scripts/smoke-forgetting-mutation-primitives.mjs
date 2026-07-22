@@ -19,17 +19,36 @@ fs.mkdirSync(pr, { recursive: true });
 
 const elp = await jiti.import("../extensions/sediment/entry-lifecycle-proposals.ts");
 const et = await jiti.import("../extensions/sediment/entry-telemetry.ts");
+const oe = await jiti.import("../extensions/sediment/outcome-evidence.ts");
 
 // ---- markProposalsExecuted: 幂等 + status 穿读路径(P0-1) ----
+// Lifecycle archive proposals require independently verified attributed L1
+// outcome evidence. Seed real resolver-valid fixtures (not synthetic hex only).
+async function seedEvidence(slug) {
+  const seeded = await oe.appendAttributedIndependentOutcomeFixture({ projectRoot: pr, targetSlug: slug, producerNonce: `mutation-prim:${slug}` });
+  if (!seeded.ok || !seeded.eventId) throw new Error(`seed evidence failed for ${slug}: ${JSON.stringify(seeded)}`);
+  return seeded.eventId;
+}
+const evidenceA = await seedEvidence("decay-target-a");
+const evidenceB = await seedEvidence("decay-target-b");
 const promoted = [
-  { slug: "decay-target-a", kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: "entry X supersedes A", falsifier: "if X is invalid" } },
-  { slug: "decay-target-b", kind: "fact", lifecycle_proposal: { op: "archive", reason: "affirm_stale", independent_evidence: "B references removed API", falsifier: "if API still exists" } },
+  { slug: "decay-target-a", kind: "decision", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: "entry X supersedes A", independent_evidence_event_ids: [evidenceA], falsifier: "if X is invalid" } },
+  { slug: "decay-target-b", kind: "fact", lifecycle_proposal: { op: "archive", reason: "affirm_stale", independent_evidence: "B references removed API", independent_evidence_event_ids: [evidenceB], falsifier: "if API still exists" } },
 ];
 const appended = elp.appendLifecycleProposals({ projectRoot: pr, promoted });
 ok(appended.ok && appended.proposals_appended === 2, `append 2 pending archive proposals (got ${appended.proposals_appended})`);
 
+// Negative: no evidence → autonomous defer (production gate stays fail-closed).
+const deferred = elp.appendLifecycleProposals({
+  projectRoot: pr,
+  promoted: [{ slug: "no-evidence-target", kind: "fact", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: "claim only", independent_evidence_event_ids: [], falsifier: "if not" } }],
+});
+ok(deferred.ok && deferred.proposals_appended === 1, "no-evidence proposal appends as deferred");
+ok(elp.readLifecycleProposals(pr).find((r) => r.slug === "no-evidence-target")?.status === "deferred_until_new_evidence", "no-evidence proposal is deferred_until_new_evidence");
+
 let rows = elp.readLifecycleProposals(pr);
-ok(rows.length === 2 && rows.every((r) => r.status === "pending"), "read back → 2 pending");
+const pending = rows.filter((r) => r.status === "pending");
+ok(pending.length === 2 && pending.every((r) => ["decay-target-a", "decay-target-b"].includes(r.slug)), "read back → 2 pending evidence-backed archives");
 
 const marked = elp.markProposalsExecuted(pr, ["decay-target-a"]);
 ok(marked.ok && marked.updated === 1, `markProposalsExecuted([a]) → updated 1 (got ${marked.updated})`);

@@ -32,6 +32,7 @@ import { runAggregatorLlmPass, type PromptNativeOutput } from "./aggregator-llm"
 import { mergeEvolutionLedger, summarizeEvolutionLedger, type EvolutionLedgerSummary } from "./evolution-ledger";
 import { appendDecayDemoteProposals, appendLifecycleProposals } from "./entry-lifecycle-proposals";
 import { appendPromptRevisionProposals, buildPromptRevisionProposalsFromAggregatorSummary } from "./prompt-revision-proposals";
+import { summarizeOutcomeEvidenceSpine, type OutcomeEvidenceSpineSummary } from "./outcome-evidence";
 import { writeDecayShadow, auditDecayAssessments } from "./decay-shadow";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { readEntryTelemetry } from "./entry-telemetry";
@@ -344,6 +345,8 @@ export interface AggregatorSummary {
     source_counts: Record<string, number>;
     missing_used: OutcomeMissingUsedSummary;
     derived_attribution: OutcomeDerivedAttributionSummary;
+    /** RM-OUTCOME-001 L1 evidence spine. Legacy rows above remain compatibility telemetry only. */
+    evidence_spine: OutcomeEvidenceSpineSummary;
   };
   staging: {
     total_files: number;
@@ -635,7 +638,7 @@ function emptyDerivedAttributionSummary(): OutcomeDerivedAttributionSummary {
   };
 }
 
-function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): AggregatorSummary["outcome"] {
+function summarizeOutcomes(rows: LedgerOutcomeRow[], cutoffMs: number): Omit<AggregatorSummary["outcome"], "evidence_spine"> {
   const activityRows = rows.filter((row) => inWindow(row.ts, cutoffMs));
   const windowRows = activityRows.filter(isOutcomeSummaryRow);
   const activityBuckets = emptyOutcomeActivityBuckets();
@@ -1470,7 +1473,10 @@ export function runSedimentAggregator(options: RunAggregatorOptions): Aggregator
   const cutoffMs = now.getTime() - windowDays * 24 * 60 * 60 * 1000;
   const audit = summarizeAudit(options.projectRoot, cutoffMs, Math.max(1, Math.floor(options.auditRowLimit ?? DEFAULT_AUDIT_ROW_LIMIT)));
   const outcomeRows = readProjectOutcomeRows(options.projectRoot, Math.max(1, Math.floor(options.outcomeRowLimit ?? DEFAULT_OUTCOME_ROW_LIMIT)));
-  const outcome = summarizeOutcomes(outcomeRows, cutoffMs);
+  const outcome = {
+    ...summarizeOutcomes(outcomeRows, cutoffMs),
+    evidence_spine: summarizeOutcomeEvidenceSpine(options.projectRoot, cutoffMs),
+  };
   const staging = summarizeStaging(now);
   const search = summarizeSearch(options.projectRoot, cutoffMs, Math.max(1, Math.floor(options.searchMetricsRowLimit ?? DEFAULT_SEARCH_METRICS_ROW_LIMIT)));
   const classifierHealth = summarizeClassifierHealth(options.projectRoot);
@@ -1662,9 +1668,9 @@ export async function runAndWriteSedimentAggregator(options: RunAggregatorOption
       now: options.now,
     });
 
-    // R5 prompt revision dossier sidecar (observation/audit only): package
-    // explicit reinforced classifier prompt patterns into a human-review
-    // proposal ledger. No prompt file mutation, no promptVersion bump, no UI.
+    // Prompt revision read model: package explicit reinforced classifier
+    // patterns into autonomous terminal/defer dispositions. No prompt file
+    // mutation, promptVersion bump, human/operator queue, or UI.
     const promptRevisionProposals = buildPromptRevisionProposalsFromAggregatorSummary(
       enrichedSummary,
       options.settings,

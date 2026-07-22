@@ -108,13 +108,31 @@ try {
   check("entry file exists on disk", typeof file === "string" && fs.existsSync(file), String(file));
   check("entry file is active", fs.readFileSync(file, "utf-8").includes("status: active"));
 
-  // 2) Queue a real pending archive proposal (truth-change driven, op=archive).
+  // 2) Queue a real pending archive proposal (truth-change driven, op=archive)
+  // with independently verified attributed L1 outcome evidence.
+  const oe = jiti(path.join(repoRoot, "extensions/sediment/outcome-evidence.ts"));
+  const seeded = await oe.appendAttributedIndependentOutcomeFixture({
+    projectRoot,
+    targetSlug: slug,
+    producerNonce: `demote-e2e:${slug}`,
+  });
+  check("seeded attributed independent outcome evidence", seeded.ok && !!seeded.eventId, JSON.stringify(seeded));
   elp.appendLifecycleProposals({
     projectRoot,
-    promoted: [{ slug, kind: "fact", lifecycle_proposal: { op: "archive", reason: "affirm_superseded", independent_evidence: `${slug} superseded by a newer fact`, falsifier: "if still cited" } }],
+    promoted: [{
+      slug,
+      kind: "fact",
+      lifecycle_proposal: {
+        op: "archive",
+        reason: "affirm_superseded",
+        independent_evidence: `${slug} superseded by a newer fact`,
+        independent_evidence_event_ids: [seeded.eventId],
+        falsifier: "if still cited",
+      },
+    }],
   });
   const queued = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === slug);
-  check("proposal is pending", queued?.status === "pending");
+  check("proposal is pending", queued?.status === "pending", JSON.stringify(queued));
   check("proposal carries join fields", !!queued?.proposal_id && queued.evidence_source === "aggregator_promoted_advisory" && queued.evidence_type === "superseded_by", JSON.stringify(queued));
 
   // 3) Run the REAL executor with the REAL archiveEntry closure.

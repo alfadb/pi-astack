@@ -138,13 +138,13 @@ console.log("canonical-path P1-S3 foundation smoke");
 await check("registry loads, validates, freezes, and declares only approved schema names", () => {
   const registry = l1.loadL1SchemaRegistry();
   assert(registry.schema_version === "l1-schema-role-registry/v2", `unexpected registry schema: ${registry.schema_version}`);
-  assert(registry.entries.length === 15, `expected 15 entries, got ${registry.entries.length}`);
+  assert(registry.entries.length === 16, `expected 16 entries, got ${registry.entries.length}`);
   assert(Object.isFrozen(registry) && Object.isFrozen(registry.entries), "registry is mutable");
   const active = l1.lookupL1SchemaRoles(registry, { phase: "active" });
   const legacy = l1.lookupL1SchemaRoles(registry, { phase: "legacy_read_only" });
   const future = l1.lookupL1SchemaRoles(registry, { phase: "phase_disabled" });
   const definedInactive = l1.lookupL1SchemaRoles(registry, { phase: "defined_inactive" });
-  assert(active.length === 4, `expected 4 active entries, got ${active.length}`);
+  assert(active.length === 5, `expected 5 active entries, got ${active.length}`);
   assert(legacy.length === 2, `expected 2 legacy-read-only entries, got ${legacy.length}`);
   assert(future.length === 6, `expected 6 future entries, got ${future.length}`);
   assert(definedInactive.length === 3, `expected 3 defined-inactive entries, got ${definedInactive.length}`);
@@ -188,6 +188,7 @@ await check("registry queries roles by envelope/body/domain/role/producer/event 
     [{ domain: "constraint", role: "evidence" }, "constraint-evidence-envelope/v1"],
     [{ producer: "sediment.constraint-compiler" }, "constraint-projection-envelope/v1"],
     [{ eventType: "knowledge_entry_observed" }, "knowledge-evidence-envelope/v1"],
+    [{ eventType: "action_outcome_observed" }, "outcome-evidence-envelope/v1"],
   ];
   for (const [query, expected] of queries) {
     const matches = l1.lookupL1SchemaRoles(registry, query);

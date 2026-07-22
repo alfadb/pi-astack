@@ -28,6 +28,7 @@ const elp = await jiti.import("../extensions/sediment/entry-lifecycle-proposals.
 const et = await jiti.import("../extensions/sediment/entry-telemetry.ts");
 const ar = await jiti.import("../extensions/sediment/archive-reactivation.ts");
 const rm = await jiti.import("../extensions/sediment/resurrection-rate-monitor.ts");
+const oe = await jiti.import("../extensions/sediment/outcome-evidence.ts");
 
 const NOW = Date.now();
 const DAY = 86_400_000;
@@ -56,11 +57,44 @@ seedWarm();
 }
 
 const settings = (enabled = true) => ({ forgetting: { enabled, instrumentation: false } });
-const prop = (slug, kind = "fact", reason = "affirm_superseded") => ({ slug, kind, lifecycle_proposal: { op: "archive", reason, independent_evidence: `${slug} ${reason}`, falsifier: "if not" } });
+const evidenceBySlug = new Map();
+async function seedEvidence(slug) {
+  if (evidenceBySlug.has(slug)) return evidenceBySlug.get(slug);
+  const seeded = await oe.appendAttributedIndependentOutcomeFixture({ projectRoot: pr, targetSlug: slug, producerNonce: `forgetting-real:${slug}:${evidenceBySlug.size}` });
+  if (!seeded.ok || !seeded.eventId) throw new Error(`seed evidence failed for ${slug}: ${JSON.stringify(seeded)}`);
+  evidenceBySlug.set(slug, seeded.eventId);
+  return seeded.eventId;
+}
+const prop = (slug, kind = "fact", reason = "affirm_superseded", eventIds = []) => ({
+  slug,
+  kind,
+  lifecycle_proposal: {
+    op: "archive",
+    reason,
+    independent_evidence: `${slug} ${reason}`,
+    independent_evidence_event_ids: eventIds,
+    falsifier: "if not",
+  },
+});
 const mkArchive = (result) => { const calls = []; const targets = []; return { calls, targets, fn: async (t) => { calls.push(t.slug); targets.push(t); return typeof result === "function" ? result(t) : result; } }; };
 const statusOf = (slug) => { const r = elp.readLifecycleProposals(pr).find((x) => x.slug === slug); return r ? r.status : "absent"; };
 const readJsonl = (file) => fs.existsSync(file) ? fs.readFileSync(file, "utf-8").trim().split(/\n/).filter(Boolean).map((line) => JSON.parse(line)) : [];
-const appendRawProposal = (row) => fs.appendFileSync(elp.entryLifecycleProposalsPath(), JSON.stringify({ schema_version: 1, ts: new Date(NOW).toISOString(), project_root: path.resolve(pr), op: "archive", status: "pending", disposition: "execution_ready", expected_status: "active", independent_evidence: "fixture", falsifier: "fixture", ...row }) + "\n", "utf-8");
+const appendRawProposal = (row) => {
+  const ids = Array.isArray(row.independent_evidence_event_ids) ? row.independent_evidence_event_ids : [];
+  fs.appendFileSync(elp.entryLifecycleProposalsPath(), JSON.stringify({
+    schema_version: 1,
+    ts: new Date(NOW).toISOString(),
+    project_root: path.resolve(pr),
+    op: "archive",
+    status: "pending",
+    disposition: "execution_ready",
+    expected_status: "active",
+    independent_evidence: "fixture",
+    falsifier: "fixture",
+    independent_evidence_event_ids: ids,
+    ...row,
+  }) + "\n", "utf-8");
+};
 const writeDurableKind = (slug, kind, status = "active") => fs.writeFileSync(path.join(pr, `${slug}.md`), `---\nid: project:test:${slug}\nkind: ${kind}\nstatus: ${status}\n---\n# ${slug}\n`, "utf-8");
 const writeDistributionEntry = (slug, kind, status) => {
   const dir = path.join(tmp, "projects", "kind-dist");
@@ -68,7 +102,9 @@ const writeDistributionEntry = (slug, kind, status) => {
   fs.writeFileSync(path.join(dir, `${slug}.md`), `---\nid: project:dist:${slug}\nkind: ${kind}\nstatus: ${status}\n---\n# ${slug}\n`, "utf-8");
 };
 
-elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop("decay-b")] });
+const idA = await seedEvidence("decay-a");
+const idB = await seedEvidence("decay-b");
+elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a", "fact", "affirm_superseded", [idA]), prop("decay-b", "fact", "affirm_superseded", [idB])] });
 
 // ---- 1) no archiveEntry → dry_run, 零 mutation ----
 {
@@ -108,7 +144,8 @@ elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-a"), prop
 }
 
 // ---- 4) CAS reject → ABANDON(标 executed, 不留 pending)----
-elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-c")] });
+const idC = await seedEvidence("decay-c");
+elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-c", "fact", "affirm_superseded", [idC])] });
 {
   const arc = mkArchive({ ok: false, status: "active", error: "status_precondition_failed", rejected: true });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -132,11 +169,12 @@ elp.appendSupersededFrontmatterProposals({
   ok(arc.targets[0]?.expected_status === "superseded", "E1 passes expected_status=superseded to archiveEntry");
   ok(arc.targets[0]?.proposal_id && arc.targets[0]?.evidence_source === "frontmatter_superseded" && arc.targets[0]?.evidence_type === "superseded_by", "E1 archive target carries frontmatter proposal/evidence join fields");
   ok(statusOf("sup-a") === "executed", "E1 proposal marked executed");
-  ok(statusOf("sup-b") === "pending", "E2 review_required proposal remains pending and unexecuted");
+  ok(statusOf("sup-b") === "deferred_until_new_evidence", "E2 evidence-deferred proposal remains deferred and unexecuted");
 }
 
 // ---- 6) executor gates: lane_required + invalid/mismatched durable kind + enabled=false strict-off ----
-appendRawProposal({ slug: "lane-a", kind: "anti-pattern", reason: "affirm_stale", evidence_source: "aggregator_promoted_advisory", evidence_type: "version_stale", evidence_key: "lane-a" });
+const idLane = await seedEvidence("lane-a");
+appendRawProposal({ slug: "lane-a", kind: "anti-pattern", reason: "affirm_stale", evidence_source: "aggregator_promoted_advisory", evidence_type: "version_stale", evidence_key: "lane-a", independent_evidence_event_ids: [idLane] });
 {
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -146,7 +184,8 @@ appendRawProposal({ slug: "lane-a", kind: "anti-pattern", reason: "affirm_stale"
   ok(statusOf("lane-a") === "pending", "lane_required proposal remains pending");
 }
 writeDurableKind("unknown-a", "emerging-kind");
-appendRawProposal({ slug: "unknown-a", kind: "emerging-kind", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "unknown-a" });
+const idUnknown = await seedEvidence("unknown-a");
+appendRawProposal({ slug: "unknown-a", kind: "emerging-kind", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "unknown-a", independent_evidence_event_ids: [idUnknown] });
 {
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -157,7 +196,8 @@ appendRawProposal({ slug: "unknown-a", kind: "emerging-kind", reason: "affirm_su
   ok(statusOf("unknown-a") === "pending", "invalid durable kind proposal remains pending");
 }
 writeDurableKind("mismatch-a", "smell");
-appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "mismatch-a" });
+const idMismatch = await seedEvidence("mismatch-a");
+appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded", evidence_source: "aggregator_promoted_advisory", evidence_type: "superseded_by", evidence_key: "mismatch-a", independent_evidence_event_ids: [idMismatch] });
 {
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -169,7 +209,8 @@ appendRawProposal({ slug: "mismatch-a", kind: "fact", reason: "affirm_superseded
 
 // ---- 6.5) decay writer -> executor: legacy repair, verified kind, and replay ----
 writeDurableKind("legacy-decay-a", "fact");
-appendRawProposal({ slug: "legacy-decay-a", kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: "legacy-decay-a" });
+const idLegacy = await seedEvidence("legacy-decay-a");
+appendRawProposal({ slug: "legacy-decay-a", kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: "legacy-decay-a", independent_evidence_event_ids: [idLegacy] });
 {
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -183,7 +224,10 @@ appendRawProposal({ slug: "legacy-decay-a", kind: "outcome_entry", reason: "affi
   ok(arc.calls.length === 0 && r.legacy_kind_compatibility?.repaired === 0 && r.legacy_kind_compatibility?.retired === 0, "legacy compatibility replay is idempotent after execution");
 }
 const unresolvedLegacySlugs = ["legacy-decay-missing-a", "legacy-decay-missing-b", "legacy-decay-missing-c", "legacy-decay-missing-d"];
-for (const slug of unresolvedLegacySlugs) appendRawProposal({ slug, kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: slug });
+for (const slug of unresolvedLegacySlugs) {
+  const id = await seedEvidence(slug);
+  appendRawProposal({ slug, kind: "outcome_entry", reason: "affirm_superseded", evidence_source: "decay", evidence_type: "superseded_by", evidence_key: slug, independent_evidence_event_ids: [id] });
+}
 {
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
@@ -204,23 +248,42 @@ for (const slug of unresolvedLegacySlugs) appendRawProposal({ slug, kind: "outco
 }
 writeDurableKind("legacy-decay-missing-a", "fact");
 {
+  // Terminal failed legacy rows are excluded from decay slug de-dupe, so a later
+  // verified decay proposal for the same slug can append once durable kind exists.
   const recovered = elp.appendDecayDemoteProposals({
     projectRoot: pr,
     now: new Date(NOW),
-    assessments: [{ slug: "legacy-decay-missing-a", decay_score: 0.9, would_demote: true, demote_evidence_type: "superseded_by", primary_driver: "supersede", falsifier: "new evidence restores freshness" }],
+    assessments: [{
+      slug: "legacy-decay-missing-a",
+      decay_score: 0.9,
+      would_demote: true,
+      demote_evidence_type: "superseded_by",
+      primary_driver: "supersede",
+      falsifier: "new evidence restores freshness",
+      independent_evidence_event_ids: [await seedEvidence("legacy-decay-missing-a")],
+    }],
   });
   const pending = elp.readLifecycleProposals(pr).filter((x) => x.slug === "legacy-decay-missing-a" && x.status === "pending");
   ok(recovered.proposals_appended === 1 && pending.length === 1 && pending[0]?.kind === "fact", "a terminal legacy row does not de-duplicate a later verified decay proposal");
 }
 writeDurableKind("fresh-decay-a", "smell");
 {
+  const freshId = await seedEvidence("fresh-decay-a");
   const writerResult = elp.appendDecayDemoteProposals({
     projectRoot: pr,
     now: new Date(NOW),
-    assessments: [{ slug: "fresh-decay-a", decay_score: 0.9, would_demote: true, demote_evidence_type: "superseded_by", primary_driver: "supersede", falsifier: "new evidence restores freshness" }],
+    assessments: [{
+      slug: "fresh-decay-a",
+      decay_score: 0.9,
+      would_demote: true,
+      demote_evidence_type: "superseded_by",
+      primary_driver: "supersede",
+      falsifier: "new evidence restores freshness",
+      independent_evidence_event_ids: [freshId],
+    }],
   });
   const row = elp.readLifecycleProposals(pr).find((x) => x.slug === "fresh-decay-a");
-  ok(writerResult.proposals_appended === 1 && row?.kind === "smell", "decay writer emits the verified durable kind rather than outcome_entry");
+  ok(writerResult.proposals_appended === 1 && row?.kind === "smell" && row.status === "pending", "decay writer emits the verified durable kind rather than outcome_entry");
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(true), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(arc.calls.includes("fresh-decay-a") && r.demoted?.includes("fresh-decay-a") && statusOf("fresh-decay-a") === "executed", "verified decay kind passes unchanged through executor gates");
@@ -233,7 +296,8 @@ writeDurableKind("fresh-decay-a", "smell");
 {
   const auditBefore = readJsonl(fx.forgettingDryRunAuditPath()).length;
   const ledgerBefore = readJsonl(demoteLedger).length;
-  elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("disabled-a")] });
+  const idDisabled = await seedEvidence("disabled-a");
+  elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("disabled-a", "fact", "affirm_superseded", [idDisabled])] });
   const arc = mkArchive({ ok: true, status: "archived" });
   const r = await fx.runForgettingExecutor(pr, settings(false), { archiveEntry: arc.fn, activeCorpusSize: 1000 }, new Date(NOW));
   ok(r.enabled === false && r.reason === "forgetting_disabled" && arc.calls.length === 0, "enabled=false → executor strict-off");
@@ -243,7 +307,9 @@ writeDurableKind("fresh-decay-a", "smell");
 
 // ---- 7) 断路器 corpus_floor: plannedCount + fail-closed ----
 fs.rmSync(demoteLedger, { force: true });
-elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e"), prop("decay-f")] }); // 2 pending
+const idE = await seedEvidence("decay-e");
+const idF = await seedEvidence("decay-f");
+elp.appendLifecycleProposals({ projectRoot: pr, promoted: [prop("decay-e", "fact", "affirm_superseded", [idE]), prop("decay-f", "fact", "affirm_superseded", [idF])] }); // 2 pending
 {
   // active=51, planned=2 → 51-2=49 < 50 → trip(plannedCount 计入)
   const arc = mkArchive({ ok: true, status: "archived" });

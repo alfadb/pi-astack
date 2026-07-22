@@ -34,11 +34,12 @@ import { withFileLock, atomicWriteText } from "../_shared/sync-file-lock";
 import type { Jsonish, MemoryEntry, RelationEdge } from "../memory/types";
 import type { LifecycleProposal, PromotedAdvisory } from "./aggregator-llm";
 import { normalizeAssessment, type EntryDecayAssessment } from "./decay-shadow";
+import { resolveIndependentOutcomeEvidenceEventIds } from "./outcome-evidence";
 import { ENTRY_KINDS, type EntryKind } from "./validation";
 
 export type LifecycleProposalReason = LifecycleProposal["reason"] | "superseded_no_successor";
-export type LifecycleProposalStatus = "pending" | "executed" | "failed";
-export type LifecycleProposalDisposition = "execution_ready" | "review_required";
+export type LifecycleProposalStatus = "pending" | "executed" | "failed" | "deferred_until_new_evidence";
+export type LifecycleProposalDisposition = "execution_ready" | "defer_until_new_evidence";
 export type LifecycleProposalExpectedStatus = "active" | "superseded";
 export type LifecycleProposalEvidenceSource = "aggregator_promoted_advisory" | "frontmatter_superseded" | "decay";
 export type DurableKindSource = "canonical_frontmatter" | "project_frontmatter" | "project_root_frontmatter";
@@ -89,7 +90,9 @@ export interface EntryLifecycleProposalRow {
   evidence_type?: string;
   /** E1 successor target when known. */
   target_slug?: string;
-  /** Explicit marker for curator/manual review queues. */
+  /** Independent L1 outcome evidence required for aggregator-origin execution. */
+  independent_evidence_event_ids?: string[];
+  /** Historical marker retained only for migration audit; never creates a human queue. */
   review_required?: boolean;
   /** Structured audit for the bounded legacy decay kind compatibility repair. */
   kind_resolution?: LifecycleProposalKindResolution;
@@ -316,7 +319,11 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   const reason = validReason(r.reason);
   if (!projectRoot || !op || !reason) return null;
   const expected = r.expected_status === "superseded" ? "superseded" : r.expected_status === "active" ? "active" : undefined;
-  const disposition = r.disposition === "review_required" ? "review_required" : r.disposition === "execution_ready" ? "execution_ready" : undefined;
+  const requestedDisposition = r.disposition === "execution_ready"
+    ? "execution_ready"
+    : r.disposition === "defer_until_new_evidence" || r.disposition === "review_required"
+      ? "defer_until_new_evidence"
+      : undefined;
   const source = r.evidence_source === "frontmatter_superseded"
     ? "frontmatter_superseded"
     : r.evidence_source === "aggregator_promoted_advisory"
@@ -325,11 +332,26 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
         ? "decay"
         : undefined;
   const kindResolution = normalizeKindResolution(r.kind_resolution);
+  const slug = typeof r.slug === "string" && r.slug ? r.slug : undefined;
+  // LLM/aggregator-derived sources (including legacy undefined + decay) require
+  // independently verified attributed L1 outcome evidence. Durable frontmatter
+  // E1 keeps its deterministic execution_ready semantics.
+  const requiresIndependentEvidence = source === "aggregator_promoted_advisory" || source === "decay" || source === undefined;
+  const verifiedEvidenceIds = requiresIndependentEvidence
+    ? resolveIndependentOutcomeEvidenceEventIds(r.independent_evidence_event_ids, projectRoot, { targetSlug: slug, requireReliableAttribution: true })
+    : Array.isArray(r.independent_evidence_event_ids)
+      ? [...new Set(r.independent_evidence_event_ids.filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)))].sort()
+      : [];
+  const executionReady = requiresIndependentEvidence
+    ? op === "archive" && !!slug && verifiedEvidenceIds.length > 0
+    : requestedDisposition === "execution_ready";
+  const disposition: LifecycleProposalDisposition = executionReady ? "execution_ready" : "defer_until_new_evidence";
+  const terminalStatus = r.status === "executed" || r.status === "failed" ? r.status : undefined;
   const normalized: EntryLifecycleProposalRow = {
     schema_version: 1,
     ts: typeof r.ts === "string" ? r.ts : formatLocalIsoTimestamp(),
     project_root: projectRoot,
-    ...(typeof r.slug === "string" && r.slug ? { slug: r.slug } : {}),
+    ...(slug ? { slug } : {}),
     kind: typeof r.kind === "string" ? r.kind : "unknown",
     op,
     reason,
@@ -342,9 +364,15 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
     ...(typeof r.evidence_key === "string" && r.evidence_key ? { evidence_key: r.evidence_key } : {}),
     ...(typeof r.target_slug === "string" && r.target_slug ? { target_slug: r.target_slug } : {}),
     ...(typeof r.supersedes_proposal_id === "string" && r.supersedes_proposal_id ? { supersedes_proposal_id: r.supersedes_proposal_id } : {}),
+    ...(verifiedEvidenceIds.length ? { independent_evidence_event_ids: verifiedEvidenceIds } : {}),
     ...(r.review_required === true ? { review_required: true } : {}),
     ...(kindResolution ? { kind_resolution: kindResolution } : {}),
-    status: (r.status === "executed" || r.status === "failed") ? r.status : "pending",
+    status: terminalStatus
+      ?? (requiresIndependentEvidence && op !== "archive" && verifiedEvidenceIds.length > 0
+        ? "failed"
+        : executionReady
+          ? "pending"
+          : "deferred_until_new_evidence"),
   };
   normalized.evidence_type = typeof r.evidence_type === "string" && r.evidence_type ? r.evidence_type : lifecycleEvidenceType(normalized.reason, normalized.evidence_source, normalized.target_slug);
   normalized.proposal_id = typeof r.proposal_id === "string" && r.proposal_id ? r.proposal_id : stableProposalId(normalized);
@@ -391,23 +419,29 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
         .filter((row): row is EntryLifecycleProposalRow => !!row && row.evidence_source === "frontmatter_superseded" && row.disposition === "execution_ready" && row.expected_status === "superseded" && !!row.slug)
         .map((row) => row.slug as string));
       const supersededBySlug = new Map(existing
-        .filter((row) => row.status === "pending" && row.disposition === "review_required" && row.evidence_source === "frontmatter_superseded" && !!row.slug)
+        .filter((row) => row.status === "deferred_until_new_evidence" && row.disposition === "defer_until_new_evidence" && row.evidence_source === "frontmatter_superseded" && !!row.slug)
         .map((row) => [row.slug as string, row.proposal_id as string]));
-      const reconciledExisting = e1Slugs.size === 0 ? existing : existing.map((row) => {
-        if (row.status === "pending" && row.disposition === "review_required" && row.evidence_source === "frontmatter_superseded" && row.slug && e1Slugs.has(row.slug)) {
+      let reconciledExisting = e1Slugs.size === 0 ? existing : existing.map((row) => {
+        if (row.status === "deferred_until_new_evidence" && row.disposition === "defer_until_new_evidence" && row.evidence_source === "frontmatter_superseded" && row.slug && e1Slugs.has(row.slug)) {
           return { ...row, status: "failed" as const, message: `${row.message ?? ""} superseded_by_edge_observed; replaced_by_E1` };
         }
         return row;
       });
+      // Deferred rows are intentionally excluded so a later pass with verified
+      // independent evidence can reopen the same identity instead of being
+      // swallowed by slug de-duplication.
       const archiveSlugs = options.dedupeArchiveBySlug
-        ? new Set(reconciledExisting.filter((row) => row.project_root === pr && row.op === "archive" && row.status !== "failed" && !!row.slug).map((row) => row.slug as string))
+        ? new Set(reconciledExisting.filter((row) => row.project_root === pr && row.op === "archive" && row.status !== "failed" && row.status !== "deferred_until_new_evidence" && !!row.slug).map((row) => row.slug as string))
         : undefined;
       // A terminal legacy decay row must not suppress a later assessment after
       // the entry finally gains a verifiable durable kind.
       const seen = new Set(reconciledExisting
         .filter((row) => !(options.dedupeArchiveBySlug && row.evidence_source === "decay" && row.status === "failed"))
         .map(proposalIdentity));
+      const existingByIdentity = new Map(reconciledExisting.map((row, index) => [proposalIdentity(row), index]));
       const newRows: EntryLifecycleProposalRow[] = [];
+      const reopenedSlugs: string[] = [];
+      let reopened = 0;
       let limited = 0;
       let skippedDuplicateSlug = 0;
       for (const row of rows) {
@@ -420,7 +454,23 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
           }
         }
         const id = proposalIdentity(normalized);
-        if (seen.has(id)) continue;
+        if (seen.has(id)) {
+          const existingIndex = existingByIdentity.get(id);
+          const previous = existingIndex === undefined ? undefined : reconciledExisting[existingIndex];
+          if (previous?.status === "deferred_until_new_evidence" && normalized.status === "pending" && normalized.disposition === "execution_ready") {
+            reconciledExisting = reconciledExisting.map((item, index) => index === existingIndex
+              ? {
+                  ...normalized,
+                  proposal_id: previous.proposal_id,
+                  independent_evidence_event_ids: [...new Set([...(previous.independent_evidence_event_ids ?? []), ...(normalized.independent_evidence_event_ids ?? [])])].sort(),
+                  message: `${normalized.message ?? previous.message ?? ""} reopened_by_new_independent_outcome_evidence`.trim(),
+                }
+              : item);
+            reopened++;
+            if (normalized.slug) reopenedSlugs.push(normalized.slug);
+          }
+          continue;
+        }
         if (newRows.length >= maxAppend) {
           limited++;
           continue;
@@ -434,14 +484,14 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
         newRows.push(normalized);
       }
       const changedExisting = reconciledExisting.some((row, idx) => row !== existing[idx]);
-      const appendedSlugs = newRows.map((row) => row.slug).filter((slug): slug is string => typeof slug === "string" && slug.length > 0);
+      const appendedSlugs = [...reopenedSlugs, ...newRows.map((row) => row.slug).filter((slug): slug is string => typeof slug === "string" && slug.length > 0)];
       if (newRows.length === 0 && !changedExisting) {
         return { proposals_appended: 0, rows_total: existing.length, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
       }
       const allRows = [...reconciledExisting, ...newRows].slice(-PROPOSALS_MAX_ROWS);
       const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
       atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
-      return { proposals_appended: newRows.length, rows_total: allRows.length, written: true, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
+      return { proposals_appended: newRows.length + reopened, rows_total: allRows.length, written: true, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
     });
     if (!locked.ok) return { ok: false, written: false, proposals_appended: 0, rows_total: 0, error: "proposal_lock_contention", limited: 0, skipped_duplicate_slug: 0, appended_slugs: [] };
     return {
@@ -508,9 +558,12 @@ export function reconcileLegacyDecayProposalKinds(options: ReconcileLegacyDecayP
       const existing = loaded.rows
         .map(normalizeRow)
         .filter((row): row is EntryLifecycleProposalRow => row !== null);
+      // Kind repair is orthogonal to the independent-evidence gate: deferred
+      // decay rows with the historical outcome_entry defect are still eligible
+      // so a later evidence reopen inherits a verified durable kind.
       const candidates = existing.filter((row) =>
         row.project_root === projectRoot &&
-        row.status === "pending" &&
+        (row.status === "pending" || row.status === "deferred_until_new_evidence") &&
         row.op === "archive" &&
         row.evidence_source === "decay" &&
         row.kind === "outcome_entry" &&
@@ -593,6 +646,11 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
   const rows: EntryLifecycleProposalRow[] = carrying.map((a) => {
     const p = a.lifecycle_proposal as LifecycleProposal;
     const evidence = clip(p.independent_evidence);
+    const evidenceEventIds = resolveIndependentOutcomeEvidenceEventIds(p.independent_evidence_event_ids, projectRoot, {
+      targetSlug: a.slug,
+      requireReliableAttribution: true,
+    });
+    const executionReady = p.op === "archive" && evidenceEventIds.length > 0 && typeof a.slug === "string" && !!a.slug;
     return {
       schema_version: 1,
       ts,
@@ -605,11 +663,16 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
       falsifier: clip(p.falsifier),
       ...(a.message ? { message: clip(a.message) } : {}),
       expected_status: "active",
-      disposition: "execution_ready",
+      disposition: executionReady ? "execution_ready" : "defer_until_new_evidence",
       evidence_source: "aggregator_promoted_advisory",
       evidence_key: `${a.slug ?? ""}:${a.kind}:${p.op}:${p.reason}:${evidence}`,
       ...(p.evidence_type ? { evidence_type: p.evidence_type } : {}),
-      status: "pending",
+      ...(evidenceEventIds.length > 0 ? { independent_evidence_event_ids: evidenceEventIds } : {}),
+      status: executionReady
+        ? "pending"
+        : evidenceEventIds.length > 0 && p.op !== "archive"
+          ? "failed"
+          : "deferred_until_new_evidence",
     };
   });
   return lifecycleAppendResult(appendRows(projectRoot, rows));
@@ -645,16 +708,22 @@ export function appendDecayDemoteProposals(options: AppendDecayDemoteProposalsOp
   const maxPerRun = Math.max(0, Math.min(DECAY_COMPAT_MAX_PER_RUN, Math.floor(options.maxPerRun ?? DECAY_COMPAT_MAX_PER_RUN)));
   const legacyKindCompatibility = reconcileLegacyDecayProposalKinds({ projectRoot, now });
   const durableKinds = durableKindResolutions(projectRoot);
-  const normalized = (Array.isArray(options.assessments) ? options.assessments : [])
-    .map(normalizeAssessment)
-    .filter((a): a is EntryDecayAssessment => !!a && a.would_demote === true && a.demote_evidence_type !== null);
-  const eligible: Array<{ assessment: EntryDecayAssessment; kind: EntryKind }> = [];
+  const eligible: Array<{ assessment: EntryDecayAssessment; kind: EntryKind; evidenceEventIds: string[] }> = [];
   let skippedMissingDurableKind = 0;
   let skippedInvalidDurableKind = 0;
-  for (const assessment of normalized) {
+  for (const raw of Array.isArray(options.assessments) ? options.assessments : []) {
+    const assessment = normalizeAssessment(raw);
+    if (!assessment || assessment.would_demote !== true || assessment.demote_evidence_type === null) continue;
     const resolution = durableKinds.get(normalizeRelationTarget(assessment.slug)) ?? { reason: "missing_durable_entry" as const };
     if (resolution.kind) {
-      eligible.push({ assessment, kind: resolution.kind });
+      const rawIds = raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).independent_evidence_event_ids)
+        ? (raw as Record<string, unknown>).independent_evidence_event_ids
+        : [];
+      const evidenceEventIds = resolveIndependentOutcomeEvidenceEventIds(rawIds, projectRoot, {
+        targetSlug: assessment.slug,
+        requireReliableAttribution: true,
+      });
+      eligible.push({ assessment, kind: resolution.kind, evidenceEventIds });
     } else if (resolution.reason === "missing_durable_entry" || resolution.reason === "missing_durable_kind") {
       skippedMissingDurableKind++;
     } else {
@@ -662,24 +731,28 @@ export function appendDecayDemoteProposals(options: AppendDecayDemoteProposalsOp
     }
   }
 
-  const rows: EntryLifecycleProposalRow[] = eligible.map(({ assessment: a, kind }) => ({
-    schema_version: 1,
-    ts,
-    project_root: projectRoot,
-    slug: a.slug,
-    kind,
-    op: "archive",
-    reason: decayReason(a),
-    independent_evidence: clip(decayEvidenceText(a)),
-    falsifier: clip(a.falsifier || "newer evidence retracts the decay assessment or the entry is revalidated as current"),
-    message: clip(`decay-shadow would_demote=true for ${a.slug}`),
-    expected_status: "active",
-    disposition: "execution_ready",
-    evidence_source: "decay",
-    evidence_key: `decay:${a.slug}:${a.demote_evidence_type}:${a.primary_driver}`,
-    evidence_type: a.demote_evidence_type ?? undefined,
-    status: "pending",
-  }));
+  const rows: EntryLifecycleProposalRow[] = eligible.map(({ assessment: a, kind, evidenceEventIds }) => {
+    const executionReady = evidenceEventIds.length > 0;
+    return {
+      schema_version: 1,
+      ts,
+      project_root: projectRoot,
+      slug: a.slug,
+      kind,
+      op: "archive" as const,
+      reason: decayReason(a),
+      independent_evidence: clip(decayEvidenceText(a)),
+      falsifier: clip(a.falsifier || "newer evidence retracts the decay assessment or the entry is revalidated as current"),
+      message: clip(`decay-shadow would_demote=true for ${a.slug}`),
+      expected_status: "active" as const,
+      disposition: executionReady ? "execution_ready" as const : "defer_until_new_evidence" as const,
+      evidence_source: "decay" as const,
+      evidence_key: `decay:${a.slug}:${a.demote_evidence_type}:${a.primary_driver}`,
+      evidence_type: a.demote_evidence_type ?? undefined,
+      ...(evidenceEventIds.length ? { independent_evidence_event_ids: evidenceEventIds } : {}),
+      status: executionReady ? "pending" as const : "deferred_until_new_evidence" as const,
+    };
+  });
   const appended = appendRows(projectRoot, rows, { dedupeArchiveBySlug: true, maxAppend: maxPerRun });
   return {
     ...appended,
@@ -787,11 +860,11 @@ export function appendSupersededFrontmatterProposals(options: AppendSupersededFr
         falsifier: "curator confirms a valid successor edge or restores the entry to an active standing",
         message: `curator_task=confirm_superseded_successor_or_restore_status; slug=${entry.slug}`,
         expected_status: "superseded",
-        disposition: "review_required",
+        disposition: "defer_until_new_evidence",
         evidence_source: "frontmatter_superseded",
         evidence_key: `E2:${entry.slug}:no_successor`,
         review_required: true,
-        status: "pending",
+        status: "deferred_until_new_evidence",
       });
     }
   }

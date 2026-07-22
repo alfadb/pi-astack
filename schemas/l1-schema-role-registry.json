@@ -27,6 +27,26 @@
       "body_domain_path": "intent.domain_hint"
     },
     {
+      "envelope_schema": "outcome-evidence-envelope/v1",
+      "body_schema": "outcome-evidence-event/v1",
+      "domain": "knowledge",
+      "role": "evidence",
+      "phase": "active",
+      "write_enabled": true,
+      "fold_eligible": false,
+      "event_types": [
+        "memory_exposure_observed",
+        "action_outcome_observed",
+        "natural_correction_observed",
+        "outcome_rejudge_recorded",
+        "proposal_disposition_recorded"
+      ],
+      "producers": [
+        "sediment.outcome-evidence-writer"
+      ],
+      "body_domain_path": "intent.domain_hint"
+    },
+    {
       "envelope_schema": "constraint-evidence-envelope/v1",
       "body_schema": "constraint-evidence-event/v1",
       "domain": "constraint",

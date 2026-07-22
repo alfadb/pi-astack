@@ -28,6 +28,16 @@ const {
   markProposalsExecuted,
   readLifecycleProposals,
 } = await jiti.import(path.join(repoRoot, "extensions/sediment/entry-lifecycle-proposals.ts"));
+const oe = await jiti.import(path.join(repoRoot, "extensions/sediment/outcome-evidence.ts"));
+const seedEvidence = async (projectRoot, slug) => {
+  const seeded = await oe.appendAttributedIndependentOutcomeFixture({
+    projectRoot,
+    targetSlug: slug,
+    producerNonce: `decay-bridge:${projectRoot}:${slug}`,
+  });
+  if (!seeded.ok || !seeded.eventId) throw new Error(`seed failed for ${slug}: ${JSON.stringify(seeded)}`);
+  return seeded.eventId;
+};
 
 let fails = 0;
 const ok = (cond, msg, detail = "") => {
@@ -66,18 +76,30 @@ try {
     "aggregator decay_proposals summary exposes append ok/error",
   );
 
+  // Without independent L1 outcome evidence, decay proposals must autonomous-defer.
+  const deferredOnly = appendDecayDemoteProposals({
+    projectRoot: projectA,
+    now,
+    assessments: [assess("old-superseded", "superseded_by")],
+  });
+  ok(deferredOnly.ok && deferredOnly.proposals_appended === 1, "decay without L1 evidence still appends", JSON.stringify(deferredOnly));
+  ok(readLifecycleProposals(projectA)[0]?.status === "deferred_until_new_evidence", "decay without evidence is deferred_until_new_evidence");
+
+  const idSup = await seedEvidence(projectA, "old-superseded");
+  const idStale = await seedEvidence(projectA, "stale-version");
   const first = appendDecayDemoteProposals({
     projectRoot: projectA,
     now,
     assessments: [
-      assess("old-superseded", "superseded_by"),
-      assess("stale-version", "version_stale", { decay_score: 0.74 }),
+      assess("old-superseded", "superseded_by", { independent_evidence_event_ids: [idSup] }),
+      assess("stale-version", "version_stale", { decay_score: 0.74, independent_evidence_event_ids: [idStale] }),
       assess("usage-only", null, { primary_driver: "disuse" }),
       { slug: "false-positive", decay_score: 0.9, would_demote: false, demote_evidence_type: "contradicted", primary_driver: "contradiction" },
       { slug: "", decay_score: 0.9, would_demote: true, demote_evidence_type: "superseded_by" },
     ],
   });
-  ok(first.ok && first.proposals_appended === 2, "truth-change-backed decay assessments append two proposals", JSON.stringify(first));
+  // first deferred row reopens with evidence for old-superseded; stale is new.
+  ok(first.ok && first.proposals_appended === 2, "truth-change-backed decay assessments append/reopen with verified evidence", JSON.stringify(first));
   ok(first.source === "decay" && first.eligible === 2 && first.limited === 0, "result carries decay audit counts", JSON.stringify(first));
 
   const rows = readLifecycleProposals(projectA);
@@ -87,7 +109,7 @@ try {
   ok(sup?.op === "archive" && sup.reason === "affirm_superseded" && sup.status === "pending" && sup.kind === "fact", "superseded_by maps to a pending archive with verified fact kind", JSON.stringify(sup));
   ok(stale?.reason === "affirm_stale" && stale.evidence_type === "version_stale" && stale.kind === "smell", "version_stale maps to affirm_stale with verified smell kind", JSON.stringify(stale));
   ok(sup?.evidence_source === "decay" && sup.evidence_key === "decay:old-superseded:superseded_by:supersede", "proposal carries source=decay and stable evidence_key", JSON.stringify(sup));
-  ok(sup?.expected_status === "active" && sup.disposition === "execution_ready", "executor gates remain active CAS + execution_ready", JSON.stringify(sup));
+  ok(sup?.expected_status === "active" && sup.disposition === "execution_ready" && sup.independent_evidence_event_ids?.includes(idSup), "executor gates remain active CAS + execution_ready with verified evidence", JSON.stringify(sup));
   ok(typeof sup?.independent_evidence === "string" && sup.independent_evidence.includes("decay_score=0.820") && sup.independent_evidence.includes("primary_driver=supersede"), "decay audit evidence is carried in independent_evidence", JSON.stringify(sup));
 
   const missingKind = appendDecayDemoteProposals({ projectRoot: projectA, now, assessments: [assess("missing-durable-kind")] });
@@ -105,18 +127,21 @@ try {
   );
 
   for (const slug of ["a", "b", "c", "d", "e"]) writeDurableEntry(projectB, `cap-${slug}`, "fact");
+  const capIds = {};
+  for (const slug of ["a", "b", "c", "d", "e"]) capIds[slug] = await seedEvidence(projectB, `cap-${slug}`);
   const capped = appendDecayDemoteProposals({
     projectRoot: projectB,
     now,
     maxPerRun: 99,
-    assessments: ["a", "b", "c", "d", "e"].map((slug) => assess(`cap-${slug}`, "contradicted", { primary_driver: "contradiction" })),
+    assessments: ["a", "b", "c", "d", "e"].map((slug) => assess(`cap-${slug}`, "contradicted", { primary_driver: "contradiction", independent_evidence_event_ids: [capIds[slug]] })),
   });
   const cappedRows = readLifecycleProposals(projectB);
   ok(capped.proposals_appended === 3 && capped.limited === 2 && capped.max_per_run === 3, "per-run cap clamps to three proposals", JSON.stringify(capped));
   ok(cappedRows.length === 3 && cappedRows.every((r) => r.evidence_source === "decay"), "only capped rows land for the project", JSON.stringify(cappedRows));
 
   writeDurableEntry(projectC, "processed-once", "fact");
-  const once = appendDecayDemoteProposals({ projectRoot: projectC, now, assessments: [assess("processed-once")] });
+  const onceId = await seedEvidence(projectC, "processed-once");
+  const once = appendDecayDemoteProposals({ projectRoot: projectC, now, assessments: [assess("processed-once", "superseded_by", { independent_evidence_event_ids: [onceId] })] });
   ok(once.proposals_appended === 1, "setup executed-proposal duplicate test", JSON.stringify(once));
   const marked = markProposalsExecuted(projectC, ["processed-once"]);
   ok(marked.ok && marked.updated === 1, "setup proposal marked executed", JSON.stringify(marked));

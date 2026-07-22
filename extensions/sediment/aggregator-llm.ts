@@ -59,6 +59,8 @@ export interface LifecycleProposal {
   /** §4.2 INDEPENDENT evidence (user correction / contradiction by a newer entry /
    *  version-domain staleness / reviewer content mismatch) — NEVER retrieved-unused alone. */
   independent_evidence: string;
+  /** Content-addressed L1 outcome events selected from the aggregator input. */
+  independent_evidence_event_ids?: string[];
   falsifier: string;
 }
 
@@ -131,6 +133,25 @@ export interface PromptNativeOutput {
    *  decay 评估列表;**保留 raw**(不规范化/不强制 §4.2)供下游 audit 捕获 prompt
    *  违规, normalize 在 writeDecayShadow 写时做。prompt 未产出(forgetting.enabled off)时缺失。 */
   entry_decay_assessments?: Record<string, unknown>[];
+  /** Reinforced prompt-level patterns. These are proposal inputs only and never mutate prompts. */
+  prompt_revision_signals?: {
+    reinforced_classifier_prompt_patterns: Array<{
+      signal_type: "classifier_prompt_pattern";
+      reinforced: true;
+      source_signal: "classifier_health" | "evolution_hypothesis";
+      target_prompt: string;
+      problem_pattern: string;
+      evidence_quotes: string[];
+      falsifier: string;
+      proposed_change_summary: string;
+      audit_trace_anchors: string[];
+      independent_evidence_event_ids?: string[];
+      agent_disposition?: {
+        decision: "accept_for_future_revision" | "reject" | "defer_until_new_evidence";
+        reason: string;
+      };
+    }>;
+  };
 }
 
 /**
@@ -361,10 +382,11 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
     const evidenceType = p.evidence_type === "superseded_by" || p.evidence_type === "contradicted" || p.evidence_type === "version_stale" ? p.evidence_type : undefined;
     if (p.evidence_type !== undefined && !evidenceType) return undefined;
     const ev = typeof p.independent_evidence === "string" ? p.independent_evidence.trim() : "";
+    const eventIds = asArray<unknown>(p.independent_evidence_event_ids).filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id));
     const fal = typeof p.falsifier === "string" ? p.falsifier.trim() : "";
     if (!op || !reason || !ev || !fal) return undefined;
     if (op === "archive" && reason === "affirm_stale" && !evidenceType) return undefined;
-    return { op, reason, ...(evidenceType ? { evidence_type: evidenceType } : {}), independent_evidence: ev, falsifier: fal };
+    return { op, reason, ...(evidenceType ? { evidence_type: evidenceType } : {}), independent_evidence: ev, ...(eventIds.length ? { independent_evidence_event_ids: [...new Set(eventIds)].sort() } : {}), falsifier: fal };
   };
   const promoted = asArray<Record<string, unknown>>(parsed.promoted_advisories).map((a): PromotedAdvisory => {
     const proposal = parseLifecycleProposal(a.lifecycle_proposal);
@@ -420,6 +442,27 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
 
   // ADR 0031 Phase 1B: 容忍解析正交 decay 评估(保留 raw 供 audit;缺失 → 字段省略)。
   const entry_decay_assessments = asArray<Record<string, unknown>>(parsed.entry_decay_assessments);
+  const revisionEnvelope = parsed.prompt_revision_signals && typeof parsed.prompt_revision_signals === "object"
+    ? parsed.prompt_revision_signals as Record<string, unknown>
+    : undefined;
+  const revisionPatterns = revisionEnvelope
+    ? asArray<Record<string, unknown>>(revisionEnvelope.reinforced_classifier_prompt_patterns)
+      .filter((item) => item?.signal_type === "classifier_prompt_pattern" && item.reinforced === true)
+      .map((item) => ({
+        signal_type: "classifier_prompt_pattern" as const,
+        reinforced: true as const,
+        source_signal: item.source_signal === "evolution_hypothesis" ? "evolution_hypothesis" as const : "classifier_health" as const,
+        target_prompt: String(item.target_prompt ?? ""),
+        problem_pattern: String(item.problem_pattern ?? ""),
+        evidence_quotes: asArray<unknown>(item.evidence_quotes).filter((value): value is string => typeof value === "string"),
+        falsifier: String(item.falsifier ?? ""),
+        proposed_change_summary: String(item.proposed_change_summary ?? ""),
+        audit_trace_anchors: asArray<unknown>(item.audit_trace_anchors).filter((value): value is string => typeof value === "string"),
+        independent_evidence_event_ids: asArray<unknown>(item.independent_evidence_event_ids).filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)),
+        ...(item.agent_disposition && typeof item.agent_disposition === "object" ? { agent_disposition: item.agent_disposition as { decision: "accept_for_future_revision" | "reject" | "defer_until_new_evidence"; reason: string } } : {}),
+      }))
+      .filter((item) => item.target_prompt && item.problem_pattern && item.evidence_quotes.length && item.falsifier && item.proposed_change_summary && item.audit_trace_anchors.length)
+    : [];
 
   return {
     promoted_advisories: promoted,
@@ -428,6 +471,7 @@ export function parseAggregatorOutput(rawText: string): PromptNativeOutput {
     trend_observations: trends,
     reasoning_quality_self_check,
     ...(entry_decay_assessments.length ? { entry_decay_assessments } : {}),
+    ...(revisionPatterns.length ? { prompt_revision_signals: { reinforced_classifier_prompt_patterns: revisionPatterns } } : {}),
   };
 }
 

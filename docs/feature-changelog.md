@@ -11,6 +11,26 @@ status: active
 
 ---
 
+## 2026-07-22 — accepted — RM-OUTCOME-001 outcome evidence spine
+
+### 变更
+
+建立内容寻址 L1 outcome evidence spine：`memory exposure -> action/outcome -> rejudge`，并派生可重建 index。独立真实来源限定为 test/lint/build、明确 workflow/tool terminal result、git revert/rewrite 与用户自然纠正；unknown 与 candidate 显式保留，不为 memory join 伪造因果。普通 LLM self-report、footnote、exposure 与沉默不具独立权威。lifecycle proposal 按 slug 消费 attributed independent evidence；prompt-revision 另需 index `proposal_id` 精确绑定稳定 proposal_id，否则安全 defer。历史人审行迁为自治终态或 `defer_until_new_evidence`，不建 human/operator queue、不自动改 prompt。真实 Path A 隔离重放写入 production dossier，供 L1/index 一致性验收。
+
+### 验收边界
+
+独立来源可稳定重放；unknown 不伪造 join；非独立信号不触发 rejudge。lifecycle 仅 attributed independent evidence 重开；prompt-revision 仅 proposal-bound attributed independent evidence 解锁。主要命令：`npm run smoke:outcome-evidence`、`npm run smoke:outcome-classifier-enrich`、`npm run dossier:outcome-evidence-production`。dossier 证明 L1/index 与自治 rejudge 一致，**不**宣称 attributed 生产闭环已完成。
+
+### 非目标
+
+不自动改 prompt；不建立人工标注/operator disposition 队列；不把 footnote/沉默/exposure 升格为独立 outcome；不夸大为 attributed 生产闭环。
+
+### 关联
+
+[Roadmap RM-OUTCOME-001](roadmap.md)；[Transition register](transition-register.md)；[production dossier](evidence/2026-07-22-rm-outcome-001-production.json)；[2026-07-08 outcome unknown triage](audits/2026-07-08-outcome-unknown-triage.md)。
+
+---
+
 ## 2026-07-22 — accepted — Retire dispatch_hub
 
 ### 变更

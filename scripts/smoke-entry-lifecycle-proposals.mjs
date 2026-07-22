@@ -10,7 +10,7 @@
  *   - demoted_signals are NOT a source (the function only takes `promoted`)
  *   - rows are project-scoped; appends accumulate across runs
  *   - corrupt sidecar lines tolerated
- *   - deterministic frontmatter bridge emits E1 execution_ready / E2 review_required
+ *   - deterministic frontmatter bridge emits E1 execution_ready / E2 defer_until_new_evidence
  *   - same slug + evidence/source replays are idempotent
  *   - HARD BOUNDARY (prompt §8): never imports writer/curator/multi-view; never
  *     writes durable markdown; proposal generation status is always "pending"
@@ -87,6 +87,17 @@ const syncFileLockStub = {
   atomicWriteText: (file, content) => fs.writeFileSync(file, content),
 };
 const validationStub = { ENTRY_KINDS: ["maxim", "decision", "anti-pattern", "pattern", "fact", "preference", "smell"] };
+const outcomeEvidenceStub = {
+  // Stub mirrors production requireReliableAttribution semantics: only hex IDs
+  // that look like fixture attributed outcomes are accepted. Real forgetting
+  // smokes seed actual L1 attributed events instead of relying on this stub.
+  resolveIndependentOutcomeEvidenceEventIds: (ids, _projectRoot, options = {}) => {
+    if (!Array.isArray(ids)) return [];
+    const hex = [...new Set(ids.filter((id) => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)))].sort();
+    if (options.requireReliableAttribution) return hex; // fixture IDs stand in for attributed events in this unit smoke
+    return hex;
+  },
+};
 const decayShadowStub = {
   normalizeAssessment: (raw) => {
     if (!raw || typeof raw !== "object" || !raw.slug) return null;
@@ -109,6 +120,7 @@ const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-pr
   ["../_shared/causal-anchor", causalAnchorStub],
   ["../_shared/sync-file-lock", syncFileLockStub],
   ["./decay-shadow", decayShadowStub],
+  ["./outcome-evidence", outcomeEvidenceStub],
   ["./validation", validationStub],
 ]));
 const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals, reconcileLegacyDecayProposalKinds, resolveDurableEntryKind } = mod;
@@ -117,11 +129,18 @@ function sha256File(file) {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 }
 
-function promotedWithProposal(slug, op, reason, evidence_type) {
+function promotedWithProposal(slug, op, reason, evidence_type, eventIds = [createHash("sha256").update(`outcome:${slug}`).digest("hex")]) {
   return {
     kind: "outcome_entry", severity: "warning", slug, message: `msg for ${slug}`,
     reasoning: "r", falsifier: "f", evidence_quotes: ["q"],
-    lifecycle_proposal: { op, reason, ...(evidence_type ? { evidence_type } : {}), independent_evidence: `superseded evidence for ${slug}`, falsifier: "would retract if X" },
+    lifecycle_proposal: {
+      op,
+      reason,
+      ...(evidence_type ? { evidence_type } : {}),
+      independent_evidence: `superseded evidence for ${slug}`,
+      independent_evidence_event_ids: eventIds,
+      falsifier: "would retract if X",
+    },
   };
 }
 function promotedNoProposal(slug) {
@@ -165,6 +184,19 @@ check("same promoted proposal replay is idempotent", () => {
   if (readLifecycleProposals(projectA).length !== before) throw new Error("duplicate replay changed row count");
 });
 
+check("aggregator proposal defers without independent L1 evidence and reopens on new joined evidence", () => {
+  const slug = "deferred-then-reopened";
+  const deferred = promotedWithProposal(slug, "archive", "affirm_superseded", "superseded_by", []);
+  const first = appendLifecycleProposals({ projectRoot: projectA, promoted: [deferred], now: new Date("2026-06-04T11:01:30Z") });
+  if (!first.ok || first.proposals_appended !== 1) throw new Error(`deferred append failed: ${JSON.stringify(first)}`);
+  let row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!row || row.status !== "deferred_until_new_evidence" || row.disposition !== "defer_until_new_evidence") throw new Error(`missing autonomous defer: ${JSON.stringify(row)}`);
+  const eventId = createHash("sha256").update(`outcome:${slug}`).digest("hex");
+  const second = appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal(slug, "archive", "affirm_superseded", "superseded_by", [eventId])], now: new Date("2026-06-04T11:01:31Z") });
+  row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!second.ok || second.proposals_appended !== 1 || !row || row.status !== "pending" || row.disposition !== "execution_ready" || !row.independent_evidence_event_ids?.includes(eventId)) throw new Error(`new evidence did not reopen: ${JSON.stringify({ second, row })}`);
+});
+
 check("appendLifecycleProposals preserves explicit evidence_type", () => {
   const r = appendLifecycleProposals({
     projectRoot: projectA,
@@ -187,7 +219,7 @@ check("promoted advisories without a proposal are never written", () => {
 check("appends accumulate across runs", () => {
   appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal("contested-entry", "contest", "affirm_echo_chamber")], now: new Date("2026-06-04T12:00:00Z") });
   const rows = readLifecycleProposals(projectA);
-  if (rows.length !== 3) throw new Error(`expected 3 accumulated rows, got ${rows.length}`);
+  if (rows.length !== 4) throw new Error(`expected 4 accumulated rows, got ${rows.length}`);
   if (!rows.some((r) => r.slug === "stale-entry") || !rows.some((r) => r.slug === "contradicted-entry") || !rows.some((r) => r.slug === "contested-entry")) throw new Error("accumulation lost a prior row");
 });
 
@@ -208,7 +240,7 @@ check("corrupt sidecar lines are tolerated and cleaned on next write", () => {
   if (fs.readFileSync(entryLifecycleProposalsPath(), "utf8").includes("{not valid json")) throw new Error("next write should rewrite clean JSONL");
 });
 
-check("frontmatter bridge emits E1 executable and E2 review-only proposals", () => {
+check("frontmatter bridge emits E1 executable and E2 evidence-deferred proposals", () => {
   const r = appendSupersededFrontmatterProposals({
     projectRoot: projectA,
     now: new Date("2026-06-04T13:00:00Z"),
@@ -226,8 +258,8 @@ check("frontmatter bridge emits E1 executable and E2 review-only proposals", () 
   const e2 = rows.find((x) => x.slug === "old-b");
   const self = rows.find((x) => x.slug === "old-c");
   if (!e1 || e1.disposition !== "execution_ready" || e1.expected_status !== "superseded" || e1.target_slug !== "new-a") throw new Error(`E1 wrong: ${JSON.stringify(e1)}`);
-  if (!e2 || e2.disposition !== "review_required" || e2.reason !== "superseded_no_successor" || e2.review_required !== true) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
-  if (!self || self.disposition !== "review_required") throw new Error(`self-edge must become E2 review: ${JSON.stringify(self)}`);
+  if (!e2 || e2.disposition !== "defer_until_new_evidence" || e2.status !== "deferred_until_new_evidence" || e2.reason !== "superseded_no_successor" || e2.review_required !== true) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
+  if (!self || self.disposition !== "defer_until_new_evidence" || self.status !== "deferred_until_new_evidence") throw new Error(`self-edge must become E2 evidence-defer: ${JSON.stringify(self)}`);
   if (!e1.proposal_id || e1.evidence_type !== "superseded_by") throw new Error(`E1 must carry proposal_id/evidence_type: ${JSON.stringify(e1)}`);
   if (!e2.proposal_id || e2.evidence_type !== "superseded_no_successor") throw new Error(`E2 must carry proposal_id/evidence_type: ${JSON.stringify(e2)}`);
   if (!self.proposal_id || self.evidence_type !== "superseded_no_successor") throw new Error(`self-edge E2 must carry proposal_id/evidence_type: ${JSON.stringify(self)}`);
@@ -242,7 +274,7 @@ check("frontmatter E1 replacing previous E2 records supersedes_proposal_id", () 
       { slug: "old-replace", kind: "decision", status: "superseded", frontmatter: { status: "superseded" }, relations: [] },
     ],
   });
-  const oldE2 = readLifecycleProposals(projectA).find((x) => x.slug === "old-replace" && x.disposition === "review_required");
+  const oldE2 = readLifecycleProposals(projectA).find((x) => x.slug === "old-replace" && x.disposition === "defer_until_new_evidence");
   if (!oldE2?.proposal_id || oldE2.evidence_type !== "superseded_no_successor") throw new Error(`setup E2 missing proposal_id/evidence_type: ${JSON.stringify(oldE2)}`);
   appendSupersededFrontmatterProposals({
     projectRoot: projectA,
@@ -252,7 +284,7 @@ check("frontmatter E1 replacing previous E2 records supersedes_proposal_id", () 
     ],
   });
   const rows = readLifecycleProposals(projectA).filter((x) => x.slug === "old-replace");
-  const failedE2 = rows.find((x) => x.disposition === "review_required");
+  const failedE2 = rows.find((x) => x.disposition === "defer_until_new_evidence");
   const newE1 = rows.find((x) => x.disposition === "execution_ready");
   if (failedE2?.status !== "failed") throw new Error(`previous E2 must be marked failed when E1 arrives: ${JSON.stringify(rows)}`);
   if (!newE1?.proposal_id || newE1.evidence_type !== "superseded_by") throw new Error(`replacement E1 missing proposal_id/evidence_type: ${JSON.stringify(newE1)}`);
