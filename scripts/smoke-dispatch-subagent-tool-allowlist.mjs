@@ -79,8 +79,8 @@ if (!defaultMatch) {
 }
 
 check(
-  /excludeTools:\s*\[\.\.\.DISABLED_SUBAGENT_TOOLS\]/.test(src),
-  "createAgentSession applies the disabled set through excludeTools",
+  /excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, heartbeatCtx\?\.delegation\)/.test(src),
+  "createAgentSession applies the context-sensitive disabled set through excludeTools",
 );
 check(
   !/\bpi\.getAllTools\s*\(/.test(src),
@@ -96,7 +96,7 @@ check(
 );
 const rejectionBlock = src.slice(registryIndex, promptIndex);
 check(
-  /await disposeSubAgentSession\(session\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
+  /await disposeSubAgentSession\(session, subAgentSm\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
   "registry rejection emits shutdown, disposes the target session, and returns tool_rejected",
 );
 check(
@@ -123,6 +123,39 @@ for (const name of ["dynamic_extension_tool", "lsp_diagnostics", "lsp_diagnostic
   const verdict = dispatch.validateTools(name);
   check(verdict.ok, `validateTools defers non-disabled name ${name} to target registry`);
 }
+const shadowDelegation = {
+  mode: "shadow",
+  maxDepth: 1,
+  maxDescendantRuns: 2,
+  maxConcurrentLeaves: 2,
+  maxAcceptedRuns: 2,
+  maxActiveExecutions: 2,
+  maxOpenSessions: 2,
+  maxRuntimeMs: 10_000,
+  allowedModels: ["openai/model-a"],
+  allowedTools: ["dispatch_agent", "read"],
+  allowedProfiles: ["read_only"],
+  allowsMutation: false,
+};
+check(
+  JSON.stringify(dispatch.resolveSubAgentExcludeTools(undefined)) === JSON.stringify(DISABLED),
+  "default SDK exclusion remains the exact five-tool deny set",
+);
+check(
+  JSON.stringify(dispatch.resolveSubAgentExcludeTools("read,dispatch_agent", shadowDelegation)) ===
+    JSON.stringify(["dispatch_parallel", "workflow_run", "prompt_user", "vault_release"]),
+  "legal shadow removes only the explicitly requested and capability-authorized dispatch tool",
+);
+check(
+  !dispatch.validateTools("read", shadowDelegation).ok &&
+    !dispatch.validateTools(undefined, shadowDelegation).ok &&
+    dispatch.resolveSubAgentExcludeTools("read", shadowDelegation).includes("dispatch_agent"),
+  "shadow delegation without an explicitly requested authorized dispatch tool is rejected before binding",
+);
+check(
+  JSON.stringify(dispatch.resolveSubAgentExcludeTools("read,dispatch_parallel", shadowDelegation)) === JSON.stringify(DISABLED),
+  "allowedTools mismatch keeps all five SDK exclusions",
+);
 
 console.log("\n  real target-session registry:");
 const dynamicNames = [

@@ -112,6 +112,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | [0039](./0039-constraint-pipeline-reset.md) | **Unified Evidence Architecture** | Accepted（2026-06-19，原 Constraint-only 版本 2026-06-18 accepted；统一架构修订经 4×T0 R2 全部 SIGN）；所有长期记忆先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view |
 | [0040](./0040-unified-proposition-evidence-model.md) | **Unified Proposition Evidence Model** | Accepted（2026-07-12）；统一 proposition/lifecycle SOT、no-migration cutover 与逐读取面授权边界 |
 | [0041](./0041-prompt-user-indefinite-wait.md) | **prompt_user 无期限等待** | Accepted（2026-07-13，用户直接决策）；仅 supersede ADR 0022 的 timeout 参数、默认值、timer、倒计时与 timeout 终态，保留主动取消/abort/shutdown 及全部隐私边界 |
+| [0042](./0042-nested-dispatch-delegation-capability.md) | **Nested dispatch delegation capability** | Accepted（2026-07-22，architecture/offline-core baseline only）；supersede “nested 永不授权”的绝对原则，但任何 live depth（含 1）仍需不依赖已退役 0030 的新独立 H5；当前五项 runtime deny 不变 |
 
 → [ADR 0027 §6](./0027-coupled-stigmergic-dual-loop-agent-system.md#6-推到独立子-adr-的能力点)
 
@@ -160,6 +161,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-06-19** ADR 0039 Unified Evidence Architecture 修订 **accepted**（4×T0 R2 全部 SIGN；原 Constraint-only 路线被全第二大脑记忆系统的 evidence → projector / compiler → stable view 架构吸收）
 - **2026-07-12** ADR 0040 Unified Proposition Evidence Model **accepted**（六厂商 T0 三轮一致 + owner ratify；统一 proposition/lifecycle SOT，no-migration cutover 与逐读取面授权）
 - **2026-07-13** ADR 0041 `prompt_user` indefinite wait **accepted**（用户直接决策；移除 elapsed-time 终止面，保留用户取消、turn abort、session shutdown 与 secret wipe）
+- **2026-07-22** ADR 0042 nested dispatch delegation capability **accepted**（三轮 T0 一致；仅接受离线 capability/governor/limiter/required-audit 架构，任何 live depth 含 1 另需独立 H5，当前 runtime fail-closed）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 

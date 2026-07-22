@@ -134,6 +134,28 @@ const tsmsOut = ts.transpileModule(fs.readFileSync(tsmsSrc, "utf8"), {
 fs.writeFileSync(path.join(tmpDir, "terminal-state.cjs"), tsmsOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "terminal-state.cjs"), path.join(tmpDir, "terminal-state.js"));
 
+// Stub the non-delegating shadow bridge. Its production behavior has a dedicated
+// real-SDK smoke; this formatter harness only needs the import surface while it
+// exercises pure rendering helpers.
+fs.writeFileSync(
+  path.join(tmpDir, "delegation-shadow-bridge.js"),
+  `module.exports = {
+  activateShadowWorkerBinding: () => {},
+  createShadowWorkerBinding: () => ({}),
+  evaluateShadowDispatchIfBound: async () => undefined,
+  hasShadowWorkerBinding: () => false,
+  shadowDelegationSchema: {},
+  shadowDispatchDenyResult: (operation, reason_code) => ({
+    content: [{ type: "text", text: JSON.stringify({ operation, reason_code }) }],
+    details: { kind: "shadow_no_delegate", operation, decision: "would_deny", reason_code, tasks: [], remaining: {} },
+    isError: true,
+  }),
+  shadowDispatchToolsGranted: () => new Set(),
+  shutdownShadowWorkerBinding: async () => false,
+  validateShadowDelegation: () => ({ ok: false }),
+};\n`,
+);
+
 // Stub the per-worker reasoning writer. formatResult never starts a session,
 // but dispatch/index.ts resolves the module at load time.
 fs.writeFileSync(

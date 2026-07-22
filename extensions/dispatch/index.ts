@@ -7,7 +7,7 @@
  * in-process with its own model, thinking level, and tool allowlist.
  *
  * Benefits over subprocess (v2):
- *   - Zero spawn overhead
+ *   - Zero subprocess startup overhead
  *   - No orphan process management (signals, _activeChildren, detached, etc.)
  *   - No double-layer timeout (D-state hang protection)
  *   - No temp file writes for prompts
@@ -43,7 +43,7 @@ import {
   isDispatchTaskProfile,
   normalizeDispatchTaskProfile,
 } from "./task-profile";
-import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
+import { isSubAgentSession, markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
   runWithTriggerAnchor,
@@ -88,6 +88,18 @@ import {
   type WorkerRunGovernorDecision,
 } from "./worker-run-governor";
 import { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR } from "../empty-visible-output-retry/index";
+import {
+  activateShadowWorkerBinding,
+  createShadowWorkerBinding,
+  evaluateShadowDispatchIfBound,
+  hasShadowWorkerBinding,
+  shadowDelegationSchema,
+  shadowDispatchDenyResult,
+  shadowDispatchToolsGranted,
+  shutdownShadowWorkerBinding,
+  validateShadowDelegation,
+  type ShadowNestedTask,
+} from "./delegation-shadow-bridge";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -725,10 +737,12 @@ export function resolveSubAgentTools(toolsStr: string | undefined): string[] {
   return parseToolCsv(toolsStr || DEFAULT_SUBAGENT_TOOLS);
 }
 
-// Universal structural validation. Sub-agents cannot orchestrate another
-// dispatch/workflow run, interact with the user, or cross the vault boundary.
-// All other names are accepted here and checked against the target session's
-// actual registry after createAgentSession() has loaded its extensions.
+// Universal structural validation. Sub-agents cannot start nested execution,
+// run workflows, interact with the user, or cross the vault boundary. A valid
+// capability-bound shadow may expose explicitly requested dispatch names only
+// for non-delegating evaluation. All other names are accepted here and checked
+// against the target session's actual registry after createAgentSession() has
+// loaded its extensions.
 //
 // NOTE (2026-06-16): mutating tools (bash/edit/write) are NO LONGER gated here.
 // The dispatch swarm may receive them via explicit `tools=`. Rationale: brain
@@ -738,16 +752,44 @@ export function resolveSubAgentTools(toolsStr: string | undefined): string[] {
 // ADR 0003 layer-2 accepted residual). The WORKFLOW channel keeps its W9 env
 // gate via enforceMutatingEnvGate (ADR 0033 triple-explicit), enforced in
 // extensions/workflow — NOT here.
-export function validateTools(toolsStr: string | undefined): ToolValidation {
-  if (!toolsStr) return { ok: true };
+export function validateTools(toolsStr: string | undefined, delegation?: unknown): ToolValidation {
+  const delegationCheck = delegation === undefined ? undefined : validateShadowDelegation(delegation);
+  if (delegationCheck && !delegationCheck.ok) {
+    return { ok: false, reason: `${delegationCheck.reasonCode}: ${delegationCheck.reason}` };
+  }
+  if (!toolsStr) {
+    return delegationCheck
+      ? { ok: false, reason: "invalid_shadow_delegation: delegation requires tools to explicitly request an authorized dispatch tool" }
+      : { ok: true };
+  }
 
-  for (const name of parseToolCsv(toolsStr)) {
-    if (DISABLED_SUBAGENT_TOOL_NAMES.has(name.toLowerCase())) {
+  const requested = parseToolCsv(toolsStr);
+  const shadowGranted = shadowDispatchToolsGranted(requested, delegation);
+  if (delegationCheck && shadowGranted.size === 0) {
+    return {
+      ok: false,
+      reason: "invalid_shadow_delegation: delegation requires tools to explicitly request an authorized dispatch tool",
+    };
+  }
+  for (const name of requested) {
+    const normalized = name.toLowerCase();
+    const shadowDispatch = normalized === "dispatch_agent" || normalized === "dispatch_parallel";
+    if (DISABLED_SUBAGENT_TOOL_NAMES.has(normalized) && !(shadowDispatch && shadowGranted.has(name))) {
       return { ok: false, reason: `tool "${name}" is disabled for sub-agents` };
     }
   }
 
   return { ok: true };
+}
+
+/** SDK-level structural deny after the optional shadow intersection is applied. */
+export function resolveSubAgentExcludeTools(
+  toolsStr: string | undefined,
+  delegation?: unknown,
+): string[] {
+  const requested = resolveSubAgentTools(toolsStr);
+  const shadowGranted = shadowDispatchToolsGranted(requested, delegation);
+  return DISABLED_SUBAGENT_TOOLS.filter((name) => !shadowGranted.has(name));
 }
 
 interface SessionToolRegistryView {
@@ -806,6 +848,74 @@ export function inferTaskGovernorProfile(toolsStr?: string, taskProfile?: string
   const hasMutatingTool = toolNamesFromAllowlist(toolsStr).some((name) => MUTATING_TOOLS.has(name));
   if (hasMutatingTool) return "mutating_default";
   return "read_only";
+}
+
+function shadowNestedTaskFromParams(params: any): ShadowNestedTask {
+  const tools = resolveSubAgentTools(params.tools);
+  return {
+    model: String(params.model ?? ""),
+    profile: inferTaskGovernorProfile(params.tools, params.taskProfile),
+    tools,
+    allowsMutation: tools.some((name) => MUTATING_TOOLS.has(name.toLowerCase())),
+    inputText: String(params.prompt ?? ""),
+  };
+}
+
+type DispatchExecuteResult = {
+  content: Array<{ type: "text"; text: string }>;
+  details: unknown;
+  isError?: boolean;
+};
+
+function structuralDispatchRejection(
+  operation: "dispatch_agent" | "dispatch_parallel",
+  reasonCode: string,
+): DispatchExecuteResult {
+  const details = {
+    kind: "tool_rejected",
+    operation,
+    reason_code: reasonCode,
+    reason: "sub-agent dispatch requires an active shadow binding",
+  };
+  return {
+    content: [{ type: "text", text: JSON.stringify(details) }],
+    details,
+    isError: true,
+  };
+}
+
+async function evaluateSubAgentShadowAtToolEntry(
+  operation: "dispatch_agent" | "dispatch_parallel",
+  tasks: readonly ShadowNestedTask[],
+  signal: AbortSignal,
+  ctx: any,
+): Promise<DispatchExecuteResult | undefined> {
+  let sessionManager: unknown;
+  try {
+    sessionManager = ctx?.sessionManager;
+  } catch {
+    return structuralDispatchRejection(operation, "dispatch_context_invalid");
+  }
+  if (sessionManager == null || typeof sessionManager !== "object") {
+    return structuralDispatchRejection(operation, "dispatch_context_missing");
+  }
+
+  const markedBeforeLookup = isSubAgentSession({ sessionManager });
+  const bindingPresent = hasShadowWorkerBinding(sessionManager);
+  const markedAfterLookup = isSubAgentSession({ sessionManager });
+  if (!markedBeforeLookup && !markedAfterLookup && !bindingPresent) return undefined;
+  if (!markedBeforeLookup || !markedAfterLookup) {
+    return shadowDispatchDenyResult(operation, "shadow_session_marker_missing");
+  }
+  if (!bindingPresent) {
+    return shadowDispatchDenyResult(operation, "shadow_binding_missing");
+  }
+
+  const result = await evaluateShadowDispatchIfBound(sessionManager, { operation, tasks, signal });
+  if (!isSubAgentSession({ sessionManager })) {
+    return shadowDispatchDenyResult(operation, "shadow_session_marker_missing");
+  }
+  return result ?? shadowDispatchDenyResult(operation, "shadow_binding_closed");
 }
 
 export interface TaskGovernorVerdict {
@@ -1342,20 +1452,64 @@ export async function createSubAgentSessionResources(
   return { settingsManager, resourceLoader };
 }
 
-const subAgentSessionDisposals = new WeakMap<object, Promise<void>>();
+const SUBAGENT_SESSION_DISPOSALS_KEY = Symbol.for("pi-astack/dispatch/subagent-session-disposals/v1");
+
+type ShadowShutdownFailureObserver = (event: { phase: string; reason_code: string }) => void;
+let shadowShutdownFailureObserverForTests: ShadowShutdownFailureObserver | undefined;
+
+export function _setShadowShutdownFailureObserverForTests(
+  observer?: ShadowShutdownFailureObserver,
+): void {
+  shadowShutdownFailureObserverForTests = observer;
+}
+
+function reportShadowShutdownFailure(error: unknown, phase: string): void {
+  const rawCode = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code ?? "")
+    : "";
+  const reasonCode = /^[a-z][a-z0-9_]{0,63}$/.test(rawCode) ? rawCode : "shadow_shutdown_failed";
+  try { shadowShutdownFailureObserverForTests?.({ phase, reason_code: reasonCode }); } catch { /* diagnostics only */ }
+}
+
+async function shutdownShadowWorkerBindingBestEffort(
+  sessionManager: unknown,
+  reasonCode: string,
+  phase: string,
+): Promise<boolean> {
+  try {
+    return await shutdownShadowWorkerBinding(sessionManager, reasonCode);
+  } catch (error) {
+    reportShadowShutdownFailure(error, phase);
+    return false;
+  }
+}
+
+function subAgentSessionDisposals(): WeakMap<object, Promise<void>> {
+  const root = globalThis as Record<symbol, unknown>;
+  let disposals = root[SUBAGENT_SESSION_DISPOSALS_KEY] as WeakMap<object, Promise<void>> | undefined;
+  if (!(disposals instanceof WeakMap)) {
+    disposals = new WeakMap<object, Promise<void>>();
+    root[SUBAGENT_SESSION_DISPOSALS_KEY] = disposals;
+  }
+  return disposals;
+}
 
 /** Emit the sub-agent shutdown lifecycle exactly once, then dispose its session. */
-export async function disposeSubAgentSession(session: any): Promise<void> {
-  if (session == null || (typeof session !== "object" && typeof session !== "function")) return;
+export async function disposeSubAgentSession(session: any, sessionManager?: unknown): Promise<void> {
+  if (session == null || (typeof session !== "object" && typeof session !== "function")) {
+    await shutdownShadowWorkerBindingBestEffort(sessionManager, "session_disposed", "dispose_without_session");
+    return;
+  }
 
   const key = session as object;
-  const existing = subAgentSessionDisposals.get(key);
+  const existing = subAgentSessionDisposals().get(key);
   if (existing) {
     await existing;
     return;
   }
 
   const disposal = (async () => {
+    await shutdownShadowWorkerBindingBestEffort(sessionManager, "session_disposed", "dispose");
     try {
       const runner = session.extensionRunner;
       if (
@@ -1373,7 +1527,7 @@ export async function disposeSubAgentSession(session: any): Promise<void> {
     }
   })();
 
-  subAgentSessionDisposals.set(key, disposal);
+  subAgentSessionDisposals().set(key, disposal);
   await disposal;
 }
 
@@ -1397,7 +1551,8 @@ export async function disposeSubAgentSession(session: any): Promise<void> {
  *     replaced by registry validation + SDK filters + isSubAgentSession guards.)
  *   - default allowlist is read-only (callers opt into bash/edit/write via tools=)
  *   - `SessionManager.inMemory()` prevents session file writes
- *   - nested/indirect orchestration, user interaction, and vault release are disabled
+ *   - nested execution, user interaction, and vault release are disabled;
+ *     capability-bound dispatch tools can only run the non-delegating shadow evaluator
  * This is acceptable because typical dispatch usage calls remote LLM APIs
  * for analysis; mutating workers are an explicit, caller-granted opt-in.
  */
@@ -1422,6 +1577,7 @@ export async function runInProcess(
     maxRuntimeMs?: number;
     taskProfile?: string;
     onProgress?: (progress: DispatchRunProgress) => void;
+    delegation?: unknown;
     reasoningTrace?: {
       dispatchToolCallId?: string;
       taskIndex?: number;
@@ -1455,6 +1611,7 @@ export async function runInProcess(
     projectRoot: heartbeatProjectRoot,
     startedNote: `model=${modelStr}`,
   });
+  let shadowSessionManager: any;
   let reasoningTrace: DispatchReasoningTraceWriter | undefined;
   let reasoningTraceEnded = false;
 
@@ -1527,6 +1684,17 @@ export async function runInProcess(
       heartbeat_liveness,
     };
   };
+
+  const directToolCheck = validateTools(toolAllowlist, heartbeatCtx?.delegation);
+  if (!directToolCheck.ok) {
+    return finalizeReasoningTrace({
+      output: "",
+      error: `tool_rejected: ${directToolCheck.reason}`,
+      failureType: "tool_rejected",
+      durationMs: Date.now() - start,
+      toolCallCount: 0,
+    });
+  }
 
   const refreshedModelRegistry = await refreshModelRegistry(modelRegistry);
   let toolCallCount = 0;
@@ -1684,6 +1852,9 @@ export async function runInProcess(
     settled = true;
     localCtl.abort();
     abortSessionOnce();
+    void shutdownShadowWorkerBinding(shadowSessionManager, "parent_aborted").catch((error) => {
+      reportShadowShutdownFailure(error, "parent_abort");
+    });
   };
 
   if (signal.aborted) {
@@ -1786,12 +1957,18 @@ export async function runInProcess(
       // fires session_start synchronously inside session construction.
       // SessionManager.inMemory() currently creates a stable getSessionId()
       // immediately; markSessionAsSubAgent registers that id plus a random
-      // nonce in globalThis before spawn. If a future pi creates the id only
+      // nonce in globalThis before child-session creation. If a future pi creates the id only
       // inside createAgentSession, the WeakSet channel covers that window and
       // backfills the id on first readable ctx. This is the sub-agent SM id,
       // never ADR 0027 C6's parent causal session_id.
       const subAgentSm = SessionManager.inMemory(process.cwd());
+      shadowSessionManager = subAgentSm;
       markSessionAsSubAgent(subAgentSm);
+      if (heartbeatCtx?.delegation !== undefined) {
+        createShadowWorkerBinding(subAgentSm, heartbeatCtx.delegation, {
+          projectRoot: heartbeatProjectRoot,
+        });
+      }
 
       // Create session. pi 0.80.10 createAgentSession takes modelRuntime (not
       // modelRegistry). Inherit the parent's ModelRuntime so memory overlays,
@@ -1801,7 +1978,7 @@ export async function runInProcess(
         model,
         thinkingLevel: thinking as any, // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
         tools,
-        excludeTools: [...DISABLED_SUBAGENT_TOOLS],
+        excludeTools: resolveSubAgentExcludeTools(toolAllowlist, heartbeatCtx?.delegation),
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoader,
@@ -1815,7 +1992,7 @@ export async function runInProcess(
       // registry. This also verifies DEFAULT_SUBAGENT_TOOLS on default calls.
       const sessionToolCheck = validateSessionToolRegistry(session, tools);
       if (!sessionToolCheck.ok) {
-        await disposeSubAgentSession(session);
+        await disposeSubAgentSession(session, subAgentSm);
         signal.removeEventListener("abort", onAbort);
         return {
           output: "",
@@ -1825,6 +2002,7 @@ export async function runInProcess(
           toolCallCount,
         };
       }
+      activateShadowWorkerBinding(subAgentSm, session);
       recordProgress("tool_registry_validated");
       installMaxOutputTokensOnSession(session, effectiveMaxOutputTokens);
 
@@ -1834,7 +2012,7 @@ export async function runInProcess(
       // would be silently ignored and the agent would run a full turn.
       if (signal.aborted || localSignal.aborted) {
         abortSessionOnce();
-        await disposeSubAgentSession(session);
+        await disposeSubAgentSession(session, subAgentSm);
         signal.removeEventListener("abort", onAbort);
         return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
       }
@@ -2003,7 +2181,7 @@ export async function runInProcess(
       recordProgress("prompt_end");
 
       unsub();
-      await disposeSubAgentSession(session);
+      await disposeSubAgentSession(session, subAgentSm);
       signal.removeEventListener("abort", onAbort);
 
       const durationMs = Date.now() - start;
@@ -2070,7 +2248,7 @@ export async function runInProcess(
       };
     } catch (err: any) {
       abortSessionOnce();
-      await disposeSubAgentSession(session);
+      await disposeSubAgentSession(session, shadowSessionManager);
       signal.removeEventListener("abort", onAbort);
       const durationMs = Date.now() - start;
       const errMsg = err?.message ?? String(err);
@@ -2184,6 +2362,7 @@ export async function runInProcess(
       reasoningTraceEnded = true;
     }
     heartbeat.stop();
+    await shutdownShadowWorkerBindingBestEffort(shadowSessionManager, "worker_run_ended", "worker_finally");
   }
 }
 
@@ -2286,6 +2465,9 @@ export default function (pi: ExtensionAPI) {
   // anchors are derived via deriveSubAgentAnchor + runWithTriggerAnchor.
   // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
+  pi.on("session_shutdown", async (_event, ctx) => {
+    await shutdownShadowWorkerBindingBestEffort(ctx?.sessionManager, "session_shutdown", "session_shutdown");
+  });
 
   // Global repeated tool-call protection is registered by
   // extensions/tool-circuit-breaker. Keeping it outside dispatch gives main
@@ -2302,13 +2484,13 @@ export default function (pi: ExtensionAPI) {
       "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
       "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
       "tool calling (read, grep, find, ls by default; bash/edit/write available via explicit tools=). " +
-      "Nested/indirect orchestration, prompt_user, and vault_release are always rejected.",
+      "Nested execution, prompt_user, and vault_release are rejected; capability-bound workers may only evaluate a non-delegating dispatch shadow.",
     promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
       "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write; requested names must exist in that worker session's registry.",
-      "The sub-agent is an independent AgentSession — its context does NOT count against your token budget.",
+      "Root dispatch creates an independent AgentSession whose context does not count against the caller token budget; a capability-bound shadow call creates no session.",
       "Output budget is internal: dispatch always sends the model registry maxTokens as the provider request cap; callers cannot lower it.",
     ],
     parameters: Type.Object({
@@ -2320,11 +2502,13 @@ export default function (pi: ExtensionAPI) {
       taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default.")),
       profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
+      delegation: Type.Optional(shadowDelegationSchema),
     }),
 
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       const n = normalizeTaskSpec(args);
+      const delegation = args.delegation as any;
       // Conditional spread for optional fields: SDK schema infers
       // `tools?: string` / `timeoutMs?: number` (optional, not `T | undefined`).
       // Returning `{ tools: undefined }`
@@ -2338,6 +2522,7 @@ export default function (pi: ExtensionAPI) {
         ...(n.tools !== undefined ? { tools: n.tools } : {}),
         ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
         ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
+        ...(delegation !== undefined ? { delegation } : {}),
       };
     },
 
@@ -2356,7 +2541,15 @@ export default function (pi: ExtensionAPI) {
     // different details shapes fail to assign to that locked TDetails).
     // This matches what memory/index.ts does via wrapToolResult.
     async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
-      const toolCheck = validateTools(params.tools);
+      const shadowEntryResult = await evaluateSubAgentShadowAtToolEntry(
+        "dispatch_agent",
+        [shadowNestedTaskFromParams(params)],
+        signal,
+        ctx,
+      );
+      if (shadowEntryResult) return shadowEntryResult;
+
+      const toolCheck = validateTools(params.tools, params.delegation);
       if (!toolCheck.ok) {
         // ADR 0027 §C5 v1 P1 fix (R6 GPT-5.5 P1-3): tool_rejected is a
         // pre-flight failure. C5's "every L2 task has explicit terminal
@@ -2427,7 +2620,7 @@ export default function (pi: ExtensionAPI) {
       // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
       // - parentAnchor may be undefined (e.g., dispatch_agent called before any
       //   user turn — extremely rare but possible in test fixtures). In that
-      //   case subAnchor is also undefined; we still spawn the sub-agent but
+      //   case subAnchor is also undefined; we still create the sub-agent session but
       //   trace chain for this row is broken (audit log records anchor absent).
       // - The anchor block is prepended to the prompt so the sub-agent LLM
       //   knows its position in the trace tree (per C6 "L2 must know its anchor").
@@ -2470,6 +2663,7 @@ export default function (pi: ExtensionAPI) {
                 taskCount: 1,
               },
               onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
+              ...(params.delegation !== undefined ? { delegation: params.delegation } : {}),
             },
           ),
         );
@@ -2603,7 +2797,7 @@ export default function (pi: ExtensionAPI) {
       "Run multiple sub-agents IN PARALLEL. Each is an independent in-process AgentSession. " +
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
-      "bash/edit/write and registered extension tools are available via explicit per-task tools=; structural disabled tools are rejected. " +
+      "bash/edit/write and registered extension tools are available via explicit per-task tools=; nested execution and the permanent structural tools are rejected. " +
       `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4).`,
     promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
@@ -2624,6 +2818,7 @@ export default function (pi: ExtensionAPI) {
           taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy.")),
           profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
+          delegation: Type.Optional(shadowDelegationSchema),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
       ),
@@ -2651,6 +2846,7 @@ export default function (pi: ExtensionAPI) {
       }
       const tasks = raw.slice(0, MAX_PARALLEL).map((t: unknown) => {
         const n = normalizeTaskSpec(t);
+        const delegation = asRecord(t).delegation as any;
         return {
           model: n.model,
           thinking: n.thinking,
@@ -2659,6 +2855,7 @@ export default function (pi: ExtensionAPI) {
           ...(n.tools !== undefined ? { tools: n.tools } : {}),
           ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
           ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
+          ...(delegation !== undefined ? { delegation } : {}),
         };
       });
       const topTimeoutMs = (args as any).timeoutMs;
@@ -2672,6 +2869,14 @@ export default function (pi: ExtensionAPI) {
     renderResult: renderDispatchToolResult,
 
     async execute(toolCallId: string, params: any, signal: AbortSignal, onUpdate: unknown, ctx: any): Promise<{ content: Array<{ type: "text"; text: string }>; details: unknown; isError?: boolean }> {
+      const shadowEntryResult = await evaluateSubAgentShadowAtToolEntry(
+        "dispatch_parallel",
+        (params.tasks ?? []).map(shadowNestedTaskFromParams),
+        signal,
+        ctx,
+      );
+      if (shadowEntryResult) return shadowEntryResult;
+
       const tasks = params.tasks ?? [];
       if (tasks.length === 0) {
         return {
@@ -2772,7 +2977,7 @@ export default function (pi: ExtensionAPI) {
           taskAnchors[i] = subAnchor;
           let res: AgentResult;
           try {
-            const toolCheck = validateTools(t.tools);
+            const toolCheck = validateTools(t.tools, t.delegation);
             if (!toolCheck.ok) {
               res = {
                 output: "",
@@ -2840,6 +3045,7 @@ export default function (pi: ExtensionAPI) {
                     taskCount: total,
                   },
                   onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
+                  ...(t.delegation !== undefined ? { delegation: t.delegation } : {}),
                 },
               ),
             );
