@@ -5,125 +5,98 @@ status: active
 
 # Roadmap / Backlog
 
-本文只列 current design vision 中仍未完成或有意 deferred 的项。**只装未完成/计划**——已 ship 的当前事实写入 [`docs/current-state.md`](./current-state.md)，功能/需求级变更写入 [`docs/feature-changelog.md`](./feature-changelog.md)，多轮审计与 commit 级实施流水写入 `docs/audits/` 或保留在 git history（REQ-006：roadmap 不是 changelog）。
+本文只列 current design vision 中仍未完成或有意 deferred 的项。**只装未完成/计划**：当前事实见 [`docs/current-state.md`](./current-state.md)，功能/需求级变更见 [`docs/feature-changelog.md`](./feature-changelog.md)，实施流水留在 audit 或 git history（REQ-006：roadmap 不是 changelog）。
 
-## Externalized GIC 顺序路线图
+## 分类、排序与共同边界
 
-本节记录 pi-astack 在 arXiv 2606.23991 的 GIC 框架下的后续顺序路线。定位：pi-astack 不追求短期训练出论文意义上的 Agent Model，也不在软件工程域优先建设 learned World Model；下一阶段目标是成为 **externalized GIC system with a closed learning loop**：把 goal / identity / belief / configurator / learning 以系统能力显式化，锚定真实 repo / test / LSP / git / browser / workflow / memory 信号，并通过 L1/L2 causal trace 闭合学习回路。
+Roadmap 分为四类，按以下规则解释：
 
-顺序项不是排期；只有前置验收信号在真实 dogfood 中成立，才进入下一项。低风险测量可以并行补齐，但不得绕过顺序把后项能力提前变成默认行为。
+1. **第二大脑自治闭环主序列**：严格按依赖顺序推进；后项不得以并行实验绕过前项语义。仅表中明确标注为“只读观测”的项可在其前置语义通过后并行采样；观测结果不得提前驱动任何行为。
+2. **并行可靠性轨**：可立即推进，但只加固已授权能力，不能改变主序列的认知语义或偷渡 blocked transition。
+3. **健康 gated-defer**：只有真实触发信号出现才进入执行预算；无触发就是正确状态。
+4. **独立产品轨**：不依赖第二大脑闭环，可单独排期，但仍遵守各自 ADR 和安全边界。
 
-| 顺序 | Epic | 目标 | 验收信号 | 主要风险 / 禁止走法 |
-|---|---|---|---|---|
-| 1 | **GIC 状态边界 ADR** | 固化 `goal` / `identity` / `belief` / `configurator` / `learning` 在 pi-astack 中的系统对应物、写权限、读路径和治理层级；明确 L1 仍 prompt-native、L2 仍 infra-structured。 | 后续 design / PR 能明确说明改动属于哪一类状态、由哪个 loop 拥有、是否触碰 `direction.md` 不变量。 | 只写术语不进入评审习惯；为对齐论文术语重构已工作的系统。 |
-| 2 | **Outcome Edge 完整化** | 闭合 `memory 注入 -> agent 行为 -> 用户/工具 outcome -> confidence / status / usage 反馈`，让 L1 从 write-only 记忆循环进入可校准学习循环。 | 活跃记忆条目出现由真实后续使用触发的 confidence 调整、降级或 contested 标记；self-echo 不被误判为确认。 | 把 LLM 自述升格为 ground truth；要求用户显式审查记忆。 |
-| 3 | **PEG 基线与仪表** | 建立 Performance / Efficiency / Growth 的最小可用指标，先观测、不作高风险 gating。 | 连续真实任务产生 P/E/G 时序；至少一类重复任务能计算跨会话变化；成本只事后透明，不作执行闸。 | 指标变成机械硬门；用 synthetic case 代替真实 dogfood 验收。 |
-| 4 | **显式 Belief State v1** | 把任务期状态从散落工具输出提升为一等结构，区分 `observed` / `inferred` / `stale`，并记录未验证假设与已证伪假设。 | sub-agent 能消费共享 belief 而减少重复探索；过期推断被显式标记；测试、LSP、git、browser 等真实观测优先于叙述性推断。 | 变成第二套手写 context 负担；用 learned simulation 替代可直接执行的真实 oracle。 |
-| 5 | **PEG-informed Configurator** | 让 configurator 从规则 + 即时 LLM 判断，升级为规则 + LLM 判断 + 历史 PEG / outcome 归因加权；只先影响低风险路由。 | direct dispatch 的模型/任务选择能引用历史 P/E/G 证据；低风险路由质量优于无历史基线；失败可回退显式主会话选择。 | 把 PEG 当机械裁决阈值；让成本成为执行 gate；重新引入二级 planner 转述层。 |
-| 6 | **L1 Identity Evolver** | 第二大脑沉淀并注入“这个用户 + 这个项目下 agent 应如何工作”的行为特征，包括验证严格度、风险偏好、协作方式和项目习惯。 | 盲测中 identity 注入提升任务质量；用户零管理操作；identity 变更有 outcome 证据链。 | 做出用户可见 memory / identity 管理界面；identity 漂移没有返回路径。 |
-| 7 | **Drift Detection Return Path** | 落地“人类管方向 / abrain 管细节”的返回路径，定期对照 `vision.md` / `direction.md` / ADR 基线检测实现细节是否反向改变方向。 | 至少能报告一类真实 direction drift 或明确确认无 drift；报告进入现有 aggregator / audit 面，不新增用户管理流程。 | 形成定期人工审查负担；把实现状态流水写进 ADR。 |
-| 8 | **Configurator 蒸馏候选** | 仅在前述 trace 足够后，评估是否从 causal trace + PEG 归因数据蒸馏小型 configurator，用于模型选择、dispatch 形态和工具选择。 | 外部化 configurator 已有可比较基线；蒸馏候选在真实任务上 P/E/G 优于外部化基线且可回滚。 | 过早训练 agentive model / world model；把模型权重自更新接入生产学习回路。 |
+每个任务使用稳定 `RM-*` roadmap ID，或明确绑定 [`transition-register.machine.json`](./transition-register.machine.json) 中一个或多个 transition stable ID。**transition 的 phase、authorization 与 gate 一律以 machine register 为准**；roadmap 聚合多个 transition 只表达依赖和阅读顺序，不产生 blanket 授权。`blocked`、`not_authorized`、`separate_authorization_required` 与 `gated_deferred` 项不得被当作当前可执行任务。
 
-明确不做，除非另有 ADR walk-back：
+所有轨道共同遵守：
 
-- 不为对齐 GIC 论文而重构已工作的子系统；GIC 是坐标系，不是迁移规范。
-- 不在软件工程域优先建设 learned World Model；真实执行、测试、LSP、git、browser 观测是更高信任来源。
-- 不把 L1 第二大脑质量问题外包给用户审批、投票、审查、手动编辑或记忆管理 UI。
-- 不引入无问责的自组织 swarm；主会话通过 direct dispatch primitives 保留 completion / liveness / accountability 语义。
-- 不重新引入 `task -> planner -> worker` 二级有损转述层；需要多 worker 时由主会话直接调用 `dispatch_parallel`。
+- 人永不参与具体 memory governance：无条目审批、裁决、投票、归档、手动编辑/恢复、清队列或定期 review。用户在自然工作中的纠正是 outcome 信号，不是治理动作。
+- 所有新能力必须用真实生产数据完成验收；synthetic / fixture 只用于回归和故障注入，不能作为唯一验收。
+- 自治遗忘终点只到 `archived`，全文保持运行时可达并自动复活；不授权自治物理删除。
+- footnote、沉默、单纯 exposure、LLM 自述或 LLM 共识都不是独立 ground truth。
+- 新增长期 brain data 继续遵守 [ADR 0039](./adr/0039-constraint-pipeline-reset.md) 的 Evidence Event -> projector/compiler -> stable view 边界；不扩大 raw `agent_end` 写时裁决，也不新增平行可写 memory store。
+- 对 LLM 语义错误优先改 prompt、上下文和自治反馈；机械门只用于 infra、不可逆风险或有明确移除条件的过渡面。
 
-## 第二大脑 research 吸收路线（activity / wiki-as-view）
+## 第二大脑自治闭环主序列
 
-本节把 2026-07-04 agent memory / LLM Wiki 调研吸收到 backlog。定位：research 是参考材料，不直接升级为 direction / requirements / ADR；只有命中方向边界、持久 schema、runtime 默认行为或高反转成本时才进入 T0 / ADR。
+GIC 在这里是 externalized system 的坐标系，不是重构规范。真实 repo、test、lint、build、LSP、git、browser、workflow、tool 与 memory outcome 是高信任观测；不优先建设 learned World Model，也不重新引入 `task -> planner -> worker` 二级转述层。
 
-| Item | Intent | Notes |
+| 顺序 | ID / transition 绑定 | 任务与依赖 | 真实验收与禁止走法 |
+|---|---|---|---|
+| 前置（非阻塞） | `RM-GIC-001` | **GIC 状态边界 ADR**：只定义 `goal` / `identity` / `belief` / `configurator` / `learning` 的状态所有权、写权限、读路径和治理层级；明确 L1 prompt-native、L2 infra-structured。它可与生产修复并行，绝不阻塞下列 P0 闭环修复。 | 后续 design 能指出状态 owner 与读写边界；不因论文术语重构已工作的系统，不把本 ADR 变成页首伪主执行序列。 |
+| 1 | `RM-OUTCOME-001` + `outcome.unknown-attribution` | **自动 outcome evidence spine**：合并原 Outcome Edge、Meta-curator outcome closure 与 unknown-attribution。自动采集 test/lint/build、workflow/tool result、git revert-or-rewrite、自然纠正等真实结果，并连接 `memory exposure -> action -> outcome -> evidence -> re-judge`；prompt revision 也只消费这条独立 outcome 链。 | 真实生产任务可从 exposure 追到独立 outcome 并触发自治 re-judge；不得人工标注。footnote、沉默、exposure 或 LLM 共识不能单独 confirm、demote 或 archive。现有 `operator disposition` 退出条件是陈旧治理残留：后续 register 修复须改为 agent 自治 terminal disposition（例如 `defer_until_new_evidence`）：保留审计轨迹，仅在出现新的独立 evidence 时才重开，不阻塞主线、不形成待人队列；仍禁止永久 operator/human 节点，也不得以静默丢弃证据的“自动退役”替代可审计 disposition。 |
+| 2 | `RM-LIFECYCLE-001` + `memory.dedup-archived-dense` | **可逆 lifecycle substrate**：在 outcome spine 之后建立 active / provisional / contested / superseded / archived 的可逆流转；`memory.dedup-archived-dense` 必须先于或同批于任何 demote。supersede / contradict 真值变化进入 aggregator，供 lifecycle 使用；recency、usage 与 activity timeline 只作有 provenance 的辅助证据。 | archived 对 dedup dense 可见但不进入默认 active retrieval；真实 round-trip 可自动复活。usage-only / disuse 永不得单独降级，低 resurrection rate 也不得证明安全；不引入 trust-score / half-life 标量，不把时间信号塞回 stage0/stage1 硬召回门。 |
+| 3 | `RM-LIFECYCLE-002` + `forgetting.kind-evidence-strength-v1` | **staging / pending / E2 / Lane G 自治收敛**：把原 E2 curator 修边、大脑内部 reviewer 与 Lane G G4-G5 合并为一个自治 lifecycle 面。每个状态必须自动进入 terminal disposition，或在带截止/退避/新证据触发条件的可逆非终态（provisional / contested 等）中等待——provisional/contested 不得成为无界非终态。针对 transient / provider failure 自动退避、重试或切换自治 reviewer。Lane G 只保留不违反 P7 gate、且不引入人工 review 的 region/ranking 与收敛能力。 | 用真实 arrival、throughput 证明队列持续收敛：无界 pending=0，oldest-age 受控；不承诺历史条目人为清零。无 review-staging 用户入口、无人工清队列、无永久 `review_required`。大脑内部 reviewer 必须是自治、非人审。`staging.hard-delete` 继续 `blocked / separate_authorization_required`，不属于本任务。 |
+| 4 | `RM-FORGET-001` + `forgetting.upstream-wiring` + `memory.dedup-archived-dense` + `forgetting.kind-evidence-strength-v1` | **自治遗忘真实 round-trip**：依赖顺序 1-3。建立单一、可审计的 pre-demote gate pipeline；覆盖 proposal identity 去重、当前状态/真值/evidence 校验、自治 reviewer + backoff、cooldown / holdout / corpus safety floor 与 archive CAS；同一 proposal 不得无限重放 audit。长尾 kind 复用 `RM-LIFECYCLE-002` 的自治、非人审 reviewer。 | demote ledger、reactivation window、proposal terminal disposition 均可审计；所有验收坚持真实生产数据：用真实 query corpus 比较 demote 前后 recall/none 语义。旧 hub active rule 可作为自动 supersede 的真实生产案例，但不得人工编辑或删除条目。首次真实 demote 只是里程碑；只有有限批次收敛、复活 round-trip 与 corpus 回归共同通过才满足退出条件。终点仍是 `archived`，无物理删除。 |
+| 5 | `RM-GIC-002` | **PEG baseline**：依赖 outcome spine 与 lifecycle outcome 可归因（步骤1-2）；只读观测臂可在步骤1-2通过后与步骤3-4并行采样。建立 Performance / Efficiency / Growth 时序，只观测、不作高风险 gate。 | 连续真实任务能计算 P/E/G 与至少一类重复任务的跨会话变化；PEG baseline 成为下游行为依据（如 Configurator）仍需完成步骤1-4真实验收，不得借 outcome 或 lifecycle 结果提前驱动行为。成本只做事后透明度，不成为执行闸。 |
+| 6 | `RM-GIC-003` | **Belief State v1**：依赖 `RM-OUTCOME-001` 与 PEG baseline；把任务期 `observed` / `inferred` / `stale`、未验证与已证伪假设变成共享状态。 | 真实任务中 sub-agent 复用 belief 并减少重复探索；test/LSP/git/browser/tool 观测压过叙述性推断；不制造第二套手写 context。 |
+| 7 | `RM-GIC-004` | **PEG-informed Configurator**：依赖 `RM-GIC-002`、`RM-GIC-003` 与稳定 outcome attribution；先影响低风险 direct dispatch 路由。 | 真实路由能引用历史 P/E/G 与 outcome 证据，质量优于无历史 baseline 且可回退；PEG 不是机械裁决阈值，成本不是执行 gate。 |
+| 8（gated） | `RM-GIC-005` + `memory.p7-low-frequency-three-arm-gate` | **L1 Identity Evolver**：同时等待 outcome spine 成熟和 P7 出现真实触发；任一未满足都保持 gated，不占执行预算。 | 真实 identity-class evidence 在真实生产任务上的系统内 blind A/B 提升任务质量（不是人工记忆评审，也不能只用 synthetic）；identity 变更有 outcome 链且可回退；无 memory/identity 管理 UI。 |
+| 9 | `RM-GIC-006` | **Drift Detection Return Path**：依赖 GIC 状态边界与 outcome spine；自动比较 `vision.md` / `direction.md` / ADR 基线。 | 只自动 report 到现有 audit / aggregator；不生成周期性人工任务，不把实现流水写进 ADR，也不要求用户裁决 drift。 |
+| 10（最后） | `RM-GIC-007` | **Configurator distillation 候选**：仅在外部化 configurator、causal trace 与 PEG attribution 都有稳定真实 baseline 后评估。 | 真实生产任务上 P/E/G 优于外部化 baseline 且可回滚；不接入生产模型权重自更新，不提前训练 agentive/world model。 |
+
+## 并行可靠性轨
+
+这些任务可以立即做，但不得改变主序列的 confirmation、lifecycle、forgetting 或 P7 语义。
+
+| ID / transition 绑定 | 任务 | 真实验收与授权边界 |
 |---|---|---|
-| **Requirement / workline attribution gate** | 在 project 内回答“正在推进哪些需求 / 工作线”，但只在有真实 evidence 样本和 schema 论证后推进。 | 不与 project allocation 同批实现：project_id 是现有 L1 metadata，requirement/workline 是语义归因。若需要扩展 L1 event metadata 或新增 attribution event，先走 T0 / ADR；禁止从 slug/title 直接猜并冻结成字段。 |
-| **wiki-as-view rendering boundary** | 吸收 LLM Wiki 的“预编译人类可读知识”优点，但不新增第三个可写 memory store。 | L2 Markdown view 可以作为 human-readable wiki-like surface；canonical home 仍只能是 docs 或 abrain L1/L2。若未来人类高频消费、要求持久链接或批注，再带真实使用证据讨论物化层。 |
-| **canonical home 唯一规则成文化** | 降低 docs / research / abrain / wiki-like view split-brain 风险。 | 候选改动是 `docs/README.md` 或 `direction.md` 的小型边界补强：同一知识断言只有一个 canonical home；人类可读性通过 renderer 获得，不通过多写一份获得。需要人类签字后再改方向文档。 |
-| **Lifecycle signals in ranking / forgetting review** | 重新评估 recency、usage、contradiction、activity timeline 作为当下判断输入的边界。 | 不做 trust_score / half-life 标量；不把时间信号塞回 stage0/stage1 硬召回门。若 P0a 数据证明 useful，可作为 ADR 0031 自治遗忘的证据输入候选。 |
-| **AutoMem tracking, not training** | 保留“记忆操作作为可学习技能”的长期研究期权。 | 当前只检查 L1 是否足够记录“memory action -> outcome”闭环；不投入 LoRA / learned memory expert，除非真实 sediment prompt 迭代出现 plateau 且有可审计训练/评估语料。 |
+| `RM-REL-001` | **Memory search budget isolation**：隔离 foreground、background、subagent 与各 search profile 的并发/时间预算；后台 defer 不能挤占前台。它是 liveness isolation，不是成本闸。 | 真实 500 次 foreground query 的 budget error = 0；后台拥塞时前台仍满足既定 accuracy contract，不能靠减少检索、静默 fallback 或放宽结果质量达标。 |
+| `RM-REL-002` + `canonical_path.p1` | **Canonical fresh-event E2E 复验**：fresh process 上让真实 auto-write 依次经过 L1 -> L2 -> canonical commit -> remote push；旧代码进程只 fail-closed，不暗示原地恢复；下一次正常 fresh startup 后由 runtime 自动恢复并 drain，无人工 retrigger。 | 仅复验已完成/已授权的 P1 runtime 能力；不得写入或暗示 `canonical_path.p2` / `canonical_path.p3`、ADR0040 residual P3 或 P4 授权。fixture 只做 crash/race 回归，最终证据必须来自 fresh production event。 |
+| `RM-REL-003` + `constraint.auto-refresh-failed-run-retry` | **Freshness health 与自治恢复**：明确区分 `no-new-input`、`projector-stalled`、L1->L2 lag、L2->L3 lag；异常自动告警并自动重建/重试，移除依赖 owner 手动 retrigger 的残余。 | Activity L2 与 hot-overlay delta 用真实数据验收；valid-but-stale 是合法可服务状态，不直接当故障。真实 stall/retry 留下可归因 outcome。 |
+| `RM-REL-004` | **Path A latency**：先完成 `RM-REL-001`，再重建真实 baseline，优化 decision brief Path A 的 foreground latency。 | 真实 turn SLO 改善且 recall / none 与 baseline 等价；不得通过少检索、缩候选、放宽 accuracy 或把错误变成 empty 达标。 |
+| `RM-GOV-001` + `knowledge.legacy-physical-retirement` + `constraint.dual-read-flip` + `constraint.read-flip-state-to-git-l2` + `constraint.dual-read-audit-retirement` + `constraint.tier2-legacy-write-gate` + `proposition.adr0040-p3-d3-v2-session-start` + `proposition.adr0040-p3-runtime-read-flips` + `proposition.adr0040-p4-legacy-authority-retirement` + `canonical_path.p2` + `canonical_path.p3` + `canonical_path.p4a` + `canonical_path.p4b` | **Transition-register consistency repair**：先修 register 语义，再讨论任何 retirement 或 flip。记录 Knowledge legacy physical retirement 的 `ready_for_decision` 与 ADR0040/canonical P4 `blocked` 冲突；该 `ready_for_decision` 不得启动人的 memory retirement 裁决。Constraint residual exit/consumer 仍引用 pre-Policy authority 的陈旧；将 D3-v2、residual non-Policy consumers、canonical P2 与 canonical P3 拆成独立授权面。 | 这是 docs/governance 一致性修复，不是 memory 条目治理，也不授权任何 mutation。`proposition.adr0040-policy-stable-view-runtime-flip` 已完成且不重开；0040 residual 聚合项不能合成 blanket P3 授权。当前 register 本身尚未在本 roadmap 批次修改，所有冲突项继续按 machine state blocked/gated。 |
+| `RM-REL-005` + `knowledge.o5-confidence-fallback-review` | **O5 pending flip 自动评估**：在真实窗口自动判断 `conf>=8` 非指令 durable fallback 是否仍产生 accepted correction / recall miss；满足退出条件即移除 fallback 回 ADR 原谓词。 | 只消费真实 audit/outcome，自动报告和 disposition；不建立人工巡检或记忆条目 review。 |
 
-## 文档体系 Phase 2（剩余项）
+## 健康 Gated-Defer
 
-| Item | Gate / Notes |
+以下项目无真实触发时不占执行预算；触发后仍须遵守真实生产数据验收，不能以 synthetic/fixture 单独转正。
+
+| ID / transition 绑定 | 触发与边界 |
 |---|---|
-| pinned `source_ref` SHA staleness re-sync | ADR 0034 ratify 显式 defer；待 dogfood 出现首例 stale 后，带真实证据起草新 ADR。 |
-| ADR 0035/0036/0037 slim + ingest | 须经 sediment lane go/no-go；主会话不直接写 abrain。 |
+| `memory.p7-low-frequency-three-arm-gate` | identity / skills / habits / workflows / project-memory / rationale 任一 P7 arm 出现真实触发后，才选择单一低频域 pilot；不一次性迁移全系统。 |
+| `memory.l3-chunks-embeddings-graph` | 只有真实规模、query latency 或 rebuild cost 证明需要时才物化 L3 表；L3 仍是可重建派生层，不成为 Git SOT。 |
+| `constraint.adr0034-staleness-resync` | pinned `source_ref` 出现真实 stale、跨源不一致或 re-sync 失败后重开；此前不做预防性实现。 |
+| `memory.adr0035-0037-slim-ingest` | 仅跟踪 ADR 0035/0036/0037 文档 slim + mechanism ingest，不代表 retrieval runtime 未实现。这里的 sediment lane go/no-go 只是一条**一次性架构 migration 授权**，不是 memory 条目审批、投票或人工逐条治理；主会话仍不直接写 abrain。 |
+| `RM-DEFER-001` | **Stage1 compact surface v2**：dark-launch 保持 off；只有真实 stage1-50、重复样本与弱模型 recall 证明无回归才重开。 |
+| `RM-DEFER-002` | **Requirement / workline attribution**：只有真实 evidence 样本与 schema 论证后推进；不得从 slug/title 猜测并冻结 attribution。若扩展 L1 metadata/event，先走对应 ADR。 |
+| `RM-DEFER-003` | **wiki-as-view**：只有真实高频人类消费、持久链接或批注需求出现才讨论物化；不新增第三个可写 memory store，human-readable surface 由 renderer 产生。 |
+| `RM-DEFER-004` | **AutoMem tracking, not training**：先由 `RM-OUTCOME-001` 记录 memory action -> outcome；只有真实 prompt 迭代 plateau 与可审计训练/评估语料出现才讨论 learned memory expert。 |
+| `RM-DEFER-005` | **Canonical home 成文化**：出现 docs/research/abrain/wiki-like view 的真实 split-brain 后，再以一次性架构决策明确“一项断言一个 canonical home”；不复制内容。 |
+| `RM-DEFER-006` | **qmd optional acceleration**：只作未来离线诊断/加速候选，不得成为 LLM retrieval 不可用时的 fallback。 |
+| `RM-DEFER-007` | **Incremental graph rebuild**：只有真实 rebuild cost 成为瓶颈才推进；graph/index 继续可丢弃重建。 |
+| `RM-DEFER-008` | **Prompts/gstack reference port**：仅在具体方法缺口出现时临时 clone/read diff 后按需 port，不恢复 active vendor submodule。 |
 
-## P0/P1 product backlog
+`staging.hard-delete`、`canonical_path.p2/p3/p4a/p4b`、ADR0040 residual P3/P4 不是健康 defer，而是 machine register 中的 blocked/未授权面；不得因出现在 roadmap 而进入执行。
 
-| Item | Intent | Notes |
+## Architecture Debt
+
+这些项是独立、可回滚的工程债；按真实故障与使用压力排序，不抢占主序列 P0。
+
+| Roadmap ID | Item | Intent |
 |---|---|---|
-| Meta-curator remaining closure | R5 classifier prompt 自迭代仍为 advisory-only；outcome feedback 仍需按真实 dogfood 判断是否收口；遗忘 executor 尚需消费一个受控批次。 | 以真实 dogfood 与可审计 executor 批次验收，不补实施流水。 |
-| E2 curator 修边 lane | 处理 superseded 但无有效 successor 的存量。 | 目标是 confirm successor / restore status，避免 E2 长期停留在 `review_required`。 |
-| 大脑内部 reviewer lane | 长尾 kind 强信号自动 demote 的前置。 | 上线后 `KIND_EVIDENCE_STRENGTH` 退化为 prompt 引导。 |
-| Lane G G4–G5 | 完成 G4 staging review/age-out 边界与 G5 region-aware ranking hint。 | 只推进仍有独立使用价值的部分；不得把维护性 slash 变成正常产品入口。 |
-| Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。 |
-| `abrain-age-key` identity passphrase wrap | 让 `~/.abrain/.vault-identity/master.age` 能用 passphrase 加密后进 git，实现跨设备仅 `git clone abrain` + 输一次 passphrase。详见 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) §"P0d 增强"。 | 技术依赖未定：(Y2) `age-encryption` JS lib in-process unwrap · (Y1) `node-pty` 模拟 pseudo-tty 。合并 P0d ADR 决策。 |
-| Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
+| `RM-ARCH-001` | Stage0 follow-up | 解耦 reconcile 写入、异步 cold-start rebuild、统一截断语义，并保留中文 sparse 防复发 guard / dedup oracle；只按真实 query 回归与瓶颈推进，不恢复全库 fallback。 |
+| `RM-ARCH-002` | Schema evolution | 为 frontmatter/audit/binding schema 建立多版本兼容与 migration path，不在 docs 镜像当前字段清单。 |
+| `RM-ARCH-003` | Runtime path docs/tests | 防止 `.pensieve` / `.pi-astack` / `.abrain/.state` 路径语义漂移。 |
+| `RM-ARCH-004` | Model fallback vs curator whitelist | 让 whitelist 与 fallbackModels 契约一致，避免 fallback 候选被无声移除；不得以降低模型质量作为可用性修复。 |
+| `RM-ARCH-005` | Constraint offline compile/dossier tooling | 继续限定为历史 Constraint 的离线/冷审计工具，不参与 Policy stable-view live injection；registry 复用 runtime/model-curator 模型源，写模式默认 temp，覆盖 residual audit artifact 必须显式且响亮。先完成 `RM-GOV-001` 的 authority 语义修复。 |
 
-## Unified Evidence Architecture Migration
+## 独立产品轨
 
-设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：所有长期记忆域先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view；Constraint 是第一优先迁移域，不再是独立特例。迁移期不得继续扩大旧 raw `agent_end` 写时裁决特殊逻辑。
-
-Canonical-path P2/P3 仍为 `blocked/not_authorized`，只可准备只读证据；任何 production mutation 或 consumer flip 均需独立授权。当前状态与证据入口见 [transition register](./transition-register.md)。
-
-### ADR 0040 — Unified Proposition Evidence Model（remaining gates）
-
-决策见 [ADR 0040](./adr/0040-unified-proposition-evidence-model.md)，当前实现与机器证据见 [current state](./current-state.md) 和 [transition register](./transition-register.md)，长期执行契约见 [proposition contracts](./notes/adr0040-proposition-contracts.md) 与 [D3 lifecycle freshness design](./notes/adr0040-d3-lifecycle-freshness-design.md)。本节只登记未完成工作。
-
-| Phase | Intent | Gate / Notes |
+| Roadmap ID | Item | Acceptance boundary |
 |---|---|---|
-| 0040-P3 residual runtime read flips **[BLOCKED]** | 仅覆盖 D3-v2 session-start adapter、Knowledge pull consumer、canonical L2 authority 与其它非-Policy consumer。 | `separate_authorization_required`；Policy stable-view session-start 已完成，不属于 blocked scope，也不得被回读成 blanket P3 授权。每个残余 consumer 独立授权并定义 rollback/fail-closed。 |
-| 0040-P4 non-Policy legacy authority / cold-audit disposition **[BLOCKED]** | 处置其它 consumer 的旧 authority 与 legacy physical retirement，同时保留 cold audit history。 | `separate_authorization_required`；Policy runtime 已无 compiled/D3/legacy fallback；本项不得恢复旧 session authority，也不得把 retirement 伪装成 migration。 |
+| `RM-PRODUCT-001` | Vault P0d：masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback；使用真实可用 backend 做端到端验收，mock 只做回归。 |
+| `RM-PRODUCT-002` | `abrain-age-key` identity passphrase wrap | 让加密后的 identity 支持跨设备恢复；与 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) P0d 增强合并决策，真实 passphrase round-trip 验收。 |
+| `RM-PRODUCT-003` | Tier 3 legacy backend reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 保持 explicit-only；复用 `RM-PRODUCT-002` 的 unwrap 路径关闭 tty gap，未完成前继续显式 deprecation/fail-closed。 |
 
-### ADR 0039 gated-deferred residual
-
-| Item | Intent | Gate / Notes |
-|---|---|---|
-| Low-frequency zone/view migration **[GATED-DEFERRED]** | 当 identity / skills / habits / workflows / project-memory / rationale 出现真实用量后，再选择单一 pilot 迁移到 evidence → projector → stable view。 | 仅在以下任一真实信号出现时重开：identity-shaped evidence 达到可验收样本；出现带 turn-pointer 的塑形错误；或存在足量可 replay 的历史事实。无触发即继续 deferred；不得用 synthetic event 验收或一次性重写全系统。 |
-
-## Memory retrieval remaining work
-
-| Item | Intent | Gate / Notes |
-|---|---|---|
-| Stage1 compact surface v2 **[DEFERRED / DARK-LAUNCH OFF]** | 在不损失弱模型 recall 的前提下降低粗筛 surface 成本。 | 现有 compact 试验有明显 recall 回归，不转正；重开需 stage1-50 度量、重复样本、compact-v2 薄证据与 sediment 路径验证。 |
-| Stage0 follow-up | 解耦 reconcile 写入、异步 cold-start rebuild、统一截断语义，并补中文 sparse 防复发 guard / dedup oracle。 | 只按真实查询回归与运行瓶颈推进，不重新引入全库 fallback。 |
-
-## Architecture debt
-
-| Item | Intent |
-|---|---|
-| Schema evolution | frontmatter/audit/binding schema 的 version upgrade path（当前 `schema_version: 1` 字段已写入，缺多版本兼容/迁移策略）。 |
-| Runtime path docs/tests | 避免 `.pensieve`/`.pi-astack`/`.abrain .state` 路径漂移。 |
-| Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
-| constraint offline compile/dossier 工具加固 | `scripts/dossier-constraint-shadow-report.mjs` 仅是历史 Constraint 的离线/冷审计工具，不参与也不改写 Policy stable-view live injection。让 registry 复用 pi runtime/model-curator 模型源；写模式默认输出 temp 树，覆盖 residual `.state` audit artifact 必须显式选择并响亮告警；用共享 stage helper 消除手维护 TS stage 清单的 bitrot。 |
-
-## Pending flips（过渡态机械门，ADR 0024 §7.6 条款）
-
-| 门 | flip/移除条件 | 证据源 |
-|---|---|---|
-| `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive，仅 no-target） | 审计窗口内 `tier1_direct_write` 中 `is_directive!==true && confidence>=8` 不再产生被用户纠正的 accepted corrections / recall misses → 移除 fallback 回 ADR 原文谓词 | `tier1_direct_write` audit 的 `is_directive` / `confidence` / correction outcome 维度（O5 sunset） |
-
-## ADR 0031 — 自治自标定遗忘剩余验收
-
-设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)。仍需完成：
-
-- 把 supersede/contradict 真值变化信号送入 aggregator 视图；disuse 单独不得触发降级。
-- 让 executor 消费一个受控批次，并证明 demote ledger 与 reactivation window 可审计。
-- 用真实 query 做 corpus vs corpus-minus-would-demote 回归；低 resurrection rate 不得被当作安全证明。
-
-自治遗忘终点保持 `archived` 全文可达；物理删除不在 ADR 0031 授权内，未来若需要必须另起专门决策。
-
-## Deferred exploration
-
-| Item | Current stance |
-|---|---|
-| qmd optional acceleration | 仅作未来离线诊断/加速实验候选；不得成为 LLM retrieval 不可用时的 fallback。 |
-| Incremental graph rebuild | graph/index 是派生物，当前可 rebuild；增量优化低优先。 |
-| Prompts/gstack reference port | 未来如需吸收 gstack 方法论，按 `UPSTREAM.md` 临时 clone/read diff 后按需 port；不恢复 active vendor submodule。 |
-
-## Design maxim
-
-对 LLM 语义错误，优先改 prompt/curator 反馈，而不是添加 silent mechanical reject gate。例外是 credential/secret 泄漏、path traversal、schema corruption 这类不可逆或存储完整性风险。
+Lane G 不在产品轨重复登记；只执行主序列 `RM-LIFECYCLE-002` 中不违反 P7 gate、且不引入人工 review 的部分。
