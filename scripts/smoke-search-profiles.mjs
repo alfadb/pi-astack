@@ -54,6 +54,8 @@ const R = (name, settings = base, callerFilters) => resolveProfileExecution(SEAR
   ok(r.search.sparseBM25 === base.search.sparseBM25, "sedimentDedup: sparseBM25 继承全局");
   ok(r.search.bestEffortOnNone === false, "sedimentDedup: bestEffortOnNone 强制 false(verdict=none 返空语义)");
   ok(r.search.dedupChunk0Aggregation === true, "sedimentDedup: dedupChunk0Aggregation 强制 true(ADR 0036 P4 条件1 dedup 专用 pin)");
+  ok(SEARCH_PROFILES.sedimentDedup.archivedDenseCandidates === true, "sedimentDedup: 唯一启用 archived dense candidate surface");
+  ok(["toolSearch", "decideSearch", "pathAInject", "correctionSearch"].every((name) => SEARCH_PROFILES[name].archivedDenseCandidates !== true), "user-facing/active profiles: archived dense candidate surface 保持关闭");
   // 关键泄漏防护: 全局开/关 dedupChunk0Aggregation, dedup 仍钉 true; 同时 stage1Skip/sparseBM25 跟随全局
   const gOff = { ...base, search: { ...base.search, stage1Skip: false, sparseBM25: false, bestEffortOnNone: false, dedupChunk0Aggregation: false } };
   const r2 = R("sedimentDedup", gOff);

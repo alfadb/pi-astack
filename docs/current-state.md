@@ -104,7 +104,7 @@ LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide` / 
 - 当前 `projection_only` 下，winning pool 由 stable L2 Knowledge projection（active project + world）与 bounded hot overlay 组成；legacy `.pensieve/`、`knowledge/`、`projects/<id>/` 不进入稳态 winning pool。非 `projection_only` 迁移模式仍保留 legacy 只读接入。
 - 当前生产形态是 `stage0 hybrid` 候选召回 + stage2 full-content LLM 精排：stage0 合并 dense embedding、sparse 候选与 stale/missing freshness floor；`stage1Skip=true` 时跳过 stage1 LLM 粗筛，仅在 verdict=none 或候选池过小时把 stage1 作为低频安全网。
 - sparse 臂当前用 char n-gram BM25（`sparseBM25=true`）补中文、符号与标识符召回；这是 stage0 候选机制，不是 LLM 不可用时的 grep/BM25 降级。
-- embedding 索引当前启用多向量（`multiVector=true`，每 entry 最多 `multiVectorMaxChunks` 个 sub-vector）；搜索时 `autoReconcile=true` 会按冷却与 backlog 门限修补 stale/add/orphan-prune，索引仍是 L3 可重建派生物。
+- embedding 索引当前启用多向量（`multiVector=true`，每 entry 最多 `multiVectorMaxChunks` 个 sub-vector）；`archived` vector 只向 `sedimentDedup` 提供 dense candidate surface，默认 active/user-facing retrieval 保持排除 archived/superseded。搜索时 `autoReconcile=true` 会按冷却与 backlog 门限修补 stale/add/orphan-prune；archived-dense 调用必须传完整 lifecycle corpus，否则 fail-closed 不产生 reconcile 信号。索引仍是 L3 可重建派生物。
 - `bestEffortOnNone=true` 时，stage2 判 `none` 且扩召后仍无命中，可以返回 stage0 排序 top-K 低置信结果；调用方需要自行判断相关性。
 - 默认排除 `status=archived` 与 `superseded`（`deprecated` 在解析期折叠为 `superseded`，一并排除）；要纳入被替代/历史条目须显式传 `filters.status`（传 `active` 则只看活跃）。
 - 返回 normalized cards，**不暴露 backend/source_path/scope**（`memory_get` exact lookup 作 debug 才暴露）。

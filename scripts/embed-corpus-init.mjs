@@ -3,12 +3,14 @@
  * ADR 0035 P1: 全库初始 embed。
  *
  * 用**真实 parseEntry**(经 ts-require-hook 加载真实 parser.ts + 依赖)读所有
- * project + knowledge 的 active entries —— content-hash 与生产 loadEntries 一致,
+ * project + knowledge entries —— content-hash 与生产 loadEntries 一致,
  * 故本次预热对生产有效(P2 sediment 写入不会因 hash mismatch 全部 re-embed)。
- * 然后 buildCorpusEmbeddings 写生产索引 ~/.abrain/.state/memory/embeddings.json
- * (全局单文件 + per-entry scope tag, ADR 0035 §7 P1 决策)。
+ * buildCorpusEmbeddings 内部按 dense lifecycle 语义索引 active + archived
+ * (superseded/rules 不进 dense surface)，写生产索引
+ * ~/.abrain/.state/memory/embeddings.json
+ * (全局单文件 + per-entry scope tag, ADR 0035 §7 P1 决策 + RM-LIFECYCLE-001)。
  *
- * 需要 ~/.pi/secrets.json 的 embedding key。幂等:content-hash 增量,重跑只 embed 变化的。
+ * 需要 embedding route key。幂等:content-hash 增量,重跑只 embed 变化的。
  */
 import fs from "node:fs";
 import { embeddingConfig } from "./_embedding-config.mjs";
@@ -92,10 +94,12 @@ if (fs.existsSync(knowledgeDir)) {
   }
 }
 
-const active = entries.filter((e) => e.status === "active");
+const indexable = emb.denseLifecycleIndexEntries(entries);
+const active = indexable.filter((e) => e.status === "active");
+const archived = indexable.filter((e) => e.status === "archived");
 const scopeCount = {};
-for (const e of active) scopeCount[emb.scopeTagOf(e)] = (scopeCount[emb.scopeTagOf(e)] || 0) + 1;
-console.log(`parsed ${entries.length} entries, ${active.length} active across ${Object.keys(scopeCount).length} scopes`);
+for (const e of indexable) scopeCount[emb.scopeTagOf(e)] = (scopeCount[emb.scopeTagOf(e)] || 0) + 1;
+console.log(`parsed ${entries.length} entries, indexable=${indexable.length} (active=${active.length}, archived=${archived.length}) across ${Object.keys(scopeCount).length} scopes`);
 
 const embedding = embeddingConfig();
 const key = embedding.apiKey;
@@ -122,7 +126,9 @@ const lock = process.env.OUT_PATH
 const t0 = Date.now();
 let r;
 try {
-  r = await emb.buildCorpusEmbeddings(active, cfg, idxPath, {
+  // Pass the full parse corpus; denseLifecycleIndexEntries inside the builder
+  // keeps active + archived and drops superseded/rules, matching embedding.ts.
+  r = await emb.buildCorpusEmbeddings(entries, cfg, idxPath, {
     maxChars: 3500,
     onProgress: (done, todo) => { if (done % 200 < 10 || done === todo) console.log(`  embedded ${done}/${todo} (${((Date.now() - t0) / 1000).toFixed(0)}s)`); },
   });
@@ -134,11 +140,14 @@ const idxData = JSON.parse(fs.readFileSync(idxPath, "utf8"));
 const indexedEntries = Object.keys(idxData.entries).length;
 if (!process.env.OUT_PATH) {
   fs.mkdirSync(path.dirname(emb.indexMetaPath()), { recursive: true });
+  // Keep index-meta fields aligned with embedding.ts writeIndexMeta semantics.
   fs.writeFileSync(emb.indexMetaPath(), `${JSON.stringify({
     updatedAt: new Date().toISOString(),
-    activeEntries: r.total,
+    activeEntries: r.active,
+    archivedEntries: r.archived,
+    indexableEntries: r.total,
     indexedEntries,
-    coverageRatio: r.total > 0 ? indexedEntries / r.total : 1,
+    coverageRatio: r.total > 0 ? Math.min(indexedEntries, r.total) / r.total : 1,
     embeddedThisRun: r.embedded,
     skippedThisRun: r.skipped,
     prunedThisRun: r.pruned,

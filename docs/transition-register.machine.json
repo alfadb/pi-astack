@@ -818,21 +818,25 @@
       "id": "memory.dedup-archived-dense",
       "partition": "memory",
       "title": "dedup-archived 无 dense 通道",
-      "human_section": "滞留需推进",
+      "human_section": "已收口",
       "register_class": "active",
-      "phase_status": "blocked_on_implementation",
+      "phase_status": "completed",
       "authorization_status": "authorized",
       "entered": "2026-07-09",
       "review_by": "2026-07-24",
-      "current": "archived 只能由 BM25 词面命中，缺少 dense dedup 候选。",
+      "current": "2026-07-23 completed: active + archived lifecycle entries rebuild into the shared L3 index; archived dense candidates are profile-gated to sedimentDedup, default active retrieval remains excluded, and missing full reconcileEntries fails closed.",
       "exit": [
         "embed/prune 合法集扩展至 archived",
         "检索 profile active 过滤保持不变",
-        "smoke 覆盖 archived dense candidate"
+        "smoke 覆盖 archived dense candidate",
+        "真实 production dossier 验证 archived dense surface 与历史 reactivation trace"
       ],
       "evidence": [
         "extensions/memory/search-profiles.ts",
-        "extensions/memory/embedding.ts"
+        "extensions/memory/embedding.ts",
+        "scripts/smoke-memory-archived-dense.mjs",
+        "scripts/dossier-rm-lifecycle-001-production.mjs",
+        "docs/evidence/2026-07-23-rm-lifecycle-001-production.json"
       ],
       "owner": "memory-retrieval",
       "consumer": [
@@ -840,7 +844,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "medium",
-      "next_action": "在 C2 受控批次放量前或同批修复。"
+      "next_action": "Keep closed; RM-LIFECYCLE-002 remains the next autonomous lifecycle work item."
     },
     {
       "id": "forgetting.kind-evidence-strength-v1",

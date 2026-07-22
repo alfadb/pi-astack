@@ -72,6 +72,24 @@ const relevantSuperseded = {
 };
 const probeSlugs = new Set([...supersededProbes, ...ruleProbes].map((e) => e.slug));
 const corpusAll = [...corpus, ...supersededProbes, ...ruleProbes, relevantSuperseded];
+// Defensive callers can carry obsolete lifecycle rows before their active
+// replacement. Bare-slug identity must still select active, regardless of
+// whether the earlier duplicate is archived or superseded.
+const archivedBeforeActive = {
+  ...base0, slug: "__archived-before-active", status: "archived",
+  title: "git singleflight lock index race condition archived duplicate",
+  summary: "git singleflight lock index race condition archived duplicate",
+  compiledTruth: "git singleflight lock index race condition archived duplicate",
+};
+const supersededBeforeActive = {
+  ...base0, slug: "__superseded-before-active", status: "superseded",
+  title: "git singleflight lock index race condition superseded duplicate",
+  summary: "git singleflight lock index race condition superseded duplicate",
+  compiledTruth: "git singleflight lock index race condition superseded duplicate",
+};
+const activeAfterArchived = { ...archivedBeforeActive, status: "active", title: "git singleflight lock index race condition active authority archived duplicate" };
+const activeAfterSuperseded = { ...supersededBeforeActive, status: "active", title: "git singleflight lock index race condition active authority superseded duplicate" };
+const duplicateCorpus = [...corpusAll, archivedBeforeActive, activeAfterArchived, supersededBeforeActive, activeAfterSuperseded];
 
 const settings = { ...resolveSettings(), embedding: resolveSettings().embedding };
 const s = { ...settings, search: { ...settings.search, stage0Enabled: true } };
@@ -81,7 +99,9 @@ console.log(`smoke-stage0-nonactive | corpus=${corpus.length}(+50 superseded +5 
 let failed = 0;
 const check = (n, c) => { console.log(`  ${c ? "ok  " : "FAIL"}  ${n}`); if (!c) failed++; };
 
+const baselinePool = await selectStage0Pool(query, corpus, s, registry, { status: ["all"] });
 const pool = await selectStage0Pool(query, corpusAll, s, registry, { status: ["all"] });
+const duplicatePool = await selectStage0Pool(query, duplicateCorpus, s, registry, { status: ["all"] });
 check(`pool != null (P7: status:["all"] 不再回退全库 full_body)`, pool !== null);
 if (pool) {
   const maxCand = s.search.stage0MaxCandidates;
@@ -90,8 +110,11 @@ if (pool) {
   check(`mode=hybrid (dense 工作, 非熔断): ${pool.mode}`, pool.mode === "hybrid");
   check(`候选面缩到 <= maxCand=${maxCand} (非全库 ${corpusAll.length}): pool=${pool.candidateEntries.length}`, pool.candidateEntries.length <= maxCand);
   check(`不可索引 probe(50 superseded + 5 rule) 不被塞进候选: 进候选数=${probesInPool} (期望 0)`, probesInPool === 0);
-  check(`staleCount 合理(仅可索引集陈旧, 不含 55 probe): staleCount=${pool.staleCount}`, pool.staleCount < 50);
+  check(`staleCount 对 55 个不可索引 probe 不变: all=${pool.staleCount}, baseline=${baselinePool?.staleCount}`, pool.staleCount === baselinePool?.staleCount);
   check(`相关非 active 旧版能被召回(sparse 通道, 去重质量): __relevant-superseded-probe ∈ pool=${candSlugs.includes("__relevant-superseded-probe")}`, candSlugs.includes("__relevant-superseded-probe"));
+  const duplicateBySlug = new Map((duplicatePool?.candidateEntries ?? []).map((entry) => [entry.slug, entry.status]));
+  check(`archived-first duplicate slug resolves to active: ${duplicateBySlug.get("__archived-before-active")}`, duplicateBySlug.get("__archived-before-active") === "active");
+  check(`superseded-first duplicate slug resolves to active: ${duplicateBySlug.get("__superseded-before-active")}`, duplicateBySlug.get("__superseded-before-active") === "active");
   console.log(`\n  pool=${pool.candidateEntries.length} dense=${pool.denseCount} sparse=${pool.sparseCount} stale=${pool.staleCount}`);
 }
 console.log(`${failed === 0 ? "\nP7 PASS — 非 active 查询走 stage0 缩候选, 不可索引集不塞 stale, 全库 full_body 漏洞已堵" : "\n" + failed + " FAILED"}`);

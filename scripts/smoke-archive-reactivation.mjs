@@ -1100,10 +1100,12 @@ check("R7: sediment/index.ts calls ctx.ui.notify when reactivations happen", () 
   // Find the archive-reactivation closure's audit block.
   const auditIdx = src.search(/operation:\s*"archive_reactivation",/);
   if (auditIdx < 0) throw new Error("could not locate archive_reactivation audit call");
-  // Notify code should be within ~2000 chars after the audit call.
-  const body = src.slice(auditIdx, auditIdx + 3000);
-  if (!/ctx\.ui\?\.notify/.test(body)) {
-    throw new Error("archive-reactivation must call ctx.ui?.notify when reactivations happen (INV-INVISIBILITY: tell the user)");
+  // Notify code follows the audit block and uses the trigger-snapshot `notify`
+  // reporter captured from ctx.ui. Keep the window large enough for the audit
+  // schema comments between the two blocks.
+  const body = src.slice(auditIdx, auditIdx + 6000);
+  if (!/notify\(lines\.join\("\\n"\),\s*"info"\)/.test(body)) {
+    throw new Error("archive-reactivation must call the captured UI notify reporter when reactivations happen (INV-INVISIBILITY: tell the user)");
   }
   // R8 NIT fix: scope-aware notify uses reactivated_entries; backward
   // compat fallback path still checks reactivated_slugs. Accept either.
@@ -1115,7 +1117,7 @@ check("R7: sediment/index.ts calls ctx.ui.notify when reactivations happen", () 
 check("R7: notify is best-effort (wrapped in try/catch so UI errors don't kill lane)", () => {
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
   // Find the notify call.
-  const notifyIdx = src.search(/ctx\.ui\.notify\(\s*lines\.join/);
+  const notifyIdx = src.search(/notify\(lines\.join\("\\n"\),\s*"info"\)/);
   if (notifyIdx < 0) throw new Error("could not locate the lines.join notify call");
   // Walk back ~400 chars to find a 'try {'.
   const before = src.slice(Math.max(0, notifyIdx - 400), notifyIdx);

@@ -7,7 +7,7 @@
  *   - VectorIndex: abrain `.state/memory/` 持久化的向量索引,content-hash
  *     keyed 失效 + embedding-model 版本戳(盲审修订:换 model 强制重建,
  *     metadata-only 更新不 re-embed),纯 JS 余弦 topN
- *   - buildCorpusEmbeddings: 全库 active entries 增量 embed(只算变化的)
+ *   - buildCorpusEmbeddings: 全库 dense lifecycle entries(active + archived)增量 embed(只算变化的)
  *
  * 零 npm 运行时依赖:仅用 node 内置(fetch / crypto / fs)。
  *
@@ -65,6 +65,30 @@ function contentBasis(e: MemoryEntry): string {
 
 export function contentHashOf(e: MemoryEntry): string {
   return crypto.createHash("sha256").update(contentBasis(e), "utf8").digest("hex").slice(0, 16);
+}
+
+/** RM-LIFECYCLE-001: the shared L3 index retains active retrieval vectors and
+ * archived dedup tombstones. Rules remain on their dedicated push surface.
+ * Superseded and all other lifecycle states stay outside this dense surface. */
+export function isDenseLifecycleIndexEntry(e: MemoryEntry): boolean {
+  const zone = (e.frontmatter as Record<string, unknown> | undefined)?.zone;
+  return (e.status === "active" || e.status === "archived") && zone !== "rules";
+}
+
+/** Bare slug is the existing VectorIndex identity. Defensive callers may pass
+ * duplicate rows, so collapse deterministically and never let an archived
+ * duplicate overwrite the active vector for the same slug. Input order still
+ * resolves same-status project/world collisions according to parser priority. */
+export function denseLifecycleIndexEntries(entries: MemoryEntry[]): MemoryEntry[] {
+  const bySlug = new Map<string, MemoryEntry>();
+  for (const entry of entries) {
+    if (!isDenseLifecycleIndexEntry(entry)) continue;
+    const current = bySlug.get(entry.slug);
+    if (!current || (current.status !== "active" && entry.status === "active")) {
+      bySlug.set(entry.slug, entry);
+    }
+  }
+  return [...bySlug.values()];
 }
 
 /** Scheme tag for the freshness key: "s"=single-vector, "m"=multi-vector.
@@ -379,7 +403,7 @@ export class VectorIndex {
     return { ok: true };
   }
 
-  /** Coverage of an active-slug set: indexed vs missing. Lets the search
+  /** Coverage of a caller-supplied valid-slug set: indexed vs missing. Lets the search
    *  layer build a BOUNDED cold-start fallback (ADR 0035 §4) instead of an
    *  O(库) full-body union. */
   coverage(activeSlugs: string[]): { indexed: number; missing: string[] } {
@@ -388,7 +412,7 @@ export class VectorIndex {
     return { indexed: activeSlugs.length - missing.length, missing };
   }
 
-  /** Drop vectors whose slug is no longer an active entry. When `scopes` is
+  /** Drop vectors whose slug is no longer a valid dense lifecycle entry. When `scopes` is
    *  given, prune ONLY slugs whose scope is in that set — reconcile passes the
    *  current session's scopes so a project-scoped reconcile never deletes other
    *  projects' vectors (ADR 0035 §7 bug1) while still clearing the current
@@ -406,7 +430,7 @@ export class VectorIndex {
   }
 
   /** ADR 0036 §10.6 auto-reconcile prune 信号: 数“scope 在本次范围内, 但 slug 不再是
-   *  active entry”的索引向量(= archived/deleted 遗留的孤儿)。纯只读, prune() 的
+   *  active/archived dense lifecycle entry”的索引向量(= hard-deleted/retired 遗留孤儿)。纯只读, prune() 的
    *  计数镜像 —— 驱动 search-time 双向 reconcile 触发判据的 PRUNE 方向。 */
   countOrphans(validSlugs: Set<string>, scopes: Set<string>): number {
     let n = 0;
@@ -650,7 +674,9 @@ export async function resolveEmbeddingProviderConfig(
 
 // ── corpus build (incremental, content-hash gated) ───────────────────────
 export interface CorpusBuildResult {
-  total: number;     // active entries
+  total: number;     // unique dense lifecycle entries(active + archived)
+  active: number;
+  archived: number;
   embedded: number;  // newly embedded (changed/missing)
   skipped: number;   // content-hash unchanged
   pruned: number;    // stale slugs dropped
@@ -666,20 +692,21 @@ export async function buildCorpusEmbeddings(
   const saveEvery = opts?.saveEvery ?? cfg.batchSize * 10;
   const idx = new VectorIndex(indexPath, cfg.model, cfg.dim).load();
 
-  const active = entries.filter((e) => e.status === "active");
-  const validSlugs = new Set(active.map((e) => e.slug));
+  const indexable = denseLifecycleIndexEntries(entries);
+  const validSlugs = new Set(indexable.map((e) => e.slug));
   // reconcile(部分库)传 pruneScopes:只 prune 当前 scope 内的 stale slug,绝不
   // 删其他 project 向量(ADR 0035 §7 bug1);全库 init 不传 → prune 全部 stale。
   const pruned = opts?.skipPrune ? 0 : idx.prune(validSlugs, opts?.pruneScopes);
-  // ADR 0035 §75(4): prune 落盘与 embed 成功解耦 —— prune 是纯本地操作, delete/archive
+  // ADR 0035 §75(4): prune 落盘与 embed 成功解耦 —— prune 是纯本地操作, hard delete
   // 的孤儿向量必须能清掉哪怕 embedding provider 宕机(否则整个 reconcile 报错
-  // 被 swallow, prune 丢失, 孤儿泄漏到下次成功 embed)。仅有 prune 时存一次(原子写)。
+  // 被 swallow, prune 丢失, 孤儿泄漏到下次成功 embed)。archived 是合法 tombstone,
+  // 不得被 orphan-prune。仅有 prune 时存一次(原子写)。
   if (pruned > 0) idx.save();
 
   // content-hash + scheme gate: only embed changed/missing/scheme-flipped(ADR 0036 P4)
   const currentScheme = embedSchemeTag(cfg.multiVector);
   const hashes = new Map<string, string>();
-  const todo = active.filter((e) => {
+  const todo = indexable.filter((e) => {
     const h = contentHashOf(e);
     hashes.set(e.slug, h);
     return !idx.isFresh(e.slug, h, currentScheme);
@@ -713,18 +740,20 @@ export async function buildCorpusEmbeddings(
       }
     }
   });
-  // refresh scope tags for ALL active (incl. content-hash-skipped): scope is
+  // refresh scope tags for ALL indexable entries (incl. content-hash-skipped): scope is
   // position metadata (project dir), independent of content-hash — must reflect
   // current location even when content unchanged (ADR 0035 §4).
   let scopeChanged = false;
-  for (const e of active) scopeChanged = idx.setScope(e.slug, scopeTagOf(e)) || scopeChanged;
+  for (const e of indexable) scopeChanged = idx.setScope(e.slug, scopeTagOf(e)) || scopeChanged;
   // no-op reconcile 跳过全量回写: embed=0 且无 scope 变更时, 内存索引与磁盘已一致
   // (prune>0 已在前面单独原子落盘)。否则每次 reconcile 都无条件重写整份(已达 ~93MB)
   // 索引文件 —— 并行项目被全局锁串行后, 这会消除背靠背 no-op reconcile 的重复全量回写。
   // load() 的 v1→v2 migrate-on-read 是幂等内存操作, 不落盘也不丢数据(下次 load 重做)。
   if (embedded > 0 || scopeChanged) idx.save();
 
-  return { total: active.length, embedded, skipped: active.length - todo.length, pruned };
+  const active = indexable.filter((entry) => entry.status === "active").length;
+  const archived = indexable.length - active;
+  return { total: indexable.length, active, archived, embedded, skipped: indexable.length - todo.length, pruned };
 }
 
 export function indexLockPath(): string {
@@ -743,7 +772,9 @@ function writeIndexMeta(cfg: EmbeddingProviderConfig, result: CorpusBuildResult,
     const indexedEntries = idx.size();
     atomicWriteJson(indexMetaPath(), {
       updatedAt: new Date().toISOString(),
-      activeEntries: result.total,
+      activeEntries: result.active,
+      archivedEntries: result.archived,
+      indexableEntries: result.total,
       indexedEntries,
       coverageRatio: result.total > 0 ? Math.min(indexedEntries, result.total) / result.total : 1,
       embeddedThisRun: result.embedded,
@@ -769,7 +800,7 @@ export async function reconcileEmbeddings(
   indexPath: string,
   opts?: { maxChars?: number; onProgress?: (done: number, todo: number) => void; lockTimeoutMs?: number },
 ): Promise<CorpusBuildResult> {
-  const scopes = new Set(entries.filter((e) => e.status === "active").map(scopeTagOf));
+  const scopes = new Set(denseLifecycleIndexEntries(entries).map(scopeTagOf));
   const lock = await acquireFileLock(indexLockPath(), {
     timeoutMs: opts?.lockTimeoutMs ?? 30_000,
     staleMs: 60_000,

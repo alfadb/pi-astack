@@ -11,6 +11,28 @@ status: active
 
 ---
 
+## 2026-07-23 — accepted — RM-LIFECYCLE-001 reversible archived lifecycle substrate
+
+### 变更
+
+完成 archived lifecycle retrieval substrate：active 与 archived 均可保留于可重建 dense index，但 archived dense 候选仅供 `sedimentDedup` 使用，默认 active/user-facing retrieval 不泄漏 archived 或 superseded。reconcile 的合法集必须是完整 lifecycle corpus；archived-dense profile 缺少该集合时 fail-closed，不触发 add/prune。
+
+生产验收拆为两门：真实 production archived surface（当前快照 15 条，重跑门只要求 archived>0 并记录实际数量）与真实 query corpus 验证 dense dedup、默认 active 边界和 archived 非 orphan；真实历史 archived→active 链验证 A 的 ledger/audit/git provenance、C 的 ADR0039 L1 event chain，并以 A 的 archived 历史快照通过正式 writer/CAS 做隔离重放。dossier 不伪造无 ledger provenance 的 formal reviewer observation，也不重放 LLM decision。
+
+### 验收边界
+
+`npm run smoke:archived-dense`、`npm run smoke:stage0-nonactive` 与 `npm run dossier:rm-lifecycle-001-production` 必须通过。production dossier 不写 `~/.abrain`、不重新调用 LLM 制造 decision、不输出 source 正文或 slug 明文；记录 source ledger/audit/git/L1 hashes、隔离 writer/CAS 结果与自 hash。
+
+### 非目标
+
+历史真实 reactivation 只证明可逆 lifecycle substrate，**不**等同于 `RM-FORGET-001` 受控 demote 批次完成；不放宽 reviewer，不授权 physical delete，不改变 forgetting 的 blocked/gated 面。
+
+### 关联
+
+[Roadmap](roadmap.md)；[Transition register](transition-register.md)；[production dossier](evidence/2026-07-23-rm-lifecycle-001-production.json)。
+
+---
+
 ## 2026-07-22 — accepted — RM-OUTCOME-001 outcome evidence spine
 
 ### 变更

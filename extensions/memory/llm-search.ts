@@ -4,7 +4,7 @@ import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
-import { embedSchemeTag, embedTexts, resolveEmbeddingProviderConfig, scopeTagOf, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
+import { denseLifecycleIndexEntries, embedSchemeTag, embedTexts, isDenseLifecycleIndexEntry, resolveEmbeddingProviderConfig, scopeTagOf, staleOrMissingSlugs, VectorIndex, vectorIndexPath, type EmbeddingProviderConfig } from "./embedding";
 import { maybeAutoReconcile, type ReconcileSignal } from "./auto-reconcile";
 import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
@@ -749,7 +749,8 @@ export async function selectStage0Pool(
   corpus: MemoryEntry[],
   settings: MemorySettings,
   modelRegistry: ModelRegistryLike,
-  filters: SearchFilters,
+  _filters: SearchFilters,
+  opts?: { profileName?: SearchProfileName; reconcileEntries?: MemoryEntry[] },
 ): Promise<Stage0Pool | null> {
   const emb = settings.embedding;
   if (!embeddingConfigured(emb)) return null; // 未配置 → 全 corpus
@@ -759,8 +760,27 @@ export async function selectStage0Pool(
   // 非 active 唯一召回通道) + stale(仅可索引集, 见下)。原 wantsNonActive→null 是
   // ADR §7 修订 7 “非 active 查询罕见可接受”的错误假设——sediment 去重是每轮高频+大库。
 
-  const entriesBySlug = new Map(corpus.map((e) => [e.slug, e]));
-  const allowSlugs = new Set(corpus.map((e) => e.slug));
+  // Bare slug is the existing candidate identity. Prefer active over archived
+  // when defensive/oracle callers provide both rows; production loadEntries
+  // already applies project/world store priority before this point.
+  const entriesBySlug = new Map<string, MemoryEntry>();
+  for (const entry of corpus) {
+    const current = entriesBySlug.get(entry.slug);
+    if (!current || (current.status !== "active" && entry.status === "active")) {
+      entriesBySlug.set(entry.slug, entry);
+    }
+  }
+  // RM-LIFECYCLE-001: archived vectors are a dedicated dedup candidate surface.
+  // User-facing/default profiles consume active dense vectors only; explicit
+  // historical status filters retain their existing sparse/LLM contract.
+  const archivedDenseCandidates = opts?.profileName
+    ? SEARCH_PROFILES[opts.profileName].archivedDenseCandidates === true
+    : false;
+  const candidateIndexable = corpus.filter((entry) =>
+    isDenseLifecycleIndexEntry(entry)
+      && (entry.status === "active" || archivedDenseCandidates),
+  );
+  const denseAllowSlugs = new Set(candidateIndexable.map((entry) => entry.slug));
   const poolLimit = settings.search.stage0PoolLimit;
   const maxCand = settings.search.stage0MaxCandidates;
 
@@ -778,7 +798,7 @@ export async function selectStage0Pool(
     // ADR 0036 P4 条件1: dedup 路径(profile 钉 dedupChunk0Aggregation)只用 chunk0 聚合,
     // 避免 multiVector max-sim 让共享尾段 chunk 的 distinct entry 浮上为 false-merge 候选。
     const agg = settings.search.dedupChunk0Aggregation ? "chunk0" : undefined;
-    denseSlugs = idx.topN(qv, poolLimit, { allowSlugs, agg }).map((h) => h.slug);
+    denseSlugs = idx.topN(qv, poolLimit, { allowSlugs: denseAllowSlugs, agg }).map((h) => h.slug);
   } catch {
     mode = "sparse_fallback"; // 熔断: dense 不可用 → sparse-only(禁全库)
   }
@@ -786,19 +806,11 @@ export async function selectStage0Pool(
   const sparseSlugs = settings.search.sparseBM25
     ? sparseMatchSlugsBM25(query, corpus)
     : sparseMatchSlugs(query, corpus);
-  // P7(4×T0 共识, load-bearing fix): stale 只算“reconcile 会 embed 的集合”。
-  // staleOrMissingSlugs 原对全 corpus 算 → status:["all"] 查询时所有非 active +
-  // readonly rule neighbors(zone:rules, 不经 loadEntries 永不被 reconcile embed)
-  // 都因 !isFresh 被标 stale → 塞爆候选池且永久 stale。只对可索引集算:
-  // status==="active" 且 非 zone:rules(与 buildCorpusEmbeddings 的 embed 集一致)。
-  // 非 active 是“故意不索引”非“陈旧”, freshness 不变量不适用于它们。
-  const indexableForStale = corpus.filter(
-    (e) => e.status === "active" && (e.frontmatter as Record<string, unknown> | undefined)?.zone !== "rules",
-  );
-  // ADR 0036 P4: 传 scheme → multiVector toggle 后旧 scheme 的 entry 被认为 stale,
-  // 进 freshness floor 重嵌(与全库 rebuild 互补)。flag-off 时 scheme="s", 迁移后
-  // 的 v1 记录默认 "s" → 不误报 stale。
-  const staleSlugs = staleOrMissingSlugs(idx, indexableForStale, embedSchemeTag(emb.multiVector)); // search-time freshness(仅可索引集)
+  // Candidate freshness follows the same profile-gated dense surface. Archived
+  // entries are fresh-floor candidates only for sedimentDedup; rules and
+  // superseded entries remain deliberately non-indexable.
+  const currentScheme = embedSchemeTag(emb.multiVector);
+  const staleSlugs = staleOrMissingSlugs(idx, candidateIndexable, currentScheme);
 
   // union + 硬上限 —— window-aware 排序(见 orderStage0Candidates, §9.1 条件 3)。
   // windowSize = two-stage 候选窗口(candidateLimit = max(stage2Limit, stage1Limit))。
@@ -821,16 +833,34 @@ export async function selectStage0Pool(
     for (const e of corpus.slice().sort(byUpdatedDesc).slice(0, poolLimit)) ordered.push(e.slug);
   }
 
-  // ADR 0036 §10.6: 双向 auto-reconcile 信号(数据均已加载, 纯 set 运算)。
-  // ADD = staleSlugs(content-hash 缺失/陈旧); PRUNE = 索引内 in-scope 但已非 active 的孤儿。
-  const activeSlugsSet = new Set(indexableForStale.map((e) => e.slug));
-  const loadedScopes = new Set(indexableForStale.map((e) => scopeTagOf(e)));
-  const reconcileSignal: ReconcileSignal = {
-    indexEmpty: idx.size() === 0,
-    staleCount: staleSlugs.length,
-    orphanCount: idx.countOrphans(activeSlugsSet, loadedScopes),
-    activeCount: activeSlugsSet.size,
-  };
+  // ADR 0036 §10.6: 双向 auto-reconcile 信号必须使用完整加载态，不能从当前
+  // status-filtered corpus 推断合法集。archived dense profile 若没有完整集合，宁可
+  // 不触发后台 add/prune，也不能把未传入的 active/archived vector 误判为 orphan。
+  const reconcileUnavailable = archivedDenseCandidates && opts?.reconcileEntries === undefined;
+  const reconcileIndexable = reconcileUnavailable
+    ? []
+    : denseLifecycleIndexEntries(opts?.reconcileEntries ?? corpus);
+  const reconcileValidSlugs = new Set(reconcileIndexable.map((entry) => entry.slug));
+  const loadedScopes = new Set(reconcileIndexable.map(scopeTagOf));
+  const reconcileStale = staleOrMissingSlugs(idx, reconcileIndexable, currentScheme);
+  const activeCount = reconcileIndexable.filter((entry) => entry.status === "active").length;
+  const reconcileSignal: ReconcileSignal = reconcileUnavailable
+    ? {
+      // Fail closed: an empty/missing filtered surface is not evidence that the
+      // shared lifecycle index is empty or orphaned.
+      indexEmpty: false,
+      staleCount: 0,
+      orphanCount: 0,
+      activeCount: 0,
+      indexableCount: 0,
+    }
+    : {
+      indexEmpty: idx.size() === 0,
+      staleCount: reconcileStale.length,
+      orphanCount: idx.countOrphans(reconcileValidSlugs, loadedScopes),
+      activeCount,
+      indexableCount: reconcileIndexable.length,
+    };
 
   return {
     candidateEntries: ordered.map((s) => entriesBySlug.get(s)).filter((e): e is MemoryEntry => !!e),
@@ -957,7 +987,7 @@ async function executeSearch(
   let surface = STAGE1_CANDIDATE_SURFACE; // full_body_v3 (flag off / fallback)
   let pool: Stage0Pool | null = null;
   if (settings.search.stage0Enabled) {
-    pool = await selectStage0Pool(query, corpus, settings, modelRegistry, filters);
+    pool = await selectStage0Pool(query, corpus, settings, modelRegistry, filters, { profileName: metricsProfile, reconcileEntries: entries });
     if (pool) {
       candidateEntries = pool.candidateEntries;
       surface = STAGE0_SURFACE;
@@ -1029,7 +1059,7 @@ async function executeSearch(
   if (pool && pool.mode === "hybrid" && (result.verdict === "none" || poolTooSmall)) {
     const expandedPoolLimit = Math.min(settings.search.stage0PoolLimit * 3, 400);
     const expSettings: MemorySettings = { ...settings, search: { ...settings.search, stage0PoolLimit: expandedPoolLimit } };
-    const exp = await selectStage0Pool(query, corpus, expSettings, modelRegistry, filters);
+    const exp = await selectStage0Pool(query, corpus, expSettings, modelRegistry, filters, { profileName: metricsProfile, reconcileEntries: entries });
     if (exp && exp.candidateEntries.length > candidateEntries.length) {
       const retrySettings: MemorySettings = { ...settings, search: { ...settings.search, stage1Skip: false } };
       let retry: TwoStageResult;
@@ -1258,7 +1288,10 @@ export async function runMemorySearch(
   // ADR 0036 P5: toolSearch 精确直查路由(dark-launch)。命中即短路跳两次 LLM; 否则 fall-through。
   // 仅 toolSearch 适用: path-A/decide/dedup/correction 的 query 永不是裸 slug/ADR 编号。
   if (profileName === "toolSearch" && search.queryRouting) {
-    const routed = routeExactLookup(query, entries);
+    // Exact routing is still retrieval and must obey the same default/explicit
+    // status contract as the LLM path. Filtering after route would leak an
+    // archived or superseded exact slug through default memory_search.
+    const routed = routeExactLookup(query, filteredEntries(entries, filters));
     if (routed) {
       const cards = [resultCard(routed, 1, "exact-route (ADR 0036 P5: slug/ADR 精确直查跳 LLM)")] as SearchPlainResult;
       cards.relevance_verdict = "has_relevant";

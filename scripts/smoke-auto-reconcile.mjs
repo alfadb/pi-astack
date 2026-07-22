@@ -26,6 +26,7 @@ ok(D({ indexEmpty: true }, { hasProjectRoot: false }).reason === "no_project_roo
 ok(D({ indexEmpty: true }, { inFlight: true }).reason === "in_flight", "single-flight: 已在飞行 → 不触发");
 ok(D({ indexEmpty: true }, { lastRunAt: 999_000 }).reason === "cooldown", "cooldown 内 → 不触发(now-last=1000ms<300000)");
 ok(D({ indexEmpty: true, activeCount: 0 }).reason === "empty_corpus", "空 corpus(无可索引)→ 不触发");
+ok(D({ indexEmpty: true, activeCount: 0, indexableCount: 4 }).trigger === true, "archived-only dense lifecycle corpus 仍可触发冷启动重建");
 
 // ── 触发场景 ──────────────────────────────────────────────────
 ok(D({ indexEmpty: true }).trigger === true, "新设备/冷启动: 空索引 + 有 active → 触发(index_empty)");
