@@ -163,7 +163,7 @@ try {
     settingsPath,
     sourceRoot: root,
     startupBarrierTimeoutMs: barrierTimeoutMs,
-    startupBusyBudgetMs: 3_000,
+    startupBusyBudgetMs: 30_000,
     startupBusyInitialBackoffMs: 20,
     startupBusyMaxBackoffMs: 80,
   });
@@ -297,12 +297,44 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
   assert(delays.every((delay) => delay <= 40), `barrier backoff exceeded cap: ${delays}`);
   assert(probes === delays.length + 3, `multi-waiter polling multiplied unexpectedly: probes=${probes} delays=${delays.length}`);
 
+  // The startup budget includes process-local singleflight queueing. Returning
+  // at 600ms must not let the expired node mutate when the 700ms holder exits.
+  const queuedRepo = initRepo("queued-deadline");
+  const queuedOptions = {
+    abrainHome: queuedRepo,
+    settingsPath,
+    sourceRoot: root,
+    startupBarrierTimeoutMs: 1_000,
+    startupBusyBudgetMs: 600,
+  };
+  const queuedRuntime = await runtimeModule.getCanonicalGitRuntime(queuedOptions);
+  let queueHolderStarted;
+  const queueHolderEntered = new Promise((resolve) => { queueHolderStarted = resolve; });
+  const queueHolder = barrier.withCanonicalMutationBarrier(queuedRepo, async () => {
+    queueHolderStarted();
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  });
+  await queueHolderEntered;
+  const queuedStartedAt = Date.now();
+  const queuedDeferred = await queuedRuntime.awaitStartup();
+  const queuedElapsedMs = Date.now() - queuedStartedAt;
+  assert(queuedDeferred.startup === "deferred" && queuedDeferred.deferredReason === "CANONICAL_MUTATION_BUSY", `queued startup did not map deadline to typed deferred: ${JSON.stringify(queuedDeferred)}`);
+  assert(queuedElapsedMs <= 680, `600ms startup queue budget overran significantly: ${queuedElapsedMs}ms`);
+  const queuedDeferredRow = queuedDeferred.tail.find((row) => row.operation === "startup" && row.status === "deferred");
+  assert(queuedDeferredRow?.budgetMs === 600 && queuedDeferredRow.elapsedMs <= 680, `deferred elapsed diagnostics exceeded budget epsilon: ${JSON.stringify(queuedDeferredRow)}`);
+  await queueHolder;
+  await new Promise((resolve) => setImmediate(resolve));
+  const afterExpiredDequeue = queuedRuntime.diagnostics();
+  assert(!afterExpiredDequeue.tail.some((row) => row.status === "barrier_acquired"), `expired queued startup executed a mutation phase: ${JSON.stringify(afterExpiredDequeue.tail)}`);
+  const queuedReady = await queuedRuntime.awaitStartup();
+  assert(queuedReady.startup === "ready", `next external lifecycle did not retry after queue expiry: ${queuedReady.blockedReason}`);
+
   // A permanent holder exhausts a short monotonic total budget into typed
   // deferred diagnostics. No retry timer remains; holder release plus a later
   // lifecycle consumer invocation starts a new freeze and reaches ready.
   const deferredRepo = initRepo("deferred-retry");
   const deferredMarker = path.join(tmp, "deferred-holder.marker");
-  const deferredHolder = barrierHolder(deferredRepo, 650, deferredMarker);
+  const deferredHolder = barrierHolder(deferredRepo, 1_500, deferredMarker);
   const deferredHolderDone = childResult(deferredHolder);
   await waitFor("deferred holder", () => fs.existsSync(deferredMarker));
   let activeSleeps = 0;
@@ -313,7 +345,7 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
     settingsPath,
     sourceRoot: root,
     startupBarrierTimeoutMs: 30,
-    startupBusyBudgetMs: 140,
+    startupBusyBudgetMs: 600,
     startupBusyInitialBackoffMs: 10,
     startupBusyMaxBackoffMs: 20,
     startupRetryRandom: () => 0,
@@ -354,6 +386,26 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
   assert(blockedDiagnostics.length === 2 && blockedDiagnostics.every((item) => item.startup === "deferred"), "both consumers did not observe the shared deferred result");
   assert(staleReports.length === 0, "deferred delivery retained stale reporters");
   assert(currentReports.every((row) => row.type !== "error"), `transient busy emitted a red error: ${JSON.stringify(currentReports)}`);
+  runtimeModule.reportCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "sediment-runtime",
+    message: `sediment agent_end deferred queue blocked: ${deferred.blockedReason}`,
+    type: "warning",
+    diagnostics: deferred,
+  });
+  assert(currentReports.filter((row) => row.type === "warning").length === 1, `abrain startup, sediment startup, and agent_end emitted duplicate generation warnings: ${JSON.stringify(currentReports)}`);
+  const changedReason = { ...deferred, blockedReason: `${deferred.blockedReason}:reason-changed` };
+  runtimeModule.reportCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "sediment-runtime",
+    message: "canonical startup deferred for a changed reason",
+    type: "warning",
+    diagnostics: changedReason,
+  });
+  assert(currentReports.filter((row) => row.type === "warning").length === 2, `changed reason did not emit a fresh warning: ${JSON.stringify(currentReports)}`);
+  runtimeModule.reportCanonicalStartupConsumer({ runtime: deferredOptions, consumerId: "sediment-runtime", message: "error-one", type: "error", diagnostics: deferred });
+  runtimeModule.reportCanonicalStartupConsumer({ runtime: deferredOptions, consumerId: "sediment-runtime", message: "error-two", type: "error", diagnostics: deferred });
+  assert(currentReports.filter((row) => row.type === "error").length === 2, `warning aggregation hid an error: ${JSON.stringify(currentReports)}`);
   assert(maxActiveSleeps === 1 && activeSleeps === 0, `startup retry timers leaked or multiplied: active=${activeSleeps} max=${maxActiveSleeps}`);
   await new Promise((resolve) => setImmediate(resolve));
   const activeTimeoutsAfter = process.getActiveResourcesInfo().filter((name) => name === "Timeout").length;
@@ -379,6 +431,24 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
   ]);
   assert(abrainReady === 1 && sedimentReady === 1, `external lifecycle retry did not run each onReady once: ${abrainReady}/${sedimentReady}`);
   assert(git(deferredRepo, "status", "--porcelain=v1", "-uall") === "", "deferred retry left repository dirty");
+  const readyDiagnostics = await runtimeModule.getCanonicalStartupPromise(deferredOptions);
+  runtimeModule.reportCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "sediment-runtime",
+    message: "late stale canonical startup fault after ready",
+    type: "warning",
+    diagnostics: deferred,
+  });
+  assert(currentReports.filter((row) => row.type === "warning").length === 2, `late pre-ready generation warning was not suppressed: ${JSON.stringify(currentReports)}`);
+  const postReadyFailure = { ...deferred, startupGeneration: readyDiagnostics.startupGeneration + 1 };
+  runtimeModule.reportCanonicalStartupConsumer({
+    runtime: deferredOptions,
+    consumerId: "sediment-runtime",
+    message: "canonical startup fault after ready",
+    type: "warning",
+    diagnostics: postReadyFailure,
+  });
+  assert(currentReports.filter((row) => row.type === "warning").length === 3, `ready did not reset warning aggregation for a new fault: ${JSON.stringify(currentReports)}`);
 
   // Terminal notifications are scoped to one startup-promise generation. Two
   // consumers share attempt 1 and emit one error. After an in-process repair
@@ -426,9 +496,61 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
   assert(terminalErrors.length === 2, `fresh startup attempts did not emit exactly two total errors: ${JSON.stringify(terminalErrors)}`);
   assert(terminalErrors.every((row) => row.message.startsWith("canonical startup failed:") && !row.message.includes("consumer-specific")), "terminal notification was not generic");
 
+  // Register rollover before the old consumers attach their await callbacks.
+  // The rejection eviction runs first, rollover installs generation 2, and only
+  // then do generation 1 consumers report. A stale report must not overwrite
+  // generation 2's notification state or suppress its one shared error.
+  const raceOptions = { abrainHome: path.join(tmp, "missing-terminal-race-repo"), settingsPath, sourceRoot: root };
+  const raceOldReports = [];
+  const raceNewReports = [];
+  const raceOldPromise = runtimeModule.getCanonicalStartupPromise(raceOptions);
+  let raceNewConsumers;
+  const rollover = raceOldPromise.catch(() => {
+    const raceNewPromise = runtimeModule.getCanonicalStartupPromise(raceOptions);
+    assert(raceNewPromise === runtimeModule.getCanonicalStartupPromise(raceOptions), "race generation 2 did not share one promise");
+    raceNewConsumers = Promise.all([
+      runtimeModule.scheduleCanonicalStartupConsumer({
+        runtime: raceOptions,
+        consumerId: "race-new-abrain",
+        mode: "json",
+        reporter: (message, type) => raceNewReports.push({ consumer: "abrain", message, type }),
+        onReady: () => { throw new Error("race generation 2 unexpectedly reached ready"); },
+      }),
+      runtimeModule.scheduleCanonicalStartupConsumer({
+        runtime: raceOptions,
+        consumerId: "race-new-sediment",
+        mode: "json",
+        reporter: (message, type) => raceNewReports.push({ consumer: "sediment", message, type }),
+        onReady: () => { throw new Error("race generation 2 unexpectedly reached ready"); },
+      }),
+    ]);
+  });
+  const raceOldConsumers = Promise.all([
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: raceOptions,
+      consumerId: "race-old-abrain",
+      mode: "json",
+      reporter: (message, type) => raceOldReports.push({ consumer: "abrain", message, type }),
+      onReady: () => { throw new Error("race generation 1 unexpectedly reached ready"); },
+    }),
+    runtimeModule.scheduleCanonicalStartupConsumer({
+      runtime: raceOptions,
+      consumerId: "race-old-sediment",
+      mode: "json",
+      reporter: (message, type) => raceOldReports.push({ consumer: "sediment", message, type }),
+      onReady: () => { throw new Error("race generation 1 unexpectedly reached ready"); },
+    }),
+  ]);
+  await Promise.all([raceOldConsumers, rollover]);
+  assert(raceNewConsumers, "race generation 2 consumers were not installed before old reports");
+  await raceNewConsumers;
+  const raceNewErrors = raceNewReports.filter((row) => row.type === "error");
+  assert(raceOldReports.length === 0, `late generation 1 report polluted current notification state: ${JSON.stringify(raceOldReports)}`);
+  assert(raceNewErrors.length === 1, `late generation 1 report suppressed or duplicated generation 2 error: ${JSON.stringify(raceNewReports)}`);
+
   console.log("startup busy retry and outside final classification: ok");
   console.log(`  A_head_advanced=${mutationHead !== headBefore} B_busy_retries=${b.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length} final_probe_ms=${finalOutsideProbeMs}`);
-  console.log(`  barrier_probes=${probes} delays=${delays.join(",")} deferred_retries=${deferred.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length}`);
+  console.log(`  barrier_probes=${probes} delays=${delays.join(",")} queued_budget_ms=${queuedElapsedMs} deferred_retries=${deferred.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length}`);
   console.log(`  onReady=abrain:${abrainReady},sediment:${sedimentReady} terminal_attempt_errors=${attempt1Errors.length}+${attempt2Errors.length}`);
 } finally {
   await Promise.allSettled([...pendingChildren]);

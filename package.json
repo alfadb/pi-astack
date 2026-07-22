@@ -179,6 +179,7 @@
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
     "smoke:l1-schema-registry-faults": "node scripts/smoke-l1-schema-registry-faults.mjs",
     "smoke:canonical-git-runtime": "node scripts/smoke-canonical-git-runtime.mjs",
+    "smoke:canonical-mutation-barrier": "node scripts/smoke-canonical-mutation-barrier.mjs",
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
     "smoke:recovery-history-batch": "node scripts/smoke-recovery-history-batch.mjs",

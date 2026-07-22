@@ -76,7 +76,6 @@ import {
   validateAbrainProjectId,
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
-import { gitSingleFlight } from "../_shared/git-singleflight";
 import {
   withCanonicalMutationBarrier,
   withoutCanonicalMutationBarrierContext,
@@ -462,21 +461,38 @@ function gitErrorSummary(err: any): string {
   return (stderr || stdout || err?.message || String(err)).trim().slice(0, 500);
 }
 
-export function autoCommitPaths(repoRoot: string, relPaths: string[], message: string): AutoCommitResult {
+function gitReadOptions(timeout: number): {
+  encoding: "utf8";
+  env: NodeJS.ProcessEnv;
+  stdio: ["ignore", "pipe", "pipe"];
+  timeout: number;
+} {
+  return {
+    encoding: "utf8",
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout,
+  };
+}
+
+export async function autoCommitPaths(repoRoot: string, relPaths: string[], message: string): Promise<AutoCommitResult> {
   const root = path.resolve(repoRoot);
   const paths = relPaths.map((p) => p.replace(/\\/g, "/")).filter(Boolean);
   if (paths.length === 0) return { repoRoot: root, paths, status: "clean", detail: "no paths" };
   try {
-    execFileSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3000 });
+    execFileSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], gitReadOptions(3_000));
   } catch {
     return { repoRoot: root, paths, status: "not_git", detail: "not a git worktree" };
   }
+  return withCanonicalMutationBarrier(root, async () => autoCommitPathsUnlocked(root, paths, message));
+}
 
+function autoCommitPathsUnlocked(root: string, paths: string[], message: string): AutoCommitResult {
   try {
-    execFileSync("git", ["-C", root, "add", "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+    execFileSync("git", ["-C", root, "add", "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 });
     let hasStagedChanges = true;
     try {
-      execFileSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+      execFileSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", ...paths], gitReadOptions(5_000));
       hasStagedChanges = false;
     } catch {
       hasStagedChanges = true;
@@ -484,7 +500,7 @@ export function autoCommitPaths(repoRoot: string, relPaths: string[], message: s
     if (!hasStagedChanges) return { repoRoot: root, paths, status: "clean", detail: "no changes" };
 
     execFileSync("git", ["-C", root, "commit", "-m", message, "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 20_000 });
-    const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3000 }).trim();
+    const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], gitReadOptions(3_000)).trim();
     return { repoRoot: root, paths, status: "committed", commitSha: sha || undefined };
   } catch (err: any) {
     return { repoRoot: root, paths, status: "failed", detail: gitErrorSummary(err) };
@@ -2915,23 +2931,21 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
           cwd: commandCwd,
           projectId: parsed.projectId,
         });
-        // The project repository has its own single-flight key. The abrain
-        // worktree write and canonical drain remain inside one OFD barrier.
-        const commitProjectManifest = async () => autoCommitPaths(
+        // autoCommitPaths owns its own singleflight-before-barrier sequence.
+        // Calling another same-repository singleflight wrapper here would queue
+        // behind this operation when a bind targets the abrain worktree itself.
+        const projectCommit = await autoCommitPaths(
           result.projectRoot,
           [".abrain-project.json"],
           `chore: 绑定 abrain 项目 ${result.projectId}`,
         );
-        const projectCommit = path.resolve(result.projectRoot) === path.resolve(ABRAIN_HOME)
-          ? await commitProjectManifest()
-          : await gitSingleFlight(result.projectRoot, commitProjectManifest);
         const abrainCommit = canonicalBindEnabled
           ? await canonicalAutoCommitAbrainPaths(
               ABRAIN_HOME,
               [".gitignore", `projects/${result.projectId}/_project.json`],
               `project: add ${result.projectId}`,
             )
-          : autoCommitPaths(
+          : await autoCommitPaths(
               ABRAIN_HOME,
               [".gitignore", `projects/${result.projectId}/_project.json`],
               `project: 添加 ${result.projectId}`,

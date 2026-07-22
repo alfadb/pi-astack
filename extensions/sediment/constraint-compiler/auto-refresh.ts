@@ -409,7 +409,7 @@ async function constraintRepoHead(abrainHome: string): Promise<string> {
     if (!key.startsWith("GIT_") && value !== undefined) env[key] = value;
   }
   const { stdout } = await execFileAsync("git", ["-C", path.resolve(abrainHome), "rev-parse", "--verify", "HEAD^{commit}"], {
-    env: { ...env, LANG: "C", LC_ALL: "C", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
+    env: { ...env, LANG: "C", LC_ALL: "C", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
     encoding: "utf-8",
     timeout: 5_000,
     maxBuffer: 128 * 1024,

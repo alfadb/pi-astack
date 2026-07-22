@@ -194,7 +194,7 @@ await check("enabled startup executes local Git only", async () => {
   const captureDir = path.join(tmp, "capture-bin"); fs.mkdirSync(captureDir);
   const captureLog = path.join(tmp, "runtime-git-argv.jsonl");
   const wrapper = path.join(captureDir, "git");
-  fs.writeFileSync(wrapper, `#!/usr/bin/env node\nconst fs=require('fs'),cp=require('child_process');const a=process.argv.slice(2);fs.appendFileSync(process.env.RUNTIME_GIT_CAPTURE,JSON.stringify(a)+'\\n');const r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',env:process.env});process.exit(r.status??1);\n`, { mode: 0o755 });
+  fs.writeFileSync(wrapper, `#!/usr/bin/env node\nconst fs=require('fs'),cp=require('child_process');const a=process.argv.slice(2);fs.appendFileSync(process.env.RUNTIME_GIT_CAPTURE,JSON.stringify({args:a,optionalLocks:process.env.GIT_OPTIONAL_LOCKS??null})+'\\n');const r=cp.spawnSync(${JSON.stringify(realGit)},a,{stdio:'inherit',env:process.env});process.exit(r.status??1);\n`, { mode: 0o755 });
   const oldPath = process.env.PATH;
   process.env.PATH = `${captureDir}${path.delimiter}${oldPath ?? ""}`;
   process.env.RUNTIME_GIT_CAPTURE = captureLog;
@@ -208,7 +208,8 @@ await check("enabled startup executes local Git only", async () => {
   }
   const calls = fs.readFileSync(captureLog, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
   assert(calls.length > 0, "startup issued no local Git commands");
-  assert(!calls.some((args) => args.includes("fetch") || args.includes("push") || args.includes("ls-remote")), `startup touched remote: ${JSON.stringify(calls)}`);
+  assert(calls.every((call) => call.optionalLocks === "0"), `sanitized Git call omitted GIT_OPTIONAL_LOCKS=0: ${JSON.stringify(calls)}`);
+  assert(!calls.some((call) => call.args.includes("fetch") || call.args.includes("push") || call.args.includes("ls-remote")), `startup touched remote: ${JSON.stringify(calls)}`);
 });
 
 await check("legacy residue is excluded while startup commits strict Knowledge content", async () => {

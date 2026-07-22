@@ -6,7 +6,7 @@ import type { MemorySettings } from "./settings";
 import { parseDirectionImpact } from "./direction-impact";
 import { validateProjectEntryDraft } from "../sediment/validation";
 import type { SanitizeResult } from "../sediment/sanitizer";
-import { gitSingleFlight } from "../_shared/git-singleflight";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentAuditPath } from "../_shared/runtime";
 
@@ -286,9 +286,17 @@ interface GitCommitOutcome {
   nothingToCommit?: boolean;
 }
 
+function gitReadEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 async function gitHeadSha(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 64 * 1024,
+    });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -310,7 +318,11 @@ async function gitCommitAll(cwd: string, message: string, pathspecs: string[]): 
     if (narrowed.length === 0) return { sha: null, nothingToCommit: true };
     await execFileAsync("git", ["-C", cwd, "add", "-A", "--", ...narrowed], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     await execFileAsync("git", ["-C", cwd, "commit", "-m", message], { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 64 * 1024,
+    });
     return { sha: stdout.trim() || null };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -396,19 +408,27 @@ export async function runAdrIngest(opts: RunIngestOptions): Promise<IngestRunRes
     return result;
   }
 
-  const projectDir = abrainProjectDir(abrainHome, opts.projectId);
   try {
-    await fs.access(projectDir);
+    await fs.access(abrainHome);
   } catch {
-    result.error = `abrain project dir not found: ${projectDir} (strict binding requires an existing bound project)`;
+    result.error = `abrain project dir not found: ${abrainProjectDir(abrainHome, opts.projectId)} (strict binding requires an existing bound project)`;
     return result;
   }
 
-  const abrainPreSha = await gitHeadSha(abrainHome);
-  result.abrainPreSha = abrainPreSha;
+  return withCanonicalMutationBarrier(abrainHome, async () => {
+    const projectDir = abrainProjectDir(abrainHome, opts.projectId);
+    try {
+      await fs.access(projectDir);
+    } catch {
+      result.error = `abrain project dir not found: ${projectDir} (strict binding requires an existing bound project)`;
+      return result;
+    }
 
-  try {
-    for (const planned of manifest.entries) {
+    const abrainPreSha = await gitHeadSha(abrainHome);
+    result.abrainPreSha = abrainPreSha;
+
+    try {
+      for (const planned of manifest.entries) {
       if (planned.issues.length > 0) {
         // Never persist an entry that failed schema / direction_impact 红线.
         result.skippedWithIssues.push(planned.slug);
@@ -441,23 +461,27 @@ export async function runAdrIngest(opts: RunIngestOptions): Promise<IngestRunRes
       ...result.written.map((slug) => path.relative(abrainHome, path.join(projectDir, `${slug}.md`))),
       path.relative(abrainHome, path.join(projectDir, "_index.md")),
       path.relative(abrainHome, path.join(projectDir, ".index", "graph.json")),
-      path.relative(abrainHome, abrainSedimentAuditPath(abrainHome)),
+      // .state/ is intentionally Git-ignored. The audit remains durable on
+      // disk but must not make this exact maintenance cohort unstageable.
     ];
-    const commit = await gitSingleFlight(abrainHome, () =>
-      gitCommitAll(abrainHome, `ingest(adr): ${result.written.length} entries from ${opts.sources.length} ADR(s)`, commitPathspecs),
+    const commit = await gitCommitAll(
+      abrainHome,
+      `ingest(adr): ${result.written.length} entries from ${opts.sources.length} ADR(s)`,
+      commitPathspecs,
     );
     result.commitSha = commit.sha;
     if (commit.error) throw new Error(`git commit failed: ${commit.error}`);
 
-    result.ok = result.failed.length === 0 && result.skippedWithIssues.length === 0;
-    return result;
-  } catch (e) {
-    result.error = e instanceof Error ? e.message : String(e);
-    if (abrainPreSha) {
-      await gitResetHard(abrainHome, abrainPreSha);
-      result.rolledBack = true;
-      result.written = [];
+      result.ok = result.failed.length === 0 && result.skippedWithIssues.length === 0;
+      return result;
+    } catch (e) {
+      result.error = e instanceof Error ? e.message : String(e);
+      if (abrainPreSha) {
+        await gitResetHard(abrainHome, abrainPreSha);
+        result.rolledBack = true;
+        result.written = [];
+      }
+      return result;
     }
-    return result;
-  }
+  });
 }

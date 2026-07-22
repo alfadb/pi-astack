@@ -92,8 +92,32 @@ export interface AbrainSyncStatus {
   lastFetch?: GitSyncEvent;
 }
 
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  "cat-file",
+  "diff",
+  "diff-tree",
+  "ls-files",
+  "rev-list",
+  "rev-parse",
+  "status",
+]);
+
 function freshGitEnvironment(): NodeJS.ProcessEnv {
-  return { ...process.env, LANG: "C", LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" };
+  const environment: NodeJS.ProcessEnv = {
+    ...process.env,
+    LANG: "C",
+    LC_ALL: "C",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  delete environment.GIT_OPTIONAL_LOCKS;
+  return environment;
+}
+
+function gitEnvironmentForArgs(args: readonly string[]): NodeJS.ProcessEnv {
+  const environment = freshGitEnvironment();
+  return READ_ONLY_GIT_SUBCOMMANDS.has(args[0] ?? "")
+    ? { ...environment, GIT_OPTIONAL_LOCKS: "0" }
+    : environment;
 }
 
 async function canonicalAbrainHome(input: string): Promise<string> {
@@ -102,7 +126,7 @@ async function canonicalAbrainHome(input: string): Promise<string> {
 
 async function runGit(repo: string, args: readonly string[], timeout: number): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
-    env: freshGitEnvironment(),
+    env: gitEnvironmentForArgs(args),
     timeout,
     maxBuffer: MAX_BUFFER,
     encoding: "utf-8",

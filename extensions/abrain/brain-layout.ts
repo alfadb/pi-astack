@@ -168,6 +168,7 @@ function structuralGitEnvironment(): NodeJS.ProcessEnv {
   env.LANG = "C";
   env.LC_ALL = "C";
   env.GIT_TERMINAL_PROMPT = "0";
+  env.GIT_OPTIONAL_LOCKS = "0";
   return env;
 }
 

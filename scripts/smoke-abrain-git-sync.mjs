@@ -205,6 +205,46 @@ await check("exact-OID push targets the configured upstream destination", async 
   assert(git(fixture.bare, "rev-parse", "refs/heads/main") === local, "remote did not receive exact local oid");
 });
 
+await check("Git read probes disable optional locks while fetch and push retain default lock semantics", async () => {
+  const fixture = createRemoteFixture("git-environment-by-subcommand");
+  const device = cloneDevice(fixture);
+  fs.appendFileSync(path.join(device, "entry.txt"), "local\n");
+  commit(device, "local");
+
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const bin = path.join(tmp, "git-environment-by-subcommand-bin");
+  const capture = path.join(tmp, "git-environment-by-subcommand.log");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nprintf '%s\\t%s\\n' "\${GIT_OPTIONAL_LOCKS-}" "$*" >> ${JSON.stringify(capture)}\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+
+  const priorPath = process.env.PATH;
+  const priorOptionalLocks = process.env.GIT_OPTIONAL_LOCKS;
+  process.env.PATH = `${bin}${path.delimiter}${priorPath ?? ""}`;
+  process.env.GIT_OPTIONAL_LOCKS = "caller-value";
+  try {
+    const counts = await sync.getAheadBehind(device);
+    assert(counts.ahead === 1 && counts.behind === 0, `read probe returned unexpected divergence: ${JSON.stringify(counts)}`);
+    const pushed = await sync.pushAsync({ abrainHome: device, jitterMs: 0 });
+    assert(pushed.result === "ok", `transport under environment probe failed: ${JSON.stringify(pushed)}`);
+  } finally {
+    process.env.PATH = priorPath;
+    if (priorOptionalLocks === undefined) delete process.env.GIT_OPTIONAL_LOCKS;
+    else process.env.GIT_OPTIONAL_LOCKS = priorOptionalLocks;
+  }
+
+  const calls = fs.readFileSync(capture, "utf8").trim().split("\n").filter(Boolean).map((line) => {
+    const [optionalLocks, args] = line.split("\t", 2);
+    return { optionalLocks, args };
+  });
+  const callsFor = (subcommand) => calls.filter((call) => new RegExp(`(?:^|\\s)${subcommand}(?:\\s|$)`).test(call.args));
+  const readProbes = callsFor("rev-list");
+  const fetches = callsFor("fetch");
+  const pushes = callsFor("push");
+  assert(readProbes.length > 0 && readProbes.every((call) => call.optionalLocks === "0"), `read probes must use GIT_OPTIONAL_LOCKS=0: ${JSON.stringify(calls)}`);
+  assert(fetches.length > 0 && fetches.every((call) => call.optionalLocks === ""), `fetch must not receive GIT_OPTIONAL_LOCKS: ${JSON.stringify(calls)}`);
+  assert(pushes.length > 0 && pushes.every((call) => call.optionalLocks === ""), `push must not receive GIT_OPTIONAL_LOCKS: ${JSON.stringify(calls)}`);
+});
+
 await check("equal fetched OIDs bypass prepare, canonical barrier, whole-tree validation, and push on a large repo", async () => {
   const fixture = createRemoteFixture("large-fetched-oid-noop", 6_000);
   const device = cloneDevice(fixture);

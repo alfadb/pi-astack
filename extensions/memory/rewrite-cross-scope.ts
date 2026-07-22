@@ -38,6 +38,7 @@ import { promisify } from "node:util";
 
 import type { MemorySettings } from "./settings";
 import { parseWikilinkTarget, scanStore, splitFrontmatter } from "./parser";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 
 const execFileAsync = promisify(execFile);
 
@@ -453,6 +454,7 @@ async function listMarkdownFilesUnder(root: string): Promise<string[]> {
 async function gitRootOf(dir: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("git", ["-C", dir, "rev-parse", "--show-toplevel"], {
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       timeout: 3000,
       maxBuffer: 256 * 1024,
     });
@@ -469,6 +471,10 @@ async function atomicWrite(file: string, content: string): Promise<void> {
 }
 
 export async function applyRewritePlan(plan: RewritePlan): Promise<RewriteApplyResult> {
+  return withCanonicalMutationBarrier(plan.abrainHome, () => applyRewritePlanUnlocked(plan));
+}
+
+async function applyRewritePlanUnlocked(plan: RewritePlan): Promise<RewriteApplyResult> {
   const affected = plan.entries.filter((e) => e.changes.length > 0 && e.newContent !== undefined);
   let filesWritten = 0;
   for (const entry of affected) {

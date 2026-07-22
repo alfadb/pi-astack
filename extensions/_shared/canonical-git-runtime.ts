@@ -20,7 +20,7 @@ import {
   snapshotIndexEntries,
   type CohortPlanEntry,
 } from "./git-exact-cohort";
-import { gitSingleFlight } from "./git-singleflight";
+import { gitSingleFlight, gitSingleFlightWithDeadline } from "./git-singleflight";
 import {
   CanonicalMutationBarrierError,
   canonicalMutationBarrierHeld,
@@ -161,6 +161,7 @@ export interface CanonicalRuntimeDiagnostics {
   apiVersion: number;
   repo: string;
   settings: CanonicalGitRuntimeSettings;
+  startupGeneration: number;
   startup: "not_started" | "running" | "ready" | "blocked" | "deferred";
   blockedReason?: string;
   deferredReason?: "CANONICAL_MUTATION_BUSY";
@@ -301,8 +302,12 @@ interface GlobalRuntimeState {
   loadedProvenance?: readonly LoadedProvenanceEntry[];
   runtimes: Map<string, CanonicalGitRuntimeImpl>;
   startupPromises: Map<string, Promise<CanonicalRuntimeDiagnostics>>;
+  startupPromiseGenerations: Map<string, number>;
+  startupPromiseGenerationTokens: WeakMap<Promise<CanonicalRuntimeDiagnostics>, number>;
   startupConsumers: Map<string, CanonicalStartupConsumerState>;
   startupFailureNotifications: Set<string>;
+  startupFailureNotificationGenerations: Map<string, number>;
+  startupWarningNotifications: Map<string, { generation: number; readyGeneration: number; signatures: Set<string> }>;
 }
 
 function globalState(): GlobalRuntimeState {
@@ -313,8 +318,12 @@ function globalState(): GlobalRuntimeState {
       apiVersion: API_VERSION,
       runtimes: new Map(),
       startupPromises: new Map(),
+      startupPromiseGenerations: new Map(),
+      startupPromiseGenerationTokens: new WeakMap(),
       startupConsumers: new Map(),
       startupFailureNotifications: new Set(),
+      startupFailureNotificationGenerations: new Map(),
+      startupWarningNotifications: new Map(),
     };
     global[GLOBAL_KEY] = created;
     return created;
@@ -323,8 +332,12 @@ function globalState(): GlobalRuntimeState {
     throw new CanonicalGitRuntimeError("RUNTIME_SINGLETON_SPLIT", "incompatible process-global canonical runtime singleton");
   }
   if (!(existing.startupPromises instanceof Map)) existing.startupPromises = new Map();
+  if (!(existing.startupPromiseGenerations instanceof Map)) existing.startupPromiseGenerations = new Map();
+  if (!(existing.startupPromiseGenerationTokens instanceof WeakMap)) existing.startupPromiseGenerationTokens = new WeakMap();
   if (!(existing.startupConsumers instanceof Map)) existing.startupConsumers = new Map();
   if (!(existing.startupFailureNotifications instanceof Set)) existing.startupFailureNotifications = new Set();
+  if (!(existing.startupFailureNotificationGenerations instanceof Map)) existing.startupFailureNotificationGenerations = new Map();
+  if (!(existing.startupWarningNotifications instanceof Map)) existing.startupWarningNotifications = new Map();
   return existing as GlobalRuntimeState;
 }
 
@@ -400,6 +413,7 @@ function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
     LC_ALL: "C",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
   };
 }
@@ -548,10 +562,24 @@ export async function preflightSharedIndexLock(repo: string): Promise<void> {
   const lockPath = await indexLockPath(repo);
   try {
     const stat = await fsp.lstat(lockPath);
-    throw new CanonicalGitRuntimeError("INDEX_LOCK_PRESENT", "shared index lock exists; it is never removed by canonical runtime", {
-      lockPath,
-      kind: stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other",
-    });
+    const kind = stat.isSymbolicLink() ? "symlink" : stat.isDirectory() ? "directory" : stat.isFile() ? "file" : "other";
+    const ageMs = Number.isFinite(stat.mtimeMs) ? Math.max(0, Math.floor(Date.now() - stat.mtimeMs)) : "unknown";
+    const diagnostic = `kind=${kind} ageMs=${ageMs} inode=${stat.ino} size=${stat.size} dev=${stat.dev} mode=${stat.mode & 0o7777}`;
+    throw new CanonicalGitRuntimeError(
+      "INDEX_LOCK_PRESENT",
+      `shared index lock exists; it is never removed by canonical runtime (${diagnostic})`,
+      {
+        lockPath,
+        kind,
+        ageMs,
+        inode: stat.ino,
+        size: stat.size,
+        dev: stat.dev,
+        mode: stat.mode & 0o7777,
+        mtimeMs: stat.mtimeMs,
+        ctimeMs: stat.ctimeMs,
+      },
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return;
     throw error;
@@ -1026,6 +1054,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   readonly loadedProvenance: readonly LoadedProvenanceEntry[];
   readonly implementationFingerprint: string;
   private startupState: CanonicalRuntimeDiagnostics["startup"] = "not_started";
+  private startupGeneration = 0;
   private startupPromise?: Promise<CanonicalRuntimeDiagnostics>;
   private blockedReason?: string;
   private deferredReason?: "CANONICAL_MUTATION_BUSY";
@@ -1074,6 +1103,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       apiVersion: API_VERSION,
       repo: this.repo,
       settings: this.settings,
+      startupGeneration: this.startupGeneration,
       startup: this.startupState,
       ...(this.blockedReason ? { blockedReason: this.blockedReason } : {}),
       ...(this.deferredReason ? { deferredReason: this.deferredReason } : {}),
@@ -1103,6 +1133,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
    */
   awaitStartup(): Promise<CanonicalRuntimeDiagnostics> {
     if (!this.startupPromise) {
+      this.startupGeneration += 1;
       const created = this.runStartupOutsideMutationBarrier();
       this.startupPromise = created;
       void created.then(
@@ -1192,10 +1223,24 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     operation: () => Promise<T>,
   ): Promise<T> {
     const configuredTimeout = Math.max(0, this.options.startupBarrierTimeoutMs ?? DEFAULT_STARTUP_BARRIER_TIMEOUT_MS);
-    const remainingBudget = Math.max(0, Math.floor(busyDeadline - now()));
-    return gitSingleFlight(this.repo, () => withCanonicalMutationBarrierInSingleFlight(this.repo, operation, {
-      timeoutMs: Math.min(configuredTimeout, remainingBudget),
-    }));
+    const remainingBudget = Math.max(0, busyDeadline - now());
+    return gitSingleFlightWithDeadline(
+      this.repo,
+      () => withCanonicalMutationBarrierInSingleFlight(this.repo, operation, {
+        timeoutMs: Math.min(configuredTimeout, remainingBudget),
+        deadlineMs: busyDeadline,
+        now,
+      }),
+      {
+        deadlineMs: busyDeadline,
+        now,
+        onExpired: (detail) => new CanonicalMutationBarrierError(
+          "CANONICAL_MUTATION_BUSY",
+          "timed out waiting for the process-local canonical mutation turn",
+          { ...detail },
+        ),
+      },
+    );
   }
 
   private async runStartupPhases(
@@ -1204,6 +1249,13 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     busyDeadline: number,
     now: () => number,
   ): Promise<CanonicalRuntimeDiagnostics> {
+    if (now() >= busyDeadline) {
+      throw new CanonicalMutationBarrierError(
+        "CANONICAL_MUTATION_BUSY",
+        "canonical startup busy deadline expired before the next phase attempt",
+        { repo: this.repo, phase: "startup_phase_entry", deadlineMs: busyDeadline },
+      );
+    }
     let initialFrozen: FrozenStartupClassificationInputs | undefined;
     let freezeError: unknown;
     this.record({ operation: "startup_phase", phase: "freeze_initial", status: "enter", driftAttempt, busyRetry });
@@ -2054,15 +2106,67 @@ function reportCanonicalStartupState(
   console.error(`[canonical-startup] ${message}`);
 }
 
+function resetCanonicalStartupWarnings(diagnostics: CanonicalRuntimeDiagnostics): void {
+  const notifications = globalState().startupWarningNotifications;
+  const existing = notifications.get(diagnostics.repo);
+  if (!existing) {
+    notifications.set(diagnostics.repo, {
+      generation: diagnostics.startupGeneration,
+      readyGeneration: diagnostics.startupGeneration,
+      signatures: new Set(),
+    });
+    return;
+  }
+  existing.generation = Math.max(Number.isFinite(existing.generation) ? existing.generation : 0, diagnostics.startupGeneration);
+  existing.readyGeneration = Math.max(Number.isFinite(existing.readyGeneration) ? existing.readyGeneration : 0, diagnostics.startupGeneration);
+  existing.signatures.clear();
+}
+
+function reportCanonicalStartupWarningOnce(
+  consumer: CanonicalStartupConsumerState,
+  diagnostics: CanonicalRuntimeDiagnostics,
+  message: string,
+): void {
+  if (diagnostics.startup !== "blocked" && diagnostics.startup !== "deferred") {
+    reportCanonicalStartupState(consumer, message, "warning");
+    return;
+  }
+  const state = globalState();
+  let generation = state.startupWarningNotifications.get(diagnostics.repo);
+  if (!generation) {
+    generation = { generation: diagnostics.startupGeneration, readyGeneration: 0, signatures: new Set() };
+    state.startupWarningNotifications.set(diagnostics.repo, generation);
+  } else {
+    generation.generation = Number.isFinite(generation.generation) ? generation.generation : 0;
+    generation.readyGeneration = Number.isFinite(generation.readyGeneration) ? generation.readyGeneration : 0;
+    if (diagnostics.startupGeneration < generation.generation) return;
+    if (diagnostics.startupGeneration > generation.generation) {
+      generation.generation = diagnostics.startupGeneration;
+      generation.signatures.clear();
+    }
+  }
+  if (diagnostics.startupGeneration <= generation.readyGeneration) return;
+  const reason = diagnostics.deferredReason
+    ? `${diagnostics.deferredReason}:${diagnostics.blockedReason ?? "unknown"}`
+    : diagnostics.blockedReason ?? "unknown";
+  const signature = `${diagnostics.startup}\0${reason}`;
+  if (generation.signatures.has(signature)) return;
+  generation.signatures.add(signature);
+  reportCanonicalStartupState(consumer, message, "warning");
+}
+
 function reportCanonicalStartupFailureOnce(
   runtime: CanonicalGitRuntimeOptions,
   consumer: CanonicalStartupConsumerState,
   error: unknown,
+  startupPromiseGeneration: number,
 ): void {
   const state = globalState();
   const key = canonicalStartupKey(runtime);
-  if (state.startupFailureNotifications.has(key)) return;
-  state.startupFailureNotifications.add(key);
+  if (state.startupFailureNotificationGenerations.get(key) !== startupPromiseGeneration) return;
+  const notificationKey = `${key}\0${startupPromiseGeneration}`;
+  if (state.startupFailureNotifications.has(notificationKey)) return;
+  state.startupFailureNotifications.add(notificationKey);
   reportCanonicalStartupState(
     consumer,
     `canonical startup failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -2070,21 +2174,38 @@ function reportCanonicalStartupFailureOnce(
   );
 }
 
-/** Return the one process-global in-flight/successful startup promise for this
- * runtime. Rejections are evicted so a repaired repo can retry in-process. */
-export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
+function nextCanonicalStartupPromiseGeneration(
+  state: GlobalRuntimeState,
+  key: string,
+  promise: Promise<CanonicalRuntimeDiagnostics>,
+): number {
+  const previousGeneration = state.startupPromiseGenerations.get(key);
+  const generation = (previousGeneration ?? 0) + 1;
+  state.startupPromiseGenerations.set(key, generation);
+  state.startupPromiseGenerationTokens.set(promise, generation);
+  state.startupFailureNotificationGenerations.set(key, generation);
+  if (previousGeneration !== undefined) state.startupFailureNotifications.delete(`${key}\0${previousGeneration}`);
+  return generation;
+}
+
+function getCanonicalStartupAttempt(options: CanonicalGitRuntimeOptions): {
+  promise: Promise<CanonicalRuntimeDiagnostics>;
+  generation: number;
+} {
   const state = globalState();
   const key = canonicalStartupKey(options);
   const existing = state.startupPromises.get(key);
-  if (existing) return existing;
-  // Notifications are deduplicated per startup-promise generation. Reset only
-  // before installing a fresh generation so consumers of one rejected promise
-  // cannot race each other into duplicate reports.
-  state.startupFailureNotifications.delete(key);
+  if (existing) {
+    const generation = state.startupPromiseGenerationTokens.get(existing)
+      ?? nextCanonicalStartupPromiseGeneration(state, key, existing);
+    return { promise: existing, generation };
+  }
   const created = (async () => (await getCanonicalGitRuntime(options)).awaitStartup())();
+  const generation = nextCanonicalStartupPromiseGeneration(state, key, created);
   state.startupPromises.set(key, created);
   void created.then(
     (diag) => {
+      if (diag.startup === "ready") resetCanonicalStartupWarnings(diag);
       // Blocked and deferred results wait for an external lifecycle trigger.
       // Eviction provides that trigger a fresh freeze and retry state machine.
       if ((diag.startup === "blocked" || diag.startup === "deferred") && state.startupPromises.get(key) === created) {
@@ -2097,7 +2218,13 @@ export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions):
       if (state.startupPromises.get(key) === created) state.startupPromises.delete(key);
     },
   );
-  return created;
+  return { promise: created, generation };
+}
+
+/** Return the one process-global in-flight/successful startup promise for this
+ * runtime. Rejections are evicted so a repaired repo can retry in-process. */
+export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
+  return getCanonicalStartupAttempt(options).promise;
 }
 
 /** Refresh the current session's reporter without retaining it in a pending task. */
@@ -2115,12 +2242,14 @@ export function reportCanonicalStartupConsumer(options: {
   consumerId: string;
   message: string;
   type: CanonicalStartupNotificationType;
+  diagnostics?: CanonicalRuntimeDiagnostics;
 }): void {
-  reportCanonicalStartupState(
-    startupConsumerState(options.runtime, options.consumerId),
-    options.message,
-    options.type,
-  );
+  const consumer = startupConsumerState(options.runtime, options.consumerId);
+  if (options.type === "warning" && options.diagnostics) {
+    reportCanonicalStartupWarningOnce(consumer, options.diagnostics, options.message);
+    return;
+  }
+  reportCanonicalStartupState(consumer, options.message, options.type);
 }
 
 /** TUI and RPC are long-lived interactive hosts. Their session_start hooks
@@ -2138,11 +2267,12 @@ function launchCanonicalStartupConsumer(
   if (state.running) return state.running;
   const running = (async () => {
     let diagnostics: CanonicalRuntimeDiagnostics;
+    const startupAttempt = getCanonicalStartupAttempt(runtime);
     try {
-      diagnostics = await getCanonicalStartupPromise(runtime);
+      diagnostics = await startupAttempt.promise;
     } catch (error) {
       state.latest = undefined;
-      reportCanonicalStartupFailureOnce(runtime, state, error);
+      reportCanonicalStartupFailureOnce(runtime, state, error, startupAttempt.generation);
       return;
     }
 
@@ -2153,10 +2283,12 @@ function launchCanonicalStartupConsumer(
       const invocation = state.latest;
       state.latest = undefined;
       try {
-        if (diagnostics.startup === "ready") await invocation.onReady(diagnostics);
-        else {
+        if (diagnostics.startup === "ready") {
+          resetCanonicalStartupWarnings(diagnostics);
+          await invocation.onReady(diagnostics);
+        } else {
           await invocation.onBlocked?.(diagnostics);
-          reportCanonicalStartupState(state, invocation.blockedMessage(diagnostics), "warning");
+          reportCanonicalStartupWarningOnce(state, diagnostics, invocation.blockedMessage(diagnostics));
         }
       } catch (error) {
         reportCanonicalStartupState(state, invocation.errorMessage(error), "error");

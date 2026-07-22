@@ -53,14 +53,27 @@ function derivedOnly(paths: string[]): string[] {
   return Array.from(new Set(paths.filter((p) => p === "l1" || p === "l2" || p.startsWith("l1/") || p.startsWith("l2/")))).sort();
 }
 
+function gitReadEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 function gitBuffer(abrainHome: string, args: string[]): Buffer {
-  const stdout = execFileSync("git", ["-C", abrainHome, ...args], { encoding: "buffer", stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 });
+  const stdout = execFileSync("git", ["-C", abrainHome, ...args], {
+    encoding: "buffer",
+    env: gitReadEnvironment(),
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 5_000,
+  });
   return Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout);
 }
 
 function pushedDerivedPaths(abrainHome: string): string[] {
   try {
-    execFileSync("git", ["-C", abrainHome, "rev-parse", "--verify", "origin/main"], { stdio: "ignore", timeout: 3_000 });
+    execFileSync("git", ["-C", abrainHome, "rev-parse", "--verify", "origin/main"], {
+      env: gitReadEnvironment(),
+      stdio: "ignore",
+      timeout: 3_000,
+    });
   } catch {
     return [];
   }

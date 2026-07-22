@@ -19,7 +19,7 @@ import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_F
 import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-seeds";
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import { collectGitAuthorTimes, type GitAuthorTimes } from "./git-times";
-import { gitSingleFlight } from "../_shared/git-singleflight";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import {
   abrainProjectDir,
@@ -155,9 +155,17 @@ interface PreflightOutcome {
   failures: string[];
 }
 
+function gitReadEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 async function gitHeadSha(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 64 * 1024,
+    });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -168,14 +176,22 @@ async function gitHeadSha(cwd: string): Promise<string | null> {
 
 async function gitToplevel(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 3000, maxBuffer: 256 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 256 * 1024,
+    });
     return stdout.trim() || null;
   } catch { return null; }
 }
 
 async function gitIsClean(cwd: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain"], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain"], {
+      env: gitReadEnvironment(),
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
     return stdout.trim().length === 0;
   } catch { return false; }
 }
@@ -195,7 +211,11 @@ function parsePorcelainPath(line: string): string | null {
 async function gitDirtyPathSet(cwd: string, scopeAbs: string): Promise<Set<string>> {
   try {
     const relScope = path.relative(cwd, scopeAbs) || ".";
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain", "--", relScope], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain", "--", relScope], {
+      env: gitReadEnvironment(),
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
     const out = new Set<string>();
     for (const line of stdout.split("\n")) {
       const p = parsePorcelainPath(line.trimEnd());
@@ -207,7 +227,11 @@ async function gitDirtyPathSet(cwd: string, scopeAbs: string): Promise<Set<strin
 
 async function gitIsTracked(cwd: string, file: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", cwd, "ls-files", "--error-unmatch", "--", file], { timeout: 3000, maxBuffer: 64 * 1024 });
+    await execFileAsync("git", ["-C", cwd, "ls-files", "--error-unmatch", "--", file], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 64 * 1024,
+    });
     return true;
   } catch { return false; }
 }
@@ -225,6 +249,10 @@ interface SourceRemoval {
 }
 
 async function gitRmOrUnlink(cwd: string, file: string): Promise<SourceRemoval> {
+  return withCanonicalMutationBarrier(cwd, () => gitRmOrUnlinkUnlocked(cwd, file));
+}
+
+async function gitRmOrUnlinkUnlocked(cwd: string, file: string): Promise<SourceRemoval> {
   const rel = path.relative(cwd, file);
   const tracked = await gitIsTracked(cwd, file);
   if (tracked) {
@@ -282,13 +310,11 @@ async function gitCommitAll(
   message: string,
   pathspecs: string[] | null = null,
 ): Promise<GitCommitOutcome> {
-  // PR-1 R2 review fix (gpt-5.5 BLOCKING-2, 2026-06-10): the migrate-in
-  // call site passes `abrainHome` and does `git add -A` there — it must
-  // not race an in-flight bg sediment commit / detached pushAsync /
-  // auto-merge on the abrain `.git/index.lock`. Route through the shared
-  // per-repo chain (keying the parent-repo call site too is harmless —
-  // distinct key, no contention).
-  return gitSingleFlight(cwd, () => gitCommitAllUnlocked(cwd, message, pathspecs));
+  // Keep the complete index mutation under the shared ordering: the
+  // process-local singleflight turn is acquired before the cross-process OFD
+  // lease, and reentrant callers already holding the lease do not queue behind
+  // themselves.
+  return withCanonicalMutationBarrier(cwd, () => gitCommitAllUnlocked(cwd, message, pathspecs));
 }
 
 async function gitCommitAllUnlocked(
@@ -306,7 +332,11 @@ async function gitCommitAllUnlocked(
       ? ["-C", cwd, "commit", "-m", message, "--", ...uniquePathspecs]
       : ["-C", cwd, "commit", "-m", message];
     await execFileAsync("git", commitArgs, { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 3000,
+      maxBuffer: 64 * 1024,
+    });
     return { sha: stdout.trim() || null };
   } catch (err) {
     const msg = errorText(err);
@@ -963,6 +993,18 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   if (canonicalGitRuntimeEnabled()) {
     throw new Error("CANONICAL_MIGRATION_REQUIRES_EVENT_IMPORT: /memory migrate --go cannot write legacy Markdown while canonicalGitRuntime is enabled");
   }
+  const abrainHome = path.resolve(opts.abrainHome);
+  try {
+    await fs.access(abrainHome);
+  } catch {
+    // Preserve the regular preflight result when the configured home is absent;
+    // the OFD lease requires an existing real directory.
+    return runMigrationGoUnlocked(opts);
+  }
+  return withCanonicalMutationBarrier(abrainHome, () => runMigrationGoUnlocked(opts));
+}
+
+async function runMigrationGoUnlocked(opts: MigrationGoOptions): Promise<MigrationGoResult> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
   const pensieveAbs = path.resolve(opts.pensieveTarget);
   const abrainHome = path.resolve(opts.abrainHome);

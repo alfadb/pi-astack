@@ -534,6 +534,7 @@ async function waitForSedimentAgentEndStartup(snapshot: SedimentAgentEndSnapshot
     consumerId: "sediment-runtime",
     message: `sediment agent_end deferred queue blocked: ${startup.blockedReason ?? "unknown"}`,
     type: "warning",
+    diagnostics: startup,
   });
   return false;
 }

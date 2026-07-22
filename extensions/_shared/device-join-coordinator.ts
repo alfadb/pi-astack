@@ -121,6 +121,16 @@ function localGitEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   };
 }
 
+function localReadGitEnvironment(): NodeJS.ProcessEnv {
+  return localGitEnvironment({ GIT_OPTIONAL_LOCKS: "0" });
+}
+
+function gitEnvironmentForArgs(args: readonly string[]): NodeJS.ProcessEnv {
+  return ["status", "diff", "diff-tree", "rev-parse"].includes(args[0] ?? "")
+    ? localReadGitEnvironment()
+    : localGitEnvironment();
+}
+
 async function runGitBuffer(
   repo: string,
   args: readonly string[],
@@ -128,7 +138,7 @@ async function runGitBuffer(
 ): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const child = spawn("git", ["-C", repo, ...(options.literalPathspecs === false ? [] : ["--literal-pathspecs"]), ...args], {
-      env: options.env ?? localGitEnvironment(),
+      env: options.env ?? gitEnvironmentForArgs(args),
       stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];

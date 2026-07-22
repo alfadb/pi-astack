@@ -244,7 +244,10 @@ try {
 
   const blockedRepo = path.join(tmp, "blocked");
   initRepo(blockedRepo, true);
-  fs.writeFileSync(path.join(blockedRepo, ".git", "index.lock"), "held\n");
+  const blockedLock = path.join(blockedRepo, ".git", "index.lock");
+  fs.writeFileSync(blockedLock, "");
+  const staleLockTime = new Date(Date.now() - 60_000);
+  fs.utimesSync(blockedLock, staleLockTime, staleLockTime);
   let deferred;
   let scheduleCount = 0;
   let staleNotices = 0;
@@ -272,7 +275,20 @@ try {
   assert(blocked.startup === "blocked" && /INDEX_LOCK_PRESENT/.test(blocked.blockedReason ?? ""), "blocked startup path did not remain fail-closed");
   await new Promise((resolve) => setImmediate(resolve));
   assert(staleNotices === 0, "stale session reporter was used");
-  assert(freshNotices.some((row) => row.type === "warning" && row.message.includes("canonical startup blocked")), "latest session did not receive blocked warning");
+  assert(freshNotices.some((row) => row.type === "warning" && /canonical startup blocked:.*ageMs=.*inode=.*size=0/.test(row.message)), `latest warning omitted read-only lock diagnostics: ${JSON.stringify(freshNotices)}`);
+  assert(fs.existsSync(blockedLock) && fs.lstatSync(blockedLock).size === 0, "zero-byte index.lock was deleted or changed");
+  fs.unlinkSync(blockedLock);
+  const unblocked = await canonical.getCanonicalStartupPromise({ abrainHome: blockedRepo });
+  assert(unblocked.startup === "ready", `next lifecycle did not retry after index.lock removal: ${unblocked.blockedReason}`);
+
+  const unknownLockRepo = path.join(tmp, "unknown-lock");
+  initRepo(unknownLockRepo, true);
+  const unknownLock = path.join(unknownLockRepo, ".git", "index.lock");
+  fs.symlinkSync("unknown-index-lock-owner", unknownLock);
+  let unknownLockError;
+  try { await canonical.preflightSharedIndexLock(unknownLockRepo); } catch (error) { unknownLockError = error; }
+  assert(unknownLockError?.code === "INDEX_LOCK_PRESENT", `unknown lock shape did not block: ${unknownLockError}`);
+  assert(fs.lstatSync(unknownLock).isSymbolicLink(), "unknown/symlink index.lock was deleted");
 
   const missingRepo = path.join(tmp, "missing-repo");
   const errors = [];

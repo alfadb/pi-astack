@@ -245,6 +245,7 @@ async function entriesForGraphTarget(
 async function gitHead(root: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"], {
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       timeout: 2_000,
       maxBuffer: 256 * 1024,
     });

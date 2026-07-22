@@ -18,11 +18,22 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
 const failures = [];
+const pendingChecks = [];
 let total = 0;
 function check(name, fn) {
   total++;
   try {
-    fn();
+    const result = fn();
+    if (result && typeof result.then === "function") {
+      pendingChecks.push(Promise.resolve(result).then(
+        () => console.log(`  ok    ${name}`),
+        (err) => {
+          failures.push({ name, err });
+          console.log(`  FAIL  ${name}\n        ${err.message}`);
+        },
+      ));
+      return;
+    }
     console.log(`  ok    ${name}`);
   } catch (err) {
     failures.push({ name, err });
@@ -55,6 +66,7 @@ fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports =
 fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = { isSubAgentSession: () => false };\n`);
 fs.writeFileSync(path.join(sharedTarget, "llm-audit.cjs"), `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`);
 fs.writeFileSync(path.join(sharedTarget, "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
+fs.writeFileSync(path.join(sharedTarget, "canonical-mutation-barrier.cjs"), "exports.withCanonicalMutationBarrier = async (_repo, operation) => operation(); exports.withoutCanonicalMutationBarrierContext = (operation) => operation();\n");
 fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 
@@ -104,6 +116,7 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
   .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
   .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 
@@ -197,7 +210,7 @@ check("boot-time snapshot helpers expose getter+reset", () => {
   if (typeof indexModule.__resetBootActiveProjectForTests !== "function") throw new Error("reset helper missing");
 });
 
-check("autoCommitPaths commits only the requested binding artifacts", () => {
+check("autoCommitPaths commits only the requested binding artifacts", async () => {
   if (typeof indexModule.autoCommitPaths !== "function") throw new Error("autoCommitPaths missing");
   const repo = fs.mkdtempSync(path.join(tmpDir, "autocommit-repo-"));
   execFileSync("git", ["-C", repo, "init", "-q"]);
@@ -211,13 +224,13 @@ check("autoCommitPaths commits only the requested binding artifacts", () => {
   fs.writeFileSync(path.join(repo, ".abrain-project.json"), JSON.stringify({ schema_version: 1, project_id: "smoke" }, null, 2) + "\n");
   fs.writeFileSync(path.join(repo, "unrelated.txt"), "must stay uncommitted\n");
   execFileSync("git", ["-C", repo, "add", "unrelated.txt"]);
-  const result = indexModule.autoCommitPaths(repo, [".abrain-project.json"], "chore: bind abrain project smoke");
+  const result = await indexModule.autoCommitPaths(repo, [".abrain-project.json"], "chore: bind abrain project smoke");
   if (result.status !== "committed") throw new Error(`expected committed, got ${JSON.stringify(result)}`);
   const committedFiles = execFileSync("git", ["-C", repo, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
   if (JSON.stringify(committedFiles) !== JSON.stringify([".abrain-project.json"])) throw new Error(`commit should include only binding artifact, got ${JSON.stringify(committedFiles)}`);
   const staged = execFileSync("git", ["-C", repo, "diff", "--cached", "--name-only"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
   if (JSON.stringify(staged) !== JSON.stringify(["unrelated.txt"])) throw new Error(`unrelated staged changes should remain staged, got ${JSON.stringify(staged)}`);
-  const clean = indexModule.autoCommitPaths(repo, [".abrain-project.json"], "noop");
+  const clean = await indexModule.autoCommitPaths(repo, [".abrain-project.json"], "noop");
   if (clean.status !== "clean") throw new Error(`second autocommit should be clean, got ${JSON.stringify(clean)}`);
 });
 
@@ -237,6 +250,7 @@ check("__resetBootActiveProjectForTests round-trips an active project value", ()
   if (indexModule.getBootActiveProject() !== null) throw new Error("reset to null failed");
 });
 
+await Promise.all(pendingChecks);
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log("");

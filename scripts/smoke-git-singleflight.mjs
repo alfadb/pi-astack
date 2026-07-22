@@ -16,7 +16,8 @@
  *   7. _gitSingleFlightStats() counts ops across copies
  *   8. git-sync.ts `_queueDepth()` reads the SAME shared state (proves the
  *      abrain ↔ sediment contract end-to-end at module level)
- *   9. integration: two concurrent real `git commit` ops on one repo both
+ *   9. deadline-aware waiter returns on budget and never runs after dequeue
+ *  10. integration: two concurrent real `git commit` ops on one repo both
  *      succeed and land as two commits (serialized, no index.lock loser)
  *
  * Strategy mirrors smoke-abrain-git-sync.mjs: transpile TS → CJS into a
@@ -211,8 +212,40 @@ await asyncCheck("[8] git-sync._queueDepth() sees ops from other copies", async 
   assert(depth.hasInflight === true, "_queueDepth did not see shared-chain ops from other copies");
 });
 
-// [9] integration: concurrent real git commits, both land
-await asyncCheck("[9] two concurrent locked git commits both succeed", async () => {
+// [9] a deadline covers queue wait and an expired tail node never runs
+await asyncCheck("[9] 700ms holder + 600ms deadline skips expired mutation", async () => {
+  const k = path.join(tmpDir, "repo-deadline");
+  let holderStarted;
+  const started = new Promise((resolve) => { holderStarted = resolve; });
+  const holder = copyA.gitSingleFlight(k, async () => {
+    holderStarted();
+    await sleep(700);
+  });
+  await started;
+  let mutations = 0;
+  const deadlineStarted = Date.now();
+  let deadlineError;
+  try {
+    await copyB.gitSingleFlightWithDeadline(k, async () => {
+      mutations += 1;
+    }, {
+      deadlineMs: deadlineStarted + 600,
+      now: Date.now,
+      onExpired: (detail) => Object.assign(new Error("deadline expired"), { code: "TEST_DEADLINE", detail }),
+    });
+  } catch (error) {
+    deadlineError = error;
+  }
+  const elapsedMs = Date.now() - deadlineStarted;
+  assert(deadlineError?.code === "TEST_DEADLINE", `deadline did not reject with typed error: ${deadlineError}`);
+  assert(elapsedMs <= 680, `600ms queue budget overran significantly: ${elapsedMs}ms`);
+  await holder;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert(mutations === 0, `expired tail node executed mutation ${mutations} time(s)`);
+});
+
+// [10] integration: concurrent real git commits, both land
+await asyncCheck("[10] two concurrent locked git commits both succeed", async () => {
   const repo = path.join(tmpDir, "real-repo");
   fs.mkdirSync(repo, { recursive: true });
   const env = {

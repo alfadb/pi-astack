@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { parseWikilinkTarget, splitFrontmatter, type WikilinkTarget } from "./parser";
 import { normalizeBareSlug, slugify } from "./utils";
 import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { parseGitStatusPorcelainV1Z } from "../_shared/git-z-parser";
 import { loadL1SchemaRegistry, validateL1Envelope } from "../_shared/l1-schema-registry";
 
@@ -392,14 +393,23 @@ async function atomicWrite(file: string, content: string): Promise<void> {
   }
 }
 
+function gitReadEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 async function gitStdout(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    env: gitReadEnvironment(),
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024,
+  });
   return String(stdout).trim();
 }
 
 async function isGitClean(cwd: string): Promise<boolean> {
   if (!canonicalGitRuntimeEnabled()) return (await gitStdout(cwd, ["status", "--porcelain"])).trim() === "";
   const { stdout } = await execFileAsync("git", ["-C", cwd, "--literal-pathspecs", "status", "--porcelain=v1", "-z", "-uall"], {
+    env: gitReadEnvironment(),
     timeout: 10_000,
     maxBuffer: 8 * 1024 * 1024,
     encoding: "buffer",
@@ -455,6 +465,10 @@ function contentHasExpectedId(raw: string | null, expectedId: string): boolean {
 }
 
 export async function writeRenameTransactionMarker(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<string> {
+  return withCanonicalMutationBarrier(opts.abrainHome, () => writeRenameTransactionMarkerUnlocked(plan, opts));
+}
+
+async function writeRenameTransactionMarkerUnlocked(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<string> {
   const markerPath = opts.markerPath ?? defaultMarkerPath(opts.abrainHome);
   const target = normalizeRenameTarget(plan.target);
   const plannedPaths = Array.from(new Set([
@@ -489,6 +503,10 @@ async function loadRenameTransactionMarker(markerPath: string): Promise<RenameTr
 }
 
 export async function rollbackRenameTransaction(abrainHome: string, markerPath = defaultMarkerPath(abrainHome)): Promise<RenameRollbackResult> {
+  return withCanonicalMutationBarrier(abrainHome, () => rollbackRenameTransactionUnlocked(abrainHome, markerPath));
+}
+
+async function rollbackRenameTransactionUnlocked(abrainHome: string, markerPath: string): Promise<RenameRollbackResult> {
   const marker = await loadRenameTransactionMarker(markerPath);
   if (!marker) return { didRollback: false, markerPath, vectorStaleSlugs: [], reason: "no_marker" };
 
@@ -514,11 +532,15 @@ export async function rollbackRenameTransaction(abrainHome: string, markerPath =
 }
 
 export async function applyRenamePlan(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<{ committed: boolean; markerPath: string; gitCommit?: string | null }> {
+  return withCanonicalMutationBarrier(opts.abrainHome, () => applyRenamePlanUnlocked(plan, opts));
+}
+
+async function applyRenamePlanUnlocked(plan: RenameApplyPlan, opts: RenameApplyOptions): Promise<{ committed: boolean; markerPath: string; gitCommit?: string | null }> {
   const markerPath = opts.markerPath ?? defaultMarkerPath(opts.abrainHome);
   if (!(await isGitClean(opts.abrainHome))) {
     throw new Error("dirty_worktree");
   }
-  await writeRenameTransactionMarker(plan, { ...opts, markerPath });
+  await writeRenameTransactionMarkerUnlocked(plan, { ...opts, markerPath });
   if (opts.failAfterStep === "marker") throw new Error("injected failure after marker");
   let vectorStepStarted = false;
   try {
@@ -556,7 +578,7 @@ export async function applyRenamePlan(plan: RenameApplyPlan, opts: RenameApplyOp
   } catch (e) {
     let rollback: RenameRollbackResult = { didRollback: false, markerPath, vectorStaleSlugs: [], reason: "rollback_failed" };
     try {
-      rollback = await rollbackRenameTransaction(opts.abrainHome, markerPath);
+      rollback = await rollbackRenameTransactionUnlocked(opts.abrainHome, markerPath);
     } catch {
       // keep the original apply failure as the result; marker remains for runtime retry
     }

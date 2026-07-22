@@ -99,6 +99,10 @@ const AUDIT_SCHEMA_VERSION = 2;
 
 const execFileAsync = promisify(execFile);
 
+function gitReadEnvironment(): NodeJS.ProcessEnv {
+  return { ...process.env, GIT_OPTIONAL_LOCKS: "0" };
+}
+
 export interface ProjectEntryDraft {
   title: string;
   kind: EntryKind;
@@ -439,7 +443,12 @@ async function resetKnowledgeEvidenceIndex(abrainHome: string, event: AppendKnow
 
 async function changedDerivedRepoPaths(abrainHome: string): Promise<string[]> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "status", "--porcelain", "-z", "--", "l1", "l2"], { timeout: 10_000, maxBuffer: 1024 * 1024, encoding: "utf-8" });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "status", "--porcelain", "-z", "--", "l1", "l2"], {
+      env: gitReadEnvironment(),
+      timeout: 10_000,
+      maxBuffer: 1024 * 1024,
+      encoding: "utf-8",
+    });
     const records = String(stdout).split("\0").filter(Boolean);
     const out: string[] = [];
     for (let i = 0; i < records.length; i += 1) {
@@ -816,7 +825,11 @@ function replaceEntryIdForRename(raw: string, projectId: string, newSlug: string
 
 async function gitHead(abrainHome: string): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
     return stdout.trim();
   } catch {
     throw new Error("rename_requires_git_head");
@@ -1444,7 +1457,11 @@ async function gitCommitManyUnlocked(
       ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
       { timeout: 30_000, maxBuffer: 1024 * 1024 },
     );
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
     const sha = stdout.trim() || null;
     await maybePushAbrainAsync(abrainHome, sha);
     return sha;
@@ -1495,14 +1512,22 @@ async function commitAbrainDerivedOutputsUnlocked(abrainHome: string, reason: st
     await execFileAsync("git", ["-C", abrainHome, "add", "-A", "--", ...derivedRels], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     let hasStaged = true;
     try {
-      await execFileAsync("git", ["-C", abrainHome, "diff", "--cached", "--quiet", "--", ...derivedRels], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+      await execFileAsync("git", ["-C", abrainHome, "diff", "--cached", "--quiet", "--", ...derivedRels], {
+        env: gitReadEnvironment(),
+        timeout: 10_000,
+        maxBuffer: 1024 * 1024,
+      });
       hasStaged = false;
     } catch {
       hasStaged = true;
     }
     if (!hasStaged) return null;
     await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `sediment: derived l1/l2 outputs (${reason})`], { timeout: 30_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
     const sha = stdout.trim() || null;
     await maybePushAbrainAsync(abrainHome, sha);
     return sha;
@@ -3056,7 +3081,11 @@ async function gitCommitAbrainUnlocked(abrainHome: string, filePath: string, slu
     // drains go through commitAbrainDerivedOutputs(), which audits its scope.
     await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
     await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `${label}: ${slug}`], { timeout: 30_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -4451,7 +4480,11 @@ async function gitCommitAbrainAboutMeUnlocked(
     const rel = path.relative(abrainHome, filePath);
     await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
     await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `about-me: ${slug} [${region}] (lane=about_me)`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], {
+      env: gitReadEnvironment(),
+      timeout: 5_000,
+      maxBuffer: 128 * 1024,
+    });
     return stdout.trim() || null;
   } catch {
     return null;

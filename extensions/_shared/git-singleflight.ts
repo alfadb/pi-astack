@@ -94,6 +94,83 @@ export function gitSingleFlight<T>(repoRoot: string, fn: () => Promise<T>): Prom
   return p;
 }
 
+export interface GitSingleFlightDeadlineOptions {
+  /** Absolute deadline in the caller's monotonic clock domain. */
+  deadlineMs: number;
+  now: () => number;
+  onExpired: (detail: Readonly<{
+    repoRoot: string;
+    deadlineMs: number;
+    expiredAtMs: number;
+    phase: "queue_wait" | "dequeued";
+  }>) => unknown;
+}
+
+/**
+ * Deadline-aware variant for callers with a wall-clock budget that includes
+ * time spent behind the current tail. The returned promise rejects at the
+ * deadline while the queued node remains in the chain. When that node is
+ * eventually dequeued, its guard rejects without invoking `fn`.
+ */
+export function gitSingleFlightWithDeadline<T>(
+  repoRoot: string,
+  fn: () => Promise<T>,
+  options: GitSingleFlightDeadlineOptions,
+): Promise<T> {
+  const s = state();
+  const key = path.resolve(repoRoot);
+  const tail = s.tails.get(key) ?? Promise.resolve();
+  let queueExpired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const expiration = (phase: "queue_wait" | "dequeued"): unknown => options.onExpired(Object.freeze({
+    repoRoot: key,
+    deadlineMs: options.deadlineMs,
+    expiredAtMs: options.now(),
+    phase,
+  }));
+  const run = (): Promise<T> => {
+    if (queueExpired || options.now() >= options.deadlineMs) return Promise.reject(expiration("dequeued"));
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    return fn();
+  };
+  const queued = tail.then(run, run);
+  s.opsStarted += 1;
+  s.tails.set(
+    key,
+    queued.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+
+  const remainingMs = options.deadlineMs - options.now();
+  if (remainingMs <= 0) {
+    queueExpired = true;
+    return Promise.reject(expiration("queue_wait"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    timer = setTimeout(() => {
+      timer = undefined;
+      queueExpired = true;
+      reject(expiration("queue_wait"));
+    }, remainingMs);
+    queued.then(
+      (value) => {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+        resolve(value);
+      },
+      (error) => {
+        if (timer !== undefined) clearTimeout(timer);
+        timer = undefined;
+        reject(error);
+      },
+    );
+  });
+}
+
 /** Introspection for smoke tests / `_queueDepth` style probes. */
 export function _gitSingleFlightStats(): { keys: number; opsStarted: number } {
   const s = state();

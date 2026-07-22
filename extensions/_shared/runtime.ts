@@ -947,6 +947,7 @@ function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | u
     const out = exec("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf8",
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2000,
     }) as string;

@@ -39,6 +39,8 @@ const DEFAULT_RETRY_MAX_MS = 1_000;
 
 export interface CanonicalMutationBarrierOptions {
   timeoutMs?: number;
+  /** Optional absolute deadline in the same monotonic clock domain as `now`. */
+  deadlineMs?: number;
   /** Backward-compatible name for the first retry delay. */
   retryMs?: number;
   maxRetryMs?: number;
@@ -83,18 +85,32 @@ async function acquireWithRetry(
   const random = options.random ?? Math.random;
   const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
   const now = options.now ?? Date.now;
-  const deadline = now() + timeoutMs;
+  const startedAtMs = now();
+  const timeoutDeadlineMs = startedAtMs + timeoutMs;
+  const deadlineMs = options.deadlineMs === undefined
+    ? timeoutDeadlineMs
+    : Math.min(timeoutDeadlineMs, options.deadlineMs);
   let probe = 0;
   for (;;) {
+    const remainingBeforeProbeMs = deadlineMs - now();
+    if (remainingBeforeProbeMs <= 0) {
+      throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository OFD mutation barrier", {
+        repo,
+        timeoutMs,
+        deadlineMs,
+        probes: probe,
+      });
+    }
     probe += 1;
     options.onProbe?.(probe);
     const lock = acquireRetainedDirectoryOfdLock(repo);
     if (lock.status === "ACQUIRED") return lock as RetainedDirectoryOfdLock & { status: "ACQUIRED" };
-    const remainingMs = deadline - now();
+    const remainingMs = deadlineMs - now();
     if (remainingMs <= 0) {
       throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository OFD mutation barrier", {
         repo,
         timeoutMs,
+        deadlineMs,
         probes: probe,
       });
     }

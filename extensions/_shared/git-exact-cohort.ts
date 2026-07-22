@@ -124,9 +124,16 @@ function compareAscii(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function gitEnvironmentForArgs(args: readonly string[], extraEnv: Record<string, string>): NodeJS.ProcessEnv {
+  const environment = gitEnvironment(extraEnv);
+  return ["rev-parse", "diff", "diff-tree", "ls-files"].includes(args[0] ?? "")
+    ? { ...environment, GIT_OPTIONAL_LOCKS: "0" }
+    : environment;
+}
+
 async function git(repo: string, args: string[], extraEnv: Record<string, string> = {}): Promise<string> {
   const { stdout } = await execFileAsync("git", ["-C", repo, "--literal-pathspecs", ...args], {
-    env: gitEnvironment(extraEnv),
+    env: gitEnvironmentForArgs(args, extraEnv),
     maxBuffer: 64 * 1024 * 1024,
   });
   return stdout;
