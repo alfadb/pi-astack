@@ -201,11 +201,11 @@ function _getState(): CausalAnchorState {
  *
  *  # Why both handlers gate on isSubAgentSession(ctx)
  *
- *  Per ADR 0027 PR-B, dispatch's shared loader has `noExtensions: false`,
+ *  Per ADR 0027 PR-B, each dispatch loader has `noExtensions: false`,
  *  which means dispatch (and every other pi-astack extension) ALSO
- *  activates in that shared loader — not just in main pi's loader. The
- *  shared loader's ExtensionRunner is what fires session_start /
- *  before_agent_start for every sub-agent AgentSession spawned via
+ *  activates in every sub-agent loader - not just in main pi's loader. Each
+ *  loader's ExtensionRunner fires session_start / before_agent_start for its
+ *  sub-agent AgentSession spawned via
  *  createAgentSession. Module-level state (_currentSessionId, _currentTurnId)
  *  is shared across both runtimes because Node module cache is process-wide.
  *

@@ -174,38 +174,6 @@ await check("boundary probe status shared: dispatch sets ok, sediment reads ok",
   }
 });
 
-// ── dispatch: _activatingInSharedLoader flag ─────────────────
-
-console.log("\n  dispatch._activatingInSharedLoader flag (globalThis):");
-
-await check("_isActivatingInSharedLoader visible across dispatch instances", async () => {
-  // Need to load the actual dispatch module, but its full activation has heavy
-  // dependencies. Instead, load via jiti and just test the flag getter
-  // signature. (Real cross-instance test would need an integration harness.)
-  //
-  // Skip if dispatch module fails to load (e.g., missing deps in test env).
-  let dispA, dispB;
-  try {
-    dispA = await loadFresh(`${repoRoot}/extensions/dispatch/index.ts`);
-    dispB = await loadFresh(`${repoRoot}/extensions/dispatch/index.ts`);
-  } catch (err) {
-    console.log(`        (dispatch load failed; structural-only test: ${err.message})`);
-    return;
-  }
-  if (typeof dispA._isActivatingInSharedLoader !== "function") {
-    throw new Error("_isActivatingInSharedLoader not exported");
-  }
-  if (typeof dispB._isActivatingInSharedLoader !== "function") {
-    throw new Error("_isActivatingInSharedLoader not exported in second instance");
-  }
-  // Initial state should match across instances
-  const a = dispA._isActivatingInSharedLoader();
-  const b = dispB._isActivatingInSharedLoader();
-  if (a !== b) {
-    throw new Error(`flag differs across instances (a=${a}, b=${b}) — globalThis not used`);
-  }
-});
-
 // ── Summary ────────────────────────────────────────────────────
 
 console.log();

@@ -24,8 +24,8 @@
  *   - encourage LLMs to call it every turn instead of using context
  *   - widen the future "we have a tool for every datum" anti-pattern
  *
- * Injection is cheaper, covers both main + sub-agent runtimes via
- * the same shared loader path, and keeps the tool list lean.
+ * Injection is cheaper, covers both main + per-session sub-agent runtimes,
+ * and keeps the tool list lean.
  *
  * ## Precision = minute
  *

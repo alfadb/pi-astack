@@ -541,7 +541,8 @@ await check("§8 API boundary: production runner uses dispatch's exported runInP
   assert(/export function validateSessionToolRegistry\(/.test(dispatchSrc), "dispatch exports target-session registry validation");
   assert(/export function enforceMutatingEnvGate\(/.test(dispatchSrc), "dispatch exports enforceMutatingEnvGate (W9 env gate, decoupled from validateTools 2026-06-16)");
   assert(/enforceMutatingEnvGate\(req\.tools\)/.test(src), "workflow production runner enforces the W9 mutating env gate locally (not inherited from validateTools)");
-  assert(/Symbol\.for\("pi-astack\/dispatch\/shared-infra\/v1"\)/.test(dispatchSrc), "shared infra is globalThis singleton (jiti copy safety)");
+  assert(/await createSubAgentSessionResources\(\)/.test(dispatchSrc), "runInProcess creates session-owned resources");
+  assert(!/pi-astack\/dispatch\/shared-infra/.test(dispatchSrc), "dispatch does not retain the obsolete shared loader cache");
 });
 
 console.log(failures.length === 0

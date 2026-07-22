@@ -88,6 +88,7 @@
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
     "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:dispatch-project-trust": "node scripts/smoke-dispatch-project-trust.mjs",
+    "smoke:dispatch-session-runtime-isolation": "node scripts/smoke-dispatch-session-runtime-isolation.mjs",
     "smoke:dispatch-task-governor": "node scripts/smoke-dispatch-task-governor.mjs",
     "smoke:worker-run-governor": "node scripts/smoke-worker-run-governor.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",

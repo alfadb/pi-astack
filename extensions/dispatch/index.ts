@@ -27,7 +27,7 @@
  *   dispatch_parallel — parallel tasks (max 16)
  */
 
-import type { ExtensionAPI, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, InlineExtension, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -1274,124 +1274,107 @@ export function installMaxOutputTokensOnSession(session: any, maxOutputTokens: n
   };
 }
 
+const subAgentBoundarySentinelExtension: InlineExtension = {
+  name: "pi-astack-dispatch-subagent-boundary-sentinel",
+  factory: function bindDispatchSubAgentBoundarySentinel(pi: ExtensionAPI): void {
+    bindSubAgentBoundarySentinel(pi);
+  },
+};
+
+export type SubAgentSessionResourceOptions = {
+  cwd?: string;
+  agentDir?: string;
+  extensionFactories?: InlineExtension[];
+};
+
 /**
- * Lazy-initialised, shared across all runInProcess calls within one
- * extension instance. SettingsManager + ResourceLoader are expensive
- * to create (disk I/O), so we create them once and reuse.
+ * Create resources owned by exactly one sub-agent session.
  *
- * Initialization is async so the first dispatch call pays the cost;
- * subsequent calls hit the cache. On failure, the cache is cleared
- * so the next call retries rather than permanently failing.
- *
- * ASSUMPTION: sub-agents do not modify settings or subscribe to
- * resourceLoader events, so sharing across concurrent AgentSessions
- * is safe. If a future SDK version adds mutable state to resourceLoader,
- * this cache must become per-session.
+ * DefaultResourceLoader.getExtensions() exposes one mutable ExtensionRuntime.
+ * createAgentSession() binds that runtime to its ExtensionRunner, and disposing
+ * the session invalidates it. Reusing a loader therefore lets sibling sessions
+ * overwrite and stale each other's extension APIs. Keep SettingsManager,
+ * loader, event bus, loaded extension objects, and runtime within one call.
+ * The SDK may still cache immutable extension factory modules internally.
  */
-// PR-10 (ADR 0032 §8): the shared-infra promise lives on a globalThis
-// Symbol.for slot, NOT a module-level variable. pi loads extensions via jiti
-// with moduleCache:false, so the workflow extension importing runInProcess
-// from this module gets its OWN module copy (heartbeat.ts R4 NEW-P0 lesson;
-// same pattern as _SHARED_LOADER_FLAG_KEY below) — a module-level cache here
-// would mean two resourceLoader.reload() passes and two shared sub-agent
-// extension stacks. The globalThis slot collapses all copies to one infra.
-const _SHARED_INFRA_KEY = Symbol.for("pi-astack/dispatch/shared-infra/v1");
+export async function createSubAgentSessionResources(
+  options: SubAgentSessionResourceOptions = {},
+): Promise<{ settingsManager: any; resourceLoader: any }> {
+  const cwd = options.cwd ?? process.cwd();
+  const agentDir = options.agentDir ?? getAgentDir();
+  const settingsManager = (SettingsManager.create as (
+    cwd: string,
+    agentDir?: string,
+    options?: { projectTrusted?: boolean },
+  ) => any)(cwd, agentDir, { projectTrusted: false });
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    // ADR 0027 PR-B: sub-agents load the full GLOBAL extension stack so
+    // they can read brain (memory_*), use web tools, etc. Main-session-only
+    // lifecycle handlers (sediment / compaction-tuner / model-fallback /
+    // persistent-input-history / model-curator / rule-injector) gate
+    // themselves OFF via isSubAgentSession(ctx) — the SessionManager
+    // passed to createAgentSession below is marked before use.
+    //
+    // pi 0.79.0 Project Trust: keep each sub-agent loader explicitly
+    // untrusted for project-local inputs. There is currently no trustworthy
+    // bridge from the main session's per-cwd trust decision into this
+    // in-process loader, so it loads user/global extensions only. The
+    // SettingsManager.create call above passes { projectTrusted:false };
+    // noExtensions remains false to retain global pi-astack tools/prompts.
+    noExtensions: false,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    noContextFiles: true,
+    // This inline extension belongs only to this loader/runtime. It avoids
+    // inferring sub-agent activation from process-wide reload timing while
+    // preserving any caller-provided factories used by tests or embedders.
+    extensionFactories: [
+      ...(options.extensionFactories ?? []),
+      subAgentBoundarySentinelExtension,
+    ],
+  });
 
-type SharedInfra = { settingsManager: any; resourceLoader: any };
+  await resourceLoader.reload();
+  return { settingsManager, resourceLoader };
+}
 
-function _sharedInfraSlot(): { value?: Promise<SharedInfra> } {
-  const g = globalThis as Record<symbol, unknown>;
-  let slot = g[_SHARED_INFRA_KEY] as { value?: Promise<SharedInfra> } | undefined;
-  if (!slot) {
-    slot = {};
-    g[_SHARED_INFRA_KEY] = slot;
+const subAgentSessionDisposals = new WeakMap<object, Promise<void>>();
+
+/** Emit the sub-agent shutdown lifecycle exactly once, then dispose its session. */
+export async function disposeSubAgentSession(session: any): Promise<void> {
+  if (session == null || (typeof session !== "object" && typeof session !== "function")) return;
+
+  const key = session as object;
+  const existing = subAgentSessionDisposals.get(key);
+  if (existing) {
+    await existing;
+    return;
   }
-  return slot;
-}
 
-/** ADR 0027 PR-B+ R1 P1-1 (sub-agent boundary sentinel): when this flag is
- *  true, `dispatch.activate(pi)` is being called from inside the shared
- *  sub-agent loader (via resourceLoader.reload below). In that runtime,
- *  every session_start fires for a sub-agent — the perfect probe site to
- *  verify SessionManager passthrough invariant. See pi-internals.ts.
- *
- *  R4 NEW-P0 fix: stored on globalThis singleton so the flag set by
- *  main-pi's dispatch instance is visible to the shared-loader's dispatch
- *  instance (different jiti, different module copies otherwise). */
-const _SHARED_LOADER_FLAG_KEY = Symbol.for("pi-astack/dispatch/activating-shared-loader/v1");
-
-function _setActivatingInSharedLoader(v: boolean): void {
-  (globalThis as Record<symbol, unknown>)[_SHARED_LOADER_FLAG_KEY] = v;
-}
-
-function _isActivatingInSharedLoaderInternal(): boolean {
-  return Boolean((globalThis as Record<symbol, unknown>)[_SHARED_LOADER_FLAG_KEY]);
-}
-
-/** Public for tests / diagnostics. Returns true during the brief window
- *  resourceLoader.reload() is initializing the shared sub-agent extensions. */
-export function _isActivatingInSharedLoader(): boolean {
-  return _isActivatingInSharedLoaderInternal();
-}
-
-function getSharedInfra(): Promise<{
-  settingsManager: any;
-  resourceLoader: any;
-}> {
-  const slot = _sharedInfraSlot();
-  if (!slot.value) {
-    slot.value = (async () => {
-      const settingsManager = (SettingsManager.create as (
-        cwd: string,
-        agentDir?: string,
-        options?: { projectTrusted?: boolean },
-      ) => any)(process.cwd(), getAgentDir(), { projectTrusted: false });
-      const resourceLoader = new DefaultResourceLoader({
-        cwd: process.cwd(),
-        agentDir: getAgentDir(),
-        settingsManager,
-        // ADR 0027 PR-B: sub-agents load the full GLOBAL extension stack so
-        // they can read brain (memory_*), use web tools, etc. Main-session-only
-        // lifecycle handlers (sediment / compaction-tuner / model-fallback /
-        // persistent-input-history / model-curator / rule-injector) gate
-        // themselves OFF via isSubAgentSession(ctx) — the SessionManager
-        // passed to createAgentSession below is marked before use.
-        //
-        // pi 0.79.0 Project Trust: keep the shared sub-agent loader explicitly
-        // untrusted for project-local inputs. There is currently no trustworthy
-        // bridge from the main session's per-cwd trust decision into this shared
-        // in-process loader, so it must load user/global extensions only. The
-        // SettingsManager.create call above passes { projectTrusted:false };
-        // noExtensions remains false to retain global pi-astack tools/prompts.
-        // (Previously noExtensions: true to enforce ADR 0014 §6, replaced
-        // by handler-level guards via pi-internals.ts WeakSet marker.)
-        noExtensions: false,
-        noSkills: true,
-        noPromptTemplates: true,
-        noThemes: true,
-        noContextFiles: true,
-      });
-      // ADR 0027 PR-B+ R1 P1-1: arm the boundary sentinel for activate() calls
-      // happening inside this reload. The flag is process-wide globalThis
-      // singleton (R4 NEW-P0 fix) so the shared-loader's dispatch instance
-      // (DIFFERENT jiti module copy from main pi's dispatch) reads the same
-      // flag value.
-      _setActivatingInSharedLoader(true);
-      try {
-        await resourceLoader.reload();
-      } finally {
-        _setActivatingInSharedLoader(false);
+  const disposal = (async () => {
+    try {
+      const runner = session.extensionRunner;
+      if (
+        runner
+        && typeof runner.hasHandlers === "function"
+        && runner.hasHandlers("session_shutdown")
+        && typeof runner.emit === "function"
+      ) {
+        await runner.emit({ type: "session_shutdown", reason: "quit" });
       }
-      return { settingsManager, resourceLoader };
-    })();
-    // P1 fix: don't cache failures. If init throws, clear the promise so
-    // the next dispatch call retries rather than permanently failing.
-    const created = slot.value;
-    created.catch(() => {
-      if (slot.value === created) slot.value = undefined;
-    });
-  }
-  return slot.value;
+    } catch {
+      // Extension cleanup is best-effort and must never block disposal.
+    } finally {
+      try { session.dispose(); } catch { /* best-effort */ }
+    }
+  })();
+
+  subAgentSessionDisposals.set(key, disposal);
+  await disposal;
 }
 
 /**
@@ -1479,7 +1462,7 @@ export async function runInProcess(
   // wrap the entire body in try/finally so heartbeat.stop() fires on
   // EVERY terminal path — including the early returns below
   // (model_not_found, signal pre-aborted) and any throw from
-  // getSharedInfra / createAgentSession. Previous implementation only
+  // resource loading / createAgentSession. Previous implementation only
   // called stop() after Promise.race, so early returns leaked the
   // setInterval timer + on-disk trace file + globalThis registry entry.
   // heartbeat.stop() is idempotent + best-effort, so wrapping is
@@ -1624,7 +1607,7 @@ export async function runInProcess(
     }));
   }
 
-  const { settingsManager, resourceLoader } = await getSharedInfra();
+  const { settingsManager, resourceLoader } = await createSubAgentSessionResources();
 
   // Local AbortController: merged from parent signal + timeout.
   // P1 fix: this closes the window where timeout fires before createAgentSession()
@@ -1832,7 +1815,7 @@ export async function runInProcess(
       // registry. This also verifies DEFAULT_SUBAGENT_TOOLS on default calls.
       const sessionToolCheck = validateSessionToolRegistry(session, tools);
       if (!sessionToolCheck.ok) {
-        try { session.dispose(); } catch { /* disposal attempted; preserve rejection */ }
+        await disposeSubAgentSession(session);
         signal.removeEventListener("abort", onAbort);
         return {
           output: "",
@@ -1851,7 +1834,7 @@ export async function runInProcess(
       // would be silently ignored and the agent would run a full turn.
       if (signal.aborted || localSignal.aborted) {
         abortSessionOnce();
-        session.dispose();
+        await disposeSubAgentSession(session);
         signal.removeEventListener("abort", onAbort);
         return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
       }
@@ -2020,7 +2003,7 @@ export async function runInProcess(
       recordProgress("prompt_end");
 
       unsub();
-      session.dispose();
+      await disposeSubAgentSession(session);
       signal.removeEventListener("abort", onAbort);
 
       const durationMs = Date.now() - start;
@@ -2087,7 +2070,7 @@ export async function runInProcess(
       };
     } catch (err: any) {
       abortSessionOnce();
-      try { session?.dispose?.(); } catch { /* best-effort */ }
+      await disposeSubAgentSession(session);
       signal.removeEventListener("abort", onAbort);
       const durationMs = Date.now() - start;
       const errMsg = err?.message ?? String(err);
@@ -2190,7 +2173,7 @@ export async function runInProcess(
     //   - timeout firing
     //   - early return for model_not_found (3 unanimous P1)
     //   - early return for pre-aborted signal
-    //   - getSharedInfra rejection (Opus P1-C)
+    //   - sub-agent resource initialization rejection (Opus P1-C)
     //   - any unexpected throw from session/prompt path
     if (reasoningTrace && !reasoningTraceEnded) {
       await reasoningTrace.end({
@@ -2286,32 +2269,20 @@ export default function (pi: ExtensionAPI) {
   // sub-process (not our concern, but belt-and-suspenders).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
-  // ADR 0027 PR-B+ R1 P1-1: if we're activating inside the shared
-  // sub-agent loader, install the SessionManager passthrough boundary
-  // sentinel. This pi.on("session_start") listener runs in the sub-agent
-  // runtime and will detect (loud-warn) if pi upgrade ever wraps
-  // SessionManager in a Proxy/facade, breaking the WeakSet identity
-  // assumption. Probe is one-shot per process. We do NOT install on the
-  // main pi runtime because in main pi, session_start is for the main
-  // session (not a sub-agent) and would always look unmarked.
-  if (_isActivatingInSharedLoaderInternal()) {
-    bindSubAgentBoundarySentinel(pi);
-  }
-
   // ADR 0027 C6a: bind dispatch (canonical anchor owner) to lifecycle events
   // so the main-session (session_id, turn_id) is tracked process-wide and
   // available to every audit writer via getCurrentAnchor().
   //
-  // Note: this activate function ALSO runs in the shared sub-agent loader
-  // (PR-B set noExtensions: false on _sharedInfraPromise). bindLifecycle
+  // Note: this activate function ALSO runs in each sub-agent loader
+  // (PR-B keeps noExtensions:false). bindLifecycle
   // registers session_start / before_agent_start / agent_end handlers on
   // EVERY call (it is NOT a first-only no-op — the old registration guard was
   // removed 2026-05-29 because it caused the live anchor_missing bug). Calling
   // it from multiple runners/extensions is safe: the before_agent_start bump
   // is idempotent PER TURN (state.turnAlreadyBumped, reset on
   // agent_end/session_start), so turn_id still advances exactly once per turn.
-  // All three handlers self-gate on isSubAgentSession(ctx), so the shared
-  // sub-agent loader's registrations never touch the main anchor; sub-agent
+  // All three handlers self-gate on isSubAgentSession(ctx), so sub-agent
+  // loader registrations never touch the main anchor; sub-agent
   // anchors are derived via deriveSubAgentAnchor + runWithTriggerAnchor.
   // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
@@ -2470,7 +2441,7 @@ export default function (pi: ExtensionAPI) {
       try {
         // ADR 0027 PR-B+ R3 fix (Opus + GPT-5.5): wrap sub-agent execution
         // in runWithTriggerAnchor(subAnchor) so getCurrentAnchor() inside
-        // the sub-agent runtime (via shared loader's pi-astack extensions)
+        // the sub-agent runtime (via its loader's pi-astack extensions)
         // returns the SUB-AGENT anchor (with subturn), not the main-session
         // anchor. This makes:
         //   - memory_decide produces ${sid}|${tid}.${subturn}|${seq}
@@ -2504,7 +2475,7 @@ export default function (pi: ExtensionAPI) {
         );
       } catch (err: any) {
         // Outer safety-net catch — reachable when:
-        //  - getSharedInfra() rejects (settings/resource init failure) before
+        //  - sub-agent resource init rejects before
         //    runInProcess's internal try wraps the session promise;
         //  - synchronous throws in runInProcess setup (param destructuring etc.).
         // Not reachable for in-flight session/retry failures — those are
@@ -2873,7 +2844,7 @@ export default function (pi: ExtensionAPI) {
               ),
             );
           } catch (err: any) {
-            // Outer safety-net catch — reachable for getSharedInfra() init
+            // Outer safety-net catch — reachable for sub-agent resource init
             // failure and synchronous throws in runInProcess setup. In-flight
             // session/retry failures are caught inside runInProcess. No
             // retryHistory at this scope, classifyError is correct.

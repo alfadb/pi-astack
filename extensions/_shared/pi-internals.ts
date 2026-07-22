@@ -1038,7 +1038,7 @@ export function _resetSubAgentMarkersForTests(): void {
 // behavior and for a possible id-generation window. If a future pi version
 // wraps SessionManager in a Proxy / facade / Pick<> adapter, the id channel
 // should still pass as long as `getSessionId()` / `sessionId` reads are
-// forwarded. If both channels miss in the shared sub-agent loader, then:
+// forwarded. If both channels miss in a sub-agent loader, then:
 //   1. dispatch called markSessionAsSubAgent(sm) before createAgentSession
 //   2. session_start fired in a runtime that only hosts sub-agent sessions
 //   3. neither registered id nor WeakSet identity matched ctx.sessionManager
@@ -1051,9 +1051,8 @@ export function _resetSubAgentMarkersForTests(): void {
 // review (Opus, Step 5-3) called this "the most hidden time bomb".
 //
 // This sentinel detects the violation by registering a one-time probe on
-// the SHARED SUB-AGENT LOADER's pi.on("session_start"). In the shared
-// loader's runtime, EVERY session_start fires for a sub-agent (the loader
-// only spawns sub-agent AgentSessions). So:
+// each sub-agent loader's pi.on("session_start"). In those per-session
+// runtimes, EVERY session_start fires for a sub-agent. So:
 //
 //   - if the id channel matches at session_start, the boundary is VERIFIED,
 //     including Proxy/facade wrapping where WeakSet identity no longer matches
@@ -1061,12 +1060,12 @@ export function _resetSubAgentMarkersForTests(): void {
 //     the id channel is backfilled when a stable id is readable
 //   - if both channels miss, the boundary is UNTRUSTED → fail closed + loud alarm
 //
-// No race conditions: the shared loader is ONLY accessed via dispatch's
-// runInProcess, which marks the SM before calling createAgentSession.
-// Sub-agents do not spawn their own sub-agents (nested dispatch is
-// forbidden per ADR 0027), so session_start in shared loader is always
-// (markSessionAsSubAgent → createAgentSession → session_start) in that
-// order with no interleaving from other code paths.
+// Concurrent dispatches use independent loaders/runtimes. Each runInProcess
+// marks its own SM before calling createAgentSession, so every loader observes
+// (markSessionAsSubAgent -> createAgentSession -> session_start) in that order.
+// Interleaving between sibling runs is safe because marker state is keyed by
+// SessionManager identity/id and the boundary result is a process-global
+// one-shot probe.
 //
 // Sentinel fires ONCE per process — the first sub-agent spawn is enough
 // to prove the invariant. Subsequent spawns are no-op fast path.
@@ -1080,7 +1079,7 @@ export function getSubAgentBoundaryStatus(): BoundaryProbeStatus {
 }
 
 /** Diagnostic snapshot of a detected mismatch. null when sentinel is OK
- *  or hasn't yet observed any session_start in shared loader. */
+ *  or hasn't yet observed any sub-agent session_start. */
 export function getSubAgentBoundaryDiagnostic(): SubAgentState["boundaryProbeDiagnostic"] {
   const d = _getSubAgentState().boundaryProbeDiagnostic;
   return d ? { ...d } : null;
@@ -1098,10 +1097,9 @@ export function _resetSubAgentBoundaryProbeForTests(): void {
 /**
  * Bind the sub-agent boundary sentinel to a pi ExtensionAPI.
  *
- * MUST be called ONLY from inside the shared sub-agent loader's runtime
- * (where dispatch sets `_activatingInSharedLoader=true` before reload).
- * Calling from the main-pi runtime would falsely flag legitimate main
- * session_start events as boundary violations.
+ * MUST be called ONLY from the named inline extension factory that dispatch
+ * injects into each sub-agent loader. Calling from the main-pi runtime would
+ * falsely flag legitimate main session_start events as boundary violations.
  *
  * Idempotent: safe to call multiple times; the sentinel listener is
  * one-shot and self-deregisters after the first verification.
@@ -1136,8 +1134,8 @@ export function bindSubAgentBoundarySentinel(
       return;
     }
 
-    // In the shared sub-agent loader, session_start is supposed to be a
-    // sub-agent session. If both channels miss, the boundary is untrusted.
+    // In a sub-agent loader, session_start must belong to a sub-agent.
+    // If both channels miss, the boundary is untrusted.
     subAgentState.boundaryProbeStatus = "broken";
     subAgentState.boundaryProbeDiagnostic = {
       observedSmType: Object.prototype.toString.call(sm),

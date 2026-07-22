@@ -75,7 +75,7 @@ check("runInProcess calls heartbeat.stop() in a finally block (R8 P1 fix)", () =
   // R8 P1 unanimous fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2):
   // moved heartbeat.stop() from inline-after-Promise.race into a
   // finally block so it fires on early returns (model_not_found,
-  // pre-aborted signal), throws (getSharedInfra reject), AND normal
+  // pre-aborted signal), throws (resource initialization reject), AND normal
   // completion. Lock the new pattern.
   const finallyMatch = dispatchSrc.match(/\}\s*finally\s*\{[\s\S]{0,800}?heartbeat\.stop\(\)/);
   if (!finallyMatch) {

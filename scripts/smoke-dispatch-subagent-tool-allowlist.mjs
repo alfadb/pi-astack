@@ -96,12 +96,12 @@ check(
 );
 const rejectionBlock = src.slice(registryIndex, promptIndex);
 check(
-  /session\.dispose\(\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
-  "registry rejection disposes the target session and returns tool_rejected",
+  /await disposeSubAgentSession\(session\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
+  "registry rejection emits shutdown, disposes the target session, and returns tool_rejected",
 );
 check(
   /SettingsManager\.create[\s\S]*?projectTrusted:\s*false/.test(src),
-  "shared sub-agent loader remains projectTrusted:false",
+  "per-session sub-agent loader remains projectTrusted:false",
 );
 
 console.log("\n  parser and structural validation:");
