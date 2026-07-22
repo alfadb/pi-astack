@@ -101,9 +101,9 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 
 ---
 
-## 8. 子 ADR (待启动)
+## 8. 子 ADR 状态索引
 
-| ADR | 主题 | 触发条件 |
+| ADR | 主题 | 状态 / 触发条件 |
 |-----|------|---------|
 | 0029 | 跨 provider 治理 | 单设备 dogfood → 团队/企业场景，或 multi-view 真正接入跨 provider |
 | [0030](./0030-l2-hub-baseline-and-evaluation-harness.md) | **L2 hub baseline + evaluation harness** | Superseded / retired（2026-07-22 owner 决策）；历史 baseline、dogfood 与 material 判定正文保留，runtime 与继续 dogfood 的评测入口已退役 |
@@ -134,10 +134,10 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | [0016](./0016-sediment-as-llm-curator.md) | sediment LLM curator 哲学（0024 落地载体） |
 | [0017](./0017-project-binding-strict-mode.md) | 项目绑定 strict mode |
 | [0018](./0018-sediment-curator-defense-layers.md) | sediment curator 删机械护栏先例 |
-| [0019](./0019-abrain-self-managed-vault-identity.md) | abrain 自管 age keypair vault identity |
+| [0019](./0019-abrain-self-managed-vault-identity.md) | `status: superseded` 仅表示 Phase-2 机制 prose 的 archive-class；abrain 自管 age keypair identity 核心方向仍 active，未被 successor 推翻 |
 | [0020](./0020-abrain-auto-sync-to-remote.md) | abrain 跨设备同步（冲突不自动 merge） |
 | [0021](./0021-lane-g-identity-skills-habits-writer.md) | Lane G identity/skills/habits writer 设计基线；当前实现见 `current-state.md` |
-| [0022](./0022-prompt-user-tool.md) | prompt_user 工具（任务相关决策） |
+| [0022](./0022-prompt-user-tool.md) | prompt_user 工具（任务相关决策）；ADR 0041 仅窄 supersede timeout 参数/default/clamp/timer/countdown/timeout 终态，其余契约仍 active |
 | [0023](./0023-session-start-rule-injection.md) | rules 区 + 第二大脑心智模型 |
 
 > **ADR 0039 统一证据架构修订了 0014 / 0023 / 0028 的写入与存储口径**：旧 "Markdown + git 是 source of truth" 与 active rule 直写表述按 evidence → projector / compiler → stable view 读；canonical memory 是 append-only evidence 的物化投影，不再是实时写时语义裁决直接修改的本体。详见 [ADR 0039 §9](./0039-constraint-pipeline-reset.md#9-对既有-adr-的修订)。

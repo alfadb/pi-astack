@@ -38,39 +38,36 @@ status: active
 
 | Item | Intent | Notes |
 |---|---|---|
-| **Activity/attention L2 projector productization** | 让第二大脑从 L1 Evidence Events 派生“最近注意力分配到哪些项目”的人类可读 L2 view，并保持 deterministic / rebuildable。 | P0a 已以显式命令验证全局 project allocation；P0b 已新增显式只读 health script；P1 已新增显式只读 `memory_activity` pull 工具，按需读取已有 activity L2 view，返回 bounded summary 并校验 manifest/markdown/hash。仍不进入默认注入、不接 `memory_search` 排序、不接 `memory_decide` 默认 prompt surface、不新增 writable wiki store。禁止把 event count 说成真实工时；默认排除 legacy import。详细方案见 [`2026-07-04-activity-attention-timeline-l2-projector-plan.md`](./notes/2026-07-04-activity-attention-timeline-l2-projector-plan.md)。 |
 | **Requirement / workline attribution gate** | 在 project 内回答“正在推进哪些需求 / 工作线”，但只在有真实 evidence 样本和 schema 论证后推进。 | 不与 project allocation 同批实现：project_id 是现有 L1 metadata，requirement/workline 是语义归因。若需要扩展 L1 event metadata 或新增 attribution event，先走 T0 / ADR；禁止从 slug/title 直接猜并冻结成字段。 |
 | **wiki-as-view rendering boundary** | 吸收 LLM Wiki 的“预编译人类可读知识”优点，但不新增第三个可写 memory store。 | L2 Markdown view 可以作为 human-readable wiki-like surface；canonical home 仍只能是 docs 或 abrain L1/L2。若未来人类高频消费、要求持久链接或批注，再带真实使用证据讨论物化层。 |
 | **canonical home 唯一规则成文化** | 降低 docs / research / abrain / wiki-like view split-brain 风险。 | 候选改动是 `docs/README.md` 或 `direction.md` 的小型边界补强：同一知识断言只有一个 canonical home；人类可读性通过 renderer 获得，不通过多写一份获得。需要人类签字后再改方向文档。 |
 | **Lifecycle signals in ranking / forgetting review** | 重新评估 recency、usage、contradiction、activity timeline 作为当下判断输入的边界。 | 不做 trust_score / half-life 标量；不把时间信号塞回 stage0/stage1 硬召回门。若 P0a 数据证明 useful，可作为 ADR 0031 自治遗忘的证据输入候选。 |
 | **AutoMem tracking, not training** | 保留“记忆操作作为可学习技能”的长期研究期权。 | 当前只检查 L1 是否足够记录“memory action -> outcome”闭环；不投入 LoRA / learned memory expert，除非真实 sediment prompt 迭代出现 plateau 且有可审计训练/评估语料。 |
 
-## 文档体系 Phase 2（共识层重构）
+## 文档体系 Phase 2（剩余项）
 
-Phase 1 已建共识层（`README`/`vision`/`direction`/`requirements`/`feature-changelog`，见 [`docs/README.md`](./README.md)）。Phase 2 **存量语料整体完成**：存量 ADR 方向上提 `direction.md`（hard invariant）/`requirements.md`（`REQ-*` 行为需求）；`current-state.md`/`architecture/*` 去代码镜像只留契约；frontmatter + `docs-doctor` 守卫落地（具体条目以各文件现状为准，不在此镜像计数）。
-
-**abrain 侧物理 ingest/瘦身已收官**（[ADR 0034](./adr/0034-abrain-mechanism-ingest-and-rationale-rendering.md) 实现）：存量机制 ADR 处置完毕（SLIM + 机制存档 ingest 入 pi-global，superseded 变体只标 archived；计数由 `ls ~/.abrain/projects/pi-global` 派生），机制分解入 abrain + `direction_impact` 注解 + 承重墙按需渲染 rationale（带 pinned `source_ref` SHA，见 `README.md` §4）；原机制 prose 由各 ADR slim banner 标注的 git 基线保留。已知残留缺口：① pinned SHA 的 **staleness re-sync**（0034 ratify 显式 defer，待 dogfood 出现首例 stale 后带证据起草）；② 收口后新增的机制 ADR（0035/0036/0037）的 slim + ingest 尚未执行（须经 sediment lane go/no-go）。
+| Item | Gate / Notes |
+|---|---|
+| pinned `source_ref` SHA staleness re-sync | ADR 0034 ratify 显式 defer；待 dogfood 出现首例 stale 后，带真实证据起草新 ADR。 |
+| ADR 0035/0036/0037 slim + ingest | 须经 sediment lane go/no-go；主会话不直接写 abrain。 |
 
 ## P0/P1 product backlog
 
 | Item | Intent | Notes |
 |---|---|---|
-| **ADR 0024 R0 patch 同 PR 交付**（阶段 0，纯文档） | ADR 0023→R5（删 INV-R8/R9、删 `/rule veto`、删 `MEMORY-RULE:` first-class、加 INV-R12 auto-demote + `last_cited_at` 字段）+ ADR 0021 patch（删 `/about-me` first-class）+ ADR 0017 patch（sediment defer + auto-bind）+ ADR 0016 patch（self-improve cron化）+ ADR 0020 patch（silent power-user only）+ docs/current-state.md / architecture/ 同步；`brain-redesign-spec.md` 后续已归档为指针页。 | **R0 不同 PR 交付→ ADR 0024 不算 Accepted**，后续所有设计 hold。纯文档 2-3 天工作量。 |
-| **ADR 0025 起草 (meta-curator subsystem)** | 基于 ADR 0024 三条 invariant + §4.2 五条 capability 清单详细设计：outcome feedback edge + cross-session aggregator + multi-view verification + classifier auto-iteration + silent archive rollback window。 | R0 完成后立刻起草 → multi-LLM xhigh audit ≥ 2 轮 P0 收敛 → R2-R6 实施阶段 phase。 |
-| **ADR 0024 R2-R6 实施**（写侧 meta-curator） | R2 outcome edge + auto-demote、R3 cross-session aggregator、R4 multi-view verification、R6 archive 回滚/复活通道 **均已实现并接入 `agent_end`**（见 `extensions/sediment/{outcome-collector,aggregator,multi-view,archive-reactivation}.ts`）。遗忘 executor 消费受控批次是验收门槛；未达成前为已 ship 待 dogfood 验收。**剩余缺口**：R5 classifier prompt 自迭代仍为 advisory-only（health/evolution ledger 仅观测，无真实 prompt 改写回路）；outcome-feedback 以 memory-footnote 注入实现（与 ADR 原设计的 agent_end 自报告不同，记为 partial）。 | 按真实 dogfood 反馈继续收口 R5/outcome 与 executor 受控批次验收。 |
-| E2 curator 修边 lane | 处理 13 条 superseded-无有效-successor 存量。 | 目标是 confirm successor / restore status，避免 E2 长期停留在 `review_required`。 |
+| Meta-curator remaining closure | R5 classifier prompt 自迭代仍为 advisory-only；outcome feedback 仍需按真实 dogfood 判断是否收口；遗忘 executor 尚需消费一个受控批次。 | 以真实 dogfood 与可审计 executor 批次验收，不补实施流水。 |
+| E2 curator 修边 lane | 处理 superseded 但无有效 successor 的存量。 | 目标是 confirm successor / restore status，避免 E2 长期停留在 `review_required`。 |
 | 大脑内部 reviewer lane | 长尾 kind 强信号自动 demote 的前置。 | 上线后 `KIND_EVIDENCE_STRENGTH` 退化为 prompt 引导。 |
-| Lane G G4–G5 | G1 writer + `MEMORY-ABOUT-ME` fence + agent_end Lane G natural path 已 ship（详 [ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）；`/about-me` slash 已退役，不是当前入口；G3 aboutness classifier 由 ADR 0023 R1 合并 unified classifier 关闭。剩余：G4 `review-staging` slash + 30-day TTL、G5 region-aware ranking hint。 | G4–G5 无阻塞；自然在 ADR 0024 R2-R6 路径里关闭。 |
-| Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。Vault P1（active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_`）已 ship。 |
+| Lane G G4–G5 | 完成 G4 staging review/age-out 边界与 G5 region-aware ranking hint。 | 只推进仍有独立使用价值的部分；不得把维护性 slash 变成正常产品入口。 |
+| Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。 |
 | `abrain-age-key` identity passphrase wrap | 让 `~/.abrain/.vault-identity/master.age` 能用 passphrase 加密后进 git，实现跨设备仅 `git clone abrain` + 输一次 passphrase。详见 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) §"P0d 增强"。 | 技术依赖未定：(Y2) `age-encryption` JS lib in-process unwrap · (Y1) `node-pty` 模拟 pseudo-tty 。合并 P0d ADR 决策。 |
 | Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
-| Abrain automatic multi-device convergence | **Implemented 2026-07-20**：native fetch 后执行 deterministic device join（L1 add-only union、注册 L2 从 union L1 重建、普通 tracked file 三方选择），再 exact-OID push。 | per-repo OFD mutation barrier、完整 `H -> M` journal/CAS/物化恢复、typed content conflict 与 bounded push-rejection retry 已接入 startup/writer delivery。网络/auth fail-soft；不管理 transport；禁用 merge-tree/rebase/force/LLM merge。部署切换要求所有旧实例重启。后续只保留真实 usage 驱动的 footer/周期频率 UX 调整。 |
 
 ## Unified Evidence Architecture Migration
 
 设计见 [ADR 0039](./adr/0039-constraint-pipeline-reset.md)。迁移原则：所有长期记忆域先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view；Constraint 是第一优先迁移域，不再是独立特例。迁移期不得继续扩大旧 raw `agent_end` 写时裁决特殊逻辑。
 
-Canonical-path R3.4.2 的 P1 已 **production complete**：[existing-drain manifest](./evidence/2026-07-12-canonical-path-p1-a-production-existing-local-drain-manifest.json) 完成 `LOCAL-DRAIN-CURRENT`，[NEXT/Curator isolation manifest](./evidence/2026-07-12-canonical-path-p1-local-drain-next-curator-isolation-manifest.json) 完成 `LOCAL-DRAIN-NEXT` 与 `CURATOR-PENDING`，[runtime restart manifest](./evidence/2026-07-12-canonical-path-p1-production-runtime-restart-manifest.json) 完成 `LOCAL-RUNTIME-RESTART`；全部 stable criteria 与残余风险汇总在 [P1 completion record](./completions/2026-07-12-canonical-path-p1-completion.md)。一次性 probe 已前向删除，R2 startup content/metadata 修复保留。Curator production v2 wiring 仍未授权；P2/P3 继续 `blocked/not_authorized`，未启动且不得由 P1 completion 自动推进。
+Canonical-path P2/P3 仍为 `blocked/not_authorized`，只可准备只读证据；任何 production mutation 或 consumer flip 均需独立授权。当前状态与证据入口见 [transition register](./transition-register.md)。
 
 ### ADR 0040 — Unified Proposition Evidence Model（remaining gates）
 
@@ -78,43 +75,21 @@ Canonical-path R3.4.2 的 P1 已 **production complete**：[existing-drain manif
 
 | Phase | Intent | Gate / Notes |
 |---|---|---|
-| 0040-P1 Knowledge pull consumer parity/read flip **[BLOCKED]** | 为 memory/search consumer 验证 parity、freshness、failure semantics 与 rollback 后，决定是否读取 proposition pull projection。 | `separate_authorization_required`；现有 shadow 不构成 read-flip 授权。 |
-| 0040-P3 runtime read flips **[BLOCKED]** | 按 consumer 单独切换 Policy push、`session_start` stable view、canonical L2 read 或其它读取面。 | `separate_authorization_required`；每个 consumer 独立授权和 rollback，禁止一次性全域切换。 |
-| 0040-P4 legacy authority retirement **[BLOCKED]** | 退休旧 rules / constraint evidence / compiled rules 的 runtime authority，并保留 cold audit history。 | `separate_authorization_required`；retirement 不是 migration，不得物理删除审计证据。 |
+| 0040-P3 residual runtime read flips **[BLOCKED]** | 仅覆盖 D3-v2 session-start adapter、Knowledge pull consumer、canonical L2 authority 与其它非-Policy consumer。 | `separate_authorization_required`；Policy stable-view session-start 已完成，不属于 blocked scope，也不得被回读成 blanket P3 授权。每个残余 consumer 独立授权并定义 rollback/fail-closed。 |
+| 0040-P4 non-Policy legacy authority / cold-audit disposition **[BLOCKED]** | 处置其它 consumer 的旧 authority 与 legacy physical retirement，同时保留 cold audit history。 | `separate_authorization_required`；Policy runtime 已无 compiled/D3/legacy fallback；本项不得恢复旧 session authority，也不得把 retirement 伪装成 migration。 |
 
-| Phase | Intent | Notes |
+### ADR 0039 gated-deferred residual
+
+| Item | Intent | Gate / Notes |
 |---|---|---|
-| P0 freeze old write-time adjudication | 停止为旧 rules 写时路径新增语义特例，并停止为其它长期记忆域新增 raw context → canonical mutation 特例。 | 只允许安全/数据完整性修复；新语义边界进入 ADR 0039 projector / compiler 设计。 |
-| P1 Constraint shadow compiler | 读取现有 active/listed/archived rules、相关 audit 与治理案例，生成 shadow Compiled Constraint View + diff 报告。 | 详细设计见 [`2026-06-19-adr0039-p1-constraint-shadow-compiler-design.md`](./notes/2026-06-19-adr0039-p1-constraint-shadow-compiler-design.md)；报告必须标出 settings/tool not-memory、project/global rescope、near-duplicate merge、conflict、compact constraints。 |
-| P2 Constraint event parallel write | `agent_end` 对新的 Constraint 信号追加 sanitized Evidence Event，同时 compiler 持续生成 shadow view。 | 详细设计见 [`2026-06-19-adr0039-p2-constraint-evidence-event-design.md`](./notes/2026-06-19-adr0039-p2-constraint-evidence-event-design.md)；验收关注 event 丢失率、compiler 活性、错误路由、not-memory 诊断、scope 保守性、旧路径差异。 |
-| P3 Constraint compiled view injection | `session_start` 从 compiled view 注入约束，旧 always/listed rules 目录降为 legacy fallback 或兼容投影。 | stale 时注入上一版稳定 view 并提示 queued，不同步触发 LLM 裁决。 |
-| P4-a retire adjudicator ✅ | tier1-ruleset/jaccard adjudicator 已退休（4×T0 一致，见 [`2026-06-20-adr0039-p4a-consensus.md`](./notes/2026-06-20-adr0039-p4a-consensus.md)）：删 `tier1-{ruleset-,}adjudicator.ts` + import；event-append 失败终结分类修复（default-terminal except `:write_failed`，修无限 HOLD）；rollback 收缩为 storage-only `writeAbrainRule`；硬删 `tier1RuleSetAdjudication`/`tier1JaccardShadowAudit` flag。`smoke:adr0039-p4a` 守护。 | 已 ship。 |
-| P4-b retire legacy read fallback | `compiledViewInjection.fallbackToLegacyOnError=false` 已进入 fail-closed compiled-view injection soak；legacy rules 当前不作为 read-failure fallback，但这不等同于 legacy retirement。2026-07-08 实测数据门全绿：coverage=1.0、queued=0、appendFailed=0、legacyOnly=0，textDelta 已经多轮 T0 复核至 2026-07-07 且全部 semantic_equivalent。 | **仍 gated**：legacy rules retirement/archive/delete 与剩余读兜底清理仍需独立 gate，不能由 fallback=false 间接执行；还需按 transition-register 先确认 Constraint 双读 flip 待决策项。soak 出口条件：fail-closed soak ≥14 日历日无 drop 事件且 legacyOnly 持续 0 → 允许启动 constraint legacy retirement gate 定义 R 轮。flip 补记见 [`2026-07-08-p4b-fail-closed-flip-record.md`](./notes/2026-07-08-p4b-fail-closed-flip-record.md)。 |
-| P5 Constraint corpus split (shadow) ✅ | 现有 active rules 经 shadow diff 分流为 8 strata（compiled_global / compiled_project / settings_not_memory / tool_contract_not_memory / knowledge_candidate / conflict_unresolved / archived / needs_attention），产出确定性 `corpus-split.{md,json}`（.state shadow，PROPOSAL — not applied）。 | 4×T0 一致（4 轮，见 [`2026-06-20-adr0039-p5-corpus-split-consensus.md`](./notes/2026-06-20-adr0039-p5-corpus-split-consensus.md)）：**additive-thin 纯 re-projection**——stratum=f(category) 对现有 `ConstraintDiffCategory` 的 many-to-one fold（TS never-default 穷尽），零 validator/diff/decision 契约改动；coverage 由 validator 上游保证，view 层 Σ 断言冗余 fail-closed。真正 actions（knowledge 迁移 / settings 落地 / rescope apply）各为后续 gated shard。`smoke:constraint-shadow-compiler` 守护（含真实 ~/.abrain 重投影）。 |
-| P5.5 Constraint L2 shadow materialized ✅ (FIX-1 backfill) | 把现有 `.state` validated `decision.json`（2 真实 constraint 事件）固化为 1 个 content-addressed `constraint-projection-envelope/v1` L1 事件 → 确定性 renderer → git-tracked `l2/views/constraint/latest/`（SHADOW，注入仍读 `.state`，无 read-flip）。`scripts/backfill-adr0039-constraint-l2.mjs`，event id recorded in the L1 backfill evidence。 | 执行 [`2026-06-20-adr0039-constraint-l2-consensus.md`](./notes/2026-06-20-adr0039-constraint-l2-consensus.md) 的 FIX-1 + 2026-06-21 R3 4×T0 一致：Revision B（causal_parents=2 实际事件，3rd 留下次自然 compile）；可逆=git revert+flag，L1 orphan 永不 rm。**已知缺口**：`reconcile:adr0039` 的 `stale_against_l1_events` 预先即 red（scan 含 knowledge 事件 + `.state` shadow 对 3rd 信号 genuinely stale；ADR §6 stale 本应 accepted）——独立 guard 修复待 multi-T0 定。 |
-| P5.6 Constraint event trigger-fidelity verifier **[DONE]** | 2 轮 4×T0 `T0审查` 一致签名：`validator` 回归结构性不变量，语义触发保真由 compiler prompt + prompt-native verifier 承担。Phase 1 已移除 `candidateTriggerPhrases` 字符串投影 hard gate 与 divergent trigger-set gate；Phase 2 merged-source verifier 已在生产验收数据上达成。 | 2026-07-08 生产证据已见 `projected_via_verifier`，`deferredMergedSourceEvents=0`；faithful merged_source 已可经 verifier 恢复 projected。后续只按回归监控处理。 |
-| P6 Knowledge projector shadow ✅ (已超越——见 P1-flip projection_only) | 为 Knowledge 建立 Evidence Event → Search Corpus View 的 shadow projector，并用 diff、search A/B 与真实使用证据验证 freshness、召回质量和延迟。 | 实态已远超 shadow：Knowledge 已 B0–B4 + Phase C + P1-flip 到 `canonicalReadMode=projection_only`（见 [`2026-06-21-adr0039-p1-flip-executed.md`](./notes/2026-06-21-adr0039-p1-flip-executed.md)）。本行保留为历史阶段名。 |
-| P7 low-frequency zone/view migration **[GATED-DEFERRED — 2026-06-21, 2 轮 4×T0 4/4]** | 把 identity / skills / habits / workflows / project-memory / rationale 等低频投影面迁移到 evidence → projector → stable view。**状态 = gated-deferred，不是 backlog**：实测全部域 canonical 目录为空且本实例零真实用量（不是缺 writer），迁移 pattern 已由 Constraint P1–P5 + Knowledge P6 证明，给空+无用量域建 writer/projector 是与 L3 §4.5 同形的投机脚手架。预选 pilot 域 = **identity**（identityKey 最干净），待 gate 触发时执行。共识见 [`2026-06-21-adr0039-p7-pilot-defer-consensus.md`](./notes/2026-06-21-adr0039-p7-pilot-defer-consensus.md)。 | **Gate（OR，任一臂触发才重开）**：A) constraint-evidence/* 30 天 ≥5 条且 ≥1 identity-shaped；B) ≥1 条带 turn-pointer 的「当前写路对 identity-class 事实塑形错误」实例；C) ≥10 条可 replay 回放的历史 identity-shaped 事实。**无触发 = 继续 deferred 的信号，不是「拖太久该做了」的提示**——auto-continuation 不得把本行当「next unstarted phase / genuinely-new」重新索取（已知 relitigation 回路）。激活时同一改动必须把 `identity-evidence-envelope/v1` 加入 event-scan `FOREIGN_SKIP_ENVELOPE_SCHEMAS`（防 coverageRatio 塌缩），parallel-write 不替换 Lane G，projector 用真实事件验收不得 synthetic。约束续旧：每面单独通过真实使用证据；不新增 ADR 0028 之外全局存储轴；禁止一次性重写全系统。 |
-| P8 unified ledger/schema review | 决策点已被 ADR 0040 supersede：统一 proposition/lifecycle SOT 已 accepted。 | 后续实施不再重开“是否统一”的问题；只按上方 P1 flip/P3/P4 门推进，每个门仍需真实生产证据与 fresh authorization。 |
+| Low-frequency zone/view migration **[GATED-DEFERRED]** | 当 identity / skills / habits / workflows / project-memory / rationale 出现真实用量后，再选择单一 pilot 迁移到 evidence → projector → stable view。 | 仅在以下任一真实信号出现时重开：identity-shaped evidence 达到可验收样本；出现带 turn-pointer 的塑形错误；或存在足量可 replay 的历史事实。无触发即继续 deferred；不得用 synthetic event 验收或一次性重写全系统。 |
 
-## ADR 0035 — memory stage1 embedding 候选检索实施
+## Memory retrieval remaining work
 
-[ADR 0035](./adr/0035-memory-stage1-embedding-candidate-retrieval.md)(Accepted;3×T0 跨厂商盲审 opus-4-8/gpt-5.5/deepseek-v4-pro 一致 RATIFY WITH REVISIONS,修订集已并入)的分阶段实施。stage1 候选面从 full-body 全库海选改为 embedding 向量检索 + LLM 精选小候选集,成本从 O(库×频率) 降为 O(N);supersede ADR 0015 的 stage1 候选面决策,保留其双阶段框架 + result-cache 禁令 + freshness 契约。
-
-**Phase 0 前置确认(已完成)**:embedding provider `doubao-embedding-vision` @ sub2api 网关(`/v1/embeddings`,dim 2048,batch≤10)配通实测;走方舟 Coding Plan 订阅额度(cost=0,非 metered);ToS 核实——embedding 为 Coding Plan 官方功能(2026-03-31 上线,RAG/agent-memory/OpenViking 用途),无违约风险;约束 TPM 600K/min(全库 embed 限流分批 ~4min)+ 按调用次数消耗套餐额度。召回实测 related-recall top-100=98%(ground truth 用 derives_from/related,有正偏,见 ADR §3)。
-
-| Phase | Intent | 盲审硬约束 |
+| Item | Intent | Gate / Notes |
 |---|---|---|
-| P1 embedding 基建 ✅ | 向量索引模块(abrain `.state`,content-hash keyed 失效 + embedding-model 版本戳);embed 封装(batch≤10 + TPM 限流 + 重试);纯 JS 余弦 top-N + scope-filter-before-topN;全库初始 embed(实测 2350 向量,12 project + world)。已 ship(`embedding.ts` + smoke) | content-hash 失效(metadata-only 不 re-embed);版本戳跨模型禁混用;索引不入 git;scope 按物理位置 |
-| P2 写入路径增量 embed(sediment 侧,ADR 0003)✅ | **方向 B(P2 盲审改,ADR §46)**:freshness 改 search-time content-hash diff(`staleOrMissingSlugs`:内存 entries vs 索引,未索引+陈旧 bounded-union),**无 dirty-manifest**(deferred 到物理分区);reconcile = agent_end `tryAutoWriteLane` 写后 best-effort `reconcileEmbeddings`(content-hash gated + scope-safe prune + 文件锁串行 RMW);修 4 高危 bug(全局 prune 删他 project / 无锁 / coverage 只看 slug / hard-delete 残留)。已 ship(`embedding.ts` + `extensions/sediment/index.ts` + smoke 16/16) | freshness:search-time diff 天然覆盖手工编辑/git pull/crash;reconcile 失败不阻塞 sediment,search bounded-union 兜底,禁回退全库 |
-| P3 stage1 改造(3×T0 盲审修订已并入,ADR §7) | 抽 `runTwoStageSearch` 内核(两函数折叠,stage0 集成一次);stage0 = query embed → hybrid(dense topN[**corpus allow-set** 非 scopeTagOf] ∪ sparse[trigger/title/slug/**body**] ∪ staleOrMissing bounded),候选面**硬上限 ~300**;feature flag `stage0Enabled` 默认 off(dark-launch) | insufficient_pool 用**结构信号 pool<K** 非绝对 cosine 在线门;熔断**禁静默**(metrics+持久状态+短超时)+ sparse-only 兜底禁全库;扩召一次有界(topN×3 上限 ~400);非-active-status 查询回退全 corpus;verdict=none 改 **pool-relative** 语义;stage1Limit≥池;oracle **离线 replay** 非 inline 双跑 |
-| P4 A/B 灰度 + 转产硬门 ✅ | `oracle:stage0` 离线 replay(full-body vs stage0 coverage/parity)+ `search-metrics.jsonl` stage0 字段(pool_hit/fallback/best_dense_rank/stale/embed_ms, `smoke:stage0-metrics` 验证)。**stage0Enabled flag 已开(dark-launch)** | **转产硬门达标**:21 query 强 baseline(v4-pro)coverage **95.1% ≥95%**(中文 11=92.4% + 英文/config 10=98%);baseline 必须强 model(flash 噪声拉低, 见 ADR §7);parity 低是 stage1/2 选择差异非召回问题 |
-| P5 切换 + 旧 surface 下线 ✅ | stage0 成默认(`DEFAULT_SEARCH_SETTINGS.stage0Enabled=true`, settings.json 移除显式 flag 单源);`full_body_v3` 退役为 flag-off kill-switch + oracle baseline;收敛权重 poolLimit 300/maxCand 400/sparse 3:1(oracle tuning 从 200/300 提升) | **oracle final 21 query 强 baseline coverage 98.1% ≥95%**(19/21 query 100%; 200/300=94.1% → 300/400=98.1%);走偏信号监控(top-100<95% / verdict=none 率升 / best-rank 劣化)回看;kill-switch + 安全网双触发 + search-time freshness 兜底 |
-| P6 方向 B 事后 review + freshness 饥饿修复 ✅ | 4×T0(opus/gpt-5.5/deepseek-v4-pro/kimi-k2.6)读代码独立 review 方向 B → 4/4 REVISE-B(不返工 A);揭出 stale 饱和饥饿 bug → `selectStage0Pool` 加 stale floor(`stage0StaleFloorRatio` 0.1, updated desc 优先, 下限非上限);`smoke-stage0-freshness` 对照守护 | **freshness 不变量兑现**:floor=0.1 probe 必进/floor=0 被挤出;oracle 21 query 强 baseline coverage 97.3% 无回归;应改(reconcile 解耦写/冷启动 rebuild 异步/截断一致性)记 ADR §7 backlog |
-| P8 stage1 紧凑 surface 降本(探索, dark-launch off) | flag `stage1CompactSurface`(off); stage1 去 compiledTruth/timeline 粗筛, body 留 stage2; `oracle:compact-surface` 对比 + prompt-surface 对齐修复 | token 304K→52K(降 83%) 但生产模型 flash recall coverage 54.4% vs 基线 67.5%(差 13 点, 弱模型损失放大); 4×T0 DARK-LAUNCH 不转正; 待 stage1-50 度量+21×3 重复+compact-v2 薄证据+sediment 路径验证 |
-| P7 非-active 查询 stage0 化(sediment 去重漏洞) ✅ | 4×T0 设计 review: sediment curator 去重 search(status:["all"])触发 wantsNonActive→null→每轮全库 full_body 915K。修:(1) 删 wantsNonActive→null 走 hybrid; (2) load-bearing: staleOrMissingSlugs 只算可索引集(active 且非 zone:rules), 防非 active+rule neighbors 塞爆 stale | `smoke-stage0-nonactive`(不回退全库+55 不可索引 probe staleCount=0+相关非 active sparse 召回) + oracle active coverage 100% 无回归; backlog: 中文 sparse 弱/防复发 guard/dedup oracle |
-
-**待定参数**(灰度收敛):候选集 N(初始 100);hybrid 权重 + sparse 字段集;向量存储格式(JSON 单文件 vs JSONL 增量 vs abrain-state sqlite,含 >5000 迁移);单向量 vs 多向量(解决实验 `[:3500]` 截断盲区);embedding provider 长期选型(doubao 现成首选,备选恢复 Bailian text-embedding-v4 / 启用 Gemini)。
+| Stage1 compact surface v2 **[DEFERRED / DARK-LAUNCH OFF]** | 在不损失弱模型 recall 的前提下降低粗筛 surface 成本。 | 现有 compact 试验有明显 recall 回归，不转正；重开需 stage1-50 度量、重复样本、compact-v2 薄证据与 sediment 路径验证。 |
+| Stage0 follow-up | 解耦 reconcile 写入、异步 cold-start rebuild、统一截断语义，并补中文 sparse 防复发 guard / dedup oracle。 | 只按真实查询回归与运行瓶颈推进，不重新引入全库 fallback。 |
 
 ## Architecture debt
 
@@ -123,70 +98,31 @@ Canonical-path R3.4.2 的 P1 已 **production complete**：[existing-drain manif
 | Schema evolution | frontmatter/audit/binding schema 的 version upgrade path（当前 `schema_version: 1` 字段已写入，缺多版本兼容/迁移策略）。 |
 | Runtime path docs/tests | 避免 `.pensieve`/`.pi-astack`/`.abrain .state` 路径漂移。 |
 | Model fallback vs curator whitelist | 当前 model-curator session_start 只 WARN，不阻止 curator 删掉 fallback 候选；需要 curator 在 whitelist 时尊重 fallbackModels 列表，或 fallback 路径自带 whitelist bypass。 |
-| Audit 新字段默认 sanitize | 新加 audit 字段须默认走 `sanitizeAuditText`（曾有 explicit/auto-write lane 的 `candidates[].title` 漏 sanitize 的先例，已修；保留此项作纪律提醒）。 |
-| constraint manual-compile 工具加固（dossier） | `scripts/dossier-constraint-shadow-report.mjs --write` 当前两个坑：① `makeOracleRegistry`（`scripts/_oracle-registry.mjs`）只解析 pi 内置 catalog，model-curator 运行时注册的模型（如 `minimax/MiniMax-M3`）解析不到 → 手动重编译只能退到 `--model deepseek/deepseek-v4-pro`（curator 官方 rollback）；② `--write` 直接覆写 `~/.abrain/.state/.../latest/compiled-view.md`，而 `rule-injector` 正注入它 → 手动跑会改写 live 注入。应：让 registry 复用 pi 运行时模型源（或 curator catalog），且 `--write` 默认指向 temp 树、覆写 live `.state` 需显式 `--force-live` + 响亮告警。另：dossier 的 TS stage 清单随 shadow-runner/parser 加依赖而 bitrot（已补 knowledge-evidence/append/projection/corpus-split）——根因是手维护 stage 清单，可考虑共享 stage helper。 |
-
-> ADR 0022 `prompt_user` 的 housekeeping batch（P3b post-audit / T0 xhigh / polish sweep 等 P2 项）已全部 ship 或 won't-fix；实施流水与 audit 轨迹见 git history 与 `docs/audits/`，不再镜像于此。
-
-## Architecture invariants（已守护，禁止退化）
-
-以下几条曾是 roadmap debt，2026-05-14 R5/R6 audit 已落地为不变量：未来 PR 退化这些行为应视为 regression。
-
-> **行号策略**：每次大幅插入后行号会过期；改用 `file::symbol` 锚点（函数 / 常量名），仅在需要时附"~行号"提示多次插入后请重新 grep，不要依赖冻结的绝对行号。
-
-| Invariant | 当前防线 |
-|---|---|
-| Dispatch sub-agent prompt 隔离 | `extensions/dispatch/index.ts` v3 in-process（`createAgentSession`）：每个 sub-agent 持独立 in-memory `SessionManager`，prompt 直接传入 `session.prompt()`，无共享临时文件（旧 v2 `runSubprocess`+`mkdtempSync("pi-dispatch-")` 已废）。`smoke:dispatch-subagent-tool-allowlist` 守护。 |
-| Vault read/bash fail-closed | `extensions/abrain/index.ts` 中 `eventRegistry.on("tool_call", …)`（~L660） 与 `eventRegistry.on("tool_result", …)`（~L697）：`prepared.kind === "block"` 或 inject try/catch → `auditBashInjectBlock` + `return { block: true }`；tool_result authorization/redaction throw 全 withhold + `auditBashOutput("bash_output_withhold", …)`。 |
-| Writer git rollback | `extensions/sediment/writer.ts` 中 `deleteProjectEntry`、`updateProjectEntry`、`writeProjectEntry`、`writeAbrainWorkflow` 在 `gitCommit()===null` 时 `git reset HEAD -- <rel>` + `fs.unlink(target)`；四条写路径均覆盖。 |
-| Vault P1 active project resolver | 核心引擎在 `extensions/_shared/runtime.ts::resolveActiveProject`；`extensions/abrain/index.ts` 中 `parseSecretScopeFlags`/`resolveSecretScope`、`bootActiveProject` 快照（session_start）、`/secret` 命令处理；`extensions/abrain/vault-bash.ts::buildBootVaultBashDeps`（`$PVAULT_/$GVAULT_/$VAULT_` 路由 + `pvaultBlockReason` 拒绝）。`--project=<id>` 必须等于 boot-time 绑定；默认走 active project。 |
-| Curator scope binding（非 create ops） | `extensions/sediment/curator.ts::effectiveScopeFor`（调用点在 update / merge / archive / supersede / delete）：以 neighbor 物理 scope 为准做 store routing（不信 LLM 声明），mixed-scope merge 仍硬拒（`scope_mismatch`）。旧 `validateScope` 硬拒码于 2026-06-06 mechanical-guard cleanup R2 改为 auto-correct（见 curator.ts:150-153 注释）；create 仍 prompt-only（下方 create-branch 行已加约束）。 |
-| Migrate-go unknown frontmatter preservation | `extensions/memory/migrate-go.ts::preservedFrontmatterLines` + `buildNormalizedFrontmatter`：迁移路径保留未知 frontmatter raw lines。 |
-| Memory store priority post-B5 cutover | `extensions/memory/parser.ts::resolveStores` 固定为 `abrain-project > world > legacy-pensieve`；`loadEntries` dedup 跨 store first-wins **不可被 confidence/updated 推翻**；`scanStore` 对 world 传 `WORLD_EXTRA_IGNORE_DIRS={projects,vault}`。 |
-| Memory read-path kind/status 枚举归一 | `extensions/memory/parser.ts::normalizeKind`/`normalizeStatus` 在 parseEntry 里被调用：`entry.kind`/`entry.status` 总是 sediment/validation.ts ENTRY_KINDS/ENTRY_STATUSES 枚举之一；legacy `pipeline`/`knowledge` + 任意未知值被 fold 到最近的 canonical kind，原值保留在可选 `legacyKind`/`legacyStatus` 供 doctor。LLM-facing card 不再看到未声明的 kind。 |
-| Curator create-branch scope binding | `extensions/sediment/curator.ts::parseDecision` create 分支加两条硬约束：(a) 每个 `derives_from` slug 必须在 allowedSlugs 中（防幻觉 slug）；(b) 若 `scope:"world"`，每个 `derives_from` neighbor 必须也是 world-scope（防漏 project context 进 world store）。project create 仍可从 world 派生（合法 specialization）。 |
-| Sediment update/merge unknown frontmatter preservation 覆盖 | `scripts/smoke-memory-sediment.mjs` "fm-preserve" fixture：注入 unknown scalar/array、update body 无 patch / 有 patch 两路，验证 unknown 存活 + 保护 key 唯一 + parseEntry roundtrip。 |
+| constraint offline compile/dossier 工具加固 | `scripts/dossier-constraint-shadow-report.mjs` 仅是历史 Constraint 的离线/冷审计工具，不参与也不改写 Policy stable-view live injection。让 registry 复用 pi runtime/model-curator 模型源；写模式默认输出 temp 树，覆盖 residual `.state` audit artifact 必须显式选择并响亮告警；用共享 stage helper 消除手维护 TS stage 清单的 bitrot。 |
 
 ## Pending flips（过渡态机械门，ADR 0024 §7.6 条款）
 
 | 门 | flip/移除条件 | 证据源 |
 |---|---|---|
-| `tier1JaccardCuratorLane: false`（显式 rollback 时 Jaccard 自治 dedup 回到 Tier-1 kill path） | 已翻默认 true；保留此项作为 rollback 再评估条件：观察窗口（aggregator 30 天 / tail 行数限）内被裁决行（create/update/merge，error 不计）≥ 50 条 且 false-merge 份额（would_decision=create）≤ 5% | aggregator P1.5 watchdog `tier1_jaccard_shadow.flip_ready`（仅用于 rollback evidence/advisory，不机械自翻） |
 | `conf≥8` 非指令 durable 过渡 fallback（correction-pipeline isTier1Directive，仅 no-target） | 审计窗口内 `tier1_direct_write` 中 `is_directive!==true && confidence>=8` 不再产生被用户纠正的 accepted corrections / recall misses → 移除 fallback 回 ADR 原文谓词 | `tier1_direct_write` audit 的 `is_directive` / `confidence` / correction outcome 维度（O5 sunset） |
 
-## ADR 0031 — 自治自标定遗忘实施(复用既有 meta-curator infra,dark-launch)
+## ADR 0031 — 自治自标定遗忘剩余验收
 
-设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)(accepted)。原则:**先补标定数据(Lane G 当年缺的那块),再上可逆 demote;自治遗忘终点是 `archived`(全文留盘 = 复活面),本 ADR 范围内无自治物理删除;disuse 永不触发降级,真值变化(supersession/contradiction)才是安全驱动**。flag 守卫(代码 DEFAULT off);**运行时 flag 状态以 settings.json 为单一真相**(kill-switch-explicit-in-settings)。decay→lifecycle_proposal 接线已落地（2026-07-08）；pending 与计数以 `~/.abrain/.state/sediment/entry-lifecycle-proposals.jsonl` 为准。剩余缺口是 executor 消费一个受控批次，并让 demote ledger 与 reactivation window 可审计。
+设计见 [ADR 0031](./adr/0031-autonomous-self-calibrating-forgetting.md)。仍需完成：
 
-**架构基线(2×T0 gap 分析 2026-06-15):ADR 0031 不是新管线,是 ADR 0024/0025 meta-curator 生命周期的安全硬化层。强制复用,不重建**:
-- 复活通道 = `archive-reactivation.ts`(已 LLM:keep_archived/reactivate/hard_archive_recommended + ledger)。
-- 防振荡 hysteresis = `entry-telemetry.ts` 已 carry 的 `last_proposed_at`/`proposal_cooldown_until`/`holdout_until`(注释明言留给 “the gated executor (a later module)”)。
-- 提议管线 = `entry-lifecycle-proposals.ts`(pending 观察,非授权队列)。
-- 写路径 = `curator-decision-writer.ts` 的 archive op(已有 git lock + rollback)。
-- 用量信号 = `usage-metrics.json`(读侧,本会话已建)+ `entry-telemetry.jsonl`(footnote/outcome 侧)——bridge 两者,不建第三套。
-- **decay 判断按 AI-Native 扩展 `aggregator` 的 prompt-native historian**(已是「读运行状态→判断→pending lifecycle proposal」,且已含「retrieved-unused 单独不足以产生 proposal」= ADR 0031 §4 真值驱动),**不另建并行 deterministic scorer**(deepseek 方案否决:机械衰减公式判断「是否遗忘」违反 direction.md §2 AI-Native + ADR 0031 §2.2 prompt-native)。
+- 把 supersede/contradict 真值变化信号送入 aggregator 视图；disuse 单独不得触发降级。
+- 让 executor 消费一个受控批次，并证明 demote ledger 与 reactivation window 可审计。
+- 用真实 query 做 corpus vs corpus-minus-would-demote 回归；低 resurrection rate 不得被当作安全证明。
 
-**Phase 0 — instrumentation(零行为变化)**:
-- ✅ 读侧 `retrieval_hit` / `cited`(`extensions/memory/usage-telemetry.ts` + 3 埋点;flag `memory.forgetting.instrumentation`,本会话已 ship)。
-- resurrection 事件流已由 `archive-reactivation-ledger.jsonl` 覆盖(不新建)。
-- 待补:supersede/contradict 信号喂进 aggregator 视图(真值变化驱动);demote 事件流 Phase 3 才需要。
-
-**Phase 1 — would_demote 影子标记(只标不动)**:decay-shadow 信号已接到 lifecycle proposal sink；pending 内容以 `entry-lifecycle-proposals.jsonl` 为准。当前缺口是 executor 消费受控批次，而不是再等待数据门。影子回归仍按最近真实 query 跑 corpus vs corpus−would_demote，量 decide brief 质量是否退。**无 `would_delete`、无 tombstone-extra-fields、无 `git rm`**——`archived` 全文留盘即 tombstone(ADR 0031 §2.1 archived 地板)。
-
-**Phase 2 — resurrection 稳态自标定(观测闭环)**:`resurrection-rate-monitor`(从 `archive-reactivation-ledger.jsonl` 算 rate + 趋势)→ 喂 aggregator 的 prompt-native 自调(更保守/更积极),噪声/近重信号复用 `entry-telemetry` echo_chamber + aggregator high_unused;自审闸 = resurrection rate 超阈值自动回退衰减强度。**低 resurrection rate 不当「安全」证明**(§2.2 非对称盲区)。
-
-**Phase 3 — gated demote executor(可逆)✅ 已实现并接线**:`extensions/sediment/forgetting-executor.ts` + `extensions/sediment/index.ts` agent_end debounced 调度,消费 pending `op=archive` proposal + decay 上下文 + `entry-telemetry` hysteresis(cooldown/holdout/CAS)→ `active→archived`(注入式 `updateProjectEntry` + `expected_status:"active"` CAS);构建期焊死的反失控地板(`DEMOTE_MAX_PER_DAY`/`MIN_ACTIVE_CORPUS_FLOOR`/`DEMOTE_COOLDOWN_MS`)+ demote 后监控 resurrection rate 自动回退;独立 audit lane。**运行模式以两个正交开关表达**:`memory.forgetting.enabled` 控制 decay 评估调度与遗忘侧写入/mutation,`memory.forgetting.instrumentation` 独立控制观测写;`enabled=false` 为 strict-off(不调度 decay 评估、零遗忘侧写入、零 mutation;instrumentation 观测写由独立开关控制);`enabled=true` 且 `autoLlmWriteEnabled===true` 时才可真实 demote,否则 dry-run/无 mutation;旧 dry-run/shadow 常态档已由异常/动作审计和受控批次验证取代。decay→lifecycle_proposal 上游接线已落地（2026-07-08）；剩余运行缺口是 executor 消费一个受控批次。**物理删除(`git rm`)不在本 ADR 授权**——若将来需要,另起 supersession-gated 专门设计(独立论证持久性/灾备)。
-
-**最小新写件**(gap 分析裁定,复用优先):`resurrection-rate-monitor`(纯确定性)+ `forgetting-executor`(gated)+ `demote-audit`(ledger)+ aggregator/proposal 的 `decay_score`/`would_demote` 字段扩展 + 影子回归 harness。**不新建**:reactivation 通道、tombstone 存储、hysteresis 存储、writer 路径、噪声检测、第三套 telemetry、`git rm`。
+自治遗忘终点保持 `archived` 全文可达；物理删除不在 ADR 0031 授权内，未来若需要必须另起专门决策。
 
 ## Deferred exploration
 
 | Item | Current stance |
 |---|---|
-| qmd / BM25 optional acceleration | `searchEntries` 已删除（零调用）；`search.ts` 其余函数活跃。sparse BM25 已作为 stage0 候选臂转产（ADR 0036），不是 LLM 不可用时的 fallback；qmd 仍只作未来离线诊断/加速实验候选。 |
-| Cross-device abrain sync | 等真实多机冲突反馈；不要提前 over-engineer。 |
+| qmd optional acceleration | 仅作未来离线诊断/加速实验候选；不得成为 LLM retrieval 不可用时的 fallback。 |
 | Incremental graph rebuild | graph/index 是派生物，当前可 rebuild；增量优化低优先。 |
-| Skills/prompts/gstack reference port | `skills/`、`prompts/` 仍是计划，不在 current repo tree；`vendor/gstack/` 已退役，未来如需吸收 gstack 方法论，按 `UPSTREAM.md` 临时 clone/read diff 后 port。 |
+| Prompts/gstack reference port | 未来如需吸收 gstack 方法论，按 `UPSTREAM.md` 临时 clone/read diff 后按需 port；不恢复 active vendor submodule。 |
 
 ## Design maxim
 

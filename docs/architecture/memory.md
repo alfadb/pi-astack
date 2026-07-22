@@ -21,9 +21,10 @@ pi-astack memory 的 current contract：
 |---|---|---|
 | `~/.abrain/l1/events/sha256/**` | content-addressed evidence events | semantic SOT |
 | `~/.abrain/l2/views/**` | deterministic markdown projections | stable read/audit view |
-| `~/.abrain/l2/views/constraint/latest/compiled-view.md` | repo L2 Constraint compiled view | projection/audit view; currently not the rule-injector read path |
+| `~/.abrain/.state/sediment/proposition-policy-stable-view/v1/latest` | content-addressed Policy stable-view pointer | sole production session rule authority for persisted main sessions (ADR 0040) |
+| `~/.abrain/l2/views/constraint/latest/compiled-view.md` | repo L2 Constraint compiled view | historical projection / offline cold-audit residual; no runtime authority |
 | `~/.abrain/l2/views/activity/latest/project-time-allocation.md` | Activity / attention L2 view | deterministic human-readable projection over L1 evidence events; not an editable wiki store and not a `memory_search` canonical Knowledge store |
-| `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` | runtime Constraint compiled view | current `session_start` rule-injector read path while compiled-view injection remains enabled |
+| `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` | Constraint shadow compiled view | historical/offline audit residual; not a production injection source or fallback |
 | `~/.abrain/projects/<id>/` | project memory legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
 | `<project>/.pensieve/` | legacy project memory | read-only migration source |
 | `~/.abrain/knowledge/` | world / cross-project legacy markdown area | retained rollback/debug surface; projection_only steady-state writes go through L1/L2 |
@@ -32,9 +33,11 @@ pi-astack memory 的 current contract：
 | `~/.abrain/.state/` | derived state/audit/locks/local maps, including current JSON/sidecar L3 artifacts | not semantic SOT |
 | `~/.abrain/.state/sediment/adr0039-l3/adr0039.sqlite` | partial production ADR0039 SQLite instance | rebuildable L3 derived layer; not current `memory_search` sole runtime |
 
-### 2.1 Constraint compiled-view runtime boundary
+### 2.1 Policy stable-view runtime boundary
 
-Constraint currently has two compiled-view materializations. The repo L2 file under `~/.abrain/l2/views/constraint/latest/compiled-view.md` is the canonical projection/audit artifact (`shadow_only:false`). The runtime rule injector still reads `~/.abrain/.state/sediment/constraint-shadow/latest/compiled-view.md` directly, filters it by active project, and injects that snapshot at `session_start`. Current production config has `ruleInjector.compiledViewInjection.fallbackToLegacyOnError=false`: compiled-view read, coverage, freshness, schema, or size failure fails closed instead of falling back to legacy rules. Legacy rules remain as rollback/debug/migration surface, not read-failure fallback. Do not interpret the existence of the repo L2 compiled-view as proof that the injector has migrated to L2 as its source.
+ADR 0040 Policy stable-view is the production authority for every persisted main session. `session_start` captures the immutable bundle selected by the current abrain root's `.state/sediment/proposition-policy-stable-view/v1/latest`, strictly validates it, and injects that view; ephemeral main sessions and subagents are excluded.
+
+A strictly valid but stale bundle remains injectable and emits a visible stale diagnostic. Missing, partial, foreign, hash/schema/provenance/budget-invalid, or otherwise invalid state produces loud zero injection. There is no compiled-view, D3, or legacy fallback. Both Constraint compiled-view materializations are historical projection/offline cold-audit residuals only and have no production session rule authority.
 
 > **World scope 范围注**：memory facade 的 "world store" 扶袱法是扫描整个 `~/.abrain/`，只排除 `projects/**` （项目私有）与 `vault/**` （密文）。因此有 frontmatter 的 `workflows/` md 文件也会以 `scope=world` 进入 `memory_search` 结果；这是有意为之（workflow 文档可被检索），但与「world = 仅 `knowledge/`」的口语理解不同，根据需要优化粒度可以后续收窄。
 

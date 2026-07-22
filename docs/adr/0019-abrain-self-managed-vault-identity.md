@@ -1,13 +1,15 @@
 ---
 doc_type: adr
 status: superseded
+status_scope: mechanism-prose-archive-class
+decision_core: active
 ---
 
 # ADR 0019 - abrain self-managed vault identity
 
-> 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：age/Tier-1/`.vault-backend` 机制是代码正确性（`extensions/abrain/backend-detect.ts` 等）；可移植身份取舍（不寄生系统 ssh key）可一句提炼，当前真相以代码为准。机制正文（含 3 根因 + invariant 表）原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。
+> 🗄️ **ARCHIVE-CLASS · SUPERSEDED（Phase-2，3×T0 mark-in-place）**：这里的 `superseded` 是机制 prose/code-shipped 的文档生命周期分类，不表示 age keypair identity 的核心方向被推翻，也不存在替代该方向的 successor ADR。age/Tier-1/`.vault-backend` 机制是代码正确性（`extensions/abrain/backend-detect.ts` 等）；“vault identity 由 abrain 自管、不寄生系统 ssh key”的方向仍 active，当前机制真相以代码为准。机制正文（含 3 根因 + invariant 表）原地保留可读、物理归档延后至 abrain ingest lane 落地，勿删。
 
-- **状态**: Superseded（与 frontmatter 一致）
+- **状态**: Superseded（仅 `status_scope: mechanism-prose-archive-class`）；核心 identity 决策仍 active，未被 successor 取代
 - **日期**: 2026-05-15
 - **决策者**: alfadb
 - **依赖**: ADR 0014 (abrain seven-zone) / ADR 0017 (strict project binding) / ADR 0001 (pi-astack as personal pi workflow)
