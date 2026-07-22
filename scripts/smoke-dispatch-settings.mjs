@@ -84,7 +84,7 @@ const { DEFAULT_DISPATCH_SETTINGS, resolveDispatchSettings, readDispatchSettings
 
 console.log("dispatch settings smoke\n");
 
-check("schema defines exactly one top-level dispatch key", () => {
+check("schema defines the current dispatch settings surface", () => {
   const matches = schemaText.match(/^\s*"dispatch":\s*\{$/gm) ?? [];
   if (matches.length !== 1) {
     throw new Error(`expected exactly one top-level dispatch key, found ${matches.length}`);
@@ -93,11 +93,12 @@ check("schema defines exactly one top-level dispatch key", () => {
   const schema = JSON.parse(schemaText);
   const dispatchProps = schema?.properties?.dispatch?.properties;
   if (!dispatchProps) throw new Error("dispatch.properties missing from parsed schema");
-  for (const key of ["auditRotation", "maxProviderConcurrency", "taskGovernor", "workerRunGovernor", "hub"]) {
+  for (const key of ["auditRotation", "maxProviderConcurrency", "taskGovernor", "workerRunGovernor"]) {
     if (!(key in dispatchProps)) {
       throw new Error(`dispatch.properties missing ${key}`);
     }
   }
+  if ("hub" in dispatchProps) throw new Error("retired dispatch.properties.hub must stay removed");
 });
 
 check("default resolver value is 4 with 64 MiB / 7d audit rotation", () => {

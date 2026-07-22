@@ -13,7 +13,7 @@ status: accepted
 
 - **dispatch 是基座能力，暴露 primitive（dispatch_agent / dispatch_parallel）而非固定策略工厂**；parallel/debate/chain/ensemble 是 cookbook pattern（进 prompt/skill），不是 API enum——反约束 LLM 自行编排。
 - 输入兼容在 argument-prep 层（strict schema 不退化为 Any），最多双层 unwrap，逐字段 opt-in，错误带修复上下文。
-- 子代理工具安全：默认只读、嵌套 dispatch 永拒、vision/imagine 需显式 list；并发是真 IO 并发（非进程隔离），跨 provider 散开降 rate-limit 耦合。**walk-back（2026-06-16 / 2026-07-21）**：历史 “mutating 需 env gate” 条款与 abrain slug `mutating-subagent-tools-require-env-gate` 已过时——dispatch env gate 已移除（ADR 0003 2026-06-16 修订）。当前边界是：direct `dispatch_agent` / `dispatch_parallel` 可显式授予 implementation tools；`dispatch_hub` 另由 ADR 0030 structural read-only cage（固定 `HUB_TOOLS` / `WORKER_TOOLS` allowlist，planner 不得扩权）约束，不是 env-gate。
+- 子代理工具安全：默认只读、嵌套 dispatch 永拒、vision/imagine 需显式 list；并发是真 IO 并发（非进程隔离），跨 provider 散开降 rate-limit 耦合。**walk-back（2026-06-16 / 2026-07-21）**：历史 “mutating 需 env gate” 条款与 abrain slug `mutating-subagent-tools-require-env-gate` 已过时——dispatch env gate 已移除（ADR 0003 2026-06-16 修订）。当前运行时仅暴露 direct `dispatch_agent` / `dispatch_parallel`，两者可显式授予 implementation tools；嵌套 dispatch、workflow、用户交互与 vault 边界工具仍结构性禁用。ADR 0030 的动态 hub 已于 2026-07-22 退役。
 
 ## 机制（已分解入 abrain，逐条 slug）
 

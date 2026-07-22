@@ -43,7 +43,6 @@ import {
   isDispatchTaskProfile,
   normalizeDispatchTaskProfile,
 } from "./task-profile";
-import { registerHubTool, readHubConfigFromSettings } from "./hub";
 import { markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
@@ -69,7 +68,6 @@ import {
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { randomUUID } from "node:crypto";
-import { join } from "node:path";
 import {
   DEFAULT_DISPATCH_SETTINGS,
   readDispatchSettings,
@@ -147,7 +145,6 @@ const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_se
 const DISABLED_SUBAGENT_TOOLS = [
   "dispatch_agent",
   "dispatch_parallel",
-  "dispatch_hub",
   "workflow_run",
   "prompt_user",
   "vault_release",
@@ -698,18 +695,6 @@ function renderDispatchParallelCall(args: any, theme: any) {
   return new Text(
     `${theme.fg("toolTitle", theme.bold("dispatch_parallel"))} ` +
       `${theme.fg("accent", `${tasks.length} tasks`)} ${theme.fg("dim", summary)}`,
-    0,
-    0,
-  );
-}
-
-function renderDispatchHubCall(args: any, theme: any) {
-  const hub = compactOneLine(args?.hubModel);
-  const task = truncateDisplayText(compactOneLine(args?.task), 96);
-  return new Text(
-    `${theme.fg("toolTitle", theme.bold("dispatch_hub"))}` +
-      `${hub ? ` ${theme.fg("dim", `hub:${hub}`)}` : ""}` +
-      `${task ? ` ${theme.fg("accent", task)}` : ""}`,
     0,
     0,
   );
@@ -2360,7 +2345,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/dispatch_hub/workflow_run/prompt_user/vault_release are disabled." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/workflow_run/prompt_user/vault_release are disabled." })),
       taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default.")),
       profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
@@ -3193,42 +3178,4 @@ export default function (pi: ExtensionAPI) {
       };
     },
   });
-
-  // ADR 0030: register dispatch_hub IFF settings.dispatch.hub.enabled === true
-  // (default off → tool absent). Main-session only — never in the shared
-  // sub-agent loader (a sub-agent calling dispatch_hub = nested orchestration).
-  if (!_isActivatingInSharedLoaderInternal()) {
-    try {
-      registerHubTool(pi as unknown as { registerTool: (def: unknown) => void }, {
-        runInProcess,
-        reasoningTraceFields: dispatchReasoningTraceFields,
-        governanceFields: dispatchGovernanceFields,
-        appendDispatchAudit,
-        providerFromModel,
-        validateTools,
-        progress: {
-          taskFromSpec: progressTaskFromSpec,
-          updateFromResult: updateProgressTaskFromResult,
-          markProgress: markProgressTask,
-          applyRunProgress: applyRunProgressToTask,
-          startTicker: startDispatchProgressTicker,
-          emit: emitDispatchProgress,
-          details: dispatchProgressDetails,
-        },
-        renderCall: renderDispatchHubCall,
-        renderResult: renderDispatchToolResult,
-        defaultTimeoutMs: DEFAULT_TIMEOUT_MS,
-        readConfig: () => {
-          const hubConfig = readHubConfigFromSettings();
-          const dispatchSettings = readDispatchSettings();
-          return {
-            ...hubConfig,
-            maxProviderConcurrency: dispatchSettings.maxProviderConcurrency,
-          };
-        },
-      });
-    } catch (err) {
-      console.warn(`pi-astack/dispatch: dispatch_hub registration skipped: ${(err as Error)?.message ?? "unknown"}`);
-    }
-  }
 }

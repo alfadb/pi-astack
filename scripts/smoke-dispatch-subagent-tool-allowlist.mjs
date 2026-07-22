@@ -3,7 +3,7 @@
  * Dispatch sub-agent tool-registry smoke.
  *
  * Covers both halves of the contract:
- *   - dispatch keeps only the six structural denials and wires them through
+ *   - dispatch keeps only the five structural denials and wires them through
  *     validateTools + createAgentSession({ excludeTools })
  *   - requested names are validated against the created target session before
  *     prompt(), including tools registered dynamically by an extension factory
@@ -46,7 +46,6 @@ const EXPECTED_DEFAULT = [
 const DISABLED = [
   "dispatch_agent",
   "dispatch_parallel",
-  "dispatch_hub",
   "workflow_run",
   "prompt_user",
   "vault_release",
@@ -62,7 +61,7 @@ if (!disabledMatch) {
   const actual = [...disabledMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   check(
     JSON.stringify(actual) === JSON.stringify(DISABLED),
-    "structural disabled set is exactly the six required tools",
+    "structural disabled set is exactly the five required tools",
     `structural disabled set drifted: ${actual.join(", ")}`,
   );
 }

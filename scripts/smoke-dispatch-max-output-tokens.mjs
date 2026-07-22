@@ -161,7 +161,10 @@ check("dispatch_agent does not expose caller output budget", () => {
 });
 
 check("dispatch_parallel does not expose per-task or top-level output budget", () => {
-  const block = dispatchSrc.match(/name: "dispatch_parallel",[\s\S]*?ADR 0030: register dispatch_hub/)?.[0] ?? "";
+  const start = dispatchSrc.indexOf('name: "dispatch_parallel"');
+  const end = dispatchSrc.lastIndexOf("\n  });\n}");
+  if (start < 0 || end <= start) throw new Error("could not locate dispatch_parallel registration");
+  const block = dispatchSrc.slice(start, end + "\n  });".length);
   if (/maxOutputTokens: Type\.Optional\(Type\.Number/.test(block)) throw new Error("schema must not expose maxOutputTokens");
   if (/normalizeMaxOutputTokens/.test(block)) throw new Error("top-level output budget must not be normalized");
   if (/n\.maxOutputTokens/.test(block)) throw new Error("per-task budget must not be preserved by prepareArguments");

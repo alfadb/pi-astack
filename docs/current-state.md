@@ -17,7 +17,7 @@ status: active
 
 ## 1. 一句话状态
 
-pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event-first 第二大脑/数字孪生系统：L1 Evidence Event 是语义 SOT，L2 Markdown 是确定性投影/审计视图，L3 SQLite/embedding/ledger 是可重建派生层；提供一组 runtime extensions、一组 pi-astack LLM-facing tools（`vault_release` / `prompt_user` / `memory_*` / `dispatch_*` / `vision` / `imagine` / `web_*`，不含 pi builtin tools）、若干 human slash commands。
+pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event-first 第二大脑/数字孪生系统：L1 Evidence Event 是语义 SOT，L2 Markdown 是确定性投影/审计视图，L3 SQLite/embedding/ledger 是可重建派生层；提供一组 runtime extensions、一组 pi-astack LLM-facing tools（`vault_release` / `prompt_user` / `memory_*` / `dispatch_agent` / `dispatch_parallel` / `vision` / `imagine` / `web_*`，不含 pi builtin tools）、若干 human slash commands。
 
 > 扩展与工具的当下**计数**以 `ls extensions/` + 各扩展 `registerTool` 为准，不在此镜像。
 
@@ -32,7 +32,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | `abrain/` | `vault_release`、`prompt_user`；`/abrain`、`/vault`、`/secret` | ✓ |
 | `compaction-tuner/` | `/compaction-tuner` | ✓ |
 | `context7/` | `context7_resolve`、`context7_docs` | ✓ |
-| `dispatch/` | `dispatch_agent`、`dispatch_parallel`、`dispatch_hub`（受 `dispatch.hub.enabled` 门控；hub planner/workers 结构固定只读 `HUB_TOOLS`/`WORKER_TOOLS` cage；dogfood 实态 1/20 material 且 `human_better`，见 [`transition-register.md`](./transition-register.md)） | ✓ |
+| `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
 | `edit-strip-empty/` | `edit` wrapper | ✓ |
 | `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |
 | `goal/` | `goal_status/set/pause/resume/stop/clear`、`goal_check`；`/goal`；auto-continue（`goal.autoContinue`，default off）经 keyed detached queue + continuation ack，不阻塞 `agent_end` awaited 链 | ✓ |

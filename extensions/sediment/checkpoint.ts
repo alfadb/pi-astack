@@ -529,8 +529,9 @@ function truncateEntryText(entry: unknown, rendered: string, maxChars: number): 
 export const L2_FANOUT_TOOL_NAMES: ReadonlySet<string> = new Set([
   "dispatch_agent",
   "dispatch_parallel",
-  // ADR 0030: dispatch_hub's toolResult (hub plan + worker aggregate) is L2
-  // fanout output, NOT user implicit truth — withhold from sediment too.
+  // Retired legacy compatibility: old transcripts may still contain
+  // dispatch_hub toolResults. Keep withholding them as L2 output so replay or
+  // compaction cannot reclassify historical worker aggregates as user truth.
   "dispatch_hub",
 ]);
 

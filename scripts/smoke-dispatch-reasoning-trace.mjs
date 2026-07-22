@@ -718,7 +718,6 @@ await check("dispatch terminal audit/details helper emits trace completeness fie
     reasoning_trace_bytes: 4096,
   });
   const source = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf8");
-  const hubSource = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/hub.ts"), "utf8");
   const workflowSource = fs.readFileSync(path.join(repoRoot, "extensions/workflow/index.ts"), "utf8");
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   assert.match(source, /operation: "dispatch_agent"[\s\S]{0,2200}?\.\.\.dispatchReasoningTraceFields\(result\)/);
@@ -729,8 +728,6 @@ await check("dispatch terminal audit/details helper emits trace completeness fie
   assert.match(source, /forceIncomplete: abortRace/);
   assert.match(source, /if \(heartbeatCtx\?\.reasoningTrace\) \{[\s\S]{0,700}?createDispatchReasoningTrace/);
   assert.doesNotMatch(source, /auditSessionEvent/);
-  assert.match(hubSource, /worker crashed:[\s\S]{0,400}?\.\.\.deps\.reasoningTraceFields\(err\)/);
-  assert.match(hubSource, /hub_reasoning: deps\.reasoningTraceFields\(hubRes\)/);
   assert.match(workflowSource, /reasoningTrace:\s*\{[\s\S]{0,160}?workflowRunId: req\.workflowRunId,[\s\S]{0,80}?workflowStageId: req\.stageId/);
   assert.match(workflowSource, /\.\.\.dispatchReasoningTraceFields\(result\)/);
   assert.equal(pkg.scripts?.["smoke:dispatch-reasoning-trace"], "node scripts/smoke-dispatch-reasoning-trace.mjs");

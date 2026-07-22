@@ -106,7 +106,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | ADR | 主题 | 触发条件 |
 |-----|------|---------|
 | 0029 | 跨 provider 治理 | 单设备 dogfood → 团队/企业场景，或 multi-view 真正接入跨 provider |
-| [0030](./0030-l2-hub-baseline-and-evaluation-harness.md) | **L2 hub baseline + evaluation harness** | Accepted (baseline，2026-06-16，3×T0 设计盲议 + owner 签字)；caged-live hub 以默认关闭 flag 进单用户 dogfood，翻默认须由在线评估器数据 ratify。原 H5 blocking gate 由本 ADR 定义 harness 形态后清除 |
+| [0030](./0030-l2-hub-baseline-and-evaluation-harness.md) | **L2 hub baseline + evaluation harness** | Superseded / retired（2026-07-22 owner 决策）；历史 baseline、dogfood 与 material 判定正文保留，runtime 与继续 dogfood 的评测入口已退役 |
 | 0038 | IDE / host 边界 | pi 引入除 CLI/TUI 外的第二个 host（原规划为 0028，因 0028 已被 ground-truth-tiered 重构占用而改号） |
 | [0034](./0034-abrain-mechanism-ingest-and-rationale-rendering.md) | **abrain mechanism-ingest + direction_impact + rationale 渲染（Phase-2 keystone）** | Accepted（2026-06-13，3×T0 一致 ratify）；解锁 ADR 机制物理瘦身/归档 + `README.md` §4 承重墙渲染；主会话只写代码，真实写入由 sediment lane 落地 |
 | [0039](./0039-constraint-pipeline-reset.md) | **Unified Evidence Architecture** | Accepted（2026-06-19，原 Constraint-only 版本 2026-06-18 accepted；统一架构修订经 4×T0 R2 全部 SIGN）；所有长期记忆先追加 Evidence Event，再由域自适应 projector / compiler 生成 stable view |

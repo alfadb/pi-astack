@@ -11,6 +11,30 @@ status: active
 
 ---
 
+## 2026-07-22 — accepted — Retire dispatch_hub
+
+### 变更
+
+立即退役 `dispatch_hub`：运行时工具面只保留 `dispatch_agent` / `dispatch_parallel`；删除 hub 专属实现、settings schema/live 配置与 smoke/oracle/backfill 入口。ADR 0030 标为 superseded，transition stable ID 收口为 completed；历史 ADR、audit 与 material ledger 保留但不再增长。
+
+### 原因
+
+真实采用极低，唯一 material 判定为 `human_better`。`task -> hub -> worker` 同时引入任务到 hub、hub 到 worker 的两级有损转述，而主会话已有的 direct dispatch primitives 足以表达模型、角色与并行策略。
+
+### 验收边界
+
+runtime、schema、live settings 与 package scripts 不再出现 hub 能力；不继续 20 条 dogfood。历史 transcript 中的旧 `dispatch_hub` toolResult 仍由 sediment withhold，防止回放时把 L2 聚合误当用户隐式真值。`dispatch_agent` / `dispatch_parallel` 行为不变。
+
+### 非目标
+
+不删除真实历史 ADR/audit/ledger，不修改 direct dispatch 的执行、并发、工具授权或审计语义。
+
+### 关联
+
+[ADR 0030](adr/0030-l2-hub-baseline-and-evaluation-harness.md)；[Transition register](transition-register.md)；[Current state](current-state.md)。
+
+---
+
 ## 2026-07-21 — accepted — Concurrent startup busy retry and post-mutation classification lock scope
 
 ### 变更

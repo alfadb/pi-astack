@@ -217,7 +217,7 @@ check("dispatch_parallel toolResult → content withheld", () => {
   if (!text.includes("dispatch_parallel")) throw new Error("toolName stripped");
 });
 
-check("dispatch_hub toolResult → content withheld (ADR 0030)", () => {
+check("retired legacy dispatch_hub transcript → content still withheld", () => {
   const e = toolResultEntry(
     "dispatch_hub",
     "Hub plan: 3 workers. Aggregate: user clearly prefers pnpm.",

@@ -460,13 +460,6 @@ const plainUtf8SettingsSource = source({
   body: "Provider/model settings JSON must be UTF-8 and must live in configuration, not memory.",
   triggerPhrases: ["provider", "model", "settings JSON", "UTF-8"],
 });
-const dispatchHubModelSelectionSource = source({
-  sourceId: "rule:global:always:dispatch-hub-model-selection-by-main-session",
-  slug: "dispatch-hub-model-selection-by-main-session",
-  title: "Dispatch hub model selection",
-  body: "dispatch_hub model choice must be made by the main session per task; do not hard-code provider/model IDs in settings wiring.",
-  triggerPhrases: ["dispatch_hub", "model choice", "per task"],
-});
 const businessModelIdsFailClosedSource = source({
   sourceId: "rule:global:always:business-model-ids-settings-not-code-fail-closed",
   slug: "business-model-ids-settings-not-code-fail-closed",
@@ -742,7 +735,6 @@ check("normalize leaves plain UTF-8 provider/model settings JSON as settings", (
 
 check("normalize keeps settings-word behavioral governance rules behavioral", () => {
   const sources = [
-    dispatchHubModelSelectionSource,
     businessModelIdsFailClosedSource,
     newestVendorRollbackSource,
     restartDisclosureSettingsWiringSource,

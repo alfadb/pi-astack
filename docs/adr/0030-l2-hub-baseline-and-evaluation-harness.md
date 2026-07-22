@@ -1,9 +1,11 @@
 ---
 doc_type: adr
-status: accepted
+status: superseded
 ---
 
 # ADR 0030 — L2 Hub Baseline + Evaluation Harness
+
+> **Retired / superseded（owner 决策，2026-07-22）**：立即退役 `dispatch_hub`，不再继续 20 条 dogfood。实态证据是采用极低、唯一 material verdict 为 `human_better`，且 `task -> hub -> worker` 的二级路径产生两级有损转述；主会话直接使用 `dispatch_agent` / `dispatch_parallel` 已足够表达所需编排。专属 runtime、settings schema/config 与继续推动 dogfood 的评测入口已删除；历史 ADR、audit 与 ledger 作为事实证据保留且不再增长。
 
 - **状态**：**Accepted (baseline，2026-06-16)**。经三轮跨 provider T0 设计盲议（Claude Opus 4-8 / GPT-5.5 / DeepSeek v4-pro / MiniMax-M3，逐轮记录于 git history）+ owner 签字收敛。本 ADR 为 baseline：caged-live hub 以默认关闭 flag 进入单用户 dogfood 已 owner-ratified；**翻默认开（默认 on）须由 material 模式离线判定数据 ratify**（见 §8；2026-07-08 walkback：在线 hub 缺 human-pick counterfactual）。ADR-text 形式审计折叠进 dogfood 阶段。
 - **依赖**：[ADR 0027](0027-coupled-stigmergic-dual-loop-agent-system.md)（CSDLAS / C1'-C6 / H5 gate）、[ADR 0009](0009-multi-agent-as-base-capability.md)（dispatch 底座）、[ADR 0024](0024-second-brain-from-natural-conversation.md)（AI-Native 认知/infra 分层）、[ADR 0026](0026-second-brain-decision-participation.md)（§3.4 回声室断路器）、[ADR 0028](0028-sediment-ground-truth-tiered-rearchitecture.md)（provenance 来源边界门）、`docs/direction.md`（INV-COST-NOT-A-GATE / INV-IMPLICIT-GROUND-TRUTH / INV-USER-NOT-WORKER）。

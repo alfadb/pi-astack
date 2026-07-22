@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-21",
+  "updated": "2026-07-22",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -757,31 +757,32 @@
     {
       "id": "dispatch.hub-dogfood",
       "partition": "dispatch",
-      "title": "hub dogfood",
-      "human_section": "滞留需推进",
+      "title": "hub dogfood retirement",
+      "human_section": "已收口",
       "register_class": "active",
-      "phase_status": "dogfood",
+      "phase_status": "completed",
       "authorization_status": "authorized",
       "entered": "2026-07-08",
-      "review_by": "2026-08-04",
-      "current": "Material offline judgment ledger has exactly 1/20 recorded judgment (`hub-judgments.jsonl`, final_verdict=human_better, 2026-07-08). The 2026-07-15 fail-closed gate required ≥1 real material judgment before that date: SATISFIED by the 2026-07-08 judgment — do NOT claim a 07-15 zero-judgment violation or auto-disable solely on that expired date. Quality gate for default-on is NOT met (need ≥20 material judgments and hub quality ≥ human-pick; current sole verdict is human_better). review_by 2026-07-15 is expired and renewed for continued dogfood observation. Hub planner/workers are now structurally pinned to fixed read-only HUB_TOOLS/WORKER_TOOLS allowlists (cage; planner tools cannot expand capability).",
+      "review_by": "2026-07-22",
+      "current": "Retired by owner decision on 2026-07-22. Adoption was extremely low; the sole material judgment was final_verdict=human_better, and the task -> hub -> worker path imposed two lossy retellings. Direct dispatch_agent/dispatch_parallel primitives are sufficient. Runtime, settings, and dogfood evaluation entrypoints were removed. The historical ledger remains immutable evidence and must not grow.",
       "exit": [
-        "累计至少 20 次 material 判定且质量不低于 human-pick",
-        "30 天无新判定触发告警与重评"
+        "dispatch_hub runtime and settings surfaces are removed",
+        "hub-specific dogfood, oracle, smoke, and judgment backfill entrypoints are removed",
+        "historical ADR, audit, and ledger evidence is retained without further growth"
       ],
       "evidence": [
-        "ADR 0030 walkback",
-        "hub-judgments.jsonl (1 material; final_verdict=human_better)",
+        "ADR 0030 historical baseline and 2026-07-22 retirement summary",
+        "hub-judgments.jsonl (historical: 1 material; final_verdict=human_better)",
         "2026-07-08 governance audit",
-        "extensions/dispatch/hub.ts structural HUB_TOOLS/WORKER_TOOLS cage"
+        "2026-07-22 feature changelog"
       ],
-      "owner": "dispatch-hub",
+      "owner": "dispatch-primitives",
       "consumer": [
-        "dispatch hub quality gate"
+        "historical transition and audit readers"
       ],
       "renewal_count": 1,
       "risk_class": "high",
-      "next_action": "Continue material judgment backfill toward ≥20; do not flip default-on while quality is human_better / sample <20. Keep structural read-only cage; treat expired 07-15 review_by as renewal trigger, not as proof of the zero-judgment fail-closed condition."
+      "next_action": "Keep the transition closed. Do not resume material backfill or restore a hub runtime without a new owner decision and a new ADR."
     },
     {
       "id": "forgetting.upstream-wiring",

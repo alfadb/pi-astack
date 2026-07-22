@@ -1642,7 +1642,7 @@
     "dispatch": {
       "type": "object",
       "additionalProperties": false,
-      "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers, while `hub` configures the ADR 0030 caged-live dynamic hub (`dispatch_hub` tool). Repeated tool-call protection now lives in top-level `toolCircuitBreaker` and applies to the current agent run, including sub-agents.",
+      "description": "dispatch extension (ADR 0009 + 0027). `maxProviderConcurrency` caps same-provider `dispatch_parallel` workers. Repeated tool-call protection lives in top-level `toolCircuitBreaker` and applies to the current agent run, including sub-agents.",
       "properties": {
         "auditRotation": {
           "type": "object",
@@ -1747,35 +1747,6 @@
                   }
                 }
               }
-            }
-          }
-        },
-        "hub": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "ADR 0030 L2 dynamic hub. A cross-vendor hub LLM proposes a worker assignment, then dispatch_hub really dispatches it (read-only, single-level). NO cost gate (INV-COST-NOT-A-GATE). Default-off kill-switch.",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Master switch. Default off -> dispatch_hub tool is NOT registered. Flip true to dogfood (ADR 0030 §4); flipping default-on is a separate data-gated ratify (ADR 0030 §8)."
-            },
-            "model": {
-              "type": "string",
-              "default": "",
-              "description": "Explicit hub planning model (provider/model). Empty -> auto-pick a flagship-tier model. Cross-vendor decorrelation from workers is flagged regardless (ADR 0030 §7)."
-            },
-            "maxWorkers": {
-              "type": "number",
-              "default": 8,
-              "minimum": 1,
-              "maximum": 8,
-              "description": "Worker-count ceiling, clamped to [1,8]. A non-tunable-past-8 infra sanity bound, NOT a cost gate (HARD_MAX_WORKERS in hub.ts)."
-            },
-            "thinking": {
-              "type": "string",
-              "default": "high",
-              "description": "Thinking level for the hub planning call."
             }
           }
         }
