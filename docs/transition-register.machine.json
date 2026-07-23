@@ -790,20 +790,17 @@
       "title": "forgetting 上游接线",
       "human_section": "滞留需推进",
       "register_class": "active",
-      "phase_status": "blocked",
-      "authorization_status": "separate_authorization_required",
+      "phase_status": "in_progress",
+      "authorization_status": "authorized",
       "entered": "2026-07-08",
       "review_by": "2026-08-04",
-      "current": "decay→lifecycle_proposal wiring, RM-LIFECYCLE-002 bridge/reconcile/read-model, and proposal dry-run remain live. RM-FORGET-001 real demote requires the AND of literal boolean memory.forgetting.executorRealApplyEnabled=true as dedicated authorization and effective sediment.autoLlmWriteEnabled=true as global write authority. The global half follows the existing schema/resolver: boolean true and legacy string 'true' enable it; staging-only, false/'false', missing, and malformed values close it. Either gate alone fails closed. Production keeps the dedicated gate false. Production gate evidence proves configuration and zero writes with no current eligible candidate; dynamic candidate blocking is automated-test evidence only. Archive reactivation retains its existing sediment.autoLlmWriteEnabled semantics independently of the dedicated gate.",
+      "current": "Fresh explicit user authorization on 2026-07-23 enables the full formal production RM-FORGET path without a canary or pre-enable wait. Production memory.forgetting.enabled, instrumentation, literal boolean executorRealApplyEnabled, effective sediment.autoLlmWriteEnabled, and the dedicated/global AND are true. All E1 kinds currently allowed by code are authorized; non-E1 retains existing evidence/kind gates. The 5/batch, 20/day, CAS, corpus floor, and resurrection backoff controls remain circuit breakers, not a canary. The 30-day, recall/none, and reviewer signals are running observation and follow-on scaling quality metrics, not activation gates. The armed dossier observes eligible=0, unchanged source/durable/demote/reactivation hashes, and action=0, so nonzero production executor acceptance is not claimed and the transition is not completed. The memory and sediment settings resolvers synchronously re-read parent settings on every call, and the forgetting slice resolves both authorities for every agent_end; formal authority is armed, requires no restart, and takes effect on the next agent_end. Archive reactivation remains independent; terminal state is full-text archived only. Hard-delete, Lane G, and human queues remain blocked or absent.",
       "exit": [
-        "RM-FORGET gate dossier is complete and independently reviewed",
-        "real production query corpus recall/none baseline is recorded before any demote",
-        "the 30-day observation/reactivation window is closed with auditable evidence",
-        "long-tail reviewer and all evidence gates are connected and pass",
-        "a fresh independent authorization explicitly enables executor real apply",
-        "a controlled production demote batch plus reactivation round-trip is audited without physical deletion"
+        "at least one naturally occurring nonzero production demote action and reactivation round-trip are audited without physical deletion"
       ],
       "evidence": [
+        "fresh explicit user authorization causal anchor: session 019f8914-fded-7d80-bd88-93904f61c959, decision date 2026-07-23, decision kind fresh_explicit_user_formal_production_enablement_no_canary",
+        "/home/worker/.pi/agent/pi-astack-settings.json",
         "entry-lifecycle-proposals ledger",
         "forgetting-demote-ledger",
         "archive-reactivation ledger",
@@ -817,7 +814,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "Keep executorRealApplyEnabled=false. Build the RM-FORGET gate dossier, recall/none baseline, closed 30-day window, and long-tail reviewer/evidence gates; then request fresh independent authorization before any production demote."
+      "next_action": "No restart is required; the next agent_end hot-reads the armed settings. Do not manufacture candidates. Observe naturally occurring eligible/actions and the 30-day, recall/none, reactivation, and reviewer quality signals. Keep hard-delete, Lane G, and human queues out of scope."
     },
     {
       "id": "memory.dedup-archived-dense",
@@ -861,9 +858,9 @@
       "authorization_status": "authorized",
       "entered": "2026-07-09",
       "review_by": "2026-07-24",
-      "current": "kind→证据强度使用确定性 infra 白名单；E1 全 kind 受 real-apply gate 统一 hold，非 E1 同样 hold，长尾非 E1 仍额外排除自动 demote。大脑内部 long-tail reviewer 尚未接入。",
+      "current": "kind→证据强度继续使用确定性 infra 白名单。正式 production path 已授权，所有当前代码允许的 E1 kind 可执行；非 E1 继续既有 evidence/kind gates，弱证据长尾仍由 lane_required 排除。大脑内部 long-tail reviewer 尚未接入，但它是运行中质量/后续放量指标，不是 E1 启用前门。",
       "exit": [
-        "大脑内部 reviewer lane 上线并纳入 RM-FORGET evidence gate 后退化为 prompt 引导"
+        "大脑内部 reviewer lane 上线后作为非 E1 质量信号与后续放量依据，并评估该 infra 映射是否可退化为 prompt 引导"
       ],
       "evidence": [
         "ADR 0031 revision record"
@@ -874,7 +871,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "medium",
-      "next_action": "推进 reviewer lane 设计。"
+      "next_action": "运行中观察 E1/non-E1 kind 分布；推进 reviewer 质量信号，但不得将其恢复为 E1 activation gate。"
     },
     {
       "id": "constraint.auto-refresh-failed-run-retry",

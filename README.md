@@ -80,13 +80,15 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
   "sediment": { "enabled": true, "autoLlmWriteEnabled": true },
   "memory": {
     "search": { "stage1Model": "deepseek/deepseek-v4-flash" },
-    "forgetting": { "enabled": true, "executorRealApplyEnabled": false }
+    "forgetting": { "enabled": true, "instrumentation": true, "executorRealApplyEnabled": true }
   },
   "vision": { "modelPreferences": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"] }
 }
 ```
 
-`memory.forgetting.enabled` 只开启 decay/proposal planning；真实 demote 同时要求 dedicated gate `executorRealApplyEnabled` 为字面布尔 `true`，且 global authority `sediment.autoLlmWriteEnabled` 满足既有有效语义：布尔 `true` 或 legacy 字符串 `"true"`。任一门缺失、关闭或类型错误都 fail-closed，且 dedicated gate 不控制 archive reactivation；reactivation 继续使用既有 `autoLlmWriteEnabled` 语义。
+`memory.forgetting.enabled` 开启 decay/proposal planning；真实 demote 同时要求 dedicated gate `executorRealApplyEnabled` 为字面布尔 `true`，且 global authority `sediment.autoLlmWriteEnabled` 满足既有有效语义：布尔 `true` 或 legacy 字符串 `"true"`。任一门缺失、关闭或类型错误都 fail-closed，且 dedicated gate 不控制 archive reactivation；reactivation 继续使用既有 `autoLlmWriteEnabled` 语义。
+
+2026-07-23 用户 fresh explicit authorization 已直接授权无 canary 的 RM-FORGET 正式全量生产路径；production dedicated/global/AND 三者均已配置为 true。`loadPiStackSettings` 每次 resolve 都同步读取 settings，sediment 在每个 `agent_end` 重新 resolve memory forgetting settings 与 global write authority，因此 formal authority 已 armed、无需重启，并在下一次 `agent_end` 生效。5/batch、20/day、CAS、corpus floor 与 resurrection backoff 是 circuit breakers；30d、recall/none 与 reviewer 是运行中观察和后续放量质量指标，不是启用前门。当前 eligible=0，因此状态为 `in_progress / authorized`，不冒充 nonzero executor 验收。所有当前代码允许的 E1 kind 可执行，非 E1 保留现有 evidence gates；终态仅全文 `archived`，hard-delete、Lane G 与人工队列仍 blocked/不存在。
 
 ### ADR0040 production Policy stable view
 

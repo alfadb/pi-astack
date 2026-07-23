@@ -7,13 +7,13 @@ status: accepted
 
 > 本 ADR 深化 [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) / [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口)（已归档至 abrain）「自治归档 + 回滚窗口」与 roadmap 的 INV-R12 auto-demote 方向:把「遗忘」从被动滞留 + 人类可调策略,收敛为**人类设零可调策略、大脑全自治自标定、一条不可调结构下限(可逆基座)作为回退保障**。设计输入是 5×T0 跨厂商盲评(设计) + 3×T0 文本盲审(R2)两轮(模型清单与完整记录见 git history / `docs/audits/`),证据摘要见 §4。实施与 instrumentation 埋点见 [`docs/roadmap.md`](../roadmap.md),不在本 ADR 正文。
 
-> **Revised 2026-07-23**：`enabled` 与 `instrumentation` 仍是遗忘语义/观测开关；新增独立 infra safety gate `memory.forgetting.executorRealApplyEnabled`，默认 false 且仅字面布尔 true 可提供专用授权。真实 callback 注入还必须同时满足既有 effective auto-write 语义下的 `sediment.autoLlmWriteEnabled=true` 全局写 authority：布尔 true 与合法 legacy 字符串 `"true"` 均有效；`staging-only`、false/`"false"`、缺失和 malformed 均关闭。任一门不能单独授权。它们不是人类可调遗忘策略。功能/需求级记录见 [feature changelog](../feature-changelog.md)。
+> **Revised 2026-07-23**：`enabled` 与 `instrumentation` 仍是遗忘语义/观测开关；独立 infra safety gate `memory.forgetting.executorRealApplyEnabled` 默认 false 且仅字面布尔 true 可提供专用授权。真实 callback 注入还必须同时满足既有 effective auto-write 语义下的 `sediment.autoLlmWriteEnabled=true` 全局写 authority：布尔 true 与合法 legacy 字符串 `"true"` 均有效；`staging-only`、false/`"false"`、缺失和 malformed 均关闭。任一门不能单独授权。2026-07-23 用户 fresh explicit authorization 已直接授权无 canary 的正式全量生产路径，production dedicated gate 现为 true；既有 caps 仍是 circuit breakers，不是 canary。它们不是人类可调遗忘策略。功能/需求级记录见 [feature changelog](../feature-changelog.md)。
 
 ## 修订记录
 
 2026-07-23 real-apply safety gate：`memory.forgetting.enabled=true` 只维持 decay evaluation、frontmatter bridge、E2 reconcile、lifecycle convergence refresh 与 proposal planning/dry-run；真实 `archiveEntry/updateProjectEntry` 注入同时要求字面布尔 `executorRealApplyEnabled===true` 和 effective `sediment.autoLlmWriteEnabled=true`。前者是专用授权，后者沿用既有 auto-write resolver/schema 语义作为全局写急停：布尔 true 与 legacy `"true"` 有效，`staging-only`、false/`"false"`、缺失和 malformed 均 fail-closed；dedicated gate 的字符串仍始终无效。agent_end 编排和 executor 双层检查，hold 分别审计 `executor_real_apply_gate_closed` 或 `global_write_authority_gate_closed`，不得写成 `real_apply`。双门对 E1 所有 kind（含长尾）与非 E1 一致，不创建 Lane G 或人审队列；archive reactivation 仍使用既有 `sediment.autoLlmWriteEnabled` 逻辑，不受 dedicated gate 影响。
 
-2026-07-23 authorization boundary：`RM-FORGET-001` 仍 blocked/gated，不因 safety gate ship 而 completed。解除 real apply 必须同时完成 RM-FORGET gate dossier、真实 recall/none pre-demote baseline、闭合 30d observation/reactivation window、long-tail reviewer 与 evidence gates，并取得 fresh independent authorization。当前 production eligible=0 的 dossier 只证明配置关闭与零写；动态 candidate blocking 由自动测试补充，不冒充 production demote 验收。staging hard-delete 继续 blocked。
+2026-07-23 fresh formal-production authorization：用户明确决定不增加 canary、不等待 30d/baseline/reviewer，直接正式全量启用 RM-FORGET real apply。`loadPiStackSettings` 每次 resolve 都同步读取 settings，sediment 在每个 `agent_end` 重新 resolve memory forgetting settings 与 global write authority；父 settings 置 true 后 formal authority 已 armed、无需重启，并在下一次 `agent_end` 生效。`forgetting.upstream-wiring` 因此进入 `in_progress / authorized`，不是 completed：当前 production eligible=0，只能证明 `enabled=true`、`instrumentation=true`、dedicated/global/AND 三者为 true，以及 source/durable/demote/reactivation 前后 hash 不变和当前 action=0，不能冒充 nonzero executor 验收。5/batch、20/day、CAS、corpus floor、resurrection backoff 保持 circuit breakers；30d、recall/none 与 reviewer 变为运行中观察和后续放量质量指标，不再是启用前门。所有当前代码允许的 E1 kind 均可走已授权路径；非 E1 继续既有 evidence/kind gates。无 canary；hard-delete、Lane G 与人工队列仍 blocked/不存在，终态仅全文 `archived`。
 
 2026-07-09 walk-back：本次修订基于 5×T0 跨厂商三轮一致共识，收敛前向遗忘的授权面、观测面和验收顺序；不得把本记录解释为重新开放自治物理删除或人工记忆管理。
 
@@ -27,7 +27,7 @@ status: accepted
 
 2026-07-09 walk-back：新增确定性 archived-vs-active kind 分布比对监控，实现 direction.md §4 走偏信号 #9 的要求，此处只交叉引用不重复定义。低复活率不能证明安全，只能作为正向报警的输入之一。
 
-2026-07-09 walk-back：落地顺序为先跑受控批次（≤5 条 fact/smell 真实 round-trip），再通过生产只读回归；两者均通过后，方可视为验收完成。
+2026-07-09 walk-back（启用顺序已由 2026-07-23 fresh authorization supersede）：原计划先跑受控批次（≤5 条 fact/smell 真实 round-trip）再启用；当前 5/batch 是正式路径 circuit breaker，不是 canary 或启用前门。生产只读回归与至少一次自然出现的 nonzero demote/reactivation action 仍是 completed 验收证据，未出现前保持 `in_progress`。
 
 ## 1. 背景:只做了新增,缺少删减
 

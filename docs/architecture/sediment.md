@@ -22,7 +22,9 @@ sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得
 
 > 机制实现以代码为准：`extensions/sediment/index.ts`（入口/注册）、`extensions/sediment/writer.ts`（落盘路由）与 `extensions/sediment/checkpoint.ts`（run-window/checkpoint）。
 
-Forgetting 是同一 `agent_end` 内的独立后台 slice：`memory.forgetting.enabled` 保持 frontmatter bridge、E2 reconcile、lifecycle convergence 与 proposal planning/dry-run；real demote 必须同时满足字面布尔 `memory.forgetting.executorRealApplyEnabled===true` 与 effective `sediment.autoLlmWriteEnabled=true`。前者是独立授权且字符串永远无效；后者复用既有 auto-write 语义，布尔 true 与 legacy `"true"` 有效，`staging-only`、false/`"false"`、缺失和 malformed 均关闭。任一门不能单独授权，agent_end 与 executor 双层复核。archive reactivation 仍按自身既有 `autoLlmWriteEnabled` 逻辑运行，不受 dedicated real-apply gate 影响。
+Forgetting 是同一 `agent_end` 内的独立后台 slice：`memory.forgetting.enabled` 保持 frontmatter bridge、E2 reconcile、lifecycle convergence 与 proposal planning；real demote 必须同时满足字面布尔 `memory.forgetting.executorRealApplyEnabled===true` 与 effective `sediment.autoLlmWriteEnabled=true`。前者是独立授权且字符串永远无效；后者复用既有 auto-write 语义，布尔 true 与 legacy `"true"` 有效，`staging-only`、false/`"false"`、缺失和 malformed 均关闭。任一门不能单独授权，agent_end 与 executor 双层复核。
+
+2026-07-23 用户 fresh explicit authorization 已授权无 canary 的正式全量生产路径，production dedicated/global/AND 三者均配置为 true。memory/sediment 的 `loadPiStackSettings` 每次 resolve 都同步读取父 settings，forgetting slice 在每个 `agent_end` 重新 resolve 两道 authority，因此 formal authority 已 armed、无需重启，并在下一次 `agent_end` 生效。5/batch、20/day、CAS、corpus floor 与 resurrection backoff 继续作为 circuit breakers；30d、recall/none 与 reviewer 后移为运行中观察/后续放量质量指标。所有当前代码允许的 E1 kind 可执行，非 E1 继续 evidence/kind gates。archive reactivation 仍按自身既有 `autoLlmWriteEnabled` 逻辑独立运行；自治终态仅全文 `archived`，hard-delete、Lane G 与人工队列不在该路径。当前 eligible=0，故 transition 为 `in_progress / authorized` 而非 completed。
 
 ## 3. Curator operation set
 
