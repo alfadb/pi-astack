@@ -197,11 +197,10 @@ console.log("\n[4] wiring locks");
   // Resolver shipped as non-destructive triage, so the OLD
   // "staging-resolver-unimplemented" claim must be gone…
   check("aggregator no longer claims the RESOLVER is unimplemented", !/id:\s*"staging-resolver-unimplemented"/.test(agg));
-  // …and after Stage 4 the age-out REVIEWER shipped too, so the structural
-  // entry was renamed again to the remaining gap: the mechanical hard-delete
-  // (unlink) of soft-archived files (Stage 5).
-  check("aggregator tracks the staging hard-archive (unlink) gap", /staging-hard-archive-unimplemented/.test(agg));
-  check("aggregator no longer claims age-out DELETION generally unimplemented", !/id:\s*"staging-backlog-deletion-unimplemented"/.test(agg));
+  // Retained soft-archived records are the reversible terminal state, not a
+  // future cleanup backlog.
+  check("aggregator does not advertise a staging hard-delete roadmap", !/staging-hard-archive-unimplemented/.test(agg));
+  check("aggregator no longer claims age-out deletion generally unimplemented", !/id:\s*"staging-backlog-deletion-unimplemented"/.test(agg));
   const mod = fs.readFileSync(path.join(repoRoot, "extensions/sediment/staging-resolver.ts"), "utf-8");
   check("resolver never flips attribution_pending (non-destructive)", !/attribution_pending:\s*false/.test(mod));
 }

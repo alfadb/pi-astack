@@ -70,28 +70,25 @@ You receive:
    A CONFIRMATORY that says "would have made the same decision
    independently" is potential echo-chamber fuel.)
 
-4. **`structural_context`** — known-unimplemented capabilities that
-   cause structural advisories every run:
-   - staging age-out SOFT-archive HAS shipped (the age-out reviewer retires
-     aged-out hypotheses via `lifecycle_state="soft_archived"`, which are
-     EXCLUDED from actionable `staging_backlog` counts). Stale hypotheses that
-     were reviewed inside the age-out debounce window are also audit-visible but
-     not actionable backlog. Only the mechanical N-day HARD-DELETE (unlink) of
-     soft-archived files remains unimplemented (deferred: `.state` is git-ignored
-     → unlink irreversible). So expect a small stable residual from
-     `soft_archived` retired-but-not-deleted files, reported separately in the
-     advisory. Demote unless the actionable backlog or due stale_count grows.
-   - `multiview_pending` mechanical hit is structural until P1.5
-     replay writer dispatch fully ships (see C4 watchdog list)
-   When a `mechanical_suspicion_signal` matches a known structural
-   issue, the appropriate response is usually to demote unless its
-   evidence shape has materially worsened (e.g. growth rate jump,
-   stale_count emerging).
-   **Staleness notice** (D4 from Phase B review): the bullet list above
-   MUST be updated by any commit that ships one of these capabilities.
-   When the staging HARD-DELETE sweep (Stage 5) / P1.5 writer dispatch lands,
-   remove the corresponding bullet and add a Phase D regression check to
-   confirm the related mechanical advisory shape has changed.
+4. **`structural_context`** — known structural states that can cause
+   recurring advisories. The runtime-provided list is authoritative; use these
+   calibration rules when interpreting it:
+   - staging age-out SOFT-archive HAS shipped. It retires aged-out hypotheses
+     via `lifecycle_state="soft_archived"`, excludes them from actionable
+     `staging_backlog`, and retains the full record as the intentional reversible
+     terminal state. Retained terminal files are audit inventory, not deferred
+     cleanup work; physical staging deletion is blocked outside this lifecycle.
+     Demote file-count-only suspicion unless actionable pending, due stale_count,
+     oldest age, or unbounded-pending metrics materially worsen.
+   - staging promotion is implemented but may be explicitly disabled; while it
+     is off, `promote_candidate` accumulation is expected and remains visible.
+   - multiview replay is implemented. Judge it from the C4 queue metrics: stale,
+     retry-cap, writer-cap, archive failures, and unbounded pending are actionable;
+     a nonzero bounded queue by itself is not a missing-capability signal.
+   When a `mechanical_suspicion_signal` matches a known structural issue,
+   demote it unless its evidence shape has materially worsened. Keep this list
+   synchronized with the runtime `structural_context`; do not invent a future
+   cleanup stage or human queue.
 
 5. **`prior_aggregator_summaries`** — compact summary of the most
    recent 8 aggregator runs (timestamps, advisory kinds + counts,
@@ -543,8 +540,8 @@ For Phase C wiring (`aggregator.ts` calling this prompt):
 Input had 3 `mechanical_suspicion_signals` (one staging_backlog, two
 high-unused on maxim entries). `structural_context` confirms staging
 age-out SOFT-archive shipped (retired entries are dropped from the active
-backlog); only the mechanical HARD-DELETE remains deferred, so a small stable
-retired backlog is expected. `outcome_counterfactual_excerpts`
+backlog and retained as intentional reversible terminal records), so retained
+file count alone is not actionable. `outcome_counterfactual_excerpts`
 shows both high-unused entries are maxims with RETRIEVED-UNUSED
 counterfactuals like "this maxim shaped my framing, I didn't cite it
 directly". `prior_aggregator_summaries` shows the same shape last 6

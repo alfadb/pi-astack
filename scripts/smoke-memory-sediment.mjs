@@ -885,7 +885,7 @@ async function main() {
         const pending = loadMultiviewPending();
         assert(pending.entries.length === 1 && pending.entries[0].slug === "multiview-pending-smoke", `loadMultiviewPending should see only multiview entry: ${JSON.stringify(pending)}`);
         assert(loadStagingContext().entries.some((entry) => entry.slug === "provisional-smoke"), `provisional loader should ignore multiview co-tenant and keep provisional`);
-        assert(deleteMultiviewPending("multiview-pending-smoke") === true, `deleteMultiviewPending should delete from ABRAIN_ROOT dir`);
+        assert(deleteMultiviewPending("multiview-pending-smoke") === true, `legacy delete API should reversibly archive from ABRAIN_ROOT live dir`);
 
         // mechanical-guard cleanup R3/B1 (2026-06-06): archiveMultiviewPending
         // soft-archives (atomic rename -> abandoned/ subdir) instead of
@@ -913,7 +913,7 @@ async function main() {
         const abandonedDir = path.join(stagingDir(), "abandoned");
         const archivedFiles = fs.existsSync(abandonedDir) ? fs.readdirSync(abandonedDir).filter((f) => f.endsWith("-multiview-pending-archive-smoke.json")) : [];
         assert(archivedFiles.length === 1, `archived file must be preserved under abandoned/, got ${JSON.stringify(archivedFiles)}`);
-        assert(archiveMultiviewPending("multiview-pending-archive-smoke") === false, `second archive should be a no-op (already moved out of live dir)`);
+        assert(archiveMultiviewPending("multiview-pending-archive-smoke") === true, `second archive should be idempotent success (already terminal in abandoned/)`);
 
         writeMultiviewPending({
           slug: "multiview-pending-origin-smoke",
@@ -5123,9 +5123,11 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
             loadNeighborsBySlug: async () => [],
             writeApprovedToBrain: async () => { liveOtherProjectWrote = true; },
           });
-          assert(liveOtherProject.deferred_other_project === 1 && liveOtherProject.terminal_stale === 0 && liveOtherProject.errors === 0 && liveOtherProject.auditRows.length === 0 && liveOtherProjectWrote === false, `stale live other-project should still defer silently: ${JSON.stringify(liveOtherProject)} wrote=${liveOtherProjectWrote}`);
-          assert(loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-live-other-project"), `stale live other-project should remain pending for its owning project`);
-          assert(deleteMultiviewPending("multiview-pending-loop-stale-live-other-project") === true, `stale live other-project smoke cleanup failed`);
+          assert(liveOtherProject.deferred_other_project === 0 && liveOtherProject.terminal_stale === 1 && liveOtherProject.errors === 0 && liveOtherProject.auditRows.length === 0 && liveOtherProjectWrote === false, `global stale sweep should terminally archive other-project backlog without a writer call: ${JSON.stringify(liveOtherProject)} wrote=${liveOtherProjectWrote}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-live-other-project"), `stale live other-project should exit the live pending queue`);
+          const archivedOtherFile = fs.readdirSync(path.join(replayRoot, ".state", "sediment", "staging", "abandoned")).find((file) => file.endsWith("-multiview-pending-loop-stale-live-other-project.json"));
+          const archivedOther = archivedOtherFile ? JSON.parse(fs.readFileSync(path.join(replayRoot, ".state", "sediment", "staging", "abandoned", archivedOtherFile), "utf-8")).entry : null;
+          assert(archivedOther?.lifecycle_terminal_reason === "multiview_stale" && archivedOther?.lifecycle_terminal_at, `stale other-project terminal evidence missing: ${JSON.stringify(archivedOther)}`);
 
           // ── S1: fail-closed project resolution (no-origin must NOT misfile) ──
           // A project-scope candidate with NO captured origin must not be written

@@ -30,8 +30,9 @@
  * Replay path (every agent_end):
  *   1. staging-loader returns retryable entries (originating_device match)
  *   2. multiview-staging-replay re-runs runMultiView with the stored args
- *   3. success → write brain, delete staging; failure → increment attempts
- *   4. terminal (attempts ≥ 5 OR age ≥ 14 days) → skip + delete + audit
+ *   3. success → write brain, archive staging; failure → increment attempts
+ *   4. terminal (attempts ≥ 5 OR age ≥ 14 days) → explicit terminal metadata
+ *      + reversible move to abandoned/ + audit
  *
  * Schema is INTENTIONALLY independent from `staging-types.ts`
  * (provisional-correction). Two different semantic categories:
@@ -164,6 +165,18 @@ export interface MultiviewPendingEntry {
   /** ISO timestamps. `updated` set on each replay attempt. */
   created: string;
   updated?: string;
+
+  /** Rebuildable RM-LIFECYCLE-002 convergence metadata. Source staging remains
+   *  the replay authority; the unified .state read model is not memory SOT. */
+  lifecycle_item_id?: string;
+  lifecycle_cohort?: "legacy" | "fresh";
+  lifecycle_attempt?: number;
+  lifecycle_failure_class?: "none" | "provider" | "transient" | "parse" | "conflict" | "writer" | "semantic_defer";
+  lifecycle_next_retry_not_before?: string;
+  lifecycle_deadline?: string;
+  lifecycle_new_evidence_trigger?: string;
+  lifecycle_terminal_at?: string;
+  lifecycle_terminal_reason?: string;
 
   /**
    * Project binding that produced this pending candidate. The staging

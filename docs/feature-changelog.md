@@ -11,6 +11,28 @@ status: active
 
 ---
 
+## 2026-07-23 — accepted — RM-LIFECYCLE-002 bounded lifecycle convergence
+
+### 变更
+
+provisional staging、multiview-pending 与 entry-lifecycle proposal 统一为 source-ledger-first 的有界生命周期：每个 pending 项必须有 attempt、failure class、下一 retry 或 new-evidence trigger、deadline；deadline 到期必须执行 source-side 自治动作。E1 execution-ready 首次到期不再永久 failed，而是在 3 次 cap 内执行 bounded exponential retry，到 cap 才 terminal。统一 read model 只作只读重建，不获得 source writer 权限。
+
+E1 的兼容 `lifecycle_deadline_expired` 或新 retry-cap terminal 仅在所属 project 再次扫描并确认 durable `superseded + valid successor` 时按同一 proposal identity 原地重开；其他 project scan 不得重开。E2 `superseded_no_successor` 仍为自治 `defer_until_new_evidence`，successor/status restoration/independent attributed evidence 按规范化 project_root 隔离地自动终态、创建 E1 或重开，不建立人类/operator queue。stale/retry-cap/deadline terminal 使用全文保真的可逆 archive。proposal 1000 行 cap 对新 arrival fail-loud，不再 silent limited。
+
+### 验收边界
+
+固定 legacy/fresh cohort；`arrivals = terminal + pending` 只作为本次分类完整性，真正守恒由上一版 persisted stable item inventory 的 `continuity_holds=true`、`missing_previous_item_ids=[]` 验收，并要求 `unbounded_pending=0`。focused smoke 覆盖双项目同 slug、E1 +2d 首次 pending retry、推进到 cap terminal、其他 project 不重开、目标 project 原 identity 重开并可被 executor 消费、+1d/+7d deadline source action、provider/transient/writer、capacity cap、restart/rebuild/idempotency、corrupt/continuity fail-closed 与稳定 ID。2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段为 `completed / authorized`，fully authorized（machine enum: `authorized`）。production evidence 保持 `idempotent_verification_only`，不声称首次 migration 证据。
+
+### 非目标
+
+不新增 Lane G，不改变 durable writer/forgetting authorization，不授权 staging hard-delete、`git rm`、`unlink` 或 digest-only tombstone。`staging.hard-delete` 继续 `blocked / separate_authorization_required`。
+
+### 关联
+
+[ADR 0043](adr/0043-lifecycle-convergence-and-reversible-terminal-state.md)；[Transition register](transition-register.md)；[Current state](current-state.md)；[production dossier](evidence/2026-07-23-rm-lifecycle-002-production.json)。
+
+---
+
 ## 2026-07-23 — accepted — RM-LIFECYCLE-001 reversible archived lifecycle substrate
 
 ### 变更

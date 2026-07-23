@@ -48,6 +48,7 @@ import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 import { formatLocalIsoTimestamp, ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { auditStreamSimple } from "../_shared/llm-audit";
+import { recordProvisionalLifecycleFailure, refreshLifecycleConvergenceReadModel } from "./lifecycle-convergence";
 
 export const STAGING_RESOLVER_PROMPT_VERSION = "v1";
 
@@ -370,21 +371,31 @@ export function annotateEntry(
   disposition: NonNullable<StagingEntry["resolver_disposition"]>,
   rationale: string,
 ): StagingEntry {
+  const reviewedAt = formatLocalIsoTimestamp(now);
   return {
     ...entry,
     // NOTE: we deliberately do NOT bump `updated` here (R2 opus/deepseek NIT):
     // `resolver_reviewed_at` is the semantically meaningful triage timestamp,
     // and bumping `updated` could look like fresh USER activity to any future
     // recency consumer. Triage is system activity, not user activity.
-    resolver_reviewed_at: formatLocalIsoTimestamp(now),
+    resolver_reviewed_at: reviewedAt,
     resolver_disposition: disposition,
     resolver_rationale: rationale.slice(0, 500),
+    lifecycle_attempt: entry.lifecycle_attempt ?? 0,
+    lifecycle_failure_class: "semantic_defer",
+    lifecycle_next_retry_not_before: new Date(now.getTime() + RE_REVIEW_DAYS * 24 * 60 * 60 * 1000).toISOString(),
+    lifecycle_deadline: new Date(now.getTime() + (RE_REVIEW_DAYS + 14) * 24 * 60 * 60 * 1000).toISOString(),
+    lifecycle_new_evidence_trigger: "new_matching_correction_evidence|resolver_due|ageout_threshold",
+    lifecycle_terminal_at: undefined,
+    lifecycle_terminal_reason: undefined,
   };
 }
 
 function writeStagingFile(file: string, entry: StagingEntry): void {
   const payload: StagingFileOnDisk = { schema_version: 1, entry };
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2), "utf-8");
+  const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf-8");
+  fs.renameSync(tmp, file);
 }
 
 export interface ApplyResult {
@@ -526,6 +537,8 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
   // 3. Model availability (don't write last_run on hard-unavailable so the
   //    next agent_end retries once a model is configured).
   if (!options.modelRegistry) {
+    recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "provider", "model_registry_available|resolver_due", now);
+    refreshLifecycleConvergenceReadModel(now);
     return { ok: true, skipped: "model_registry_unavailable", ...base, reviewed_count: candidates.length, durationMs: Date.now() - t0 };
   }
 
@@ -551,6 +564,8 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
         // detectable (R1 opus/gpt P2) without scanning every single turn.
         writeLastRun(options.projectRoot, now, "skipped");
         appendLedgerRow({ op: "staging_resolve", ok: false, skipped: inv.skipReason, reviewed_count: candidates.length, model: inv.model, session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+        recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "provider", "provider_or_auth_recovered|resolver_due", now);
+        refreshLifecycleConvergenceReadModel(now);
         return { ok: true, skipped: inv.skipReason, ...base, reviewed_count: candidates.length, model: inv.model, durationMs: Date.now() - t0 };
       }
       rawText = inv.rawText;
@@ -559,6 +574,8 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
       writeLastRun(options.projectRoot, now, "degraded");
       const error = e instanceof Error ? e.message : String(e);
       appendLedgerRow({ op: "staging_resolve", ok: false, degraded: true, reviewed_count: candidates.length, error: error.slice(0, 500), session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+      recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "transient", "provider_or_transport_recovered|resolver_due", now);
+      refreshLifecycleConvergenceReadModel(now);
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, error: error.slice(0, 500), durationMs: Date.now() - t0 };
     }
 
@@ -569,6 +586,8 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
     } catch {
       writeLastRun(options.projectRoot, now, "degraded");
       appendLedgerRow({ op: "staging_resolve", ok: false, degraded: true, reviewed_count: candidates.length, error: "unparseable_llm_output", session_id: options.sessionId, prompt_version: STAGING_RESOLVER_PROMPT_VERSION });
+      recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "parse", "new_parseable_reviewer_output|resolver_due", now);
+      refreshLifecycleConvergenceReadModel(now);
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, model, durationMs: Date.now() - t0 };
     }
 
@@ -589,6 +608,7 @@ export async function runStagingResolverIfDue(options: RunStagingResolverOptions
       session_id: options.sessionId,
       prompt_version: STAGING_RESOLVER_PROMPT_VERSION,
     });
+    refreshLifecycleConvergenceReadModel(now);
     return {
       ok: true,
       reviewed_count: candidates.length,

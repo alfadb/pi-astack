@@ -1,5 +1,5 @@
 /**
- * staging-promotion — ADR 0025 §4.1.5 Stage 5 follow-up:
+ * staging-promotion — ADR 0025 §4.1.5 promotion follow-up:
  * multi-view gated promotion of `promote_candidate` staging entries to
  * durable memory entries.
  *
@@ -54,6 +54,7 @@ import {
 } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { auditStreamSimple } from "../_shared/llm-audit";
+import { recordProvisionalLifecycleFailure, refreshLifecycleConvergenceReadModel } from "./lifecycle-convergence";
 
 export const STAGING_PROMOTION_PROMPT_VERSION = "v2";
 
@@ -1066,8 +1067,34 @@ export function applyPromotionOutcome(
   } else if (outcome === "duplicate" || outcome === "cluster_sibling") {
     latest.attribution_pending = false;
     if (promotedToSlug) latest.promoted_to_slug = promotedToSlug;
+  } else if (outcome === "rejected") {
+    // A real multi-view disposition is terminal for this provisional item.
+    // Preserve the full source file as a reversible soft archive.
+    latest.lifecycle_state = "soft_archived";
+    latest.aged_out_at = formatLocalIsoTimestamp(tsNow);
   } else if (outcome === "sibling_deferred") {
     latest.attribution_pending = true;
+  }
+
+  if (outcome === "promoted" || outcome === "duplicate" || outcome === "cluster_sibling" || outcome === "rejected") {
+    latest.lifecycle_terminal_at = formatLocalIsoTimestamp(tsNow);
+    latest.lifecycle_terminal_reason = outcome === "rejected" ? "reviewer_rejected" : outcome;
+    latest.lifecycle_failure_class = "none";
+    delete latest.lifecycle_next_retry_not_before;
+    delete latest.lifecycle_deadline;
+    delete latest.lifecycle_new_evidence_trigger;
+  } else {
+    const attempt = Math.max(0, latest.lifecycle_attempt ?? 0) + (outcome === "error" ? 1 : 0);
+    const delayHours = outcome === "error" ? Math.min(24, 2 ** Math.max(0, attempt - 1)) : 24;
+    latest.lifecycle_attempt = attempt;
+    latest.lifecycle_failure_class = outcome === "error" ? "transient" : "semantic_defer";
+    latest.lifecycle_next_retry_not_before = new Date(tsNow.getTime() + delayHours * 60 * 60 * 1000).toISOString();
+    latest.lifecycle_deadline = new Date(tsNow.getTime() + (delayHours + 14 * 24) * 60 * 60 * 1000).toISOString();
+    latest.lifecycle_new_evidence_trigger = outcome === "staged_for_replay"
+      ? "multiview_replay_resolution|provider_recovered"
+      : "promotion_due|new_matching_correction_evidence";
+    delete latest.lifecycle_terminal_at;
+    delete latest.lifecycle_terminal_reason;
   }
   writeStagingFileAtomic(file, latest);
 }
@@ -1176,6 +1203,8 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
   // 3. Model availability (don't write last_run on hard-unavailable so the
   //    next agent_end retries once a model is configured).
   if (!options.modelRegistry) {
+    recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "provider", "model_registry_available|promotion_due", now);
+    refreshLifecycleConvergenceReadModel(now);
     return { ok: true, skipped: "model_registry_unavailable", ...base, reviewed_count: candidates.length, durationMs: Date.now() - t0 };
   }
 
@@ -1469,6 +1498,7 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
       prompt_version: STAGING_PROMOTION_PROMPT_VERSION,
       duration_ms: result.durationMs,
     });
+    refreshLifecycleConvergenceReadModel(now);
 
     return result;
   } finally {

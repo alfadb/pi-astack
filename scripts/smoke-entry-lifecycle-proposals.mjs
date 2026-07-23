@@ -87,7 +87,9 @@ const syncFileLockStub = {
   atomicWriteText: (file, content) => fs.writeFileSync(file, content),
 };
 const validationStub = { ENTRY_KINDS: ["maxim", "decision", "anti-pattern", "pattern", "fact", "preference", "smell"] };
+let outcomeEvidenceRows = [];
 const outcomeEvidenceStub = {
+  readOutcomeEvidenceIndex: () => outcomeEvidenceRows,
   // Stub mirrors production requireReliableAttribution semantics: only hex IDs
   // that look like fixture attributed outcomes are accepted. Real forgetting
   // smokes seed actual L1 attributed events instead of relying on this stub.
@@ -123,7 +125,7 @@ const mod = loadCJS(transpile(modulePath), path.join(tmpDir, "entry-lifecycle-pr
   ["./outcome-evidence", outcomeEvidenceStub],
   ["./validation", validationStub],
 ]));
-const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals, reconcileLegacyDecayProposalKinds, resolveDurableEntryKind } = mod;
+const { entryLifecycleProposalsPath, appendLifecycleProposals, appendSupersededFrontmatterProposals, appendSupersededMarkdownFrontmatterProposals, readLifecycleProposals, reconcileLifecycleProposalDeferrals, reconcileLegacyDecayProposalKinds, resolveDurableEntryKind, markProposalsExecuted } = mod;
 
 function sha256File(file) {
   return createHash("sha256").update(fs.readFileSync(file)).digest("hex");
@@ -232,12 +234,63 @@ check("rows are project-scoped", () => {
   if (readLifecycleProposals().length < 3) throw new Error("global read should see all projects");
 });
 
-check("corrupt sidecar lines are tolerated and cleaned on next write", () => {
+check("E2 successor/status/evidence reconcile is isolated by project_root for the same slug", () => {
+  const created = new Date("2026-06-04T12:11:00Z");
+  const e2 = (slug) => [{ slug, kind: "fact", status: "superseded", frontmatter: { status: "superseded" }, relations: [] }];
+  for (const slug of ["shared-successor", "shared-status", "shared-evidence"]) {
+    appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: e2(slug), now: created });
+    appendSupersededFrontmatterProposals({ projectRoot: projectB, entries: e2(slug), now: created });
+  }
+
+  appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T12:12:00Z"),
+    entries: [{ slug: "shared-successor", kind: "fact", status: "superseded", frontmatter: { status: "superseded", superseded_by: ["successor-a"] }, relations: [{ type: "superseded_by", to: "successor-a" }] }],
+  });
+  appendSupersededFrontmatterProposals({
+    projectRoot: projectA,
+    now: new Date("2026-06-04T12:13:00Z"),
+    entries: [{ slug: "shared-status", kind: "fact", status: "active", frontmatter: { status: "active" }, relations: [] }],
+  });
+  const outcome = (root, marker) => ({
+    event_id: createHash("sha256").update(marker).digest("hex"),
+    project_root_hash: createHash("sha256").update(path.resolve(root)).digest("hex"),
+    attribution_status: "attributed",
+    evidence_independence: "independent_execution",
+    event_type: "action_outcome_observed",
+    created_at_utc: "2026-06-04T12:14:00.000Z",
+    memory_entry_slugs: ["shared-evidence"],
+  });
+  outcomeEvidenceRows = [outcome(projectB, "project-b-evidence")];
+  appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: e2("shared-evidence"), now: new Date("2026-06-04T12:15:00Z") });
+
+  let a = readLifecycleProposals(projectA);
+  let b = readLifecycleProposals(projectB);
+  if (a.find((row) => row.slug === "shared-successor" && row.reason === "superseded_no_successor")?.terminal_reason !== "successor_edge_observed") throw new Error("project A successor did not terminal its own E2");
+  if (b.find((row) => row.slug === "shared-successor")?.status !== "deferred_until_new_evidence") throw new Error("project A successor changed project B E2");
+  if (a.find((row) => row.slug === "shared-status")?.terminal_reason !== "status_no_longer_superseded") throw new Error("project A status did not terminal its own E2");
+  if (b.find((row) => row.slug === "shared-status")?.status !== "deferred_until_new_evidence") throw new Error("project A status changed project B E2");
+  if (b.find((row) => row.slug === "shared-evidence")?.status !== "deferred_until_new_evidence") throw new Error("project B evidence was consumed during a project A scan");
+
+  outcomeEvidenceRows.push(outcome(projectA, "project-a-evidence"));
+  appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: e2("shared-evidence"), now: new Date("2026-06-04T12:16:00Z") });
+  a = readLifecycleProposals(projectA);
+  b = readLifecycleProposals(projectB);
+  if (a.find((row) => row.slug === "shared-evidence")?.status !== "pending") throw new Error("project A evidence did not reopen project A E2");
+  if (b.find((row) => row.slug === "shared-evidence")?.status !== "deferred_until_new_evidence") throw new Error("project A evidence reopened project B E2");
+  outcomeEvidenceRows = [];
+});
+
+check("corrupt sidecar lines are readable but every rewrite fails closed", () => {
   fs.appendFileSync(entryLifecycleProposalsPath(), "{not valid json\n\n");
-  const survived = readLifecycleProposals(projectA).length; // read ignores corrupt line
+  const survived = readLifecycleProposals(projectA).length; // diagnostic reads ignore corrupt lines
   if (survived < 2) throw new Error("read must ignore corrupt line, not crash");
-  appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal("cleanup", "archive", "affirm_stale")], now: new Date("2026-06-04T12:20:00Z") });
-  if (fs.readFileSync(entryLifecycleProposalsPath(), "utf8").includes("{not valid json")) throw new Error("next write should rewrite clean JSONL");
+  const before = sha256File(entryLifecycleProposalsPath());
+  const append = appendLifecycleProposals({ projectRoot: projectA, promoted: [promotedWithProposal("cleanup", "archive", "affirm_stale")], now: new Date("2026-06-04T12:20:00Z") });
+  if (append.ok || append.written || append.error !== "proposal_jsonl_parse_failed") throw new Error(`corrupt append must fail closed: ${JSON.stringify(append)}`);
+  if (sha256File(entryLifecycleProposalsPath()) !== before) throw new Error("corrupt append changed source bytes");
+  const lines = fs.readFileSync(entryLifecycleProposalsPath(), "utf8").split("\n").filter((line) => line.trim() && line !== "{not valid json");
+  fs.writeFileSync(entryLifecycleProposalsPath(), `${lines.join("\n")}\n`);
 });
 
 check("frontmatter bridge emits E1 executable and E2 evidence-deferred proposals", () => {
@@ -258,7 +311,7 @@ check("frontmatter bridge emits E1 executable and E2 evidence-deferred proposals
   const e2 = rows.find((x) => x.slug === "old-b");
   const self = rows.find((x) => x.slug === "old-c");
   if (!e1 || e1.disposition !== "execution_ready" || e1.expected_status !== "superseded" || e1.target_slug !== "new-a") throw new Error(`E1 wrong: ${JSON.stringify(e1)}`);
-  if (!e2 || e2.disposition !== "defer_until_new_evidence" || e2.status !== "deferred_until_new_evidence" || e2.reason !== "superseded_no_successor" || e2.review_required !== true) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
+  if (!e2 || e2.disposition !== "defer_until_new_evidence" || e2.status !== "deferred_until_new_evidence" || e2.reason !== "superseded_no_successor" || e2.failure_class !== "semantic_defer" || e2.new_evidence_trigger !== "new_valid_successor_edge|status_no_longer_superseded|independent_attributed_evidence" || !e2.next_retry_not_before || !e2.deadline || "review_required" in e2) throw new Error(`E2 wrong: ${JSON.stringify(e2)}`);
   if (!self || self.disposition !== "defer_until_new_evidence" || self.status !== "deferred_until_new_evidence") throw new Error(`self-edge must become E2 evidence-defer: ${JSON.stringify(self)}`);
   if (!e1.proposal_id || e1.evidence_type !== "superseded_by") throw new Error(`E1 must carry proposal_id/evidence_type: ${JSON.stringify(e1)}`);
   if (!e2.proposal_id || e2.evidence_type !== "superseded_no_successor") throw new Error(`E2 must carry proposal_id/evidence_type: ${JSON.stringify(e2)}`);
@@ -370,6 +423,76 @@ check("frontmatter bridge second replay appends zero rows", () => {
   if (readLifecycleProposals(projectA).length !== before) throw new Error("idempotent bridge replay changed row count");
 });
 
+check("E1 deadline uses bounded retry, project-scoped scan reopen, and stable identity", () => {
+  const slug = "e1-bounded-retry";
+  const target = "e1-bounded-retry-successor";
+  const created = new Date("2026-07-01T00:00:00.000Z");
+  const entry = { slug, kind: "decision", status: "superseded", frontmatter: { status: "superseded", superseded_by: [target] }, relations: [{ type: "superseded_by", to: target }] };
+  const first = appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: [entry], now: created });
+  let row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!first.ok || first.proposals_appended !== 1 || !row) throw new Error(`E1 setup failed: ${JSON.stringify({ first, row })}`);
+  const proposalId = row.proposal_id;
+  const initialDelay = Date.parse(row.next_retry_not_before) - created.getTime();
+  const firstExpiry = reconcileLifecycleProposalDeferrals({ now: new Date(created.getTime() + 2 * 24 * 60 * 60 * 1000) });
+  row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!firstExpiry.ok || firstExpiry.bounded_retry_scheduled < 1 || firstExpiry.retry_cap_terminal !== 0) throw new Error(`first E1 expiry did not schedule a bounded retry: ${JSON.stringify(firstExpiry)}`);
+  if (!row || row.status !== "pending" || row.attempt !== 1 || row.terminal_at || row.terminal_reason) throw new Error(`first E1 expiry became terminal: ${JSON.stringify(row)}`);
+  if (Date.parse(row.next_retry_not_before) <= new Date(created.getTime() + 2 * 24 * 60 * 60 * 1000).getTime() || Date.parse(row.deadline) <= Date.parse(row.next_retry_not_before)) throw new Error(`retry schedule is not future-bounded: ${JSON.stringify(row)}`);
+  if (Date.parse(row.next_retry_not_before) - new Date(created.getTime() + 2 * 24 * 60 * 60 * 1000).getTime() <= initialDelay) throw new Error(`retry schedule did not back off exponentially: ${JSON.stringify(row)}`);
+
+  let terminalSweep;
+  for (let expectedAttempt = 2; expectedAttempt <= 3; expectedAttempt++) {
+    terminalSweep = reconcileLifecycleProposalDeferrals({ now: new Date(Date.parse(row.deadline) + 1) });
+    row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+    if (!terminalSweep.ok || terminalSweep.bounded_retry_scheduled < 1 || !row || row.status !== "pending" || row.attempt !== expectedAttempt) throw new Error(`E1 retry attempt ${expectedAttempt} failed: ${JSON.stringify({ terminalSweep, row })}`);
+  }
+  terminalSweep = reconcileLifecycleProposalDeferrals({ now: new Date(Date.parse(row.deadline) + 1) });
+  row = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!terminalSweep.ok || terminalSweep.retry_cap_terminal < 1 || terminalSweep.deadline_terminal < 1 || !row || row.status !== "failed" || row.attempt !== 3 || row.terminal_reason !== "lifecycle_retry_cap_reached" || !row.terminal_at) throw new Error(`E1 did not terminal at retry cap: ${JSON.stringify({ terminalSweep, row })}`);
+  if (!row.message?.includes("deterministic E1 archive proposal")) throw new Error("E1 terminal rewrite lost proposal text");
+  const terminalAt = row.terminal_at;
+  const rowsBeforeScans = readLifecycleProposals().length;
+
+  const otherProject = appendSupersededFrontmatterProposals({ projectRoot: projectB, entries: [entry], now: new Date(Date.parse(row.deadline) + 2) });
+  const aAfterOtherScan = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  const bAfterOtherScan = readLifecycleProposals(projectB).find((item) => item.slug === slug);
+  if (!otherProject.ok || otherProject.proposals_appended !== 1 || aAfterOtherScan?.status !== "failed" || aAfterOtherScan.terminal_at !== terminalAt || bAfterOtherScan?.status !== "pending") throw new Error(`other project scan crossed project_root: ${JSON.stringify({ otherProject, aAfterOtherScan, bAfterOtherScan })}`);
+
+  const targetScan = appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: [entry], now: new Date(Date.parse(row.deadline) + 3) });
+  const reopened = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!targetScan.ok || targetScan.proposals_appended !== 1 || !reopened || reopened.status !== "pending" || reopened.disposition !== "execution_ready" || reopened.attempt !== 0 || reopened.terminal_at || reopened.terminal_reason) throw new Error(`target project scan did not reopen E1: ${JSON.stringify({ targetScan, reopened })}`);
+  if (reopened.proposal_id !== proposalId || readLifecycleProposals().length !== rowsBeforeScans + 1) throw new Error(`E1 reopen duplicated or changed identity: ${JSON.stringify({ proposalId, reopened, rows: readLifecycleProposals().length })}`);
+  const consumed = markProposalsExecuted(projectA, [slug]);
+  const executed = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!consumed.ok || consumed.updated !== 1 || executed?.status !== "executed" || executed.terminal_reason !== "executor_completed") throw new Error(`reopened E1 was not consumable: ${JSON.stringify({ consumed, executed })}`);
+});
+
+check("target project scan reopens legacy lifecycle_deadline_expired E1 in place", () => {
+  const slug = "e1-legacy-deadline-terminal";
+  const target = "e1-legacy-deadline-successor";
+  const created = new Date("2026-07-10T00:00:00.000Z");
+  const entry = { slug, kind: "fact", status: "superseded", frontmatter: { status: "superseded", superseded_by: [target] }, relations: [{ type: "superseded_by", to: target }] };
+  const appended = appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: [entry], now: created });
+  const initial = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!appended.ok || appended.proposals_appended !== 1 || !initial?.proposal_id) throw new Error(`legacy E1 setup failed: ${JSON.stringify({ appended, initial })}`);
+  const file = entryLifecycleProposalsPath();
+  const rows = fs.readFileSync(file, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const terminalAt = new Date(created.getTime() + 2 * 24 * 60 * 60 * 1000).toISOString();
+  for (const row of rows) {
+    if (row.project_root === path.resolve(projectA) && row.slug === slug) {
+      row.status = "failed";
+      row.terminal_at = terminalAt;
+      row.terminal_reason = "lifecycle_deadline_expired";
+    }
+  }
+  fs.writeFileSync(file, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`);
+  const beforeCount = readLifecycleProposals().length;
+  const reopenedResult = appendSupersededFrontmatterProposals({ projectRoot: projectA, entries: [entry], now: new Date(Date.parse(terminalAt) + 1) });
+  const reopened = readLifecycleProposals(projectA).find((item) => item.slug === slug);
+  if (!reopenedResult.ok || reopenedResult.proposals_appended !== 1 || !reopened || reopened.status !== "pending" || reopened.terminal_at || reopened.terminal_reason) throw new Error(`legacy deadline terminal did not reopen: ${JSON.stringify({ reopenedResult, reopened })}`);
+  if (reopened.proposal_id !== initial.proposal_id || readLifecycleProposals().length !== beforeCount) throw new Error(`legacy deadline reopen duplicated identity: ${JSON.stringify({ initial, reopened })}`);
+});
+
 check("legacy decay reconciliation preserves the head beyond the tail-read window", () => {
   fs.mkdirSync(projectA, { recursive: true });
   fs.writeFileSync(path.join(projectA, "tail-window-legacy.md"), [
@@ -405,6 +528,18 @@ check("legacy decay reconciliation preserves the head beyond the tail-read windo
   if (!reconciled.ok || reconciled.repaired !== 1 || persisted.length !== 1000) throw new Error(`full bounded reconciliation failed: ${JSON.stringify(reconciled)}`);
   if (persisted[0]?.slug !== "head-before-tail") throw new Error("tail-window reconciliation dropped the sidecar head");
   if (persisted.at(-1)?.slug !== "tail-window-legacy" || persisted.at(-1)?.kind !== "fact") throw new Error(`legacy tail row was not repaired: ${JSON.stringify(persisted.at(-1))}`);
+});
+
+check("1000-row proposal cap rejects a new arrival loudly without changing bytes", () => {
+  const file = entryLifecycleProposalsPath();
+  const before = sha256File(file);
+  const result = appendLifecycleProposals({
+    projectRoot: projectA,
+    promoted: [promotedWithProposal("capacity-new-arrival", "archive", "affirm_stale")],
+    now: new Date("2026-06-04T14:01:00Z"),
+  });
+  if (result.ok || result.written || result.error !== "proposal_row_limit_reached" || result.rows_total !== 1000) throw new Error(`cap must fail loud: ${JSON.stringify(result)}`);
+  if (sha256File(file) !== before) throw new Error("cap rejection changed proposal source bytes");
 });
 
 for (const [position, lineNumber] of [["head", 1], ["middle", 2], ["tail", 3]]) {

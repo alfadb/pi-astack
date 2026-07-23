@@ -76,7 +76,8 @@ import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
 import { runForgettingExecutor } from "./forgetting-executor";
-import { appendSupersededMarkdownFrontmatterProposals, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
+import { appendSupersededMarkdownFrontmatterProposals, reconcileLifecycleProposalDeferrals, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
+import { refreshLifecycleConvergenceReadModel } from "./lifecycle-convergence";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
@@ -2729,8 +2730,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // 真实 demote 要求 memory.forgetting.enabled 且 autoLlmWriteEnabled===true
               // (staging-only/false 一律退化 dry-run, 尊重既有写 kill-switch 层级)。
               const wantReal = settings.autoLlmWriteEnabled === true;
-              try { appendSupersededMarkdownFrontmatterProposals({ projectRoot: cwd }); }
-              catch { /* frontmatter bridge is advisory; executor still runs */ }
+              try {
+                appendSupersededMarkdownFrontmatterProposals({ projectRoot: cwd });
+                reconcileLifecycleProposalDeferrals();
+                refreshLifecycleConvergenceReadModel();
+              } catch { /* frontmatter bridge is advisory; executor still runs */ }
               let allEntries: Array<{ slug: string; status: string; scope?: string }> = [];
               try { allEntries = (await loadEntries(cwd, memForgettingSettings, undefined)) as typeof allEntries; }
               catch { /* active corpus stays unknown; real executor fail-closes via corpus floor */ }
@@ -2934,9 +2938,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // hypotheses — the tier the resolver explicitly skips. The reviewer
       // gives each a disposition: keep_aging / soft_archive / promote_candidate.
       // REVERSIBLE: soft_archive only flips lifecycle_state (drops the entry
-      // from the active backlog) — it NEVER unlinks (staging is git-ignored
-      // .state, so unlink is irreversible; the mechanical hard-delete window
-      // is a deferred Stage 5). promote_candidate is ADVISORY only (multi-view
+      // from the active backlog) and retains the full terminal record. Physical
+      // staging deletion remains blocked outside this lifecycle. promote_candidate
+      // is ADVISORY only (multi-view
       // §4.4 still gates promotion). Only rewrites .state staging files (never
       // durable entries), so it is safe under "staging-only" too. Gated like
       // the resolver: false → no LLM tokens, no scheduling. Own 24h debounce /
@@ -2980,7 +2984,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         })();
       });
 
-      // ADR 0025 §4.1.5 Stage 5 follow-up: staging-promotion executor.
+      // ADR 0025 §4.1.5 promotion follow-up: staging-promotion executor.
       // Multi-view gated promotion of resolver/age-out promote_candidate flags
       // to durable memory entries. Default disabled (settings.stagingPromotionEnabled);
       // also gated on autoLlmWriteEnabled===true because it performs durable

@@ -5,9 +5,9 @@
  * §4.6.6).
  *
  * Stage 4 is REVERSIBLE soft-archive ONLY: soft_archive flips lifecycle_state
- * + sets aged_out_at; it NEVER unlinks a file (staging is git-ignored .state →
- * unlink is irreversible; the mechanical N-day hard-delete is a deferred
- * Stage 5). promote_candidate is ADVISORY only (multi-view §4.4 still gates
+ * + sets aged_out_at; it NEVER unlinks a file. The full retained record is the
+ * terminal state and physical staging deletion remains blocked.
+ * promote_candidate is ADVISORY only (multi-view §4.4 still gates
  * promotion). attribution_pending is left UNTOUCHED.
  *
  * Locks the deterministic logic WITHOUT a real LLM:
@@ -281,7 +281,7 @@ console.log("\n[4] wiring + invariant locks");
   // candidate / staging hypothesis file path. (The behavioral check above —
   // fileCount unchanged after apply — is the authoritative guarantee; this is
   // a defense-in-depth source lock.)
-  check("age-out does NOT unlink any staging hypothesis file (Stage 5 deferred)",
+  check("age-out does NOT unlink any staging hypothesis file",
     !/unlinkSync\(\s*(?:c\.file|candidate|abs|tmp)\b/.test(mod) && !/(?:c\.file|candidate)[^\n]*unlinkSync/.test(mod));
   // Every unlinkSync in the module must target the lock path helper.
   const unlinkCalls = mod.match(/unlinkSync\([^)]*\)/g) || [];
@@ -290,7 +290,7 @@ console.log("\n[4] wiring + invariant locks");
   check("age-out uses atomic tmp+rename write", /renameSync\(/.test(mod));
 
   const agg = fs.readFileSync(path.join(repoRoot, "extensions/sediment/aggregator.ts"), "utf-8");
-  check("aggregator renamed structural entry → staging-hard-archive-unimplemented", /staging-hard-archive-unimplemented/.test(agg));
+  check("aggregator has no staging hard-delete roadmap entry", !/staging-hard-archive-unimplemented/.test(agg));
   check("aggregator dropped the old deletion-unimplemented id", !/id:\s*"staging-backlog-deletion-unimplemented"/.test(agg));
 }
 

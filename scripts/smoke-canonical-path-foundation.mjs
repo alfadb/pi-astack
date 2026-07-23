@@ -403,13 +403,21 @@ await check("whole-L1 scan rejects non-regular event-tree entries", async () => 
 await check("transition machine schema has stable unique IDs and exact canonical phase authorization", () => {
   const register = transition.loadTransitionRegister();
   const summary = transition.summarizeTransitionRegister(register);
-  assert(summary.total === 36 && summary.active === 33 && summary.gated === 3, JSON.stringify(summary));
+  assert(summary.total === 37 && summary.active === 34 && summary.gated === 3, JSON.stringify(summary));
   assert(Object.isFrozen(register) && Object.isFrozen(register.transitions), "transition register is mutable");
   const canonical = Object.fromEntries(summary.canonicalPath.map((entry) => [entry.id, `${entry.phaseStatus}/${entry.authorizationStatus}`]));
   assert(canonical["canonical_path.p1"] === "completed/authorized", "P1 status/auth mismatch");
   for (const phase of ["p2", "p3", "p4a", "p4b"]) {
     assert(canonical[`canonical_path.${phase}`] === "blocked/not_authorized", `${phase} status/auth mismatch`);
   }
+  const lifecycle = register.transitions.find((entry) => entry.id === "lifecycle.convergence-rm-002");
+  assert(lifecycle?.phase_status === "completed" && lifecycle.authorization_status === "authorized", "RM-LIFECYCLE-002 must be completed/authorized after final T0 review");
+  assert(lifecycle.current.includes("T0 复核通过") && lifecycle.current.includes("无未解决 P0/P1"), "RM-LIFECYCLE-002 lost final review outcome");
+  for (const boundary of ["idempotent_verification_only", "hard-delete 仍 blocked", "未新增 Lane G", "人审队列", "forgetting 权限"]) {
+    assert(lifecycle.current.includes(boundary), `RM-LIFECYCLE-002 lost boundary: ${boundary}`);
+  }
+  const stagingHardDelete = register.transitions.find((entry) => entry.id === "staging.hard-delete");
+  assert(stagingHardDelete?.phase_status === "blocked" && stagingHardDelete.authorization_status === "separate_authorization_required", "staging hard-delete authorization boundary drifted");
   const proposition = Object.fromEntries(register.transitions
     .filter((entry) => entry.partition === "proposition")
     .map((entry) => [entry.id, `${entry.phase_status}/${entry.authorization_status}`]));
@@ -466,7 +474,7 @@ await check("deterministic transition CLI and read-only startup consumer are wir
   });
   assert(run.status === 0, run.stderr || `CLI status ${run.status}`);
   const output = JSON.parse(run.stdout);
-  assert(output.total === 36 && output.active === 33 && output.gated === 3 && output.canonicalPath.length === 5, run.stdout);
+  assert(output.total === 37 && output.active === 34 && output.gated === 3 && output.canonicalPath.length === 5, run.stdout);
   const startupSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf8");
   assert(startupSource.includes("loadAndValidateTransitionRegister();"), "session startup does not consume machine transition register");
   assert(startupSource.includes("transition register invalid"), "startup validation failure is not surfaced");

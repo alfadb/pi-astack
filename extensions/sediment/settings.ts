@@ -217,7 +217,7 @@ export interface SedimentSettings {
    *    ADR0039 P4-a 退休；rollback 写已收缩为 storage-only writeAbrainRule）。 */
   tier1JaccardCuratorLane: boolean;
 
-  /** ADR 0025 §4.1.5 Stage 5 follow-up: enable multi-view gated promotion of
+  /** ADR 0025 §4.1.5 promotion follow-up: enable multi-view gated promotion of
    *  staging `promote_candidate` entries to durable memory. Default false so
    *  the new executor is opt-in; when false, promote_candidate flags remain
    *  advisory and accumulate in staging. */
@@ -387,7 +387,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   // tier1JaccardCuratorLane:false as a rollback path to the legacy autonomous
   // dedup gate (storage-only create after ADR0039 P4-a retired the adjudicator).
   tier1JaccardCuratorLane: true,
-  /** ADR 0025 §4.1.5 Stage 5 follow-up: default false. Enable only after
+  /** ADR 0025 §4.1.5 promotion follow-up: default false. Enable only after
    *  reviewing the backlog policy and confirming multi-view reviewer providers
    *  are configured. */
   stagingPromotionEnabled: false,

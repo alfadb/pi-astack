@@ -107,9 +107,9 @@ check("known writer failures clear intent so approved non-create ops can retry",
 
 check("ambiguous crash intent suppresses fresh non-idempotent replay and stale-archives later", () => {
   if (!/entry\.brain_write_intent_at_iso && entry\.approved_decision && entry\.approved_decision\.op !== "create"/.test(multiviewReplay)) throw new Error("non-idempotent intent guard missing");
-  if (!/writer replay suppressed, manual inspection required/.test(multiviewReplay)) throw new Error("fresh suppressed replay audit detail missing");
+  if (!/writer replay suppressed until the bounded stale terminal deadline/.test(multiviewReplay)) throw new Error("fresh suppressed replay audit detail missing");
   if (!/ageDays >= STALE_DAYS_MULTIVIEW_PENDING/.test(multiviewReplay)) throw new Error("ambiguous intent guard must eventually release replay budget through stale archive");
-  if (!/entry soft-archived to abandoned\/ for manual inspection/.test(multiviewReplay)) throw new Error("ambiguous stale intent archive detail missing");
+  if (!/entry terminally archived to abandoned\/ with the full candidate preserved/.test(multiviewReplay)) throw new Error("ambiguous stale intent archive detail missing");
 });
 
 console.log("\nSection: F13 dispatch audit singleFlight");

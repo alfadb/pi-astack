@@ -5,8 +5,9 @@
  * carrying a `lifecycle_proposal`. D* Phase 1 adds a deterministic bridge from
  * current entry frontmatter: status=superseded + valid non-self superseded_by
  * becomes execution-ready archive proposal with expected_status=superseded; a
- * standing superseded entry without a valid successor becomes review_required
- * only and is not executable in Phase 1. D* Phase 2 adds a bounded bridge from
+ * standing superseded entry without a valid successor autonomously defers until
+ * a successor, status change, or independent attributed evidence arrives. D*
+ * Phase 2 adds a bounded bridge from
  * decay-shadow's truth-change-gated would_demote=true assessments to ordinary
  * execution-ready archive proposals, leaving all mutation gates in the executor.
  *
@@ -34,7 +35,7 @@ import { withFileLock, atomicWriteText } from "../_shared/sync-file-lock";
 import type { Jsonish, MemoryEntry, RelationEdge } from "../memory/types";
 import type { LifecycleProposal, PromotedAdvisory } from "./aggregator-llm";
 import { normalizeAssessment, type EntryDecayAssessment } from "./decay-shadow";
-import { resolveIndependentOutcomeEvidenceEventIds } from "./outcome-evidence";
+import { readOutcomeEvidenceIndex, resolveIndependentOutcomeEvidenceEventIds } from "./outcome-evidence";
 import { ENTRY_KINDS, type EntryKind } from "./validation";
 
 export type LifecycleProposalReason = LifecycleProposal["reason"] | "superseded_no_successor";
@@ -92,8 +93,16 @@ export interface EntryLifecycleProposalRow {
   target_slug?: string;
   /** Independent L1 outcome evidence required for aggregator-origin execution. */
   independent_evidence_event_ids?: string[];
-  /** Historical marker retained only for migration audit; never creates a human queue. */
-  review_required?: boolean;
+  /** Autonomous non-terminal schedule. `deadline` is a re-evaluation SLA,
+   *  never an authorization to archive merely because time elapsed. */
+  next_retry_not_before?: string;
+  deadline?: string;
+  new_evidence_trigger?: string;
+  attempt?: number;
+  failure_class?: "provider" | "transient" | "parse" | "conflict" | "writer" | "semantic_defer";
+  /** Explicit terminal evidence for rebuildable convergence. */
+  terminal_at?: string;
+  terminal_reason?: string;
   /** Structured audit for the bounded legacy decay kind compatibility repair. */
   kind_resolution?: LifecycleProposalKindResolution;
   /** normalizeRow 保留磁盘状态: executor transitions pending -> executed/failed. */
@@ -161,6 +170,21 @@ export interface ReconcileLegacyDecayProposalKindsOptions {
   now?: Date;
 }
 
+export interface ReconcileLifecycleProposalDeferralsResult {
+  ok: boolean;
+  written: boolean;
+  rows_total: number;
+  migrated_e2: number;
+  scheduled_nonterminal: number;
+  deadline_expired: number;
+  deadline_terminal: number;
+  deadline_reopened: number;
+  bounded_retry_scheduled: number;
+  retry_cap_terminal: number;
+  invalid_json_lines: number;
+  error?: string;
+}
+
 export interface ReconcileLegacyDecayProposalKindsResult {
   ok: boolean;
   written: boolean;
@@ -181,10 +205,14 @@ export interface ReconcileLegacyDecayProposalKindsResult {
 interface AppendRowsOptions {
   dedupeArchiveBySlug?: boolean;
   maxAppend?: number;
+  /** Current durable status observed by the same frontmatter scan. */
+  currentStatusBySlug?: Map<string, string>;
+  now?: Date;
 }
 
 interface AppendRowsResult extends AppendLifecycleProposalsResult {
   limited?: number;
+  capacity_rejected?: number;
   skipped_duplicate_slug?: number;
   appended_slugs?: string[];
 }
@@ -193,6 +221,11 @@ const PROPOSALS_MAX_ROWS = 1000;
 const PROPOSALS_TAIL_READ_BYTES = 2 * 1024 * 1024;
 const STRING_FIELD_MAX_CHARS = 1_000;
 const DECAY_COMPAT_MAX_PER_RUN = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const E1_RETRY_CAP = 3;
+const E1_RETRY_BASE_MS = 5 * 60 * 1000;
+const E1_NEW_EVIDENCE_TRIGGER = "executor_capacity|target_project_session|durable_state_change";
+const E2_NEW_EVIDENCE_TRIGGER = "new_valid_successor_edge|status_no_longer_superseded|independent_attributed_evidence";
 const ENTRY_KIND_SET: ReadonlySet<string> = new Set(ENTRY_KINDS);
 
 export function entryLifecycleProposalsPath(): string {
@@ -311,7 +344,7 @@ function stableProposalId(row: EntryLifecycleProposalRow): string {
   return `elp-${createHash("sha256").update(proposalIdentity(row)).digest("hex").slice(0, 16)}`;
 }
 
-function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
+export function normalizeLifecycleProposalRow(row: unknown): EntryLifecycleProposalRow | null {
   if (!row || typeof row !== "object") return null;
   const r = row as Record<string, unknown>;
   const projectRoot = normalizeProjectRoot(r.project_root);
@@ -336,7 +369,10 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   // LLM/aggregator-derived sources (including legacy undefined + decay) require
   // independently verified attributed L1 outcome evidence. Durable frontmatter
   // E1 keeps its deterministic execution_ready semantics.
-  const requiresIndependentEvidence = source === "aggregator_promoted_advisory" || source === "decay" || source === undefined;
+  const requiresIndependentEvidence = reason === "superseded_no_successor"
+    || source === "aggregator_promoted_advisory"
+    || source === "decay"
+    || source === undefined;
   const verifiedEvidenceIds = requiresIndependentEvidence
     ? resolveIndependentOutcomeEvidenceEventIds(r.independent_evidence_event_ids, projectRoot, { targetSlug: slug, requireReliableAttribution: true })
     : Array.isArray(r.independent_evidence_event_ids)
@@ -365,7 +401,13 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
     ...(typeof r.target_slug === "string" && r.target_slug ? { target_slug: r.target_slug } : {}),
     ...(typeof r.supersedes_proposal_id === "string" && r.supersedes_proposal_id ? { supersedes_proposal_id: r.supersedes_proposal_id } : {}),
     ...(verifiedEvidenceIds.length ? { independent_evidence_event_ids: verifiedEvidenceIds } : {}),
-    ...(r.review_required === true ? { review_required: true } : {}),
+    ...(typeof r.next_retry_not_before === "string" && Number.isFinite(Date.parse(r.next_retry_not_before)) ? { next_retry_not_before: new Date(Date.parse(r.next_retry_not_before)).toISOString() } : {}),
+    ...(typeof r.deadline === "string" && Number.isFinite(Date.parse(r.deadline)) ? { deadline: new Date(Date.parse(r.deadline)).toISOString() } : {}),
+    ...(typeof r.new_evidence_trigger === "string" && r.new_evidence_trigger ? { new_evidence_trigger: r.new_evidence_trigger } : {}),
+    ...(typeof r.attempt === "number" && Number.isSafeInteger(r.attempt) && r.attempt >= 0 ? { attempt: r.attempt } : {}),
+    ...(r.failure_class === "provider" || r.failure_class === "transient" || r.failure_class === "parse" || r.failure_class === "conflict" || r.failure_class === "writer" || r.failure_class === "semantic_defer" ? { failure_class: r.failure_class } : {}),
+    ...(typeof r.terminal_at === "string" && Number.isFinite(Date.parse(r.terminal_at)) ? { terminal_at: new Date(Date.parse(r.terminal_at)).toISOString() } : {}),
+    ...(typeof r.terminal_reason === "string" && r.terminal_reason ? { terminal_reason: r.terminal_reason } : {}),
     ...(kindResolution ? { kind_resolution: kindResolution } : {}),
     status: terminalStatus
       ?? (requiresIndependentEvidence && op !== "archive" && verifiedEvidenceIds.length > 0
@@ -379,6 +421,8 @@ function normalizeRow(row: unknown): EntryLifecycleProposalRow | null {
   return normalized;
 }
 
+const normalizeRow = normalizeLifecycleProposalRow;
+
 function proposalIdentity(row: EntryLifecycleProposalRow): string {
   // Rows written before evidence_source/evidence_key existed came only from the
   // promoted-advisory path, so normalize them to the modern identity to avoid a
@@ -388,6 +432,60 @@ function proposalIdentity(row: EntryLifecycleProposalRow): string {
     ? `${row.slug ?? ""}:${row.kind}:${row.op}:${row.reason}:${row.independent_evidence}`
     : `${row.kind}:${row.op}:${row.reason}:${row.independent_evidence}`);
   return [row.project_root, row.slug ?? "", row.op, source, key].join("\0");
+}
+
+function e2Schedule(now: Date, attempt: number): { next_retry_not_before: string; deadline: string } {
+  const delayDays = Math.min(14, 2 ** Math.max(0, Math.min(4, attempt)));
+  const nextMs = now.getTime() + delayDays * DAY_MS;
+  return {
+    next_retry_not_before: new Date(nextMs).toISOString(),
+    deadline: new Date(nextMs + 14 * DAY_MS).toISOString(),
+  };
+}
+
+function executableSchedule(now: Date, attempt = 0): { next_retry_not_before: string; deadline: string } {
+  const delayMs = Math.min(DAY_MS, E1_RETRY_BASE_MS * 2 ** Math.max(0, Math.min(E1_RETRY_CAP, attempt)));
+  return {
+    next_retry_not_before: new Date(now.getTime() + delayMs).toISOString(),
+    deadline: new Date(now.getTime() + DAY_MS).toISOString(),
+  };
+}
+
+function isDurableE1(row: EntryLifecycleProposalRow): boolean {
+  return row.evidence_source === "frontmatter_superseded"
+    && row.reason === "affirm_superseded"
+    && row.op === "archive"
+    && row.expected_status === "superseded"
+    && row.disposition === "execution_ready"
+    && !!row.slug
+    && !!row.target_slug;
+}
+
+function isReopenableE1Terminal(row: EntryLifecycleProposalRow): boolean {
+  return isDurableE1(row)
+    && row.status === "failed"
+    && (row.terminal_reason === "lifecycle_deadline_expired" || row.terminal_reason === "lifecycle_retry_cap_reached");
+}
+
+function hasValidLifecycleSchedule(row: EntryLifecycleProposalRow): boolean {
+  const next = typeof row.next_retry_not_before === "string" ? Date.parse(row.next_retry_not_before) : NaN;
+  const deadline = typeof row.deadline === "string" ? Date.parse(row.deadline) : NaN;
+  return Number.isFinite(next) && Number.isFinite(deadline) && deadline >= next;
+}
+
+function attributedIndependentEvidenceFor(row: EntryLifecycleProposalRow): string[] {
+  if (!row.slug) return [];
+  const projectHash = createHash("sha256").update(path.resolve(row.project_root)).digest("hex");
+  const since = Date.parse(row.ts);
+  return readOutcomeEvidenceIndex()
+    .filter((item) => item.project_root_hash === projectHash)
+    .filter((item) => item.attribution_status === "attributed")
+    .filter((item) => item.evidence_independence === "independent_execution" || item.evidence_independence === "user_authored")
+    .filter((item) => item.event_type === "action_outcome_observed" || item.event_type === "natural_correction_observed")
+    .filter((item) => item.memory_entry_slugs.includes(row.slug as string))
+    .filter((item) => !Number.isFinite(since) || Date.parse(item.created_at_utc) > since)
+    .map((item) => item.event_id)
+    .sort();
 }
 
 function lifecycleAppendResult(r: AppendRowsResult): AppendLifecycleProposalsResult {
@@ -402,8 +500,10 @@ function lifecycleAppendResult(r: AppendRowsResult): AppendLifecycleProposalsRes
 
 function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], options: AppendRowsOptions = {}): AppendRowsResult {
   const pr = normalizeProjectRoot(projectRoot);
+  const now = options.now ?? new Date();
+  const nowIso = now.toISOString();
   try {
-    if (!pr || rows.length === 0) {
+    if (!pr || (rows.length === 0 && !options.currentStatusBySlug)) {
       const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
         .map(normalizeRow)
         .filter((r): r is EntryLifecycleProposalRow => r !== null);
@@ -411,21 +511,113 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
     }
     const maxAppend = typeof options.maxAppend === "number" ? Math.max(0, Math.floor(options.maxAppend)) : Number.POSITIVE_INFINITY;
     const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
-      const existing = readJsonlTail<unknown>(entryLifecycleProposalsPath())
-        .map(normalizeRow)
-        .filter((r): r is EntryLifecycleProposalRow => r !== null);
+      const loaded = readJsonlForFullRewrite<unknown>(entryLifecycleProposalsPath());
+      if (loaded.error) {
+        return {
+          error: loaded.error,
+          proposals_appended: 0,
+          rows_total: loaded.row_count,
+          limited: 0,
+          skipped_duplicate_slug: 0,
+          appended_slugs: [] as string[],
+        };
+      }
+      const normalizedExisting = loaded.rows.map(normalizeRow);
+      if (normalizedExisting.some((row) => row === null)) {
+        return {
+          error: "proposal_row_normalization_failed",
+          proposals_appended: 0,
+          rows_total: loaded.row_count,
+          limited: 0,
+          skipped_duplicate_slug: 0,
+          appended_slugs: [] as string[],
+        };
+      }
+      const existing = normalizedExisting as EntryLifecycleProposalRow[];
       const e1Slugs = new Set(rows
         .map((row) => normalizeRow({ ...row, project_root: pr }))
         .filter((row): row is EntryLifecycleProposalRow => !!row && row.evidence_source === "frontmatter_superseded" && row.disposition === "execution_ready" && row.expected_status === "superseded" && !!row.slug)
         .map((row) => row.slug as string));
       const supersededBySlug = new Map(existing
-        .filter((row) => row.status === "deferred_until_new_evidence" && row.disposition === "defer_until_new_evidence" && row.evidence_source === "frontmatter_superseded" && !!row.slug)
+        .filter((row) => row.project_root === pr && row.reason === "superseded_no_successor" && row.evidence_source === "frontmatter_superseded" && !!row.slug)
         .map((row) => [row.slug as string, row.proposal_id as string]));
-      let reconciledExisting = e1Slugs.size === 0 ? existing : existing.map((row) => {
-        if (row.status === "deferred_until_new_evidence" && row.disposition === "defer_until_new_evidence" && row.evidence_source === "frontmatter_superseded" && row.slug && e1Slugs.has(row.slug)) {
-          return { ...row, status: "failed" as const, message: `${row.message ?? ""} superseded_by_edge_observed; replaced_by_E1` };
+      let reconciledExisting = existing.map((row) => {
+        if (row.project_root !== pr) return row;
+        if (row.reason === "superseded_no_successor" && row.status !== "executed" && row.status !== "failed" && row.evidence_source === "frontmatter_superseded" && row.slug && e1Slugs.has(row.slug)) {
+          return {
+            ...row,
+            status: "failed" as const,
+            terminal_at: nowIso,
+            terminal_reason: "successor_edge_observed",
+            message: `${row.message ?? ""} superseded_by_edge_observed; replaced_by_E1`,
+          };
         }
-        return row;
+        if (row.reason !== "superseded_no_successor" || !row.slug) return row;
+        const evidenceIds = attributedIndependentEvidenceFor(row);
+        if (row.status === "executed" || row.status === "failed") {
+          if (row.status === "failed" && row.terminal_reason === "lifecycle_deadline_expired" && evidenceIds.length > 0) {
+            const attempt = Math.max(0, row.attempt ?? 0) + 1;
+            return {
+              ...row,
+              ...executableSchedule(now),
+              status: "pending" as const,
+              disposition: "execution_ready" as const,
+              attempt,
+              failure_class: "transient" as const,
+              new_evidence_trigger: "executor_capacity|durable_state_change|independent_attributed_evidence",
+              independent_evidence_event_ids: [...new Set([...(row.independent_evidence_event_ids ?? []), ...evidenceIds])].sort(),
+              message: `${row.message ?? ""} reopened_after_deadline_by_independent_attributed_evidence`.trim(),
+              terminal_at: undefined,
+              terminal_reason: undefined,
+            };
+          }
+          return row;
+        }
+        const observedStatus = options.currentStatusBySlug?.get(row.slug);
+        if (observedStatus && observedStatus !== "superseded") {
+          return {
+            ...row,
+            status: "failed" as const,
+            terminal_at: nowIso,
+            terminal_reason: "status_no_longer_superseded",
+            message: `${row.message ?? ""} status_restored=${observedStatus}`.trim(),
+          };
+        }
+        if (row.status === "pending" && row.disposition === "execution_ready" && (row.independent_evidence_event_ids?.length ?? 0) > 0) return row;
+        const due = !row.next_retry_not_before || Date.parse(row.next_retry_not_before) <= now.getTime();
+        const deadlineMs = row.deadline ? Date.parse(row.deadline) : NaN;
+        const deadlineExpired = Number.isFinite(deadlineMs) && deadlineMs <= now.getTime();
+        if (!due && !deadlineExpired && evidenceIds.length === 0 && row.new_evidence_trigger === E2_NEW_EVIDENCE_TRIGGER && row.failure_class === "semantic_defer") return row;
+        const attempt = Math.max(0, row.attempt ?? 0) + 1;
+        if (evidenceIds.length > 0) {
+          return {
+            ...row,
+            ...executableSchedule(now),
+            status: "pending" as const,
+            disposition: "execution_ready" as const,
+            attempt,
+            failure_class: "transient" as const,
+            new_evidence_trigger: "executor_capacity|durable_state_change|independent_attributed_evidence",
+            independent_evidence_event_ids: [...new Set([...(row.independent_evidence_event_ids ?? []), ...evidenceIds])].sort(),
+            message: `${row.message ?? ""} reopened_by_independent_attributed_evidence`.trim(),
+          };
+        }
+        if (deadlineExpired) {
+          return {
+            ...row,
+            status: "failed" as const,
+            terminal_at: nowIso,
+            terminal_reason: "lifecycle_deadline_expired",
+            message: `${row.message ?? ""} terminal_after_deadline_without_new_evidence`.trim(),
+          };
+        }
+        return {
+          ...row,
+          ...e2Schedule(now, attempt),
+          attempt,
+          failure_class: "semantic_defer" as const,
+          new_evidence_trigger: E2_NEW_EVIDENCE_TRIGGER,
+        };
       });
       // Deferred rows are intentionally excluded so a later pass with verified
       // independent evidence can reopen the same identity instead of being
@@ -443,10 +635,26 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
       const reopenedSlugs: string[] = [];
       let reopened = 0;
       let limited = 0;
+      let capacityRejected = 0;
       let skippedDuplicateSlug = 0;
       for (const row of rows) {
         const normalized = normalizeRow({ ...row, project_root: pr });
         if (!normalized) continue;
+        if (normalized.status === "pending" && !normalized.next_retry_not_before) {
+          Object.assign(normalized, executableSchedule(now), {
+            attempt: normalized.attempt ?? 0,
+            failure_class: normalized.failure_class ?? "transient",
+            new_evidence_trigger: normalized.new_evidence_trigger ?? "executor_capacity|durable_state_change|independent_attributed_evidence",
+          });
+        } else if (normalized.status === "deferred_until_new_evidence" && !normalized.next_retry_not_before) {
+          Object.assign(normalized, e2Schedule(now, normalized.attempt ?? 0), {
+            attempt: normalized.attempt ?? 0,
+            failure_class: "semantic_defer",
+            new_evidence_trigger: normalized.reason === "superseded_no_successor"
+              ? E2_NEW_EVIDENCE_TRIGGER
+              : normalized.new_evidence_trigger ?? "independent_attributed_evidence|durable_state_change",
+          });
+        }
         if (archiveSlugs && normalized.op === "archive" && normalized.slug) {
           if (archiveSlugs.has(normalized.slug)) {
             skippedDuplicateSlug++;
@@ -457,7 +665,22 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
         if (seen.has(id)) {
           const existingIndex = existingByIdentity.get(id);
           const previous = existingIndex === undefined ? undefined : reconciledExisting[existingIndex];
-          if (previous?.status === "deferred_until_new_evidence" && normalized.status === "pending" && normalized.disposition === "execution_ready") {
+          if (previous?.status === "failed" && previous.reason === "superseded_no_successor" && previous.terminal_reason === "status_no_longer_superseded" && normalized.status === "deferred_until_new_evidence") {
+            const attempt = Math.max(0, previous.attempt ?? 0) + 1;
+            reconciledExisting = reconciledExisting.map((item, index) => index === existingIndex
+              ? {
+                  ...normalized,
+                  ...e2Schedule(now, attempt),
+                  proposal_id: previous.proposal_id,
+                  attempt,
+                  failure_class: "semantic_defer" as const,
+                  new_evidence_trigger: E2_NEW_EVIDENCE_TRIGGER,
+                  message: `${normalized.message ?? ""} reopened_after_status_returned_to_superseded`.trim(),
+                }
+              : item);
+            reopened++;
+            if (normalized.slug) reopenedSlugs.push(normalized.slug);
+          } else if (previous?.status === "deferred_until_new_evidence" && normalized.status === "pending" && normalized.disposition === "execution_ready") {
             reconciledExisting = reconciledExisting.map((item, index) => index === existingIndex
               ? {
                   ...normalized,
@@ -468,11 +691,34 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
               : item);
             reopened++;
             if (normalized.slug) reopenedSlugs.push(normalized.slug);
+          } else if (previous && isReopenableE1Terminal(previous) && isDurableE1(normalized) && normalized.status === "pending") {
+            reconciledExisting = reconciledExisting.map((item, index) => index === existingIndex
+              ? {
+                  ...previous,
+                  ...executableSchedule(now, 0),
+                  kind: normalized.kind,
+                  independent_evidence: normalized.independent_evidence,
+                  falsifier: normalized.falsifier,
+                  status: "pending" as const,
+                  attempt: 0,
+                  failure_class: "transient" as const,
+                  new_evidence_trigger: E1_NEW_EVIDENCE_TRIGGER,
+                  message: `${previous.message ?? normalized.message ?? ""} reopened_by_target_project_frontmatter_scan_after=${previous.terminal_reason}; prior_attempt=${previous.attempt ?? 0}`.trim(),
+                  terminal_at: undefined,
+                  terminal_reason: undefined,
+                }
+              : item);
+            reopened++;
+            if (normalized.slug) reopenedSlugs.push(normalized.slug);
           }
           continue;
         }
         if (newRows.length >= maxAppend) {
           limited++;
+          continue;
+        }
+        if (reconciledExisting.length + newRows.length >= PROPOSALS_MAX_ROWS) {
+          capacityRejected++;
           continue;
         }
         if (normalized.evidence_source === "frontmatter_superseded" && normalized.disposition === "execution_ready" && normalized.slug) {
@@ -485,21 +731,46 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
       }
       const changedExisting = reconciledExisting.some((row, idx) => row !== existing[idx]);
       const appendedSlugs = [...reopenedSlugs, ...newRows.map((row) => row.slug).filter((slug): slug is string => typeof slug === "string" && slug.length > 0)];
-      if (newRows.length === 0 && !changedExisting) {
-        return { proposals_appended: 0, rows_total: existing.length, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
+      if (capacityRejected > 0) {
+        return {
+          error: "proposal_row_limit_reached",
+          proposals_appended: 0,
+          rows_total: existing.length,
+          limited,
+          capacity_rejected: capacityRejected,
+          skipped_duplicate_slug: skippedDuplicateSlug,
+          appended_slugs: [] as string[],
+        };
       }
-      const allRows = [...reconciledExisting, ...newRows].slice(-PROPOSALS_MAX_ROWS);
+      if (newRows.length === 0 && !changedExisting) {
+        return { proposals_appended: 0, rows_total: existing.length, limited, capacity_rejected: 0, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
+      }
+      const allRows = [...reconciledExisting, ...newRows];
       const enriched = allRows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
       atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
-      return { proposals_appended: newRows.length + reopened, rows_total: allRows.length, written: true, limited, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
+      return { proposals_appended: newRows.length + reopened, rows_total: allRows.length, written: true, limited, capacity_rejected: 0, skipped_duplicate_slug: skippedDuplicateSlug, appended_slugs: appendedSlugs };
     });
     if (!locked.ok) return { ok: false, written: false, proposals_appended: 0, rows_total: 0, error: "proposal_lock_contention", limited: 0, skipped_duplicate_slug: 0, appended_slugs: [] };
+    if ("error" in locked.value) {
+      return {
+        ok: false,
+        written: false,
+        proposals_appended: 0,
+        rows_total: locked.value.rows_total,
+        error: locked.value.error,
+        limited: locked.value.limited ?? 0,
+        capacity_rejected: locked.value.capacity_rejected ?? 0,
+        skipped_duplicate_slug: locked.value.skipped_duplicate_slug ?? 0,
+        appended_slugs: [],
+      };
+    }
     return {
       ok: true,
       written: locked.value.written === true,
       proposals_appended: locked.value.proposals_appended,
       rows_total: locked.value.rows_total,
       limited: locked.value.limited ?? 0,
+      capacity_rejected: locked.value.capacity_rejected ?? 0,
       skipped_duplicate_slug: locked.value.skipped_duplicate_slug ?? 0,
       appended_slugs: locked.value.appended_slugs ?? [],
     };
@@ -514,6 +785,218 @@ function appendRows(projectRoot: string, rows: EntryLifecycleProposalRow[], opti
       skipped_duplicate_slug: 0,
       appended_slugs: [],
     };
+  }
+}
+
+/** One-time plus replay-safe migration of historical E2 `review_required`
+ * rows into autonomous evidence deferral. It also schedules every other live
+ * proposal so the sidecar cannot contain an unbounded non-terminal row. */
+export function reconcileLifecycleProposalDeferrals(options: { now?: Date } = {}): ReconcileLifecycleProposalDeferralsResult {
+  const now = options.now ?? new Date();
+  try {
+    const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
+      const loaded = readJsonlForFullRewrite<unknown>(entryLifecycleProposalsPath());
+      if (loaded.error) {
+        return {
+          error: loaded.error,
+          rows_total: loaded.row_count,
+          migrated_e2: 0,
+          scheduled_nonterminal: 0,
+          deadline_expired: 0,
+          deadline_terminal: 0,
+          deadline_reopened: 0,
+          bounded_retry_scheduled: 0,
+          retry_cap_terminal: 0,
+          invalid_json_lines: loaded.invalid_json_lines,
+        };
+      }
+      const normalizedRows = loaded.rows.map(normalizeRow);
+      if (normalizedRows.some((row) => row === null)) {
+        return {
+          error: "proposal_row_normalization_failed",
+          rows_total: loaded.row_count,
+          migrated_e2: 0,
+          scheduled_nonterminal: 0,
+          deadline_expired: 0,
+          deadline_terminal: 0,
+          deadline_reopened: 0,
+          bounded_retry_scheduled: 0,
+          retry_cap_terminal: 0,
+          invalid_json_lines: 0,
+        };
+      }
+      let migratedE2 = 0;
+      let scheduled = 0;
+      let deadlineExpired = 0;
+      let deadlineTerminal = 0;
+      let deadlineReopened = 0;
+      let boundedRetryScheduled = 0;
+      let retryCapTerminal = 0;
+      const rows = normalizedRows.map((normalized, index) => {
+        const raw = loaded.rows[index];
+        const row = normalized as EntryLifecycleProposalRow;
+        const discoveredEvidenceIds = row.reason === "superseded_no_successor" ? attributedIndependentEvidenceFor(row) : [];
+        const joinedEvidenceIds = [...new Set([...(row.independent_evidence_event_ids ?? []), ...discoveredEvidenceIds])].sort();
+        if (row.status === "executed" || row.status === "failed") {
+          if (row.status === "failed" && row.reason === "superseded_no_successor" && row.terminal_reason === "lifecycle_deadline_expired" && joinedEvidenceIds.length > 0) {
+            deadlineReopened++;
+            return {
+              ...row,
+              ...executableSchedule(now),
+              status: "pending" as const,
+              disposition: "execution_ready" as const,
+              attempt: Math.max(0, row.attempt ?? 0) + 1,
+              failure_class: "transient" as const,
+              new_evidence_trigger: "executor_capacity|durable_state_change|independent_attributed_evidence",
+              independent_evidence_event_ids: joinedEvidenceIds,
+              terminal_at: undefined,
+              terminal_reason: undefined,
+              message: `${row.message ?? ""} reopened_after_deadline_by_independent_attributed_evidence`.trim(),
+            };
+          }
+          return {
+            ...row,
+            terminal_at: row.terminal_at ?? row.ts,
+            terminal_reason: row.terminal_reason ?? `legacy_${row.status}_migration`,
+          };
+        }
+        const hasSchedule = hasValidLifecycleSchedule(row);
+        const deadlineMs = row.deadline ? Date.parse(row.deadline) : NaN;
+        const isDeadlineExpired = Number.isFinite(deadlineMs) && deadlineMs <= now.getTime();
+        if (row.reason === "superseded_no_successor") {
+          const attempt = Math.max(0, row.attempt ?? 0);
+          const independentEvidenceReady = (row.status === "pending"
+            && row.disposition === "execution_ready"
+            && (row.independent_evidence_event_ids?.length ?? 0) > 0)
+            || joinedEvidenceIds.length > 0;
+          if (independentEvidenceReady) {
+            if (!hasSchedule || isDeadlineExpired) scheduled++;
+            if (isDeadlineExpired) deadlineReopened++;
+            return {
+              ...row,
+              ...(!hasSchedule || isDeadlineExpired ? executableSchedule(now) : {}),
+              status: "pending" as const,
+              disposition: "execution_ready" as const,
+              attempt,
+              failure_class: row.failure_class === "semantic_defer" ? "transient" as const : row.failure_class ?? "transient" as const,
+              new_evidence_trigger: "executor_capacity|durable_state_change|independent_attributed_evidence",
+              ...(joinedEvidenceIds.length ? { independent_evidence_event_ids: joinedEvidenceIds } : {}),
+            };
+          }
+          if (isDeadlineExpired) {
+            deadlineExpired++;
+            deadlineTerminal++;
+            return {
+              ...row,
+              status: "failed" as const,
+              terminal_at: now.toISOString(),
+              terminal_reason: "lifecycle_deadline_expired",
+              message: `${row.message ?? ""} terminal_after_deadline_without_new_evidence`.trim(),
+            };
+          }
+          const rawRecord = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+          const needsMigration = rawRecord.review_required === true
+            || row.status !== "deferred_until_new_evidence"
+            || row.disposition !== "defer_until_new_evidence"
+            || row.failure_class !== "semantic_defer"
+            || row.new_evidence_trigger !== E2_NEW_EVIDENCE_TRIGGER
+            || !hasSchedule;
+          if (needsMigration) migratedE2++;
+          if (!hasSchedule) scheduled++;
+          return {
+            ...row,
+            ...(!hasSchedule ? e2Schedule(now, attempt) : {}),
+            status: "deferred_until_new_evidence" as const,
+            disposition: "defer_until_new_evidence" as const,
+            attempt,
+            failure_class: "semantic_defer" as const,
+            new_evidence_trigger: E2_NEW_EVIDENCE_TRIGGER,
+          };
+        }
+        if (isDeadlineExpired && isDurableE1(row)) {
+          deadlineExpired++;
+          const attempt = Math.max(0, row.attempt ?? 0);
+          if (attempt < E1_RETRY_CAP) {
+            const nextAttempt = attempt + 1;
+            scheduled++;
+            boundedRetryScheduled++;
+            return {
+              ...row,
+              ...executableSchedule(now, nextAttempt),
+              status: "pending" as const,
+              attempt: nextAttempt,
+              failure_class: "transient" as const,
+              new_evidence_trigger: E1_NEW_EVIDENCE_TRIGGER,
+              message: `${row.message ?? ""} bounded_retry_after_deadline; attempt=${nextAttempt}/${E1_RETRY_CAP}`.trim(),
+              terminal_at: undefined,
+              terminal_reason: undefined,
+            };
+          }
+          deadlineTerminal++;
+          retryCapTerminal++;
+          return {
+            ...row,
+            status: "failed" as const,
+            terminal_at: now.toISOString(),
+            terminal_reason: "lifecycle_retry_cap_reached",
+            message: `${row.message ?? ""} terminal_after_bounded_retry_cap; attempt=${attempt}/${E1_RETRY_CAP}`.trim(),
+          };
+        }
+        if (isDeadlineExpired) {
+          deadlineExpired++;
+          deadlineTerminal++;
+          return {
+            ...row,
+            status: "failed" as const,
+            terminal_at: now.toISOString(),
+            terminal_reason: "lifecycle_deadline_expired",
+            message: `${row.message ?? ""} terminal_after_lifecycle_deadline`.trim(),
+          };
+        }
+        if (!hasSchedule) scheduled++;
+        if (row.status === "pending") {
+          const attempt = Math.max(0, row.attempt ?? 0);
+          return {
+            ...row,
+            ...(!hasSchedule ? executableSchedule(now, attempt) : {}),
+            attempt,
+            failure_class: row.failure_class ?? "transient" as const,
+            new_evidence_trigger: isDurableE1(row)
+              ? row.new_evidence_trigger ?? E1_NEW_EVIDENCE_TRIGGER
+              : row.new_evidence_trigger ?? "executor_capacity|durable_state_change|independent_attributed_evidence",
+          };
+        }
+        return {
+          ...row,
+          ...(!hasSchedule ? e2Schedule(now, Math.max(0, row.attempt ?? 0)) : {}),
+          attempt: Math.max(0, row.attempt ?? 0),
+          failure_class: "semantic_defer" as const,
+          new_evidence_trigger: row.new_evidence_trigger ?? "independent_attributed_evidence|durable_state_change",
+        };
+      });
+      const enriched = rows.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
+      const content = enriched.map((row) => JSON.stringify(row)).join("\n") + (enriched.length ? "\n" : "");
+      const previous = fs.existsSync(entryLifecycleProposalsPath()) ? fs.readFileSync(entryLifecycleProposalsPath(), "utf-8") : "";
+      const written = content !== previous;
+      if (written) atomicWriteText(entryLifecycleProposalsPath(), content);
+      return {
+        written,
+        rows_total: rows.length,
+        migrated_e2: migratedE2,
+        scheduled_nonterminal: scheduled,
+        deadline_expired: deadlineExpired,
+        deadline_terminal: deadlineTerminal,
+        deadline_reopened: deadlineReopened,
+        bounded_retry_scheduled: boundedRetryScheduled,
+        retry_cap_terminal: retryCapTerminal,
+        invalid_json_lines: 0,
+      };
+    });
+    if (!locked.ok) return { ok: false, written: false, rows_total: 0, migrated_e2: 0, scheduled_nonterminal: 0, deadline_expired: 0, deadline_terminal: 0, deadline_reopened: 0, bounded_retry_scheduled: 0, retry_cap_terminal: 0, invalid_json_lines: 0, error: "proposal_lock_contention" };
+    if ("error" in locked.value) return { ok: false, written: false, ...locked.value };
+    return { ok: true, ...locked.value };
+  } catch (error) {
+    return { ok: false, written: false, rows_total: 0, migrated_e2: 0, scheduled_nonterminal: 0, deadline_expired: 0, deadline_terminal: 0, deadline_reopened: 0, bounded_retry_scheduled: 0, retry_cap_terminal: 0, invalid_json_lines: 0, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -555,9 +1038,16 @@ export function reconcileLegacyDecayProposalKinds(options: ReconcileLegacyDecayP
           invalid_json_line_numbers: loaded.invalid_json_line_numbers,
         };
       }
-      const existing = loaded.rows
-        .map(normalizeRow)
-        .filter((row): row is EntryLifecycleProposalRow => row !== null);
+      const normalizedExisting = loaded.rows.map(normalizeRow);
+      if (normalizedExisting.some((row) => row === null)) {
+        return {
+          error: "proposal_row_normalization_failed",
+          rows_total: loaded.row_count,
+          invalid_json_lines: 0,
+          invalid_json_line_numbers: [],
+        };
+      }
+      const existing = normalizedExisting as EntryLifecycleProposalRow[];
       // Kind repair is orthogonal to the independent-evidence gate: deferred
       // decay rows with the historical outcome_entry defect are still eligible
       // so a later evidence reopen inherits a verified durable kind.
@@ -593,6 +1083,8 @@ export function reconcileLegacyDecayProposalKinds(options: ReconcileLegacyDecayP
         return {
           ...row,
           status: "failed" as const,
+          terminal_at: resolvedAt,
+          terminal_reason: "legacy_decay_kind_unresolved",
           message: clip(`${row.message ?? ""} legacy_decay_kind_unresolved=${resolution.reason ?? "missing_durable_entry"}`),
           kind_resolution: {
             schema_version: 1,
@@ -808,11 +1300,12 @@ function validSupersededBy(entry: SupersededFrontmatterEntry): string | undefine
  * emits:
  *   E1: status=superseded + non-self superseded_by -> execution_ready archive
  *       proposal with expected_status=superseded.
- *   E2: status=superseded without a valid successor -> review_required pending
- *       proposal; the executor must not execute it in Phase 1.
+ *   E2: status=superseded without a valid successor -> autonomous
+ *       deferred_until_new_evidence. It is rechecked on successor/status/
+ *       attributed-evidence triggers and never becomes a human queue.
  *
- * TODO(D* Phase 2): add L1/writer-audit backfill sources, always revalidated
- * against current frontmatter before proposal emission.
+ * The same scan terminally resolves an E2 when status is no longer superseded;
+ * a newly observed valid successor replaces it with E1 automatically.
  */
 export function appendSupersededFrontmatterProposals(options: AppendSupersededFrontmatterProposalsOptions): AppendSupersededFrontmatterProposalsResult {
   const projectRoot = normalizeProjectRoot(options.projectRoot);
@@ -844,6 +1337,10 @@ export function appendSupersededFrontmatterProposals(options: AppendSupersededFr
         evidence_source: "frontmatter_superseded",
         evidence_key: `E1:${entry.slug}:${target}`,
         target_slug: target,
+        ...executableSchedule(options.now ?? new Date(), 0),
+        attempt: 0,
+        failure_class: "transient",
+        new_evidence_trigger: E1_NEW_EVIDENCE_TRIGGER,
         status: "pending",
       });
     } else {
@@ -863,13 +1360,19 @@ export function appendSupersededFrontmatterProposals(options: AppendSupersededFr
         disposition: "defer_until_new_evidence",
         evidence_source: "frontmatter_superseded",
         evidence_key: `E2:${entry.slug}:no_successor`,
-        review_required: true,
+        ...e2Schedule(options.now ?? new Date(), 0),
+        attempt: 0,
+        failure_class: "semantic_defer",
+        new_evidence_trigger: E2_NEW_EVIDENCE_TRIGGER,
         status: "deferred_until_new_evidence",
       });
     }
   }
 
-  const r = lifecycleAppendResult(appendRows(projectRoot, rows));
+  const currentStatusBySlug = new Map((Array.isArray(options.entries) ? options.entries : [])
+    .filter((entry): entry is SupersededFrontmatterEntry => !!entry && typeof entry.slug === "string" && !!entry.slug)
+    .map((entry) => [entry.slug, scalarString(entry.frontmatter?.status) ?? String(entry.status ?? "")]));
+  const r = lifecycleAppendResult(appendRows(projectRoot, rows, { currentStatusBySlug, now: options.now }));
   return { ...r, e1_count: e1.length, e2_count: e2.length, e1_slugs: e1, e2_slugs: e2 };
 }
 
@@ -1070,15 +1573,22 @@ export function markProposalsExecuted(
   const slugSet = new Set((Array.isArray(slugs) ? slugs : []).filter((s): s is string => typeof s === "string" && s.length > 0));
   if (!pr || slugSet.size === 0) return { ok: true, updated: 0 };
   const locked = withFileLock(entryLifecycleProposalsLockPath(), () => {
-    const rows = readJsonlTail<unknown>(entryLifecycleProposalsPath())
-      .map(normalizeRow)
-      .filter((r): r is EntryLifecycleProposalRow => r !== null);
+    const loaded = readJsonlForFullRewrite<unknown>(entryLifecycleProposalsPath());
+    if (loaded.error) return { error: loaded.error, updated: 0 };
+    const normalizedRows = loaded.rows.map(normalizeRow);
+    if (normalizedRows.some((row) => row === null)) return { error: "proposal_row_normalization_failed", updated: 0 };
+    const rows = normalizedRows as EntryLifecycleProposalRow[];
     let updated = 0;
     const next = rows.map((r) => {
       const executable = (r.disposition ?? "execution_ready") === "execution_ready";
       if (executable && r.project_root === pr && r.op === "archive" && r.status === "pending" && r.slug && slugSet.has(r.slug)) {
         updated++;
-        return { ...r, status };
+        return {
+          ...r,
+          status,
+          terminal_at: new Date().toISOString(),
+          terminal_reason: status === "executed" ? "executor_completed" : "executor_failed",
+        };
       }
       return r;
     });
@@ -1086,8 +1596,9 @@ export function markProposalsExecuted(
       const enriched = next.map((row) => ({ ...spreadAnchor(getCurrentAnchor()), ...row }));
       atomicWriteText(entryLifecycleProposalsPath(), enriched.map((row) => JSON.stringify(row)).join("\n") + "\n");
     }
-    return updated;
+    return { updated };
   });
   if (!locked.ok) return { ok: false, updated: 0, error: "proposal_lock_contention" };
-  return { ok: true, updated: locked.value };
+  if ("error" in locked.value) return { ok: false, updated: 0, error: locked.value.error };
+  return { ok: true, updated: locked.value.updated };
 }

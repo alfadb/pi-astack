@@ -1,0 +1,308 @@
+{
+  "schema_version": "rm-lifecycle-002-production/v1",
+  "generated_at": "2026-07-23T00:34:52.844Z",
+  "scope": "production lifecycle source reconciliation and rebuildable read-model verification",
+  "evidence_mode": "idempotent_verification_only",
+  "initial_migration_evidence_claimed": false,
+  "privacy": "counts and SHA-256 only; no source body, slug, project path, or candidate text",
+  "self_sha256_convention": "sha256(UTF-8 recursive-key-sorted compact JSON of the dossier before self_sha256 is added; arrays preserve order)",
+  "source_selection": "default_user_global_production",
+  "boundaries": {
+    "durable_memory_mutated": false,
+    "physical_delete_used": false,
+    "lane_g_pipeline_created": false,
+    "human_or_operator_queue_created": false,
+    "staging_hard_delete_authorization": "blocked/separate_authorization_required",
+    "lifecycle_read_model_role": "derived_target_only"
+  },
+  "before": {
+    "sources": {
+      "staging": {
+        "active_provisional": 74,
+        "active_multiview": 21,
+        "abandoned_multiview": 34,
+        "other_json": 0,
+        "corrupt_json": 0,
+        "aggregate_sha256": "f1f1bb0d3370c516fb40c6312334fa6bc5e190135130cb15b4b98ff39ee8b304"
+      },
+      "proposals": {
+        "rows": 25,
+        "corrupt_rows": 0,
+        "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+      }
+    },
+    "durable_memory": {
+      "files": 3312,
+      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    },
+    "derived_target_sha256": "1c9a196eb339e616d1c8cb98d3801f98af6433ffb2d7c6b4c1d9a8305e7a202c",
+    "metrics": {
+      "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+      "arrivals": 154,
+      "terminal": 83,
+      "pending": 71,
+      "unbounded_pending": 0,
+      "retry_count": 583,
+      "oldest_pending_age_days": 60.574741,
+      "oldest_fresh_pending_age_days": 5.682291,
+      "failure_classes": {
+        "none": 83,
+        "provider": 0,
+        "transient": 13,
+        "parse": 1,
+        "conflict": 0,
+        "writer": 9,
+        "semantic_defer": 48
+      },
+      "cohorts": {
+        "legacy": {
+          "arrivals": 144,
+          "terminal": 83,
+          "pending": 61,
+          "conservation_holds": true
+        },
+        "fresh": {
+          "arrivals": 10,
+          "terminal": 0,
+          "pending": 10,
+          "conservation_holds": true
+        }
+      },
+      "queues": {
+        "provisional_correction": {
+          "arrivals": 74,
+          "terminal": 47,
+          "pending": 27,
+          "oldest_pending_age_days": 60.57474097222222,
+          "oldest_fresh_pending_age_days": null
+        },
+        "multiview_pending": {
+          "arrivals": 55,
+          "terminal": 34,
+          "pending": 21,
+          "oldest_pending_age_days": 13.727517476851851,
+          "oldest_fresh_pending_age_days": 5.682290844907407
+        },
+        "entry_lifecycle_proposal": {
+          "arrivals": 25,
+          "terminal": 2,
+          "pending": 23,
+          "oldest_pending_age_days": 18.744582291666667,
+          "oldest_fresh_pending_age_days": 0.5645637615740741
+        }
+      },
+      "continuity_holds": true,
+      "continuity_baseline": "persisted_read_model",
+      "previous_item_count": 154,
+      "missing_previous_item_ids_count": 0,
+      "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "conservation": {
+        "holds": true,
+        "arrivals": 154,
+        "terminal_plus_pending": 154,
+        "delta": 0,
+        "previous_items": 154,
+        "missing_previous_items": 0
+      },
+      "source": {
+        "valid_records": 154,
+        "corrupt_records": 0,
+        "duplicate_item_ids": 0,
+        "proposal_rows": 25,
+        "proposal_row_limit": 1000,
+        "proposal_row_limit_reached": false
+      },
+      "stable_item_ids_sha256": "b541fb16e8c96f8714a9551f9f538c68324efd4b392d7081b87e3c77b87aa6c7"
+    }
+  },
+  "actions": {
+    "proposal_reconcile": {
+      "ok": true,
+      "written": false,
+      "rows_total": 25,
+      "migrated_e2": 0,
+      "scheduled_nonterminal": 0,
+      "deadline_expired": 0,
+      "deadline_terminal": 0,
+      "deadline_reopened": 0,
+      "bounded_retry_scheduled": 0,
+      "retry_cap_terminal": 0,
+      "invalid_json_lines": 0
+    },
+    "terminal_sweep": {
+      "ok": true,
+      "scanned": 21,
+      "terminal": 0,
+      "stale": 0,
+      "retry_cap": 0,
+      "writer_cap": 0,
+      "already_terminal": 0,
+      "already_terminal_archived": 0,
+      "deadline_expired": 0,
+      "archive_failed": 0
+    },
+    "source_reconcile": {
+      "ok": true,
+      "updated": 0,
+      "provisional_updated": 0,
+      "multiview_updated": 0,
+      "abandoned_migrated": 0,
+      "deadline_terminal": 0,
+      "provisional_deadline_terminal": 0,
+      "corrupt_records": 0
+    }
+  },
+  "source_transition_observation": {
+    "first_pass_source_action_applied": false,
+    "source_hashes_unchanged": true,
+    "source_inventory_unchanged": true,
+    "durable_memory_unchanged": true
+  },
+  "after": {
+    "sources": {
+      "staging": {
+        "active_provisional": 74,
+        "active_multiview": 21,
+        "abandoned_multiview": 34,
+        "other_json": 0,
+        "corrupt_json": 0,
+        "aggregate_sha256": "f1f1bb0d3370c516fb40c6312334fa6bc5e190135130cb15b4b98ff39ee8b304"
+      },
+      "proposals": {
+        "rows": 25,
+        "corrupt_rows": 0,
+        "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+      }
+    },
+    "durable_memory": {
+      "files": 3312,
+      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    },
+    "derived_target_sha256": "ca7d96d4e6a1575a10ebbc0be63851ec68aa88fa5e134aeb07db853030adefb9",
+    "metrics": {
+      "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+      "arrivals": 154,
+      "terminal": 83,
+      "pending": 71,
+      "unbounded_pending": 0,
+      "retry_count": 583,
+      "oldest_pending_age_days": 60.574741,
+      "oldest_fresh_pending_age_days": 5.682291,
+      "failure_classes": {
+        "none": 83,
+        "provider": 0,
+        "transient": 13,
+        "parse": 1,
+        "conflict": 0,
+        "writer": 9,
+        "semantic_defer": 48
+      },
+      "cohorts": {
+        "legacy": {
+          "arrivals": 144,
+          "terminal": 83,
+          "pending": 61,
+          "conservation_holds": true
+        },
+        "fresh": {
+          "arrivals": 10,
+          "terminal": 0,
+          "pending": 10,
+          "conservation_holds": true
+        }
+      },
+      "queues": {
+        "provisional_correction": {
+          "arrivals": 74,
+          "terminal": 47,
+          "pending": 27,
+          "oldest_pending_age_days": 60.57474097222222,
+          "oldest_fresh_pending_age_days": null
+        },
+        "multiview_pending": {
+          "arrivals": 55,
+          "terminal": 34,
+          "pending": 21,
+          "oldest_pending_age_days": 13.727517476851851,
+          "oldest_fresh_pending_age_days": 5.682290844907407
+        },
+        "entry_lifecycle_proposal": {
+          "arrivals": 25,
+          "terminal": 2,
+          "pending": 23,
+          "oldest_pending_age_days": 18.744582291666667,
+          "oldest_fresh_pending_age_days": 0.5645637615740741
+        }
+      },
+      "continuity_holds": true,
+      "continuity_baseline": "persisted_read_model",
+      "previous_item_count": 154,
+      "missing_previous_item_ids_count": 0,
+      "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "conservation": {
+        "holds": true,
+        "arrivals": 154,
+        "terminal_plus_pending": 154,
+        "delta": 0,
+        "previous_items": 154,
+        "missing_previous_items": 0
+      },
+      "source": {
+        "valid_records": 154,
+        "corrupt_records": 0,
+        "duplicate_item_ids": 0,
+        "proposal_rows": 25,
+        "proposal_row_limit": 1000,
+        "proposal_row_limit_reached": false
+      },
+      "stable_item_ids_sha256": "b541fb16e8c96f8714a9551f9f538c68324efd4b392d7081b87e3c77b87aa6c7"
+    }
+  },
+  "idempotency_replay": {
+    "proposal_written": false,
+    "proposal_migrated_e2": 0,
+    "proposal_scheduled_nonterminal": 0,
+    "multiview_terminal": 0,
+    "source_updated": 0,
+    "proposal_deadline_terminal": 0,
+    "proposal_bounded_retry_scheduled": 0,
+    "proposal_retry_cap_terminal": 0,
+    "multiview_deadline_expired": 0,
+    "multiview_already_terminal_archived": 0,
+    "source_deadline_terminal": 0,
+    "read_model_written": false,
+    "metrics_equal": true
+  },
+  "acceptance": {
+    "production_source_selected": true,
+    "source_hash_transition_accounted": true,
+    "source_inventory_transition_accounted": true,
+    "durable_memory_unchanged": true,
+    "read_model_is_derived_target_only": true,
+    "total_conservation": true,
+    "legacy_conservation": true,
+    "fresh_conservation": true,
+    "continuity_holds": true,
+    "missing_previous_item_ids_zero": true,
+    "continuity_uses_persisted_baseline": true,
+    "unbounded_pending_zero": true,
+    "source_corrupt_rows_zero": true,
+    "repeat_is_idempotent": true
+  },
+  "artifacts": {
+    "lifecycle_read_model_sha256": "ca7d96d4e6a1575a10ebbc0be63851ec68aa88fa5e134aeb07db853030adefb9",
+    "code_sha256": {
+      "extensions/sediment/lifecycle-convergence.ts": "488a7aa324bdaceae87be78f521e1d762f72555bd1378e389773a9fcfad95cc9",
+      "extensions/sediment/entry-lifecycle-proposals.ts": "efd7afd6ad471dc04c29c0c92ce2ff4e7ead78a49e786abc4c4a3e912c87f859",
+      "extensions/sediment/multiview-staging-io.ts": "bc03e1e5754f9b7f96f822415e62cb2173eb30f27a863cc56609b915cb509426",
+      "extensions/sediment/multiview-staging-replay.ts": "a583a9da78ccdd97158325649f79cd3fb99e39549bc498f12bd16963ae6b6248",
+      "extensions/sediment/staging-ageout.ts": "3c46c0f9c76934c12263a7247e188a471bd7828c53999a440111ab1ba7656f24",
+      "scripts/smoke-lifecycle-convergence.mjs": "d3b8deca7c16f80789d65ef9533f606e4857995f5e83fd1683c603814fec23be",
+      "scripts/smoke-entry-lifecycle-proposals.mjs": "8b61e5bf1f7065c6d7b2ec26a137b034de115245a782414616b6aff23e684ac5",
+      "scripts/dossier-rm-lifecycle-002-production.mjs": "6e6eb0271ebb1d2f490aa4009701bddcf90cb3a2e5db0b26fa3ed5aa9f97fc99",
+      "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md": "85303a9045fd27e908248b3f48b19eb60179f316e0fb14d1cd4490aeea4b5d85",
+      "docs/transition-register.machine.json": "fcfb1659ad0e155e434ed842b7e2b46e593928b6ce853142f410cf7f037dccd4"
+    }
+  },
+  "self_sha256": "7cf57e3617fb43fe14f0cc9dce6c8923ec990b6d74f1ae05189fa8efe9dce96e"
+}

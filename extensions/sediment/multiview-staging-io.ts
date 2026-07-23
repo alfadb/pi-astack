@@ -38,6 +38,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { stagingDir } from "./staging-loader";
+import { atomicWriteText, withFileLock } from "../_shared/sync-file-lock";
 import type {
   MultiviewPendingEntry,
   MultiviewPendingFileOnDisk,
@@ -351,53 +352,23 @@ export function loadMultiviewPending(): MultiviewPendingLoadResult {
   return { entries, totalFound: entries.length, skippedCount };
 }
 
-// ── Delete ───────────────────────────────────────────────────────────────
+// ── Reversible terminal archive ──────────────────────────────────────────
 
 /**
- * Remove a multiview-pending entry from disk by slug. Returns true if
- * a file was deleted, false if no matching file was found (or any IO
- * error). Used by replay (3c-i) after successful brain write OR after
- * terminal skip.
+ * Compatibility wrapper retained for older callers. Despite its historical
+ * name, it never removes evidence: it records an explicit terminal disposition
+ * and atomically moves the full record into abandoned/.
  *
- * The filename was built with a timestamp prefix we don't have at
- * delete time — so we readdir + find the suffix-matching file. O(N)
- * but N ≤ ~20 typically, trivial.
- *
- * Process-level concurrency: not a concern. pi runs as a single Node
- * process per device, fs operations are synchronous and not
- * interleavable, so the readdir → unlink window cannot observe a
- * partially-written file from a concurrent write (the writer's
- * `writeFileSync` is also synchronous, and would block this delete
- * until complete — see file header concurrency note).
- *
- * Best-effort: missing file is NOT an error (idempotent). Filesystem
- * errors (EACCES) are swallowed; the caller can detect failure via
- * the false return value but cannot get the underlying errno. If a
- * stronger contract is needed later, add a variant that throws.
+ * Returns true when the record was archived or was already present in the
+ * terminal archive. Filesystem failures return false and leave the source live.
  */
+/** @deprecated Use archiveMultiviewPending. Physical staging deletion is
+ * blocked by RM-LIFECYCLE-002. */
 export function deleteMultiviewPending(slug: string): boolean {
-  const dir = stagingDir();
-  if (!fs.existsSync(dir)) return false;
-  const suffix = `-${slug}.json`;
-
-  try {
-    const files = fs.readdirSync(dir);
-    const matches = files.filter((f) => f.endsWith(suffix));
-    if (matches.length === 0) return false;
-
-    let deletedAny = false;
-    for (const f of matches) {
-      try {
-        fs.unlinkSync(path.join(dir, f));
-        deletedAny = true;
-      } catch {
-        // continue trying others (pathological dup case)
-      }
-    }
-    return deletedAny;
-  } catch {
-    return false;
-  }
+  return archiveMultiviewPending(slug, {
+    terminalAt: new Date().toISOString(),
+    terminalReason: "legacy_delete_api_retired",
+  });
 }
 
 /**
@@ -405,9 +376,8 @@ export function deleteMultiviewPending(slug: string): boolean {
  * (mechanical-guard cleanup R3/B1, 2026-06-06). Used by the replay
  * routine's terminal BUDGET/age/trigger-vanished paths so a candidate the
  * LLM extracted but multi-view could not synthesize is PRESERVED for
- * inspection rather than permanently lost. Reviewer-DECIDED skips
- * (approved_decision.op==="skip" / replay op=skip) keep using
- * deleteMultiviewPending — those received a real disposition.
+ * audit rather than permanently lost. Reviewer-decided skips use the same
+ * reversible archive path with an explicit terminal reason.
  *
  * Mechanism: atomic rename into <STAGING_DIR>/abandoned/. The live-dir
  * readers (loadMultiviewPending / countMultiviewPending / staging-loader
@@ -417,30 +387,62 @@ export function deleteMultiviewPending(slug: string): boolean {
  * archived entry is never re-picked-up. A failed move leaves the original
  * intact so the caller can fall back to an audit-only row.
  */
-export function archiveMultiviewPending(slug: string): boolean {
+export interface ArchiveMultiviewPendingMetadata {
+  terminalAt?: string;
+  terminalReason?: string;
+}
+
+function multiviewMutationLockPath(): string {
+  return path.join(stagingDir(), ".locks", "multiview-pending.lock");
+}
+
+export function archiveMultiviewPending(slug: string, metadata: ArchiveMultiviewPendingMetadata = {}): boolean {
   const dir = stagingDir();
   if (!fs.existsSync(dir)) return false;
   const suffix = `-${slug}.json`;
   const abandonedDir = path.join(dir, "abandoned");
-
-  try {
-    const matches = fs.readdirSync(dir).filter((f) => f.endsWith(suffix));
-    if (matches.length === 0) return false;
-
-    let movedAny = false;
-    for (const f of matches) {
-      try {
-        fs.mkdirSync(abandonedDir, { recursive: true });
-        fs.renameSync(path.join(dir, f), path.join(abandonedDir, f));
-        movedAny = true;
-      } catch {
-        // continue trying others; a failed move leaves the original intact
+  const locked = withFileLock(multiviewMutationLockPath(), () => {
+    try {
+      const matches = fs.readdirSync(dir).filter((f) => f.endsWith(suffix));
+      if (matches.length === 0) {
+        // Rename may have completed before a crash or competing replay. Treat an
+        // explicit abandoned record as idempotent success.
+        if (!fs.existsSync(abandonedDir)) return false;
+        return fs.readdirSync(abandonedDir).some((f) => f.endsWith(suffix));
       }
+
+      let movedAny = false;
+      for (const f of matches) {
+        const source = path.join(dir, f);
+        try {
+          const parsed = JSON.parse(fs.readFileSync(source, "utf-8")) as MultiviewPendingFileOnDisk;
+          if (parsed.schema_version !== MULTIVIEW_PENDING_SCHEMA_VERSION || parsed.entry?.kind !== "multiview-pending") continue;
+          const at = metadata.terminalAt && Number.isFinite(Date.parse(metadata.terminalAt))
+            ? new Date(Date.parse(metadata.terminalAt)).toISOString()
+            : parsed.entry.lifecycle_terminal_at ?? new Date().toISOString();
+          parsed.entry.lifecycle_terminal_at = at;
+          parsed.entry.lifecycle_terminal_reason = metadata.terminalReason ?? parsed.entry.lifecycle_terminal_reason ?? "abandoned";
+          parsed.entry.lifecycle_failure_class = "none";
+          delete parsed.entry.lifecycle_next_retry_not_before;
+          delete parsed.entry.lifecycle_deadline;
+          delete parsed.entry.lifecycle_new_evidence_trigger;
+          atomicWriteText(source, `${JSON.stringify(parsed, null, 2)}\n`);
+          fs.mkdirSync(abandonedDir, { recursive: true, mode: 0o700 });
+          const target = path.join(abandonedDir, f);
+          if (fs.existsSync(target)) continue;
+          fs.renameSync(source, target);
+          movedAny = true;
+        } catch {
+          // Explicit terminal write or rename did not complete. Keep source live
+          // so a later sweep can retry without data loss.
+        }
+      }
+      return movedAny;
+    } catch {
+      return false;
     }
-    return movedAny;
-  } catch {
-    return false;
-  }
+  });
+  return locked.ok ? locked.value : false;
 }
 
 // ── Update (replay attempt accounting) ───────────────────────────────
@@ -503,7 +505,7 @@ function loadPendingFileBySlug(slug: string): { absPath: string; parsed: Multivi
  * parse/IO failure prevents the update (best-effort; replay logs
  * the failure and proceeds — see batch 3c-i replay loop).
  *
- * Implementation: readdir → find suffix match (same as delete) → read
+ * Implementation: readdir → find suffix match (same as archive) → read
  * → JSON.parse → mutate three fields → JSON.stringify → write same
  * filename. ETag-style race avoidance unnecessary in single-process pi.
  */

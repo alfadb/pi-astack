@@ -21,11 +21,10 @@
  * Staging files live in `~/.abrain/.state/sediment/staging/`, which is
  * git-IGNORED (`.abrain/.gitignore` line 2: `.state/`). So unlinking a staging
  * file is IRREVERSIBLE — there is no `git rm` history to recover from. ADR
- * §4.6's "hard-delete is fine because git history recovers it" rationale is
- * load-bearing for DURABLE entries and simply does not hold here. Therefore
- * Stage 4 only ever flips a lifecycle field; the mechanical N-day-window →
- * hard-delete (unlink) is a deferred follow-up (Stage 5), to be gated on a
- * recovery primitive (tombstone / trash dir / move-to-tracked-archive).
+ * §4.6's durable-entry rationale does not hold here. This lifecycle therefore
+ * ends in a retained, reversible terminal record. Physical deletion is blocked
+ * by the lifecycle transition register and is not a later stage of age-out;
+ * authorizing it would require a separate ADR and a recovery design.
  *
  * # A-layer (§4.4) compliance — promotion is NOT done here
  *
@@ -57,6 +56,7 @@ import type { StagingEntry, StagingFileOnDisk } from "./staging-types";
 import { formatLocalIsoTimestamp, ensureUserGlobalSidecarMigrated, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import { auditStreamSimple } from "../_shared/llm-audit";
+import { recordProvisionalLifecycleFailure, refreshLifecycleConvergenceReadModel } from "./lifecycle-convergence";
 
 export const STAGING_AGEOUT_PROMPT_VERSION = "v1";
 
@@ -264,8 +264,8 @@ export function selectAgeOutCandidates(now: Date = new Date(), max: number = MAX
       const entry = parsed?.entry;
       if (!entry || entry.kind !== "provisional-correction") continue;
       if (entry.attribution_pending !== true) continue;
-      // Already retired by a prior age-out run → leave it (Stage 5 will
-      // hard-delete). soft_archived is the orthogonal backlog axis.
+      // Already retired by a prior age-out run: leave the full reversible
+      // terminal record in place. soft_archived is the orthogonal backlog axis.
       if (entry.lifecycle_state === "soft_archived") continue;
       const created = Date.parse(entry.created);
       // ONLY aged-out entries (≥ STALE_DAYS). Fresh ones are the resolver's.
@@ -380,9 +380,25 @@ export function annotateAgeOut(
   if (decision === "soft_archive") {
     next.lifecycle_state = "soft_archived";
     next.aged_out_at = reviewedAt;
+    next.lifecycle_terminal_at = reviewedAt;
+    next.lifecycle_terminal_reason = "soft_archived";
+    next.lifecycle_failure_class = "none";
+    delete next.lifecycle_next_retry_not_before;
+    delete next.lifecycle_deadline;
+    delete next.lifecycle_new_evidence_trigger;
+  } else {
+    // keep_aging / promote_candidate remain reversible non-terminal states with
+    // a bounded autonomous recheck schedule; the deadline is not an archive TTL.
+    next.lifecycle_attempt = entry.lifecycle_attempt ?? 0;
+    next.lifecycle_failure_class = "semantic_defer";
+    next.lifecycle_next_retry_not_before = new Date(now.getTime() + AGEOUT_RE_REVIEW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    next.lifecycle_deadline = new Date(now.getTime() + AGEOUT_RE_REVIEW_DAYS * 2 * 24 * 60 * 60 * 1000).toISOString();
+    next.lifecycle_new_evidence_trigger = decision === "promote_candidate"
+      ? "promotion_lane_available|new_matching_correction_evidence|ageout_due"
+      : "new_matching_correction_evidence|ageout_due";
+    delete next.lifecycle_terminal_at;
+    delete next.lifecycle_terminal_reason;
   }
-  // keep_aging / promote_candidate: stay active (lifecycle_state untouched);
-  // promote_candidate is advisory only (multi-view §4.4 still gates promotion).
   return next;
 }
 
@@ -524,6 +540,8 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
   // 3. Model availability (don't write last_run on hard-unavailable so the
   //    next agent_end retries once a model is configured).
   if (!options.modelRegistry) {
+    recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "provider", "model_registry_available|ageout_due", now);
+    refreshLifecycleConvergenceReadModel(now);
     return { ok: true, skipped: "model_registry_unavailable", ...base, reviewed_count: candidates.length, durationMs: Date.now() - t0 };
   }
 
@@ -545,6 +563,8 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
       if (inv.skipReason) {
         writeLastRun(options.projectRoot, now, "skipped");
         appendLedgerRow({ op: "staging_ageout", ok: false, skipped: inv.skipReason, reviewed_count: candidates.length, model: inv.model, session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
+        recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "provider", "provider_or_auth_recovered|ageout_due", now);
+        refreshLifecycleConvergenceReadModel(now);
         return { ok: true, skipped: inv.skipReason, ...base, reviewed_count: candidates.length, model: inv.model, durationMs: Date.now() - t0 };
       }
       rawText = inv.rawText;
@@ -553,6 +573,8 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
       writeLastRun(options.projectRoot, now, "degraded");
       const error = e instanceof Error ? e.message : String(e);
       appendLedgerRow({ op: "staging_ageout", ok: false, degraded: true, reviewed_count: candidates.length, error: error.slice(0, 500), session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
+      recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "transient", "provider_or_transport_recovered|ageout_due", now);
+      refreshLifecycleConvergenceReadModel(now);
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, error: error.slice(0, 500), durationMs: Date.now() - t0 };
     }
 
@@ -563,6 +585,8 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
     } catch {
       writeLastRun(options.projectRoot, now, "degraded");
       appendLedgerRow({ op: "staging_ageout", ok: false, degraded: true, reviewed_count: candidates.length, error: "unparseable_llm_output", session_id: options.sessionId, prompt_version: STAGING_AGEOUT_PROMPT_VERSION });
+      recordProvisionalLifecycleFailure(candidates.map((candidate) => candidate.file), "parse", "new_parseable_reviewer_output|ageout_due", now);
+      refreshLifecycleConvergenceReadModel(now);
       return { ok: false, degraded: true, ...base, reviewed_count: candidates.length, model, durationMs: Date.now() - t0 };
     }
 
@@ -583,6 +607,7 @@ export async function runStagingAgeOutIfDue(options: RunStagingAgeOutOptions): P
       session_id: options.sessionId,
       prompt_version: STAGING_AGEOUT_PROMPT_VERSION,
     });
+    refreshLifecycleConvergenceReadModel(now);
     return {
       ok: true,
       reviewed_count: candidates.length,

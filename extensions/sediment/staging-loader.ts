@@ -129,11 +129,10 @@ export function writeStagingEntry(entry: StagingEntry): boolean {
   }
 }
 
-/** F11 (PR-C): remove provisional staging twins once a deterministic Tier-1
- * direct write has durably captured the same user quote. Matching by slug is
- * stable across process restarts because buildProvisionalStagingEntry and the
- * tier1 cleanup path share buildProvisionalStagingSlug(). Best-effort: failed
- * deletes are reported via counters but never roll back the brain write. */
+/** F11 compatibility name: retire provisional staging twins once a
+ * deterministic Tier-1 write captured the same signal. RM-LIFECYCLE-002
+ * forbids physical staging deletion, so the full source record is retained as
+ * a reversible soft-archived terminal disposition. */
 export function removeStagingEntriesBySlug(slug: string): { removed: number; failed: number } {
   let removed = 0;
   let failed = 0;
@@ -142,8 +141,22 @@ export function removeStagingEntriesBySlug(slug: string): { removed: number; fai
     if (!fs.existsSync(dir)) return { removed, failed };
     for (const file of fs.readdirSync(dir)) {
       if (!file.endsWith(`-${slug}.json`)) continue;
+      const target = path.join(dir, file);
       try {
-        fs.unlinkSync(path.join(dir, file));
+        const parsed = JSON.parse(fs.readFileSync(target, "utf-8")) as StagingFileOnDisk;
+        if (parsed?.entry?.kind !== "provisional-correction") continue;
+        const now = new Date().toISOString();
+        parsed.entry.lifecycle_state = "soft_archived";
+        parsed.entry.aged_out_at = parsed.entry.aged_out_at ?? now;
+        parsed.entry.lifecycle_terminal_at = parsed.entry.lifecycle_terminal_at ?? now;
+        parsed.entry.lifecycle_terminal_reason = "tier1_signal_captured";
+        parsed.entry.lifecycle_failure_class = "none";
+        delete parsed.entry.lifecycle_next_retry_not_before;
+        delete parsed.entry.lifecycle_deadline;
+        delete parsed.entry.lifecycle_new_evidence_trigger;
+        const tmp = `${target}.tmp.${process.pid}.${Date.now()}`;
+        fs.writeFileSync(tmp, JSON.stringify(parsed, null, 2), "utf-8");
+        fs.renameSync(tmp, target);
         removed++;
       } catch {
         failed++;
@@ -170,11 +183,10 @@ export function stagingFileCount(): number {
 }
 
 /**
- * Count ACTIVE staging files, EXCLUDING age-out soft-archived ones (Stage 4,
- * ADR 0025 §4.1.5 / §4.6.6). Use this for the classifier-over-production
- * inflation monitor: a soft-archived hypothesis was already retired by the
- * age-out reviewer and is only awaiting the deferred mechanical hard-delete
- * (Stage 5), so it must NOT count as evidence the classifier is
+ * Count ACTIVE staging files, EXCLUDING reversible soft-archived ones.
+ * Use this for the classifier-over-production inflation monitor: a
+ * soft-archived hypothesis was already retired and remains only as an audit/
+ * recovery record, so it must NOT count as evidence the classifier is
  * over-producing — otherwise the advisory fires perpetually as retired files
  * accumulate.
  */

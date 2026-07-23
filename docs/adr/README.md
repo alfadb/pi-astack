@@ -74,7 +74,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | 跨会话趋势观察 (aggregator) | [ADR 0024 §5.3](./0024-second-brain-from-natural-conversation.md#53-跨会话趋势观察) | [ADR 0025 §4.3](./0025-sediment-meta-curator-subsystem.md#43-跨会话趋势观察aggregator) |
 | 双 AI 互审 (multi-view) | [ADR 0024 §5.4](./0024-second-brain-from-natural-conversation.md#54-双-ai-互相审查multi-view-verification) | [ADR 0025 §4.4](./0025-sediment-meta-curator-subsystem.md#44-multi-view-verification) |
 | Classifier prompt 自身演进 | [ADR 0024 §5.5](./0024-second-brain-from-natural-conversation.md#55-classifier-prompt-自身的演进) | [ADR 0025 §4.5](./0025-sediment-meta-curator-subsystem.md#45-classifier-prompt-自身演进) |
-| 自治归档 + 回滚窗口 | [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) | [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口) → 演进 [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md)(完全自治自标定遗忘 + 可逆基座) |
+| 自治归档 + 回滚窗口 | [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) | [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口) → [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md)（自治遗忘 + 可逆基座）→ [ADR 0043](./0043-lifecycle-convergence-and-reversible-terminal-state.md)（有界队列 + 全文终态 + 守恒） |
 
 ---
 

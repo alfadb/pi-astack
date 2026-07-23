@@ -78,6 +78,19 @@ export interface StagingEntry {
   /** Frontmatter: warning for downstream consumers */
   _provenance_warning: string;
 
+  // ── Unified lifecycle convergence fields (RM-LIFECYCLE-002) ──
+  // These fields are a rebuildable .state audit/read-model projection. They do
+  // not become memory truth and never authorize a durable writer operation.
+  lifecycle_item_id?: string;
+  lifecycle_cohort?: "legacy" | "fresh";
+  lifecycle_attempt?: number;
+  lifecycle_failure_class?: "none" | "provider" | "transient" | "parse" | "conflict" | "writer" | "semantic_defer";
+  lifecycle_next_retry_not_before?: string;
+  lifecycle_deadline?: string;
+  lifecycle_new_evidence_trigger?: string;
+  lifecycle_terminal_at?: string;
+  lifecycle_terminal_reason?: string;
+
   // ── Resolver triage fields (set by staging-resolver, ADR 0025 §4.1.5.1) ──
   // IMPORTANT (R1 opus P1): the resolver is NON-DESTRUCTIVE. It does NOT
   // flip attribution_pending or remove a hypothesis from the learning loop —
@@ -100,11 +113,10 @@ export interface StagingEntry {
   // ── Age-out lifecycle fields (set by staging-ageout, ADR 0025 §4.1.5 / §4.6.6) ──
   // Stage 4 (2026-05-29): when a provisional hypothesis ages past STALE_DAYS
   // (30d) unresolved, the staging-ageout reviewer gives it a TERMINAL-ish
-  // disposition. Stage 4 is REVERSIBLE soft-archive ONLY — it NEVER unlinks a
-  // file, because staging lives in git-ignored `.state/` so unlink is
-  // irreversible (no `git rm` recovery, unlike durable §4.6 entries). The
-  // mechanical N-day-window → hard-delete (unlink) is a deferred follow-up
-  // (Stage 5). `attribution_pending` is left UNTOUCHED on purpose: it remains
+  // disposition. It is REVERSIBLE soft-archive ONLY and NEVER unlinks a file,
+  // because staging lives in git-ignored `.state/`. The retained full record is
+  // the terminal state; physical deletion remains blocked outside this lifecycle.
+  // `attribution_pending` is left UNTOUCHED on purpose: it remains
   // the honest record that the hypothesis aged out WITHOUT ever being
   // attributed, and the resolver's non-destructive contract depends on that
   // field meaning exactly that. Backlog drainage is driven by
@@ -122,13 +134,13 @@ export interface StagingEntry {
    *  attribution_pending so the future multi-view path can pick it up). */
   aged_out_decision?: "keep_aging" | "soft_archive" | "promote_candidate";
   aged_out_rationale?: string;
-  /** Set ONLY on soft_archive — the retire timestamp. A future mechanical
-   *  hard-delete sweep (Stage 5) reads this to enforce its N-day window. */
+  /** Set ONLY on soft_archive — the reversible terminal timestamp. The file
+   *  remains in place; RM-LIFECYCLE-002 does not authorize a delete window. */
   aged_out_at?: string;
   aged_out_prompt_version?: string;
 
   // ── Promotion executor fields (set by staging-promotion.ts, ADR 0025 §4.1.5
-  // Stage 5 follow-up). Promotion to durable memory MUST pass the multi-view
+  // promotion follow-up). Promotion to durable memory MUST pass the multi-view
   // gate; these fields record the outcome without ever unlinking the file.
   /** When the promotion executor last attempted to promote this entry. Used
    *  to debounce retries (e.g. after a multi-view rejection or writer

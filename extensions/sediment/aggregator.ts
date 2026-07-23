@@ -72,25 +72,6 @@ export interface StructuralContextEntry {
 
 export const STRUCTURAL_CONTEXT: ReadonlyArray<StructuralContextEntry> = [
   {
-    // 2026-05-29 Stage 4: the prompt-driven age-out REVIEWER shipped
-    // (extensions/sediment/staging-ageout.ts + prompts/staging-ageout-
-    // reviewer-v1.md). Aged-out (≥30d) provisional hypotheses now get a
-    // reviewer disposition: keep_aging / soft_archive (REVERSIBLE — retired
-    // from the active backlog, file retained) / promote_candidate (advisory).
-    // Soft-archived entries are excluded from loadStagingContext's staleCount,
-    // so the operational backlog (token cost + classifier-context bloat) is
-    // now drained. What remains UNIMPLEMENTED is the mechanical N-day-window →
-    // hard-delete (unlink) of soft-archived files — deferred (Stage 5) because
-    // staging lives in git-ignored `.state/`, so unlink is irreversible and
-    // must be gated on a recovery primitive. So a small, STABLE staging_backlog
-    // (file count of retired-but-not-yet-deleted entries) is still expected.
-    // Renamed from "staging-backlog-deletion-unimplemented".
-    id: "staging-hard-archive-unimplemented",
-    description:
-      "ADR 0025 §4.1.5 staging age-out SOFT-archive shipped (staging-ageout reviewer retires aged-out hypotheses reversibly + drops them from staleCount), but the mechanical N-day-window → hard-delete (unlink) of soft-archived files is NOT implemented (deferred: .state is git-ignored, unlink is irreversible). Expect a small STABLE staging_backlog from retired-but-not-deleted files; demote unless pending/unreviewed growth materially worsens.",
-    causes_advisory: "staging_backlog",
-  },
-  {
     // 2026-07-03 Stage 5 follow-up: the staging-promotion executor is
     // implemented and multi-view gated, but it defaults to OFF. While disabled,
     // resolver/age-out promote_candidate flags are advisory-only and will
@@ -364,9 +345,8 @@ export interface AggregatorSummary {
     /** Stage 4 (ADR 0025 §4.1.5 / §4.6.6): aged-out hypotheses retired by the
      *  age-out reviewer (lifecycle_state==="soft_archived"). These are EXCLUDED
      *  from provisional_pending / provisional_stale (the active backlog the
-     *  staging_backlog advisory fires on) — they are already handled and only
-     *  await the deferred mechanical hard-delete (Stage 5). Surfaced separately
-     *  for visibility into how much of total_files is retired-but-not-deleted. */
+     *  staging_backlog advisory fires on) because they are reversible terminal
+     *  records, retained separately for audit visibility. */
     soft_archived: number;
   };
   search: {
@@ -1234,8 +1214,7 @@ function summarizeStaging(now: Date): AggregatorSummary["staging"] {
           // — count them separately and EXCLUDE them from the active
           // provisional_pending / provisional_stale that drive the
           // staging_backlog advisory, so soft-archiving actually DRAINS the
-          // advisory instead of it firing forever on retired entries. Only the
-          // deferred mechanical hard-delete (Stage 5) removes the files.
+          // advisory instead of it firing forever on retained terminal records.
           if (e.lifecycle_state === "soft_archived") { softArchived++; continue; }
           provisionalPending++;
           const createdMs = typeof e.created === "string" ? Date.parse(e.created) : NaN;
@@ -1324,7 +1303,7 @@ function buildAdvisories(summary: Omit<AggregatorSummary, "ok" | "advisories">):
   // immediate classifier/resolver/age-out attention.
   const debouncedStale = summary.staging.provisional_stale_review_debounced ?? 0;
   const actionableStaging = summary.staging.provisional_actionable;
-  const retiredNote = summary.staging.soft_archived > 0 ? ` (${summary.staging.soft_archived} soft-archived awaiting Stage-5 hard-delete)` : "";
+  const retiredNote = summary.staging.soft_archived > 0 ? ` (${summary.staging.soft_archived} reversible terminal records retained)` : "";
   const reviewedNote = debouncedStale > 0 ? `; ${debouncedStale} stale reviewed within age-out debounce` : "";
   if (actionableStaging >= STAGING_CRITICAL_THRESHOLD || summary.staging.provisional_stale > 0) {
     advisories.push({

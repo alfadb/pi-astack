@@ -355,13 +355,10 @@ check("aggregator.ts STRUCTURAL_CONTEXT removed archive-reactivation entry", () 
       "STRUCTURAL_CONTEXT must NOT contain archive-reactivation-reviewer-unimplemented anymore (Stage 2 shipped)",
     );
   }
-  // Stage 4 (2026-05-29): the age-out REVIEWER shipped (reversible soft-
-  // archive), so the entry was renamed again to
-  // "staging-hard-archive-unimplemented" (the remaining gap is the mechanical
-  // N-day hard-delete/unlink of soft-archived files, deferred to Stage 5).
-  // It MUST still be present until that unlink sweep ships.
-  if (!/id:\s*"staging-hard-archive-unimplemented"/.test(aggregatorSrc)) {
-    throw new Error("staging-hard-archive-unimplemented MUST still be present (hard-delete sweep not yet shipped)");
+  // RM-LIFECYCLE-002 makes the retained full source the reversible terminal
+  // state. Hard-delete is blocked, not a structural capability waiting to ship.
+  if (/id:\s*"staging-hard-archive-unimplemented"/.test(aggregatorSrc)) {
+    throw new Error("staging-hard-archive-unimplemented must not advertise physical deletion as future work");
   }
 });
 

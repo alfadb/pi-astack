@@ -67,7 +67,6 @@ import {
 } from "./multiview-staging-types";
 import {
   archiveMultiviewPending,
-  deleteMultiviewPending,
   loadMultiviewPending,
   markMultiviewPendingApprovedDecision,
   markMultiviewPendingBrainWriteCompleted,
@@ -75,6 +74,11 @@ import {
   updateMultiviewPendingAttempts,
   updateMultiviewPendingWriterFailure,
 } from "./multiview-staging-io";
+import {
+  reconcileStagingLifecycleSources,
+  refreshLifecycleConvergenceReadModel,
+  sweepMultiviewTerminalEntries,
+} from "./lifecycle-convergence";
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -298,7 +302,7 @@ function archiveStaleMissingOriginRootOtherProject(
     return true;
   }
   audit.outcome = "terminal_stale";
-  audit.detail = `${originMismatchDetail(entry, deps)} origin_project_root=${originRoot} no longer exists; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry soft-archived to abandoned/ for manual inspection (candidate preserved, not re-picked-up).`;
+  audit.detail = `${originMismatchDetail(entry, deps)} origin_project_root=${originRoot} no longer exists; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry terminally archived to abandoned/ with the full candidate preserved.`;
   audit.durationMs = Date.now() - entryStart;
   result.terminal_stale++;
   result.auditRows.push(audit);
@@ -379,7 +383,10 @@ function deleteOriginalOrAudit(
   context: string,
   entryStart: number,
 ): boolean {
-  if (deleteMultiviewPending(entry.slug)) {
+  if (archiveMultiviewPending(entry.slug, {
+    terminalAt: new Date().toISOString(),
+    terminalReason: context.includes("skip") ? "reviewer_skip" : context.includes("completed") ? "brain_write_completed" : "replay_disposition",
+  })) {
     inMemoryWriterBackoff.delete(inMemoryKey(entry));
     inMemoryBrainCompleted.delete(inMemoryKey(entry));
     return true;
@@ -414,7 +421,18 @@ function archiveTerminalOrAudit(
   context: string,
   entryStart: number,
 ): boolean {
-  if (archiveMultiviewPending(entry.slug)) {
+  const terminalReason = context.includes("writer_retry_attempts")
+    ? "multiview_writer_retry_cap"
+    : context.includes("retry_attempts")
+      ? "multiview_reviewer_retry_cap"
+      : context.includes("age=") || context.includes("terminal stale")
+        ? "multiview_stale"
+        : context.includes("no captured origin")
+          ? "multiview_no_safe_origin"
+          : context.includes("no longer triggers")
+            ? "multiview_trigger_disappeared"
+            : "multiview_abandoned";
+  if (archiveMultiviewPending(entry.slug, { terminalAt: new Date().toISOString(), terminalReason })) {
     inMemoryWriterBackoff.delete(inMemoryKey(entry));
     inMemoryBrainCompleted.delete(inMemoryKey(entry));
     return true;
@@ -437,7 +455,7 @@ function deleteDuplicateOrAudit(
   entryStart: number,
 ): boolean {
   if (slug === entry.slug) return true;
-  if (deleteMultiviewPending(slug)) return true;
+  if (archiveMultiviewPending(slug, { terminalAt: new Date().toISOString(), terminalReason: "duplicate_replay_staging" })) return true;
   audit.outcome = "error";
   audit.detail = `${context}; duplicate_staging_delete_failed for slug=${slug}. Original staging kept to avoid losing retry identity.`;
   audit.durationMs = Date.now() - entryStart;
@@ -460,26 +478,33 @@ function deleteDuplicateOrAudit(
  */
 export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBatchResult> {
   const batchStart = Date.now();
+  // Mechanical terminal collection is global to the user-local queue and does
+  // not require the owning project or an LLM call. This closes the historical
+  // bug where stale entries owned by another project never entered the oldest-3
+  // replay slice. Full records are annotated then moved to abandoned/.
+  const terminalSweep = sweepMultiviewTerminalEntries({ now: new Date(batchStart) });
   const loaded = loadMultiviewPending();
   const result: ReplayBatchResult = {
-    attempted: 0,
+    attempted: terminalSweep.terminal,
     succeeded: 0,
     re_staged: 0,
-    terminal_max_retries: 0,
-    terminal_stale: 0,
+    terminal_max_retries: terminalSweep.retry_cap,
+    terminal_stale: terminalSweep.stale,
     deferred_other_project: 0,
     terminal_no_origin: 0,
     skipped_backoff: 0,
     cleanup_pending: 0,
-    terminal_writer_max_retries: 0,
-    staging_delete_failed: 0,
-    errors: 0,
-    totalPending: loaded.totalFound,
+    terminal_writer_max_retries: terminalSweep.writer_cap,
+    staging_delete_failed: terminalSweep.archive_failed,
+    errors: terminalSweep.archive_failed,
+    totalPending: loaded.totalFound + terminalSweep.terminal + terminalSweep.already_terminal_archived,
     auditRows: [],
     durationMs: 0,
   };
 
   if (loaded.entries.length === 0) {
+    reconcileStagingLifecycleSources({ now: new Date(batchStart) });
+    refreshLifecycleConvergenceReadModel(new Date(batchStart));
     result.durationMs = Date.now() - batchStart;
     return result;
   }
@@ -510,6 +535,8 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     await processOneEntry(entry, deps, result);
   }
 
+  reconcileStagingLifecycleSources({ now: new Date() });
+  refreshLifecycleConvergenceReadModel(new Date());
   result.durationMs = Date.now() - batchStart;
   return result;
 }
@@ -550,7 +577,7 @@ async function processOneEntry(
 
   const inMemoryCompletedAt = inMemoryBrainCompleted.get(inMemoryKey(entry));
   if (entry.brain_write_completed_at_iso || inMemoryCompletedAt) {
-    if (deleteMultiviewPending(entry.slug)) {
+    if (archiveMultiviewPending(entry.slug, { terminalAt: new Date().toISOString(), terminalReason: "brain_write_completed" })) {
       inMemoryWriterBackoff.delete(inMemoryKey(entry));
       inMemoryBrainCompleted.delete(inMemoryKey(entry));
       audit.outcome = "cleanup_pending";
@@ -580,7 +607,7 @@ async function processOneEntry(
       if (!archiveTerminalOrAudit(entry, audit, result, `ambiguous brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; terminal stale wanted to archive entry`, entryStart)) return;
       audit.outcome = "terminal_stale";
       audit.new_decision = entry.approved_decision;
-      audit.detail = `ambiguous brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry soft-archived to abandoned/ for manual inspection (candidate preserved, not re-picked-up)`;
+      audit.detail = `ambiguous brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; age=${ageDays.toFixed(1)}days >= cap=${STALE_DAYS_MULTIVIEW_PENDING}days; entry terminally archived to abandoned/ with the full candidate preserved`;
       audit.durationMs = Date.now() - entryStart;
       result.terminal_stale++;
       result.auditRows.push(audit);
@@ -588,7 +615,7 @@ async function processOneEntry(
     }
     audit.outcome = "error";
     audit.new_decision = entry.approved_decision;
-    audit.detail = `brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; writer replay suppressed, manual inspection required`;
+    audit.detail = `brain_write_intent_at_iso=${entry.brain_write_intent_at_iso} exists without brain_write_completed_at_iso for non-idempotent op=${entry.approved_decision.op}; writer replay suppressed until the bounded stale terminal deadline`;
     audit.durationMs = Date.now() - entryStart;
     result.errors++;
     result.auditRows.push(audit);
@@ -919,9 +946,9 @@ async function retryApprovedWriterOnly(
       return;
     }
 
-    if (!deleteMultiviewPending(entry.slug)) {
+    if (!archiveMultiviewPending(entry.slug, { terminalAt: completedAtIso, terminalReason: "brain_write_completed" })) {
       audit.outcome = "error";
-      audit.detail = `replay approved op=${finalDecision.op}; brain write executed but staging_delete_failed for slug=${entry.slug}. Marked brain_write_completed_at_iso=${completedAtIso}; future replay will retry cleanup only.${extraDetail}`;
+      audit.detail = `replay approved op=${finalDecision.op}; brain write executed but staging_archive_failed for slug=${entry.slug}. Marked brain_write_completed_at_iso=${completedAtIso}; future replay will retry reversible cleanup only.${extraDetail}`;
       audit.durationMs = Date.now() - entryStart;
       result.staging_delete_failed++;
       result.errors++;

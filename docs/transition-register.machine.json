@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-22",
+  "updated": "2026-07-23",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -981,6 +981,43 @@
       "next_action": "绑定到 constraint legacy retirement 完成后关闭。"
     },
     {
+      "id": "lifecycle.convergence-rm-002",
+      "partition": "lifecycle",
+      "title": "RM-LIFECYCLE-002 lifecycle convergence",
+      "human_section": "已收口",
+      "register_class": "active",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
+      "entered": "2026-07-23",
+      "review_by": "2026-08-06",
+      "current": "2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段 completed 且 fully authorized（machine enum: authorized）。provisional、multiview-pending 与 entry-lifecycle proposal 已统一为可重建生命周期读模型；source ledger 仍是唯一写权威。deadline 有 source-side 自治动作；E1 execution-ready 在 3 次 cap 内 bounded exponential retry，到 cap terminal，并仅由所属 project 的 valid durable frontmatter scan 按原 identity 重开；E2 三迁移继续以 project_root 隔离，terminal 全文保留且可逆。production evidence 为 idempotent_verification_only，不声称首次 migration。staging hard-delete 仍 blocked，未新增 Lane G、人审队列或 forgetting 权限。",
+      "exit": [
+        "legacy/fresh cohort 分类完整，且 persisted stable item inventory continuity_holds=true、missing_previous_item_ids=[]",
+        "unbounded_pending=0，所有 pending 有 next_retry_not_before/new_evidence_trigger 与 deadline，deadline 到期有自治 source action",
+        "E1 +2d 首次 expiry 保持 pending 且 attempt/schedule 前进；推进到 cap terminal；其他 project scan 不重开，所属 project valid scan 原 identity 重开并可被 executor 消费",
+        "restart/rebuild/idempotency/corrupt-source/cap/continuity fail-closed smoke 通过",
+        "真实 production dossier 的 source/durable hashes 不变、continuity acceptance 全 true",
+        "staging physical deletion 保持 blocked 且未新增 Lane G 或人类队列"
+      ],
+      "evidence": [
+        "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md",
+        "extensions/sediment/lifecycle-convergence.ts",
+        "scripts/smoke-lifecycle-convergence.mjs",
+        "scripts/smoke-entry-lifecycle-proposals.mjs",
+        "docs/evidence/2026-07-23-rm-lifecycle-002-production.json",
+        "~/.abrain/.state/sediment/lifecycle-convergence.json"
+      ],
+      "owner": "sediment-lifecycle",
+      "consumer": [
+        "multiview replay",
+        "entry lifecycle proposal bridge",
+        "lifecycle convergence read model"
+      ],
+      "renewal_count": 0,
+      "risk_class": "high",
+      "next_action": "保持 closed，并维持 source-ledger authority、可逆 terminal、continuity loss detection、idempotent_verification_only evidence 边界与 blocked physical deletion；不得扩展到 Lane G、人审或 forgetting 权限。"
+    },
+    {
       "id": "staging.hard-delete",
       "partition": "staging",
       "title": "staging 硬删",
@@ -990,14 +1027,15 @@
       "authorization_status": "separate_authorization_required",
       "entered": "2026-07-08",
       "review_by": "2026-07-24",
-      "current": "canonical-path P1 production acceptance 已完成，但这不构成 staging 硬删授权；staging backlog 仍需由 inventory/metrics 评估。",
+      "current": "RM-LIFECYCLE-002 明确 staging 生命周期止于全文保留的可逆 terminal；物理删除不是 age-out 或 convergence 的后续阶段，当前无删除授权。",
       "exit": [
-        "硬删 runbook、回滚验证与独立授权完成"
+        "新的独立 ADR 明确覆盖可恢复性、全文保真、灾备与失败回滚",
+        "取得与本 blocked 面分离的显式授权"
       ],
       "evidence": [
-        "staging inventory",
-        "promotion/ageout metrics",
-        "canonical-path P1 completion dossier"
+        "docs/adr/0031-autonomous-self-calibrating-forgetting.md",
+        "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md",
+        "scripts/smoke-lifecycle-convergence.mjs"
       ],
       "owner": "sediment-staging",
       "consumer": [
@@ -1005,7 +1043,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "另行完成硬删 runbook、回滚验证与授权后再讨论硬删。"
+      "next_action": "无当前动作；保持 blocked。不得把 retained terminal 数量或存储压力自动解释为删除授权。"
     },
     {
       "id": "knowledge.o5-confidence-fallback-review",
