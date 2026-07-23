@@ -1,6 +1,6 @@
 {
   "schema_version": "rm-forget-001-real-apply-gate-production/v1",
-  "generated_at": "2026-07-23T02:35:37.307Z",
+  "generated_at": "2026-07-23T02:44:35.706Z",
   "evidence_mode": "production_configuration_and_zero_write_verification_only",
   "scope": "fail-closed forgetting real-apply gate hold",
   "privacy": "aggregate counts and SHA-256 only; no slug, body, source path, candidate text, or frontmatter",
@@ -39,7 +39,7 @@
     "settings_sha256": "9b60663651ab32a886b260c6d82a5e7b8e8f0ed58b3270c83d9f7a1b6623011a",
     "staging_sources": {
       "files": 130,
-      "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77"
+      "aggregate_sha256": "be1b675d7c82e688684807f6e149bf833567872454c16c186277bfc51543e5ac"
     },
     "proposals": {
       "rows": 25,
@@ -54,7 +54,7 @@
       "files": 3312,
       "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
     },
-    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+    "lifecycle_read_model_sha256": "28abfee12b2bc23b879a556c793d0ccff52b974d362f225cf1efeb3dce9f6950",
     "demote_ledger": {
       "rows": 1,
       "corrupt_rows": 0,
@@ -81,7 +81,7 @@
     "settings_sha256": "9b60663651ab32a886b260c6d82a5e7b8e8f0ed58b3270c83d9f7a1b6623011a",
     "staging_sources": {
       "files": 130,
-      "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77"
+      "aggregate_sha256": "be1b675d7c82e688684807f6e149bf833567872454c16c186277bfc51543e5ac"
     },
     "proposals": {
       "rows": 25,
@@ -96,7 +96,7 @@
       "files": 3312,
       "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
     },
-    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+    "lifecycle_read_model_sha256": "28abfee12b2bc23b879a556c793d0ccff52b974d362f225cf1efeb3dce9f6950",
     "demote_ledger": {
       "rows": 1,
       "corrupt_rows": 0,
@@ -142,5 +142,5 @@
   "artifacts": {
     "implementation_code_aggregate_sha256": "af20b20fc6c6607596127d1e325447009923bfaea22544843f95a55a2584d1c6"
   },
-  "self_sha256": "53daab095de19ccf9b454ac4d57019c57831b33e3aa5ae780768e6a0b20c471b"
+  "self_sha256": "69f3313e195a9e303e69fa983e44136fa542607cdd8bc2bad0e1cd187d633f2c"
 }

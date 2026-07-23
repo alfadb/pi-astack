@@ -1,6 +1,6 @@
 {
   "schema_version": "rm-lifecycle-002-production/v2",
-  "generated_at": "2026-07-23T02:35:18.081Z",
+  "generated_at": "2026-07-23T02:44:15.132Z",
   "scope": "production lifecycle source-metadata reconciliation and rebuildable read-model verification",
   "evidence_mode": "historical_transition_retained_plus_current_run_verification",
   "privacy": "counts and SHA-256 only in current evidence; the retained self-hash preimage preserves the prior counts/hash-only dossier",
@@ -8,7 +8,7 @@
   "source_selection": "default_user_global_production",
   "boundaries": {
     "durable_memory_mutated_in_current_run": false,
-    "lifecycle_source_mutated_in_current_run": false,
+    "lifecycle_source_mutated_in_current_run": true,
     "lifecycle_source_mutation_recorded_by_current_actions": true,
     "derived_read_model_mutated_in_current_run": true,
     "derived_read_model_mutation_recorded_by_current_actions": true,
@@ -370,12 +370,12 @@
     }
   },
   "current_run": {
-    "generated_at": "2026-07-23T02:35:18.081Z",
-    "evidence_mode": "current_idempotent_verification_only",
+    "generated_at": "2026-07-23T02:44:15.132Z",
+    "evidence_mode": "current_source_actions_plus_idempotent_verification",
     "historical_35_row_migration_claimed": false,
     "source_action_classification": {
-      "action_applied": false,
-      "proposal_file_rewritten": false,
+      "action_applied": true,
+      "proposal_file_rewritten": true,
       "multiview_terminal_archived": 0,
       "multiview_existing_terminal_archived": 0,
       "source_records_updated": 0,
@@ -391,39 +391,39 @@
           "abandoned_multiview": 34,
           "other_json": 0,
           "corrupt_json": 0,
-          "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77",
-          "payload_excluding_lifecycle_sha256": "e77fc6c956a059149cd805e64861fb3d609aa45a40479d8fef50fed9c351b59a",
-          "payload_content_multiset_excluding_lifecycle_sha256": "ac29530db918df8d3df10d2c6dabf7ef6ad2b291a89d3a5544f8add0c4e51911",
-          "lifecycle_metadata_sha256": "9c3ce97c2188abf538d566650eee784a128ba8006e297911dadb9d6499f091c5"
+          "aggregate_sha256": "be1b675d7c82e688684807f6e149bf833567872454c16c186277bfc51543e5ac",
+          "payload_excluding_lifecycle_sha256": "0cdf72114fa63570d2006a0df91923ab7ee81098ddae50556a38d4f4baa14a5a",
+          "payload_content_multiset_excluding_lifecycle_sha256": "260662e2e8c73268808c178da293a2ba33039550f5109079af2608b4e7847c0f",
+          "lifecycle_metadata_sha256": "6a330226e37cc5719aff3d7463fafbe9d4f5bebffe1cc4e1dff568bd36c4f3ea"
         },
         "proposals": {
           "rows": 25,
           "corrupt_rows": 0,
-          "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+          "file_sha256": "e35ba43d0e6e9f4b114dcbfaae88deafa40e29347803d785966eaa67a125db77"
         }
       },
       "durable_memory": {
         "files": 3312,
         "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
       },
-      "derived_target_sha256": "efcde2dd8c5f353dbaa7f18d45d03ccf7a75aaf3fe41180f0eac19abb1585975",
+      "derived_target_sha256": "8c241a0fa702fdcaa17d08ef307ccb8977a9c15e5bb069a42737421927dd9a59",
       "metrics": {
         "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
         "arrivals": 155,
         "terminal": 83,
         "pending": 72,
         "unbounded_pending": 0,
-        "retry_count": 592,
-        "oldest_pending_age_days": 60.658366,
-        "oldest_fresh_pending_age_days": 5.765916,
+        "retry_count": 593,
+        "oldest_pending_age_days": 60.664582,
+        "oldest_fresh_pending_age_days": 5.772132,
         "failure_classes": {
           "none": 83,
           "provider": 0,
-          "transient": 12,
+          "transient": 11,
           "parse": 1,
           "conflict": 0,
           "writer": 11,
-          "semantic_defer": 48
+          "semantic_defer": 49
         },
         "cohorts": {
           "legacy": {
@@ -444,22 +444,22 @@
             "arrivals": 74,
             "terminal": 47,
             "pending": 27,
-            "oldest_pending_age_days": 60.65836640046296,
+            "oldest_pending_age_days": 60.664582268518515,
             "oldest_fresh_pending_age_days": null
           },
           "multiview_pending": {
             "arrivals": 56,
             "terminal": 34,
             "pending": 22,
-            "oldest_pending_age_days": 13.811142905092593,
-            "oldest_fresh_pending_age_days": 5.765916273148148
+            "oldest_pending_age_days": 13.817358773148149,
+            "oldest_fresh_pending_age_days": 5.772132141203704
           },
           "entry_lifecycle_proposal": {
             "arrivals": 25,
             "terminal": 2,
             "pending": 23,
-            "oldest_pending_age_days": 18.828207719907407,
-            "oldest_fresh_pending_age_days": 0.6481891898148148
+            "oldest_pending_age_days": 18.834423587962963,
+            "oldest_fresh_pending_age_days": 0.6544050578703704
           }
         },
         "continuity_holds": true,
@@ -493,7 +493,7 @@
       },
       "proposal_reconcile": {
         "ok": true,
-        "written": false,
+        "written": true,
         "rows_total": 25,
         "migrated_e2": 0,
         "scheduled_nonterminal": 0,
@@ -528,7 +528,7 @@
       },
       "after_read_model_build": {
         "ok": true,
-        "written": false
+        "written": true
       }
     },
     "source_transition_observation": {
@@ -536,15 +536,15 @@
       "before_unbounded_pending": 0,
       "after_unbounded_pending": 0,
       "unbounded_pending_delta": 0,
-      "source_hashes_unchanged": true,
-      "source_inventory_unchanged": true,
+      "source_hashes_unchanged": false,
+      "source_inventory_unchanged": false,
       "staging_full_hash_changed": false,
-      "proposal_hash_changed": false,
+      "proposal_hash_changed": true,
       "staging_payload_path_inventory_excluding_lifecycle_unchanged": true,
       "staging_payload_content_multiset_excluding_lifecycle_unchanged": true,
       "durable_memory_unchanged": true,
       "staging_hash_explanation": "staging source bytes and locations were already converged; no staging mutation occurred",
-      "proposal_hash_explanation": "entry lifecycle proposal source was unchanged",
+      "proposal_hash_explanation": "entry lifecycle proposal source changed through the current run's recorded proposal reconcile action",
       "durable_hash_explanation": "projects/knowledge aggregate is outside lifecycle source metadata and remained unchanged"
     },
     "after": {
@@ -555,10 +555,10 @@
           "abandoned_multiview": 34,
           "other_json": 0,
           "corrupt_json": 0,
-          "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77",
-          "payload_excluding_lifecycle_sha256": "e77fc6c956a059149cd805e64861fb3d609aa45a40479d8fef50fed9c351b59a",
-          "payload_content_multiset_excluding_lifecycle_sha256": "ac29530db918df8d3df10d2c6dabf7ef6ad2b291a89d3a5544f8add0c4e51911",
-          "lifecycle_metadata_sha256": "9c3ce97c2188abf538d566650eee784a128ba8006e297911dadb9d6499f091c5"
+          "aggregate_sha256": "be1b675d7c82e688684807f6e149bf833567872454c16c186277bfc51543e5ac",
+          "payload_excluding_lifecycle_sha256": "0cdf72114fa63570d2006a0df91923ab7ee81098ddae50556a38d4f4baa14a5a",
+          "payload_content_multiset_excluding_lifecycle_sha256": "260662e2e8c73268808c178da293a2ba33039550f5109079af2608b4e7847c0f",
+          "lifecycle_metadata_sha256": "6a330226e37cc5719aff3d7463fafbe9d4f5bebffe1cc4e1dff568bd36c4f3ea"
         },
         "proposals": {
           "rows": 25,
@@ -570,24 +570,24 @@
         "files": 3312,
         "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
       },
-      "derived_target_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+      "derived_target_sha256": "28abfee12b2bc23b879a556c793d0ccff52b974d362f225cf1efeb3dce9f6950",
       "metrics": {
         "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
         "arrivals": 155,
         "terminal": 83,
         "pending": 72,
         "unbounded_pending": 0,
-        "retry_count": 592,
-        "oldest_pending_age_days": 60.658366,
-        "oldest_fresh_pending_age_days": 5.765916,
+        "retry_count": 593,
+        "oldest_pending_age_days": 60.664582,
+        "oldest_fresh_pending_age_days": 5.772132,
         "failure_classes": {
           "none": 83,
           "provider": 0,
-          "transient": 12,
+          "transient": 11,
           "parse": 1,
           "conflict": 0,
           "writer": 11,
-          "semantic_defer": 48
+          "semantic_defer": 49
         },
         "cohorts": {
           "legacy": {
@@ -608,22 +608,22 @@
             "arrivals": 74,
             "terminal": 47,
             "pending": 27,
-            "oldest_pending_age_days": 60.65836640046296,
+            "oldest_pending_age_days": 60.664582268518515,
             "oldest_fresh_pending_age_days": null
           },
           "multiview_pending": {
             "arrivals": 56,
             "terminal": 34,
             "pending": 22,
-            "oldest_pending_age_days": 13.811142905092593,
-            "oldest_fresh_pending_age_days": 5.765916273148148
+            "oldest_pending_age_days": 13.817358773148149,
+            "oldest_fresh_pending_age_days": 5.772132141203704
           },
           "entry_lifecycle_proposal": {
             "arrivals": 25,
             "terminal": 2,
             "pending": 23,
-            "oldest_pending_age_days": 18.828207719907407,
-            "oldest_fresh_pending_age_days": 0.6481891898148148
+            "oldest_pending_age_days": 18.834423587962963,
+            "oldest_fresh_pending_age_days": 0.6544050578703704
           }
         },
         "continuity_holds": true,
@@ -692,7 +692,7 @@
     "code_hashes_all_present": true
   },
   "artifacts": {
-    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+    "lifecycle_read_model_sha256": "28abfee12b2bc23b879a556c793d0ccff52b974d362f225cf1efeb3dce9f6950",
     "code_sha256": {
       "extensions/sediment/lifecycle-convergence.ts": "067b9bdfd5976b4e7ab31443fadf748c4d4e321273f3aa9f5f38eb3a36189623",
       "extensions/sediment/lifecycle-source-metadata.ts": "281fffd20dc457d42d96c9632bbee8daab7b56c605ecf5d324b95faf4d813573",
@@ -709,5 +709,5 @@
     "code_aggregate_sha256_convention": "sha256(join('\\n', codeFiles in recorded insertion order as relativePath + NUL + file sha256))",
     "code_aggregate_sha256": "26e33055a007ecb4454361ab65ea71cce1629a23d1f55040086d7ab449d0fee2"
   },
-  "self_sha256": "81f34457f6265c4997092624ee7b3b3143ffae1d6f3dfaff10c400574c4092e7"
+  "self_sha256": "c122f53df724f9fdbcc7f2f888c7d1d11f94030283463c6ea7ad1dcb30d14a0b"
 }
