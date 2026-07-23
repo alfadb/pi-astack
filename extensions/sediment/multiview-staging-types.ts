@@ -166,8 +166,10 @@ export interface MultiviewPendingEntry {
   created: string;
   updated?: string;
 
-  /** Rebuildable RM-LIFECYCLE-002 convergence metadata. Source staging remains
-   *  the replay authority; the unified .state read model is not memory SOT. */
+  /** RM-LIFECYCLE-002 source metadata. Optional in the TypeScript shape only
+   *  for legacy-file compatibility; writeMultiviewPending materializes every
+   *  field atomically for all new sources before returning. Source staging
+   *  remains replay authority; the unified .state read model is not memory SOT. */
   lifecycle_item_id?: string;
   lifecycle_cohort?: "legacy" | "fresh";
   lifecycle_attempt?: number;

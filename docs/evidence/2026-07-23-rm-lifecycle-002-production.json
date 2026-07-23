@@ -1,308 +1,713 @@
 {
-  "schema_version": "rm-lifecycle-002-production/v1",
-  "generated_at": "2026-07-23T00:34:52.844Z",
-  "scope": "production lifecycle source reconciliation and rebuildable read-model verification",
-  "evidence_mode": "idempotent_verification_only",
-  "initial_migration_evidence_claimed": false,
-  "privacy": "counts and SHA-256 only; no source body, slug, project path, or candidate text",
+  "schema_version": "rm-lifecycle-002-production/v2",
+  "generated_at": "2026-07-23T02:35:18.081Z",
+  "scope": "production lifecycle source-metadata reconciliation and rebuildable read-model verification",
+  "evidence_mode": "historical_transition_retained_plus_current_run_verification",
+  "privacy": "counts and SHA-256 only in current evidence; the retained self-hash preimage preserves the prior counts/hash-only dossier",
   "self_sha256_convention": "sha256(UTF-8 recursive-key-sorted compact JSON of the dossier before self_sha256 is added; arrays preserve order)",
   "source_selection": "default_user_global_production",
   "boundaries": {
-    "durable_memory_mutated": false,
+    "durable_memory_mutated_in_current_run": false,
+    "lifecycle_source_mutated_in_current_run": false,
+    "lifecycle_source_mutation_recorded_by_current_actions": true,
+    "derived_read_model_mutated_in_current_run": true,
+    "derived_read_model_mutation_recorded_by_current_actions": true,
     "physical_delete_used": false,
     "lane_g_pipeline_created": false,
     "human_or_operator_queue_created": false,
     "staging_hard_delete_authorization": "blocked/separate_authorization_required",
     "lifecycle_read_model_role": "derived_target_only"
   },
-  "before": {
-    "sources": {
-      "staging": {
-        "active_provisional": 74,
-        "active_multiview": 21,
-        "abandoned_multiview": 34,
-        "other_json": 0,
-        "corrupt_json": 0,
-        "aggregate_sha256": "f1f1bb0d3370c516fb40c6312334fa6bc5e190135130cb15b4b98ff39ee8b304"
+  "historical_retained_evidence": {
+    "evidence_mode": "historical_retained_source_transition",
+    "source_dossier_schema_version": "rm-lifecycle-002-production/v1",
+    "source_dossier_generated_at": "2026-07-23T01:45:48.789Z",
+    "source_dossier_self_sha256": "0fbd2fdfad3d3f508e6069890d3ec3f79ffbb56b1e3cf1ecbc9400ab627109dd",
+    "source_dossier": {
+      "schema_version": "rm-lifecycle-002-production/v1",
+      "generated_at": "2026-07-23T01:45:48.789Z",
+      "scope": "production lifecycle source-metadata reconciliation and rebuildable read-model verification",
+      "evidence_mode": "source_lifecycle_metadata_convergence_plus_idempotent_verification",
+      "initial_migration_evidence_claimed": true,
+      "privacy": "counts and SHA-256 only; no source body, slug, project path, or candidate text",
+      "self_sha256_convention": "sha256(UTF-8 recursive-key-sorted compact JSON of the dossier before self_sha256 is added; arrays preserve order)",
+      "source_selection": "default_user_global_production",
+      "boundaries": {
+        "durable_memory_mutated": false,
+        "physical_delete_used": false,
+        "lane_g_pipeline_created": false,
+        "human_or_operator_queue_created": false,
+        "staging_hard_delete_authorization": "blocked/separate_authorization_required",
+        "lifecycle_read_model_role": "derived_target_only"
       },
-      "proposals": {
-        "rows": 25,
-        "corrupt_rows": 0,
-        "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+      "before": {
+        "sources": {
+          "staging": {
+            "active_provisional": 74,
+            "active_multiview": 22,
+            "abandoned_multiview": 34,
+            "other_json": 0,
+            "corrupt_json": 0,
+            "aggregate_sha256": "e1a57fd6d78550e9e4b79fddcaed69cfa95ae01f201c2584bb874600151f0020",
+            "payload_excluding_lifecycle_sha256": "66c18fa8de3b7905f67c6806d699c5801c1db01eb0da5540bb7acd11795c3682",
+            "lifecycle_metadata_sha256": "7bff608e1179856284a9bca1ed69dac25d5ccb48852947ea88a1694e0b77514e"
+          },
+          "proposals": {
+            "rows": 25,
+            "corrupt_rows": 0,
+            "file_sha256": "4710af10c5b46ade051f341169fd4aa3a5c971d3ffb46a88f5530acdb59f6e71"
+          }
+        },
+        "durable_memory": {
+          "files": 3312,
+          "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+        },
+        "derived_target_sha256": "c2379ef9282e02674d148a723a4d7219fdee70c7db6e190586124b554ac77d63",
+        "metrics": {
+          "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+          "arrivals": 155,
+          "terminal": 83,
+          "pending": 72,
+          "unbounded_pending": 1,
+          "retry_count": 586,
+          "oldest_pending_age_days": 60.624,
+          "oldest_fresh_pending_age_days": 5.731549,
+          "failure_classes": {
+            "none": 83,
+            "provider": 0,
+            "transient": 13,
+            "parse": 1,
+            "conflict": 0,
+            "writer": 10,
+            "semantic_defer": 48
+          },
+          "cohorts": {
+            "legacy": {
+              "arrivals": 144,
+              "terminal": 83,
+              "pending": 61,
+              "conservation_holds": true
+            },
+            "fresh": {
+              "arrivals": 11,
+              "terminal": 0,
+              "pending": 11,
+              "conservation_holds": true
+            }
+          },
+          "queues": {
+            "provisional_correction": {
+              "arrivals": 74,
+              "terminal": 47,
+              "pending": 27,
+              "oldest_pending_age_days": 60.62399959490741,
+              "oldest_fresh_pending_age_days": null
+            },
+            "multiview_pending": {
+              "arrivals": 56,
+              "terminal": 34,
+              "pending": 22,
+              "oldest_pending_age_days": 13.776776099537036,
+              "oldest_fresh_pending_age_days": 5.731549467592592
+            },
+            "entry_lifecycle_proposal": {
+              "arrivals": 25,
+              "terminal": 2,
+              "pending": 23,
+              "oldest_pending_age_days": 18.79384091435185,
+              "oldest_fresh_pending_age_days": 0.6138223842592593
+            }
+          },
+          "continuity_holds": true,
+          "continuity_baseline": "persisted_read_model",
+          "previous_item_count": 154,
+          "missing_previous_item_ids_count": 0,
+          "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "conservation": {
+            "holds": true,
+            "arrivals": 155,
+            "terminal_plus_pending": 155,
+            "delta": 0,
+            "previous_items": 154,
+            "missing_previous_items": 0
+          },
+          "source": {
+            "valid_records": 155,
+            "corrupt_records": 0,
+            "duplicate_item_ids": 0,
+            "proposal_rows": 25,
+            "proposal_row_limit": 1000,
+            "proposal_row_limit_reached": false
+          },
+          "stable_item_ids_sha256": "1d01890866bd8fd1582aab4ae7d91eea7baafb1b98d991274f6ccf8d0f45eda7"
+        }
+      },
+      "actions": {
+        "proposal_reconcile": {
+          "ok": true,
+          "written": true,
+          "rows_total": 25,
+          "migrated_e2": 0,
+          "scheduled_nonterminal": 0,
+          "deadline_expired": 0,
+          "deadline_terminal": 0,
+          "deadline_reopened": 0,
+          "bounded_retry_scheduled": 0,
+          "retry_cap_terminal": 0,
+          "invalid_json_lines": 0
+        },
+        "terminal_sweep": {
+          "ok": true,
+          "scanned": 22,
+          "terminal": 0,
+          "stale": 0,
+          "retry_cap": 0,
+          "writer_cap": 0,
+          "already_terminal": 0,
+          "already_terminal_archived": 0,
+          "deadline_expired": 0,
+          "archive_failed": 0
+        },
+        "source_reconcile": {
+          "ok": true,
+          "updated": 35,
+          "provisional_updated": 0,
+          "multiview_updated": 35,
+          "abandoned_migrated": 0,
+          "deadline_terminal": 0,
+          "provisional_deadline_terminal": 0,
+          "corrupt_records": 0
+        }
+      },
+      "source_transition_observation": {
+        "first_pass_source_action_applied": true,
+        "before_unbounded_pending": 1,
+        "after_unbounded_pending": 0,
+        "unbounded_pending_delta": -1,
+        "source_hashes_unchanged": false,
+        "source_inventory_unchanged": false,
+        "staging_full_hash_changed": true,
+        "proposal_hash_changed": true,
+        "staging_payload_excluding_lifecycle_unchanged": true,
+        "durable_memory_unchanged": true,
+        "hash_change_explanation": "staging source bytes changed only by recorded lifecycle_* metadata reconciliation; payload-excluding-lifecycle hash is unchanged",
+        "proposal_hash_explanation": "entry lifecycle proposal source changed through the recorded proposal reconcile action",
+        "durable_hash_explanation": "projects/knowledge aggregate is outside lifecycle source metadata and remained unchanged"
+      },
+      "after": {
+        "sources": {
+          "staging": {
+            "active_provisional": 74,
+            "active_multiview": 22,
+            "abandoned_multiview": 34,
+            "other_json": 0,
+            "corrupt_json": 0,
+            "aggregate_sha256": "61e679bd3db4b74099a14556809638b5e6b80c509e237cfa9cfdc23279add0ed",
+            "payload_excluding_lifecycle_sha256": "66c18fa8de3b7905f67c6806d699c5801c1db01eb0da5540bb7acd11795c3682",
+            "lifecycle_metadata_sha256": "8a3ebbde963fce77ead1978b3d8898cabd8b755a3cf6f5aded885e6b87c1f94d"
+          },
+          "proposals": {
+            "rows": 25,
+            "corrupt_rows": 0,
+            "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+          }
+        },
+        "durable_memory": {
+          "files": 3312,
+          "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+        },
+        "derived_target_sha256": "3cd7d79aeff368f14a961a69c22522d3973dd620a4da7b6e5080890c931b3881",
+        "metrics": {
+          "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+          "arrivals": 155,
+          "terminal": 83,
+          "pending": 72,
+          "unbounded_pending": 0,
+          "retry_count": 586,
+          "oldest_pending_age_days": 60.624,
+          "oldest_fresh_pending_age_days": 5.731549,
+          "failure_classes": {
+            "none": 83,
+            "provider": 0,
+            "transient": 13,
+            "parse": 1,
+            "conflict": 0,
+            "writer": 10,
+            "semantic_defer": 48
+          },
+          "cohorts": {
+            "legacy": {
+              "arrivals": 144,
+              "terminal": 83,
+              "pending": 61,
+              "conservation_holds": true
+            },
+            "fresh": {
+              "arrivals": 11,
+              "terminal": 0,
+              "pending": 11,
+              "conservation_holds": true
+            }
+          },
+          "queues": {
+            "provisional_correction": {
+              "arrivals": 74,
+              "terminal": 47,
+              "pending": 27,
+              "oldest_pending_age_days": 60.62399959490741,
+              "oldest_fresh_pending_age_days": null
+            },
+            "multiview_pending": {
+              "arrivals": 56,
+              "terminal": 34,
+              "pending": 22,
+              "oldest_pending_age_days": 13.776776099537036,
+              "oldest_fresh_pending_age_days": 5.731549467592592
+            },
+            "entry_lifecycle_proposal": {
+              "arrivals": 25,
+              "terminal": 2,
+              "pending": 23,
+              "oldest_pending_age_days": 18.79384091435185,
+              "oldest_fresh_pending_age_days": 0.6138223842592593
+            }
+          },
+          "continuity_holds": true,
+          "continuity_baseline": "persisted_read_model",
+          "previous_item_count": 155,
+          "missing_previous_item_ids_count": 0,
+          "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "conservation": {
+            "holds": true,
+            "arrivals": 155,
+            "terminal_plus_pending": 155,
+            "delta": 0,
+            "previous_items": 155,
+            "missing_previous_items": 0
+          },
+          "source": {
+            "valid_records": 155,
+            "corrupt_records": 0,
+            "duplicate_item_ids": 0,
+            "proposal_rows": 25,
+            "proposal_row_limit": 1000,
+            "proposal_row_limit_reached": false
+          },
+          "stable_item_ids_sha256": "1d01890866bd8fd1582aab4ae7d91eea7baafb1b98d991274f6ccf8d0f45eda7"
+        }
+      },
+      "idempotency_replay": {
+        "proposal_written": false,
+        "proposal_migrated_e2": 0,
+        "proposal_scheduled_nonterminal": 0,
+        "multiview_terminal": 0,
+        "source_updated": 0,
+        "proposal_deadline_terminal": 0,
+        "proposal_bounded_retry_scheduled": 0,
+        "proposal_retry_cap_terminal": 0,
+        "multiview_deadline_expired": 0,
+        "multiview_already_terminal_archived": 0,
+        "source_deadline_terminal": 0,
+        "read_model_written": false,
+        "metrics_equal": true
+      },
+      "acceptance": {
+        "production_source_selected": true,
+        "source_hash_transition_accounted": true,
+        "source_inventory_transition_accounted": true,
+        "initial_unbounded_pending_converged": true,
+        "staging_payload_excluding_lifecycle_unchanged": true,
+        "durable_memory_unchanged": true,
+        "read_model_is_derived_target_only": true,
+        "total_conservation": true,
+        "legacy_conservation": true,
+        "fresh_conservation": true,
+        "continuity_holds": true,
+        "missing_previous_item_ids_zero": true,
+        "continuity_uses_persisted_baseline": true,
+        "unbounded_pending_zero": true,
+        "source_corrupt_rows_zero": true,
+        "repeat_is_idempotent": true
+      },
+      "artifacts": {
+        "lifecycle_read_model_sha256": "3cd7d79aeff368f14a961a69c22522d3973dd620a4da7b6e5080890c931b3881",
+        "code_sha256": {
+          "extensions/sediment/lifecycle-convergence.ts": "f12a6de2414fc3f1cd43dc0ccbb78b8943bef98c448e32fd91cf72b9f3fc0d33",
+          "extensions/sediment/lifecycle-source-metadata.ts": "0b31b4f5eba03bda84451842cc160b254dfd86c819ce1ecd4c04457640f3b9e4",
+          "extensions/sediment/entry-lifecycle-proposals.ts": "efd7afd6ad471dc04c29c0c92ce2ff4e7ead78a49e786abc4c4a3e912c87f859",
+          "extensions/sediment/multiview-staging-io.ts": "321877a6bdadf5bf7653a86dbc763be6083ae698d64c2a7cf366807bddc27791",
+          "extensions/sediment/multiview-staging-replay.ts": "d35c0969967308709416fc632dc96b221a1792bd7ddee92ba565e18428abbe56",
+          "extensions/sediment/staging-ageout.ts": "3c46c0f9c76934c12263a7247e188a471bd7828c53999a440111ab1ba7656f24",
+          "scripts/smoke-lifecycle-convergence.mjs": "0be08f8849876774cd606277b79054bbf4832fab68eb35e0a4671e15a3a614e7",
+          "scripts/smoke-entry-lifecycle-proposals.mjs": "8b61e5bf1f7065c6d7b2ec26a137b034de115245a782414616b6aff23e684ac5",
+          "scripts/dossier-rm-lifecycle-002-production.mjs": "b6af0a008c5bf1c7ff59e4b66cb4355c8fd40c0a782c04797e893f7dcc3d82e5",
+          "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md": "01068c096954eb79fceb59362bd998b4ac1eb866d9e118f0d3c5180a5e436e9a",
+          "docs/transition-register.machine.json": "39994dea2bf80e579e9b4b976fea49546ecf71652094e22d474172d20f768f10"
+        }
+      },
+      "self_sha256": "0fbd2fdfad3d3f508e6069890d3ec3f79ffbb56b1e3cf1ecbc9400ab627109dd"
+    },
+    "transition": {
+      "historical_source_transition_rows": 35,
+      "historical_multiview_transition_rows": 35,
+      "before_unbounded_pending": 1,
+      "after_unbounded_pending": 0,
+      "before_staging_aggregate_sha256": "e1a57fd6d78550e9e4b79fddcaed69cfa95ae01f201c2584bb874600151f0020",
+      "after_staging_aggregate_sha256": "61e679bd3db4b74099a14556809638b5e6b80c509e237cfa9cfdc23279add0ed",
+      "before_payload_excluding_lifecycle_sha256": "66c18fa8de3b7905f67c6806d699c5801c1db01eb0da5540bb7acd11795c3682",
+      "after_payload_excluding_lifecycle_sha256": "66c18fa8de3b7905f67c6806d699c5801c1db01eb0da5540bb7acd11795c3682",
+      "before_durable_memory_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3",
+      "after_durable_memory_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    },
+    "acceptance": {
+      "source_dossier_self_hash_valid": true,
+      "exact_35_row_source_transition": true,
+      "exact_35_row_multiview_transition": true,
+      "unbounded_pending_converged_1_to_0": true,
+      "staging_full_hash_changed": true,
+      "payload_excluding_lifecycle_unchanged": true,
+      "durable_memory_unchanged": true
+    }
+  },
+  "current_run": {
+    "generated_at": "2026-07-23T02:35:18.081Z",
+    "evidence_mode": "current_idempotent_verification_only",
+    "historical_35_row_migration_claimed": false,
+    "source_action_classification": {
+      "action_applied": false,
+      "proposal_file_rewritten": false,
+      "multiview_terminal_archived": 0,
+      "multiview_existing_terminal_archived": 0,
+      "source_records_updated": 0,
+      "source_deadline_terminal": 0,
+      "derived_read_model_written": true,
+      "derived_read_model_write_reason": "real wall-clock generated_at/as_of refresh and any recorded source transition"
+    },
+    "before": {
+      "sources": {
+        "staging": {
+          "active_provisional": 74,
+          "active_multiview": 22,
+          "abandoned_multiview": 34,
+          "other_json": 0,
+          "corrupt_json": 0,
+          "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77",
+          "payload_excluding_lifecycle_sha256": "e77fc6c956a059149cd805e64861fb3d609aa45a40479d8fef50fed9c351b59a",
+          "payload_content_multiset_excluding_lifecycle_sha256": "ac29530db918df8d3df10d2c6dabf7ef6ad2b291a89d3a5544f8add0c4e51911",
+          "lifecycle_metadata_sha256": "9c3ce97c2188abf538d566650eee784a128ba8006e297911dadb9d6499f091c5"
+        },
+        "proposals": {
+          "rows": 25,
+          "corrupt_rows": 0,
+          "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+        }
+      },
+      "durable_memory": {
+        "files": 3312,
+        "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+      },
+      "derived_target_sha256": "efcde2dd8c5f353dbaa7f18d45d03ccf7a75aaf3fe41180f0eac19abb1585975",
+      "metrics": {
+        "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+        "arrivals": 155,
+        "terminal": 83,
+        "pending": 72,
+        "unbounded_pending": 0,
+        "retry_count": 592,
+        "oldest_pending_age_days": 60.658366,
+        "oldest_fresh_pending_age_days": 5.765916,
+        "failure_classes": {
+          "none": 83,
+          "provider": 0,
+          "transient": 12,
+          "parse": 1,
+          "conflict": 0,
+          "writer": 11,
+          "semantic_defer": 48
+        },
+        "cohorts": {
+          "legacy": {
+            "arrivals": 144,
+            "terminal": 83,
+            "pending": 61,
+            "conservation_holds": true
+          },
+          "fresh": {
+            "arrivals": 11,
+            "terminal": 0,
+            "pending": 11,
+            "conservation_holds": true
+          }
+        },
+        "queues": {
+          "provisional_correction": {
+            "arrivals": 74,
+            "terminal": 47,
+            "pending": 27,
+            "oldest_pending_age_days": 60.65836640046296,
+            "oldest_fresh_pending_age_days": null
+          },
+          "multiview_pending": {
+            "arrivals": 56,
+            "terminal": 34,
+            "pending": 22,
+            "oldest_pending_age_days": 13.811142905092593,
+            "oldest_fresh_pending_age_days": 5.765916273148148
+          },
+          "entry_lifecycle_proposal": {
+            "arrivals": 25,
+            "terminal": 2,
+            "pending": 23,
+            "oldest_pending_age_days": 18.828207719907407,
+            "oldest_fresh_pending_age_days": 0.6481891898148148
+          }
+        },
+        "continuity_holds": true,
+        "continuity_baseline": "persisted_read_model",
+        "previous_item_count": 155,
+        "missing_previous_item_ids_count": 0,
+        "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "conservation": {
+          "holds": true,
+          "arrivals": 155,
+          "terminal_plus_pending": 155,
+          "delta": 0,
+          "previous_items": 155,
+          "missing_previous_items": 0
+        },
+        "source": {
+          "valid_records": 155,
+          "corrupt_records": 0,
+          "duplicate_item_ids": 0,
+          "proposal_rows": 25,
+          "proposal_row_limit": 1000,
+          "proposal_row_limit_reached": false
+        },
+        "stable_item_ids_sha256": "1d01890866bd8fd1582aab4ae7d91eea7baafb1b98d991274f6ccf8d0f45eda7"
       }
     },
-    "durable_memory": {
-      "files": 3312,
-      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
-    },
-    "derived_target_sha256": "1c9a196eb339e616d1c8cb98d3801f98af6433ffb2d7c6b4c1d9a8305e7a202c",
-    "metrics": {
-      "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
-      "arrivals": 154,
-      "terminal": 83,
-      "pending": 71,
-      "unbounded_pending": 0,
-      "retry_count": 583,
-      "oldest_pending_age_days": 60.574741,
-      "oldest_fresh_pending_age_days": 5.682291,
-      "failure_classes": {
-        "none": 83,
-        "provider": 0,
-        "transient": 13,
-        "parse": 1,
-        "conflict": 0,
-        "writer": 9,
-        "semantic_defer": 48
+    "actions": {
+      "before_read_model_build": {
+        "ok": true,
+        "written": true
       },
-      "cohorts": {
-        "legacy": {
-          "arrivals": 144,
-          "terminal": 83,
-          "pending": 61,
-          "conservation_holds": true
-        },
-        "fresh": {
-          "arrivals": 10,
-          "terminal": 0,
-          "pending": 10,
-          "conservation_holds": true
-        }
+      "proposal_reconcile": {
+        "ok": true,
+        "written": false,
+        "rows_total": 25,
+        "migrated_e2": 0,
+        "scheduled_nonterminal": 0,
+        "deadline_expired": 0,
+        "deadline_terminal": 0,
+        "deadline_reopened": 0,
+        "bounded_retry_scheduled": 0,
+        "retry_cap_terminal": 0,
+        "invalid_json_lines": 0
       },
-      "queues": {
-        "provisional_correction": {
-          "arrivals": 74,
-          "terminal": 47,
-          "pending": 27,
-          "oldest_pending_age_days": 60.57474097222222,
-          "oldest_fresh_pending_age_days": null
-        },
-        "multiview_pending": {
-          "arrivals": 55,
-          "terminal": 34,
-          "pending": 21,
-          "oldest_pending_age_days": 13.727517476851851,
-          "oldest_fresh_pending_age_days": 5.682290844907407
-        },
-        "entry_lifecycle_proposal": {
-          "arrivals": 25,
-          "terminal": 2,
-          "pending": 23,
-          "oldest_pending_age_days": 18.744582291666667,
-          "oldest_fresh_pending_age_days": 0.5645637615740741
-        }
+      "terminal_sweep": {
+        "ok": true,
+        "scanned": 22,
+        "terminal": 0,
+        "stale": 0,
+        "retry_cap": 0,
+        "writer_cap": 0,
+        "already_terminal": 0,
+        "already_terminal_archived": 0,
+        "deadline_expired": 0,
+        "archive_failed": 0
       },
-      "continuity_holds": true,
-      "continuity_baseline": "persisted_read_model",
-      "previous_item_count": 154,
-      "missing_previous_item_ids_count": 0,
-      "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "conservation": {
-        "holds": true,
-        "arrivals": 154,
-        "terminal_plus_pending": 154,
-        "delta": 0,
-        "previous_items": 154,
-        "missing_previous_items": 0
+      "source_reconcile": {
+        "ok": true,
+        "updated": 0,
+        "provisional_updated": 0,
+        "multiview_updated": 0,
+        "abandoned_migrated": 0,
+        "deadline_terminal": 0,
+        "provisional_deadline_terminal": 0,
+        "corrupt_records": 0
       },
-      "source": {
-        "valid_records": 154,
-        "corrupt_records": 0,
-        "duplicate_item_ids": 0,
-        "proposal_rows": 25,
-        "proposal_row_limit": 1000,
-        "proposal_row_limit_reached": false
-      },
-      "stable_item_ids_sha256": "b541fb16e8c96f8714a9551f9f538c68324efd4b392d7081b87e3c77b87aa6c7"
-    }
-  },
-  "actions": {
-    "proposal_reconcile": {
-      "ok": true,
-      "written": false,
-      "rows_total": 25,
-      "migrated_e2": 0,
-      "scheduled_nonterminal": 0,
-      "deadline_expired": 0,
-      "deadline_terminal": 0,
-      "deadline_reopened": 0,
-      "bounded_retry_scheduled": 0,
-      "retry_cap_terminal": 0,
-      "invalid_json_lines": 0
-    },
-    "terminal_sweep": {
-      "ok": true,
-      "scanned": 21,
-      "terminal": 0,
-      "stale": 0,
-      "retry_cap": 0,
-      "writer_cap": 0,
-      "already_terminal": 0,
-      "already_terminal_archived": 0,
-      "deadline_expired": 0,
-      "archive_failed": 0
-    },
-    "source_reconcile": {
-      "ok": true,
-      "updated": 0,
-      "provisional_updated": 0,
-      "multiview_updated": 0,
-      "abandoned_migrated": 0,
-      "deadline_terminal": 0,
-      "provisional_deadline_terminal": 0,
-      "corrupt_records": 0
-    }
-  },
-  "source_transition_observation": {
-    "first_pass_source_action_applied": false,
-    "source_hashes_unchanged": true,
-    "source_inventory_unchanged": true,
-    "durable_memory_unchanged": true
-  },
-  "after": {
-    "sources": {
-      "staging": {
-        "active_provisional": 74,
-        "active_multiview": 21,
-        "abandoned_multiview": 34,
-        "other_json": 0,
-        "corrupt_json": 0,
-        "aggregate_sha256": "f1f1bb0d3370c516fb40c6312334fa6bc5e190135130cb15b4b98ff39ee8b304"
-      },
-      "proposals": {
-        "rows": 25,
-        "corrupt_rows": 0,
-        "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
+      "after_read_model_build": {
+        "ok": true,
+        "written": false
       }
     },
-    "durable_memory": {
-      "files": 3312,
-      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    "source_transition_observation": {
+      "initial_unbounded_pending_present": false,
+      "before_unbounded_pending": 0,
+      "after_unbounded_pending": 0,
+      "unbounded_pending_delta": 0,
+      "source_hashes_unchanged": true,
+      "source_inventory_unchanged": true,
+      "staging_full_hash_changed": false,
+      "proposal_hash_changed": false,
+      "staging_payload_path_inventory_excluding_lifecycle_unchanged": true,
+      "staging_payload_content_multiset_excluding_lifecycle_unchanged": true,
+      "durable_memory_unchanged": true,
+      "staging_hash_explanation": "staging source bytes and locations were already converged; no staging mutation occurred",
+      "proposal_hash_explanation": "entry lifecycle proposal source was unchanged",
+      "durable_hash_explanation": "projects/knowledge aggregate is outside lifecycle source metadata and remained unchanged"
     },
-    "derived_target_sha256": "ca7d96d4e6a1575a10ebbc0be63851ec68aa88fa5e134aeb07db853030adefb9",
-    "metrics": {
-      "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
-      "arrivals": 154,
-      "terminal": 83,
-      "pending": 71,
-      "unbounded_pending": 0,
-      "retry_count": 583,
-      "oldest_pending_age_days": 60.574741,
-      "oldest_fresh_pending_age_days": 5.682291,
-      "failure_classes": {
-        "none": 83,
-        "provider": 0,
-        "transient": 13,
-        "parse": 1,
-        "conflict": 0,
-        "writer": 9,
-        "semantic_defer": 48
-      },
-      "cohorts": {
-        "legacy": {
-          "arrivals": 144,
-          "terminal": 83,
-          "pending": 61,
-          "conservation_holds": true
+    "after": {
+      "sources": {
+        "staging": {
+          "active_provisional": 74,
+          "active_multiview": 22,
+          "abandoned_multiview": 34,
+          "other_json": 0,
+          "corrupt_json": 0,
+          "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77",
+          "payload_excluding_lifecycle_sha256": "e77fc6c956a059149cd805e64861fb3d609aa45a40479d8fef50fed9c351b59a",
+          "payload_content_multiset_excluding_lifecycle_sha256": "ac29530db918df8d3df10d2c6dabf7ef6ad2b291a89d3a5544f8add0c4e51911",
+          "lifecycle_metadata_sha256": "9c3ce97c2188abf538d566650eee784a128ba8006e297911dadb9d6499f091c5"
         },
-        "fresh": {
-          "arrivals": 10,
-          "terminal": 0,
-          "pending": 10,
-          "conservation_holds": true
+        "proposals": {
+          "rows": 25,
+          "corrupt_rows": 0,
+          "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f"
         }
       },
-      "queues": {
-        "provisional_correction": {
-          "arrivals": 74,
-          "terminal": 47,
-          "pending": 27,
-          "oldest_pending_age_days": 60.57474097222222,
-          "oldest_fresh_pending_age_days": null
-        },
-        "multiview_pending": {
-          "arrivals": 55,
-          "terminal": 34,
-          "pending": 21,
-          "oldest_pending_age_days": 13.727517476851851,
-          "oldest_fresh_pending_age_days": 5.682290844907407
-        },
-        "entry_lifecycle_proposal": {
-          "arrivals": 25,
-          "terminal": 2,
-          "pending": 23,
-          "oldest_pending_age_days": 18.744582291666667,
-          "oldest_fresh_pending_age_days": 0.5645637615740741
-        }
+      "durable_memory": {
+        "files": 3312,
+        "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
       },
+      "derived_target_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+      "metrics": {
+        "cohort_cutover_at": "2026-07-16T18:55:00.000Z",
+        "arrivals": 155,
+        "terminal": 83,
+        "pending": 72,
+        "unbounded_pending": 0,
+        "retry_count": 592,
+        "oldest_pending_age_days": 60.658366,
+        "oldest_fresh_pending_age_days": 5.765916,
+        "failure_classes": {
+          "none": 83,
+          "provider": 0,
+          "transient": 12,
+          "parse": 1,
+          "conflict": 0,
+          "writer": 11,
+          "semantic_defer": 48
+        },
+        "cohorts": {
+          "legacy": {
+            "arrivals": 144,
+            "terminal": 83,
+            "pending": 61,
+            "conservation_holds": true
+          },
+          "fresh": {
+            "arrivals": 11,
+            "terminal": 0,
+            "pending": 11,
+            "conservation_holds": true
+          }
+        },
+        "queues": {
+          "provisional_correction": {
+            "arrivals": 74,
+            "terminal": 47,
+            "pending": 27,
+            "oldest_pending_age_days": 60.65836640046296,
+            "oldest_fresh_pending_age_days": null
+          },
+          "multiview_pending": {
+            "arrivals": 56,
+            "terminal": 34,
+            "pending": 22,
+            "oldest_pending_age_days": 13.811142905092593,
+            "oldest_fresh_pending_age_days": 5.765916273148148
+          },
+          "entry_lifecycle_proposal": {
+            "arrivals": 25,
+            "terminal": 2,
+            "pending": 23,
+            "oldest_pending_age_days": 18.828207719907407,
+            "oldest_fresh_pending_age_days": 0.6481891898148148
+          }
+        },
+        "continuity_holds": true,
+        "continuity_baseline": "persisted_read_model",
+        "previous_item_count": 155,
+        "missing_previous_item_ids_count": 0,
+        "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "conservation": {
+          "holds": true,
+          "arrivals": 155,
+          "terminal_plus_pending": 155,
+          "delta": 0,
+          "previous_items": 155,
+          "missing_previous_items": 0
+        },
+        "source": {
+          "valid_records": 155,
+          "corrupt_records": 0,
+          "duplicate_item_ids": 0,
+          "proposal_rows": 25,
+          "proposal_row_limit": 1000,
+          "proposal_row_limit_reached": false
+        },
+        "stable_item_ids_sha256": "1d01890866bd8fd1582aab4ae7d91eea7baafb1b98d991274f6ccf8d0f45eda7"
+      }
+    },
+    "idempotency_replay": {
+      "proposal_written": false,
+      "proposal_migrated_e2": 0,
+      "proposal_scheduled_nonterminal": 0,
+      "multiview_terminal": 0,
+      "source_updated": 0,
+      "proposal_deadline_terminal": 0,
+      "proposal_bounded_retry_scheduled": 0,
+      "proposal_retry_cap_terminal": 0,
+      "multiview_deadline_expired": 0,
+      "multiview_already_terminal_archived": 0,
+      "source_deadline_terminal": 0,
+      "read_model_written": false,
+      "metrics_equal": true
+    },
+    "acceptance": {
+      "production_source_selected": true,
+      "source_hash_transition_matches_current_actions": true,
+      "source_inventory_transition_matches_current_actions": true,
+      "derived_target_hash_transition_matches_read_model_actions": true,
+      "initial_unbounded_pending_converged_or_not_applicable": true,
+      "staging_payload_content_excluding_lifecycle_unchanged": true,
+      "durable_memory_unchanged": true,
+      "read_model_is_derived_target_only": true,
+      "total_conservation": true,
+      "legacy_conservation": true,
+      "fresh_conservation": true,
       "continuity_holds": true,
-      "continuity_baseline": "persisted_read_model",
-      "previous_item_count": 154,
-      "missing_previous_item_ids_count": 0,
-      "missing_previous_item_ids_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "conservation": {
-        "holds": true,
-        "arrivals": 154,
-        "terminal_plus_pending": 154,
-        "delta": 0,
-        "previous_items": 154,
-        "missing_previous_items": 0
-      },
-      "source": {
-        "valid_records": 154,
-        "corrupt_records": 0,
-        "duplicate_item_ids": 0,
-        "proposal_rows": 25,
-        "proposal_row_limit": 1000,
-        "proposal_row_limit_reached": false
-      },
-      "stable_item_ids_sha256": "b541fb16e8c96f8714a9551f9f538c68324efd4b392d7081b87e3c77b87aa6c7"
+      "missing_previous_item_ids_zero": true,
+      "continuity_uses_persisted_baseline": true,
+      "unbounded_pending_zero": true,
+      "source_corrupt_rows_zero": true,
+      "repeat_is_idempotent": true
     }
-  },
-  "idempotency_replay": {
-    "proposal_written": false,
-    "proposal_migrated_e2": 0,
-    "proposal_scheduled_nonterminal": 0,
-    "multiview_terminal": 0,
-    "source_updated": 0,
-    "proposal_deadline_terminal": 0,
-    "proposal_bounded_retry_scheduled": 0,
-    "proposal_retry_cap_terminal": 0,
-    "multiview_deadline_expired": 0,
-    "multiview_already_terminal_archived": 0,
-    "source_deadline_terminal": 0,
-    "read_model_written": false,
-    "metrics_equal": true
   },
   "acceptance": {
-    "production_source_selected": true,
-    "source_hash_transition_accounted": true,
-    "source_inventory_transition_accounted": true,
-    "durable_memory_unchanged": true,
-    "read_model_is_derived_target_only": true,
-    "total_conservation": true,
-    "legacy_conservation": true,
-    "fresh_conservation": true,
-    "continuity_holds": true,
-    "missing_previous_item_ids_zero": true,
-    "continuity_uses_persisted_baseline": true,
-    "unbounded_pending_zero": true,
-    "source_corrupt_rows_zero": true,
-    "repeat_is_idempotent": true
+    "historical_retained_transition_valid": true,
+    "current_run_valid": true,
+    "current_run_does_not_claim_historical_migration": true,
+    "code_hashes_all_present": true
   },
   "artifacts": {
-    "lifecycle_read_model_sha256": "ca7d96d4e6a1575a10ebbc0be63851ec68aa88fa5e134aeb07db853030adefb9",
+    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
     "code_sha256": {
-      "extensions/sediment/lifecycle-convergence.ts": "488a7aa324bdaceae87be78f521e1d762f72555bd1378e389773a9fcfad95cc9",
+      "extensions/sediment/lifecycle-convergence.ts": "067b9bdfd5976b4e7ab31443fadf748c4d4e321273f3aa9f5f38eb3a36189623",
+      "extensions/sediment/lifecycle-source-metadata.ts": "281fffd20dc457d42d96c9632bbee8daab7b56c605ecf5d324b95faf4d813573",
       "extensions/sediment/entry-lifecycle-proposals.ts": "efd7afd6ad471dc04c29c0c92ce2ff4e7ead78a49e786abc4c4a3e912c87f859",
-      "extensions/sediment/multiview-staging-io.ts": "bc03e1e5754f9b7f96f822415e62cb2173eb30f27a863cc56609b915cb509426",
-      "extensions/sediment/multiview-staging-replay.ts": "a583a9da78ccdd97158325649f79cd3fb99e39549bc498f12bd16963ae6b6248",
+      "extensions/sediment/multiview-staging-io.ts": "321877a6bdadf5bf7653a86dbc763be6083ae698d64c2a7cf366807bddc27791",
+      "extensions/sediment/multiview-staging-replay.ts": "d35c0969967308709416fc632dc96b221a1792bd7ddee92ba565e18428abbe56",
       "extensions/sediment/staging-ageout.ts": "3c46c0f9c76934c12263a7247e188a471bd7828c53999a440111ab1ba7656f24",
-      "scripts/smoke-lifecycle-convergence.mjs": "d3b8deca7c16f80789d65ef9533f606e4857995f5e83fd1683c603814fec23be",
+      "scripts/smoke-lifecycle-convergence.mjs": "da18891c8452c62dd60bdc586245fbd077ba61d44326c9790df188bd0af8b341",
       "scripts/smoke-entry-lifecycle-proposals.mjs": "8b61e5bf1f7065c6d7b2ec26a137b034de115245a782414616b6aff23e684ac5",
-      "scripts/dossier-rm-lifecycle-002-production.mjs": "6e6eb0271ebb1d2f490aa4009701bddcf90cb3a2e5db0b26fa3ed5aa9f97fc99",
-      "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md": "85303a9045fd27e908248b3f48b19eb60179f316e0fb14d1cd4490aeea4b5d85",
-      "docs/transition-register.machine.json": "fcfb1659ad0e155e434ed842b7e2b46e593928b6ce853142f410cf7f037dccd4"
-    }
+      "scripts/dossier-rm-lifecycle-002-production.mjs": "095905d97d72f2908366cd0b2e9cf601ab1dc3f7ba68a1e6e2364d72d64a5baf",
+      "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md": "e4552183ed332edded85bd6b103809f98720e02646445ffc40544fab86550cf4",
+      "docs/transition-register.machine.json": "e028c063cbd30740e973af386e478fb02900daaf13fe45d8face6c6c9551e4af"
+    },
+    "code_aggregate_sha256_convention": "sha256(join('\\n', codeFiles in recorded insertion order as relativePath + NUL + file sha256))",
+    "code_aggregate_sha256": "26e33055a007ecb4454361ab65ea71cce1629a23d1f55040086d7ab449d0fee2"
   },
-  "self_sha256": "7cf57e3617fb43fe14f0cc9dce6c8923ec990b6d74f1ae05189fa8efe9dce96e"
+  "self_sha256": "81f34457f6265c4997092624ee7b3b3143ffae1d6f3dfaff10c400574c4092e7"
 }

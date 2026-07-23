@@ -1,0 +1,146 @@
+{
+  "schema_version": "rm-forget-001-real-apply-gate-production/v1",
+  "generated_at": "2026-07-23T02:35:37.307Z",
+  "evidence_mode": "production_configuration_and_zero_write_verification_only",
+  "scope": "fail-closed forgetting real-apply gate hold",
+  "privacy": "aggregate counts and SHA-256 only; no slug, body, source path, candidate text, or frontmatter",
+  "self_sha256_convention": "sha256(UTF-8 recursive-key-sorted compact JSON before self_sha256; arrays preserve order)",
+  "production_truth": {
+    "source_selection": "default_user_global_production",
+    "dedicated_gate_configured_present": true,
+    "dedicated_gate_configured_type": "boolean",
+    "dedicated_gate_effective_enabled": false,
+    "dedicated_gate_schema_type": "boolean",
+    "dedicated_gate_schema_default": false,
+    "global_write_gate_configured_present": true,
+    "global_write_gate_configured_type": "boolean",
+    "global_write_authority_effective_enabled": true,
+    "global_write_gate_schema_enum": [
+      true,
+      false,
+      "staging-only",
+      "staging",
+      "true",
+      "false"
+    ],
+    "global_write_authority_semantics": "effective sediment auto-write true: boolean true or legacy string 'true'; staging-only/false/missing/malformed are closed",
+    "real_apply_authority_semantics": "literal boolean memory.forgetting.executorRealApplyEnabled===true AND effective sediment.autoLlmWriteEnabled=true",
+    "real_apply_authority_effective_enabled": false,
+    "real_apply_authority_effective_closed": true,
+    "forgetting_evaluation_enabled": true,
+    "archive_reactivation_authority": "existing sediment.autoLlmWriteEnabled semantics",
+    "archive_reactivation_authority_independent_of_dedicated_gate": true,
+    "eligible_current": 0,
+    "eligible_e1_current": 0,
+    "eligible_non_e1_current": 0,
+    "eligible_long_tail_e1_current": 0
+  },
+  "before": {
+    "settings_sha256": "9b60663651ab32a886b260c6d82a5e7b8e8f0ed58b3270c83d9f7a1b6623011a",
+    "staging_sources": {
+      "files": 130,
+      "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77"
+    },
+    "proposals": {
+      "rows": 25,
+      "corrupt_rows": 0,
+      "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f",
+      "pending_execution_ready_archive": 0,
+      "e1_execution_ready_archive": 0,
+      "non_e1_execution_ready_archive": 0,
+      "long_tail_e1_execution_ready_archive": 0
+    },
+    "durable_memory": {
+      "files": 3312,
+      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    },
+    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+    "demote_ledger": {
+      "rows": 1,
+      "corrupt_rows": 0,
+      "file_sha256": "bb53a993ee92d0c45f5b029efae10f8be06e0ba9e9dd349cc8548a1107c52e69"
+    },
+    "reactivation_ledger": {
+      "rows": 729,
+      "corrupt_rows": 0,
+      "file_sha256": "450bc97673d131a4cf40edd958971d53fdc4762439e3187ff0e563ba3f97e298"
+    }
+  },
+  "lifecycle_read_only_hook": {
+    "ok": true,
+    "persist": false,
+    "written": false,
+    "arrivals": 155,
+    "terminal": 83,
+    "pending": 72,
+    "unbounded_pending": 0,
+    "corrupt_records": 0,
+    "stable_item_ids_sha256": "1d01890866bd8fd1582aab4ae7d91eea7baafb1b98d991274f6ccf8d0f45eda7"
+  },
+  "after": {
+    "settings_sha256": "9b60663651ab32a886b260c6d82a5e7b8e8f0ed58b3270c83d9f7a1b6623011a",
+    "staging_sources": {
+      "files": 130,
+      "aggregate_sha256": "c3d239da32ab39da04e852cff95af8903a8e841ffb3fd5c2c744bab50a5d1d77"
+    },
+    "proposals": {
+      "rows": 25,
+      "corrupt_rows": 0,
+      "file_sha256": "db963c8226b78bb4ffe8b289ea98a7f4321519baf4b223c1729a4bb3ce55557f",
+      "pending_execution_ready_archive": 0,
+      "e1_execution_ready_archive": 0,
+      "non_e1_execution_ready_archive": 0,
+      "long_tail_e1_execution_ready_archive": 0
+    },
+    "durable_memory": {
+      "files": 3312,
+      "aggregate_sha256": "f00e801fd1476303dbfc5d522ca5fdb5aa4df35e8ed5add894786f380b5a8ad3"
+    },
+    "lifecycle_read_model_sha256": "6741312846a57d486730f45beee363071933c7b8833abe413ef7069058682dc2",
+    "demote_ledger": {
+      "rows": 1,
+      "corrupt_rows": 0,
+      "file_sha256": "bb53a993ee92d0c45f5b029efae10f8be06e0ba9e9dd349cc8548a1107c52e69"
+    },
+    "reactivation_ledger": {
+      "rows": 729,
+      "corrupt_rows": 0,
+      "file_sha256": "450bc97673d131a4cf40edd958971d53fdc4762439e3187ff0e563ba3f97e298"
+    }
+  },
+  "boundaries": {
+    "production_demote_executed": false,
+    "durable_memory_mutated": false,
+    "proposal_source_mutated": false,
+    "forgetting_gate_opened": false,
+    "archive_reactivation_disabled": false,
+    "lane_g_created": false,
+    "human_review_queue_created": false,
+    "hard_delete_used": false,
+    "production_candidate_mutation_blocking_claimed": false,
+    "dynamic_candidate_mutation_blocking_evidence": "focused automated smoke only"
+  },
+  "acceptance": {
+    "production_settings_selected": true,
+    "dedicated_gate_effective_closed": true,
+    "global_write_authority_matches_effective_auto_write_semantics": true,
+    "global_write_schema_accepts_boolean_and_legacy_string_true": true,
+    "dual_gate_real_apply_effective_closed": true,
+    "gate_schema_default_false": true,
+    "eligible_current_zero": true,
+    "eligible_e1_current_zero": true,
+    "staging_source_hash_unchanged": true,
+    "proposal_hash_unchanged": true,
+    "durable_hash_unchanged": true,
+    "lifecycle_target_hash_unchanged": true,
+    "demote_ledger_hash_unchanged": true,
+    "reactivation_ledger_hash_unchanged": true,
+    "lifecycle_hook_read_only_ran": true,
+    "all_production_sources_unchanged": true,
+    "no_real_candidate_claim": true
+  },
+  "artifacts": {
+    "implementation_code_aggregate_sha256": "af20b20fc6c6607596127d1e325447009923bfaea22544843f95a55a2584d1c6"
+  },
+  "self_sha256": "53daab095de19ccf9b454ac4d57019c57831b33e3aa5ae780768e6a0b20c471b"
+}

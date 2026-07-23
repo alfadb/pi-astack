@@ -7,15 +7,19 @@ status: accepted
 
 > 本 ADR 深化 [ADR 0024 §5.6](./0024-second-brain-from-natural-conversation.md#56-自治归档--回滚窗口) / [ADR 0025 §4.6](./0025-sediment-meta-curator-subsystem.md#46-静默归档--回滚窗口)（已归档至 abrain）「自治归档 + 回滚窗口」与 roadmap 的 INV-R12 auto-demote 方向:把「遗忘」从被动滞留 + 人类可调策略,收敛为**人类设零可调策略、大脑全自治自标定、一条不可调结构下限(可逆基座)作为回退保障**。设计输入是 5×T0 跨厂商盲评(设计) + 3×T0 文本盲审(R2)两轮(模型清单与完整记录见 git history / `docs/audits/`),证据摘要见 §4。实施与 instrumentation 埋点见 [`docs/roadmap.md`](../roadmap.md),不在本 ADR 正文。
 
-> **Revised 2026-07-09**：settings 形状已由四开关修订为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两开关；功能/需求级记录见 [feature-changelog.md 2026-07-09 条目](../feature-changelog.md#2026-07-09--accepted--遗忘子系统收敛与-docs-冲突裁定)。
+> **Revised 2026-07-23**：`enabled` 与 `instrumentation` 仍是遗忘语义/观测开关；新增独立 infra safety gate `memory.forgetting.executorRealApplyEnabled`，默认 false 且仅字面布尔 true 可提供专用授权。真实 callback 注入还必须同时满足既有 effective auto-write 语义下的 `sediment.autoLlmWriteEnabled=true` 全局写 authority：布尔 true 与合法 legacy 字符串 `"true"` 均有效；`staging-only`、false/`"false"`、缺失和 malformed 均关闭。任一门不能单独授权。它们不是人类可调遗忘策略。功能/需求级记录见 [feature changelog](../feature-changelog.md)。
 
 ## 修订记录
 
+2026-07-23 real-apply safety gate：`memory.forgetting.enabled=true` 只维持 decay evaluation、frontmatter bridge、E2 reconcile、lifecycle convergence refresh 与 proposal planning/dry-run；真实 `archiveEntry/updateProjectEntry` 注入同时要求字面布尔 `executorRealApplyEnabled===true` 和 effective `sediment.autoLlmWriteEnabled=true`。前者是专用授权，后者沿用既有 auto-write resolver/schema 语义作为全局写急停：布尔 true 与 legacy `"true"` 有效，`staging-only`、false/`"false"`、缺失和 malformed 均 fail-closed；dedicated gate 的字符串仍始终无效。agent_end 编排和 executor 双层检查，hold 分别审计 `executor_real_apply_gate_closed` 或 `global_write_authority_gate_closed`，不得写成 `real_apply`。双门对 E1 所有 kind（含长尾）与非 E1 一致，不创建 Lane G 或人审队列；archive reactivation 仍使用既有 `sediment.autoLlmWriteEnabled` 逻辑，不受 dedicated gate 影响。
+
+2026-07-23 authorization boundary：`RM-FORGET-001` 仍 blocked/gated，不因 safety gate ship 而 completed。解除 real apply 必须同时完成 RM-FORGET gate dossier、真实 recall/none pre-demote baseline、闭合 30d observation/reactivation window、long-tail reviewer 与 evidence gates，并取得 fresh independent authorization。当前 production eligible=0 的 dossier 只证明配置关闭与零写；动态 candidate blocking 由自动测试补充，不冒充 production demote 验收。staging hard-delete 继续 blocked。
+
 2026-07-09 walk-back：本次修订基于 5×T0 跨厂商三轮一致共识，收敛前向遗忘的授权面、观测面和验收顺序；不得把本记录解释为重新开放自治物理删除或人工记忆管理。
 
-2026-07-09 walk-back：settings 四开关 `instrumentation` / `decayShadow` / `demoteShadow` / `autoDemote` 收敛为两开关 `memory.forgetting.enabled` + `memory.forgetting.instrumentation`，二者正交独立。理由是原四开关实际构成依赖链而非隔离面，`forgetting-executor` 中 `demoteShadow` 作为主闸会短路下游；生产 dry-run 档会制造观察/生产配置漂移，典型事故形态是 planned_count=0；真实安全地板来自 build-time 结构常量与 archived 可逆下限。strict-off 语义为：`enabled=false` 时不调度 decay 评估、零遗忘侧写入、零 mutation；`instrumentation` 控制的观测写入独立于此，不列入遗忘侧写入。
+2026-07-09 walk-back：settings 四个策略链开关 `instrumentation` / `decayShadow` / `demoteShadow` / `autoDemote` 收敛为两个语义开关 `memory.forgetting.enabled` + `memory.forgetting.instrumentation`，二者正交独立。理由是原四开关实际构成依赖链而非隔离面，`forgetting-executor` 中 `demoteShadow` 作为主闸会短路下游；生产 dry-run 档会制造观察/生产配置漂移，典型事故形态是 planned_count=0；真实安全地板来自 build-time 结构常量与 archived 可逆下限。strict-off 语义为：`enabled=false` 时不调度 decay 评估、零遗忘侧写入、零 mutation；`instrumentation` 控制的观测写入独立于此，不列入遗忘侧写入。2026-07-23 新增的 `executorRealApplyEnabled` 是有明确移除条件的 infra authorization gate，不恢复四段策略模式。
 
-2026-07-09 walk-back：archive-reactivation 链路独立于 forgetting 开关，由 `sediment.autoLlmWriteEnabled` 管理；复活通道不得被遗忘总开关连带关闭，否则会削弱 INV-REVERSIBLE-AUTONOMY 的运行时复活面。
+2026-07-09 walk-back：archive-reactivation 链路独立于 forgetting 开关，由 `sediment.autoLlmWriteEnabled` 管理；复活通道不得被遗忘总开关或 2026-07-23 real-apply gate 连带关闭，否则会削弱 INV-REVERSIBLE-AUTONOMY 的运行时复活面。
 
 2026-07-09 walk-back：遗忘放开采用 evidence-first + kind prior。自动 `execution_ready` 的硬门为 `op=archive` 且 `demote_evidence_type ∈ {superseded_by, contradicted, version_stale}`；disuse、usage-only、kind_atypical 永不单独触发。`KIND_EVIDENCE_STRENGTH` 是 kind→证据强度的 schema 化 infra 白名单：fact/smell 允许 version_stale 类弱信号；anti-pattern/maxim/preference/decision/pattern 归入长尾桶，必须有强 supersede 信号并经大脑内部 reviewer lane，lane 未实现前排除自动 demote，proposal 留 ledger。`review_required` 指自治 reviewer 复核而非人审（INV-INVISIBILITY）。executor 入口从磁盘重读 kind 防伪，`kind_mismatch` 进入 `review_required` 并落 ledger。E1 确定性 frontmatter 通道对全 kind 照常生效。E2（superseded 无有效 successor）与 kind 无关，保持 `review_required`，出路为 curator 修边 lane。相对 E1 全 kind 放行现状，长尾 kind 门是收紧；kind 分层是 v1 代理维度。
 

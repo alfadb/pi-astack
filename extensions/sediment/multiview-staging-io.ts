@@ -17,12 +17,11 @@
  * context-only split. See the 2026-05-24 discovery commit
  * (b08ad0d) for the full reasoning.
  *
- * Process-level concurrency: pi runs as a single process per device, so
- * multiple writers racing the same staging slug is also out of scope.
- * If a user runs two pi instances on one machine they may get duplicate
- * staging entries (each instance hashes a different timestamp into the
- * slug); replay still works because each entry is processed at most
- * once before being deleted.
+ * Process-level concurrency: source creation, lifecycle reconciliation, and
+ * terminal archive share the multiview mutation lock. A new source receives
+ * its complete lifecycle metadata and file bytes in one locked atomic write,
+ * so a concurrent reconcile cannot observe an unbounded partial record.
+ * Separate candidates may still use different timestamp-derived slugs.
  *
  * Hard limits enforced here (see multiview-staging-types.ts constants):
  *   - PROPOSER_RAW_TEXT_CAP (4000) applied to:
@@ -49,6 +48,7 @@ import {
   PROPOSER_RAW_TEXT_CAP,
   validateMultiviewPendingConsistency,
 } from "./multiview-staging-types";
+import { ensureMultiviewLifecycleMetadata } from "./lifecycle-source-metadata";
 
 // ── Slug generation ──────────────────────────────────────────────────────
 
@@ -219,10 +219,9 @@ function clipTo(text: string, cap: number): string {
  * is NOT acceptable.
  *
  * Caller contract reminders:
- *   - All required fields per multiview-staging-types.ts D1.G must
- *     be present. The IO layer does NOT verify (deepseek 3a-ii review
- *     I1: redundant for programmatic callers); missing fields will
- *     surface at replay time as runMultiView arg validation failures.
+ *   - All required candidate/replay fields per multiview-staging-types.ts D1.G
+ *     must be present. The IO layer materializes the complete lifecycle source
+ *     contract itself so every creation branch is bounded before returning.
  *   - Length caps are applied DEFENSIVELY here. Caller may pre-clip
  *     but is not required to.
  *
@@ -236,17 +235,22 @@ export function writeMultiviewPending(entry: MultiviewPendingEntry): string {
   }
 
   const capped = applyFieldCaps(entry);
+  ensureMultiviewLifecycleMetadata(capped, new Date(capped.created));
+
   const dir = stagingDir();
   fs.mkdirSync(dir, { recursive: true });
-
   const filename = buildFilename(capped);
   const absPath = path.join(dir, filename);
   const file: MultiviewPendingFileOnDisk = {
     schema_version: MULTIVIEW_PENDING_SCHEMA_VERSION,
     entry: capped,
   };
-  fs.writeFileSync(absPath, JSON.stringify(file, null, 2), "utf-8");
-  return absPath;
+  const locked = withFileLock(multiviewMutationLockPath(), () => {
+    atomicWriteText(absPath, `${JSON.stringify(file, null, 2)}\n`);
+    return absPath;
+  });
+  if (!locked.ok) throw new Error("writeMultiviewPending: lifecycle source lock contention");
+  return locked.value;
 }
 
 // ── Load ─────────────────────────────────────────────────────────────────
@@ -496,8 +500,9 @@ function loadPendingFileBySlug(slug: string): { absPath: string; parsed: Multivi
 // byte-for-byte (we serialize the original parsed object back, only
 // the three counted fields change).
 //
-// Concurrency: single-process pi (see file header). No fs-level lock
-// needed.
+// Concurrency: these later replay bookkeeping updates retain their historical
+// single-process assumption. Initial source creation and lifecycle reconcile
+// use the shared mutation lock described above.
 
 /**
  * Bump retry counter and timestamp on an existing staging entry.

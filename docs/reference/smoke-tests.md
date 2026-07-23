@@ -65,6 +65,10 @@ npm run smoke:sediment-agent-end-queue
 npm run smoke:startup-classify-outside-barrier
 npm run smoke:staging-resolver
 npm run smoke:outcome-classifier-enrich
+npm run smoke:forgetting-real-apply-gate
+npm run smoke:forgetting-executor-real
+npm run smoke:lifecycle-convergence
+npm run smoke:entry-lifecycle-proposals
 npm run smoke:archive-reactivation
 
 # Dispatch / L2 changes
@@ -94,6 +98,10 @@ npm run smoke:production-existing-local-drain
 npm run smoke:production-local-drain-next
 npm run smoke:script-registry-drift
 ```
+
+`smoke:forgetting-real-apply-gate` drives the exact forgetting orchestration function called by the real `agent_end` path. It constructs eligible E1 proposals across every kind plus a non-E1 attributed-evidence proposal and covers the dedicated/global four-quadrant matrix. The dedicated gate accepts only literal boolean true; the global raw-value matrix follows effective auto-write semantics, accepting boolean true and legacy `"true"` while rejecting staging-only, false/`"false"`, missing, and malformed values. Any closed effective quadrant leaves callbacks unconstructed and proposals pending with the precise `executor_real_apply_gate_closed` or `global_write_authority_gate_closed`; a direct executor injection also proves the second gate cannot be bypassed. Lifecycle hooks continue, while archive reactivation retains its existing independent `autoLlmWriteEnabled` behavior. The production companion `dossier:rm-forget-001-gate-production` is counts/hashes-only and zero-write; with current eligible=0 it proves configuration/zero-write only, not a production demote.
+
+`smoke:lifecycle-convergence` creates all seven multiview pending states through the production IO writer and checks the source bytes before any reconcile: stable item/cohort/attempt/failure/schedule/deadline/trigger must already exist, the read model must report `unbounded_pending=0`, and a fresh module restart must preserve IDs. It also proves unknown states throw and fail the corrupt-source read model closed, and that a terminal live residue clears stale pending schedules before full-text reversible archive. The remaining coverage includes source reconcile/idempotency, deadline terminal actions, continuity/corruption/cap fail-closed behavior, and conservation. `dossier:rm-lifecycle-002-production` retains the complete self-hash-valid historical 35-row transition preimage while each real wall-clock invocation records and accepts only its own `current_run` before/actions/after.
 
 `smoke:sediment-agent-end-queue` drives the real registered extension handler through an awaited fake pi runner. It injects delayed and never-settling startup gates, asserts typical <100ms return with a 5,000-entry branch snapshot (clone bytes/latency metrics recorded; no false hard bound for multi-MB branches), verifies pre-claim coalescing and post-claim ordering, replays 43 entries oldest-first across count/char caps with exact-once ordering, proves same-lineage compaction oldest replay + legacy/unproven lineage fail-closed + branch-switch fail-closed, `ready=false→park→wake` and parked TTL eviction with audit, ready-pending backlog ≥12 windows without a next `agent_end`, multi-session never-ready non-blocking concurrency, global cross-key concurrency cap, `--unhandled-rejections=strict` classifier/correction reject containment with onError/audit, rejects retained ctx/session/UI surfaces, and proves audited rejection containment plus later-job recovery without `unhandledRejection`.
 

@@ -5100,7 +5100,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           });
           const abandonedDir = path.join(replayRoot, ".state", "sediment", "staging", "abandoned");
           const abandonedFiles = fs.existsSync(abandonedDir) ? fs.readdirSync(abandonedDir) : [];
-          assert(staleMissing.terminal_stale === 1 && staleMissing.succeeded === 1 && staleMissing.deferred_other_project === 0 && staleMissing.errors === 0 && staleMissingWrote === true, `stale missing-origin should archive while owned entry still processes: ${JSON.stringify(staleMissing)} wrote=${staleMissingWrote}`);
+          assert(staleMissing.terminal_deadline_expired === 1 && staleMissing.terminal_stale === 0 && staleMissing.succeeded === 1 && staleMissing.deferred_other_project === 0 && staleMissing.errors === 0 && staleMissingWrote === true, `deadline-expired missing-origin should archive while owned entry still processes: ${JSON.stringify(staleMissing)} wrote=${staleMissingWrote}`);
           assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-missing-origin"), `stale missing-origin should leave live pending queue`);
           assert(abandonedFiles.some((file) => file.endsWith("-multiview-pending-loop-stale-missing-origin.json")), `stale missing-origin should be soft-archived to abandoned/: ${JSON.stringify(abandonedFiles)}`);
           assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-owned-behind-stale-missing-origin"), `owned behind stale missing-origin should delete after success`);
@@ -5133,11 +5133,11 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
             loadNeighborsBySlug: async () => [],
             writeApprovedToBrain: async () => { liveOtherProjectWrote = true; },
           });
-          assert(liveOtherProject.deferred_other_project === 0 && liveOtherProject.terminal_stale === 1 && liveOtherProject.errors === 0 && liveOtherProject.auditRows.length === 0 && liveOtherProjectWrote === false, `global stale sweep should terminally archive other-project backlog without a writer call: ${JSON.stringify(liveOtherProject)} wrote=${liveOtherProjectWrote}`);
-          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-live-other-project"), `stale live other-project should exit the live pending queue`);
+          assert(liveOtherProject.deferred_other_project === 0 && liveOtherProject.terminal_deadline_expired === 1 && liveOtherProject.terminal_stale === 0 && liveOtherProject.errors === 0 && liveOtherProject.auditRows.length === 0 && liveOtherProjectWrote === false, `global deadline sweep should terminally archive other-project backlog without a writer call: ${JSON.stringify(liveOtherProject)} wrote=${liveOtherProjectWrote}`);
+          assert(!loadMultiviewPending().entries.some((entry) => entry.slug === "multiview-pending-loop-stale-live-other-project"), `deadline-expired live other-project should exit the live pending queue`);
           const archivedOtherFile = fs.readdirSync(path.join(replayRoot, ".state", "sediment", "staging", "abandoned")).find((file) => file.endsWith("-multiview-pending-loop-stale-live-other-project.json"));
           const archivedOther = archivedOtherFile ? JSON.parse(fs.readFileSync(path.join(replayRoot, ".state", "sediment", "staging", "abandoned", archivedOtherFile), "utf-8")).entry : null;
-          assert(archivedOther?.lifecycle_terminal_reason === "multiview_stale" && archivedOther?.lifecycle_terminal_at, `stale other-project terminal evidence missing: ${JSON.stringify(archivedOther)}`);
+          assert(archivedOther?.lifecycle_terminal_reason === "multiview_deadline_expired" && archivedOther?.lifecycle_terminal_at, `deadline-expired other-project terminal evidence missing: ${JSON.stringify(archivedOther)}`);
 
           // ── S1: fail-closed project resolution (no-origin must NOT misfile) ──
           // A project-scope candidate with NO captured origin must not be written

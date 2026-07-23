@@ -11,17 +11,41 @@ status: active
 
 ---
 
+## 2026-07-23 — accepted — RM-FORGET-001 fail-closed real-apply hold
+
+### 变更
+
+新增专用 `memory.forgetting.executorRealApplyEnabled` real demote gate，默认 false，生产显式 false，且只接受字面布尔 true；缺失、旧 settings、null、字符串与数字均 fail-closed。真实 demote 采用 AND 双门：专用 gate 提供独立授权；global write authority 与既有 effective `sediment.autoLlmWriteEnabled` 语义一致，布尔 true 和 schema 合法的 legacy `"true"` 均有效，`staging-only`、false/`"false"`、缺失和 malformed 均关闭。二者任一不能单独授权。`memory.forgetting.enabled` 继续运行 decay、frontmatter bridge、E2 reconcile、lifecycle convergence 与 proposal planning/dry-run。agent_end 编排与 executor 双层检查；hold summary/audit 分别使用 `executor_real_apply_gate_closed` 或 `global_write_authority_gate_closed` / `real_apply_hold`，不得误报 `real_apply`。
+
+### 验收边界
+
+focused smoke 动态覆盖 E1 全 kind（含长尾）与非 E1：dedicated 四象限仍仅字面布尔 true 可开；global raw-value matrix 证明布尔 true 与 legacy `"true"` 投影为 true，而 staging-only、false/`"false"`、缺失和 malformed 投影为 false。任一 effective gate 关闭时 callback 零构造零调用、proposal 不 executed、lifecycle hooks 继续，并直接向 executor 注入 callback 验证第二道全局门仍拒绝。archive reactivation 继续按既有 `autoLlmWriteEnabled` 逻辑独立运行。真实 production dossier 仅记录 aggregate counts/hashes，确认双门 effective closed、eligible current=0、proposal/durable/lifecycle/demote/reactivation hashes 不变及 lifecycle read-only build 可运行；它不声称真实 candidate blocking 或 production demote 已验收。
+
+### 状态与解除条件
+
+`RM-FORGET-001` / `forgetting.upstream-wiring` 仍 `blocked / separate_authorization_required`，不是 completed。解除需 RM-FORGET gate dossier、真实 recall/none baseline、闭合 30d observation/reactivation window、long-tail reviewer/evidence gates 与 fresh independent authorization；之后仍需受控 production demote + reactivation round-trip。staging hard-delete 继续 blocked。
+
+### 非目标
+
+不执行 production demote，不修改 durable memory status/body，不开启 real gate，不回退 RM-LIFECYCLE-002，不关闭 archive reactivation，不新增 Lane G、人审队列或 hard-delete。
+
+### 关联
+
+[ADR 0031](adr/0031-autonomous-self-calibrating-forgetting.md)；[Roadmap](roadmap.md)；[Transition register](transition-register.md)；[production gate dossier](evidence/2026-07-23-rm-forget-001-real-apply-gate-production.json)。
+
+---
+
 ## 2026-07-23 — accepted — RM-LIFECYCLE-002 bounded lifecycle convergence
 
 ### 变更
 
-provisional staging、multiview-pending 与 entry-lifecycle proposal 统一为 source-ledger-first 的有界生命周期：每个 pending 项必须有 attempt、failure class、下一 retry 或 new-evidence trigger、deadline；deadline 到期必须执行 source-side 自治动作。E1 execution-ready 首次到期不再永久 failed，而是在 3 次 cap 内执行 bounded exponential retry，到 cap 才 terminal。统一 read model 只作只读重建，不获得 source writer 权限。
+provisional staging、multiview-pending 与 entry-lifecycle proposal 统一为 source-ledger-first 的有界生命周期：每个 pending 项必须有 attempt、failure class、下一 retry 或 new-evidence trigger、deadline；deadline 到期必须执行 source-side 自治动作。所有 multiview transient creation branch 统一经过同一 IO 边界，在共享 mutation lock 内用单一 helper 生成稳定 item/cohort/attempt/failure/schedule/deadline/trigger，并与 source 文件同次原子创建，不等待下一次 `agent_end` reconcile。E1 execution-ready 首次到期不再永久 failed，而是在 3 次 cap 内执行 bounded exponential retry，到 cap 才 terminal。统一 read model 只作只读重建，不获得 source writer 权限。
 
 E1 的兼容 `lifecycle_deadline_expired` 或新 retry-cap terminal 仅在所属 project 再次扫描并确认 durable `superseded + valid successor` 时按同一 proposal identity 原地重开；其他 project scan 不得重开。E2 `superseded_no_successor` 仍为自治 `defer_until_new_evidence`，successor/status restoration/independent attributed evidence 按规范化 project_root 隔离地自动终态、创建 E1 或重开，不建立人类/operator queue。stale/retry-cap/deadline terminal 使用全文保真的可逆 archive。proposal 1000 行 cap 对新 arrival fail-loud，不再 silent limited。
 
 ### 验收边界
 
-固定 legacy/fresh cohort；`arrivals = terminal + pending` 只作为本次分类完整性，真正守恒由上一版 persisted stable item inventory 的 `continuity_holds=true`、`missing_previous_item_ids=[]` 验收，并要求 `unbounded_pending=0`。focused smoke 覆盖双项目同 slug、E1 +2d 首次 pending retry、推进到 cap terminal、其他 project 不重开、目标 project 原 identity 重开并可被 executor 消费、+1d/+7d deadline source action、provider/transient/writer、capacity cap、restart/rebuild/idempotency、corrupt/continuity fail-closed 与稳定 ID。2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段为 `completed / authorized`，fully authorized（machine enum: `authorized`）。production evidence 保持 `idempotent_verification_only`，不声称首次 migration 证据。
+固定 legacy/fresh cohort；`arrivals = terminal + pending` 只作为本次分类完整性，真正守恒由上一版 persisted stable item inventory 的 `continuity_holds=true`、`missing_previous_item_ids=[]` 验收，并要求 `unbounded_pending=0`。focused smoke 覆盖七种 multiview 创建分支在 reconcile 前立即有界、未知 state 显式 throw/corrupt-source fail-closed、terminal live 残留先清 schedule 后全文归档、fresh module restart ID 稳定、双项目同 slug、E1 +2d 首次 pending retry、推进到 cap terminal、其他 project 不重开、目标 project 原 identity 重开并可被 executor 消费、+1d/+7d deadline source action、provider/transient/writer、capacity cap、rebuild/idempotency、corrupt/continuity fail-closed。2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段为 `completed / authorized`，fully authorized（machine enum: `authorized`）。production dossier v2 将原 35-row、unbounded 1→0、payload-excluding-lifecycle/durable unchanged 且 self-hash-valid 的首次迁移完整保留为 historical evidence；每次真实 wall-clock rerun 在 `current_run` 下独立记录 before/actions/after 和 evidence mode，当前无 initial unbounded 时不要求 `before>0`，新 action 不冒充首次 35-row 迁移。
 
 ### 非目标
 
@@ -249,7 +273,7 @@ ADR 0020 autosync 语义补全：`fetchAndFF` 在 fetch 后发现本地领先且
 ## 2026-07-09 — accepted — 遗忘子系统收敛与 docs 冲突裁定
 
 ### 变更
-遗忘子系统按 ADR 0031 walk-back 收敛：settings 四开关改为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两开关，采用 evidence-first + kind prior 的自动 demote 前置条件，审计面改为异常/动作驱动，并新增 archived-vs-active kind 分布监控。同步修复 memory-system-vision 与 direction 的恢复/复活边界冲突，并在 docs README 增加内部冲突裁定规则。遗忘子系统形状为两开关；sediment 主开关 `autoLlmWriteEnabled` 独立存在，并承担 demote 生产门控。
+遗忘子系统按 ADR 0031 walk-back 收敛：settings 四个策略链开关改为 `memory.forgetting.enabled` + `memory.forgetting.instrumentation` 两个语义开关，采用 evidence-first + kind prior 的自动 demote 前置条件，审计面改为异常/动作驱动，并新增 archived-vs-active kind 分布监控。同步修复 memory-system-vision 与 direction 的恢复/复活边界冲突，并在 docs README 增加内部冲突裁定规则。该条当时让 sediment 主开关 `autoLlmWriteEnabled` 单独承担 demote 生产授权；此口径已由 2026-07-23 RM-FORGET-001 AND 双门取代：dedicated gate 是独立授权，`autoLlmWriteEnabled===true` 仅作为仍必需但不充分的全局写 authority。
 
 ### 原因
 经 3 轮 5×T0 一致共识，原四开关是依赖链而非独立安全面，dry-run/live 组合会制造观察与生产配置漂移；条目级自治遗忘的可逆面应限定在工作树内 archived 状态，Git 只承担库级灾备与人工例外通道。

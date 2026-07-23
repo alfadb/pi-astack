@@ -790,21 +790,26 @@
       "title": "forgetting 上游接线",
       "human_section": "滞留需推进",
       "register_class": "active",
-      "phase_status": "in_progress",
-      "authorization_status": "authorized",
+      "phase_status": "blocked",
+      "authorization_status": "separate_authorization_required",
       "entered": "2026-07-08",
       "review_by": "2026-08-04",
-      "current": "decay→lifecycle_proposal wiring remains landed. 2026-07-21 durable-kind / legacy compatibility repair: proposals resolve kind from durable frontmatter (canonical/project/project-root), repair or retire legacy decay rows missing/invalid kind with structured kind_resolution audit, and skip new decay demote proposals without a valid durable kind. Exit still requires a controlled executor consumption batch with demote ledger + reactivation window auditability.",
+      "current": "decay→lifecycle_proposal wiring, RM-LIFECYCLE-002 bridge/reconcile/read-model, and proposal dry-run remain live. RM-FORGET-001 real demote requires the AND of literal boolean memory.forgetting.executorRealApplyEnabled=true as dedicated authorization and effective sediment.autoLlmWriteEnabled=true as global write authority. The global half follows the existing schema/resolver: boolean true and legacy string 'true' enable it; staging-only, false/'false', missing, and malformed values close it. Either gate alone fails closed. Production keeps the dedicated gate false. Production gate evidence proves configuration and zero writes with no current eligible candidate; dynamic candidate blocking is automated-test evidence only. Archive reactivation retains its existing sediment.autoLlmWriteEnabled semantics independently of the dedicated gate.",
       "exit": [
-        "executor 消费一个受控批次",
-        "demote ledger 与 reactivation window 可审计"
+        "RM-FORGET gate dossier is complete and independently reviewed",
+        "real production query corpus recall/none baseline is recorded before any demote",
+        "the 30-day observation/reactivation window is closed with auditable evidence",
+        "long-tail reviewer and all evidence gates are connected and pass",
+        "a fresh independent authorization explicitly enables executor real apply",
+        "a controlled production demote batch plus reactivation round-trip is audited without physical deletion"
       ],
       "evidence": [
         "entry-lifecycle-proposals ledger",
         "forgetting-demote-ledger",
-        "aggregator run ledger",
+        "archive-reactivation ledger",
         "decay-shadow audit",
-        "extensions/sediment/entry-lifecycle-proposals.ts durable kind + legacy repair"
+        "scripts/smoke-forgetting-real-apply-gate.mjs",
+        "docs/evidence/2026-07-23-rm-forget-001-real-apply-gate-production.json"
       ],
       "owner": "sediment-forgetting",
       "consumer": [
@@ -812,7 +817,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "Run a small controlled executor batch after durable-kind compatibility; verify demote ledger and reactivation window remain auditable."
+      "next_action": "Keep executorRealApplyEnabled=false. Build the RM-FORGET gate dossier, recall/none baseline, closed 30-day window, and long-tail reviewer/evidence gates; then request fresh independent authorization before any production demote."
     },
     {
       "id": "memory.dedup-archived-dense",
@@ -856,9 +861,9 @@
       "authorization_status": "authorized",
       "entered": "2026-07-09",
       "review_by": "2026-07-24",
-      "current": "kind→证据强度使用确定性 infra 白名单，长尾 kind 排除自动 demote。",
+      "current": "kind→证据强度使用确定性 infra 白名单；E1 全 kind 受 real-apply gate 统一 hold，非 E1 同样 hold，长尾非 E1 仍额外排除自动 demote。大脑内部 long-tail reviewer 尚未接入。",
       "exit": [
-        "大脑内部 reviewer lane 上线后退化为 prompt 引导"
+        "大脑内部 reviewer lane 上线并纳入 RM-FORGET evidence gate 后退化为 prompt 引导"
       ],
       "evidence": [
         "ADR 0031 revision record"
@@ -990,18 +995,19 @@
       "authorization_status": "authorized",
       "entered": "2026-07-23",
       "review_by": "2026-08-06",
-      "current": "2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段 completed 且 fully authorized（machine enum: authorized）。provisional、multiview-pending 与 entry-lifecycle proposal 已统一为可重建生命周期读模型；source ledger 仍是唯一写权威。deadline 有 source-side 自治动作；E1 execution-ready 在 3 次 cap 内 bounded exponential retry，到 cap terminal，并仅由所属 project 的 valid durable frontmatter scan 按原 identity 重开；E2 三迁移继续以 project_root 隔离，terminal 全文保留且可逆。production evidence 为 idempotent_verification_only，不声称首次 migration。staging hard-delete 仍 blocked，未新增 Lane G、人审队列或 forgetting 权限。",
+      "current": "2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；阶段 completed 且 fully authorized（machine enum: authorized）。provisional、multiview-pending 与 entry-lifecycle proposal 已统一为可重建生命周期读模型；source ledger 仍是唯一写权威。新 multiview source 在共享 mutation lock 的同次原子创建中写全稳定 item/cohort/attempt/failure/schedule/deadline/trigger；未知 state 显式 fail-closed，terminal live 残留先清 pending schedule 后全文归档；deadline 有 source-side 自治动作。E1 execution-ready 在 3 次 cap 内 bounded exponential retry，到 cap terminal，并仅由所属 project 的 valid durable frontmatter scan 按原 identity 重开；E2 三迁移继续以 project_root 隔离，terminal 全文保留且可逆。production dossier v2 保留完整、self-hash-valid 的历史 35-row/unbounded 1→0 transition preimage，并将每次真实 wall-clock run 的 evidence mode、before/actions/after 独立记录为 current_run，不把新 action 冒充首次迁移。staging hard-delete 仍 blocked，未新增 Lane G、人审队列或 forgetting 权限。",
       "exit": [
         "legacy/fresh cohort 分类完整，且 persisted stable item inventory continuity_holds=true、missing_previous_item_ids=[]",
-        "unbounded_pending=0，所有 pending 有 next_retry_not_before/new_evidence_trigger 与 deadline，deadline 到期有自治 source action",
+        "unbounded_pending=0，所有 pending 从创建完成时即有 next_retry_not_before/new_evidence_trigger 与 deadline，deadline 到期有自治 source action",
         "E1 +2d 首次 expiry 保持 pending 且 attempt/schedule 前进；推进到 cap terminal；其他 project scan 不重开，所属 project valid scan 原 identity 重开并可被 executor 消费",
-        "restart/rebuild/idempotency/corrupt-source/cap/continuity fail-closed smoke 通过",
-        "真实 production dossier 的 source/durable hashes 不变、continuity acceptance 全 true",
+        "七种 multiview creation state 在 reconcile 前立即有界，且 unknown-state corruption、terminal live residue、fresh module restart/rebuild/idempotency/corrupt-source/cap/continuity fail-closed smoke 通过",
+        "真实 production dossier 保留 self-hash-valid 的历史 35-row/1→0 proof，并逐次独立验收 current_run actions、source/payload/durable transitions、unbounded_pending 与 continuity",
         "staging physical deletion 保持 blocked 且未新增 Lane G 或人类队列"
       ],
       "evidence": [
         "docs/adr/0043-lifecycle-convergence-and-reversible-terminal-state.md",
         "extensions/sediment/lifecycle-convergence.ts",
+        "extensions/sediment/lifecycle-source-metadata.ts",
         "scripts/smoke-lifecycle-convergence.mjs",
         "scripts/smoke-entry-lifecycle-proposals.mjs",
         "docs/evidence/2026-07-23-rm-lifecycle-002-production.json",
@@ -1015,7 +1021,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "high",
-      "next_action": "保持 closed，并维持 source-ledger authority、可逆 terminal、continuity loss detection、idempotent_verification_only evidence 边界与 blocked physical deletion；不得扩展到 Lane G、人审或 forgetting 权限。"
+      "next_action": "保持 closed，并维持 creation-time bounded source、source-ledger authority、可逆 terminal、continuity loss detection、historical/current evidence separation 与 blocked physical deletion；不得扩展到 Lane G、人审或 forgetting 权限。"
     },
     {
       "id": "staging.hard-delete",

@@ -173,11 +173,16 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
 
 // ADR 0031 Phase 0 — 遗忘自治子系统设置。
 export interface ForgettingSettings {
-  /** Runtime kill-switch for all forgetting-side evaluation and mutation.
+  /** Runtime kill-switch for forgetting-side evaluation and proposal planning.
    *  enabled=false: no decay assessment scheduling, no forgetting side writes,
-   *  and no mutation. Read-side instrumentation remains governed only by its
-   *  orthogonal switch below; archive reactivation is governed by sediment. */
+   *  and no mutation. Real demote mutation additionally requires both the
+   *  dedicated executorRealApplyEnabled gate below and the sediment global
+   *  durable-write authority. */
   enabled: boolean;
+  /** RM-FORGET-001 dedicated fail-closed real-apply gate. Literal boolean true
+   *  is necessary but not sufficient: effective sediment auto-write authority
+   *  must also be true before agent_end may inject the archive writer. */
+  executorRealApplyEnabled: boolean;
   /** ADR 0031 Phase 0: read-side usage instrumentation switch.
    *  Pure observation; off = instrumentation short-circuits and writes nothing. */
   instrumentation: boolean;
@@ -185,6 +190,7 @@ export interface ForgettingSettings {
 
 export const DEFAULT_FORGETTING_SETTINGS: ForgettingSettings = {
   enabled: false,
+  executorRealApplyEnabled: false,
   instrumentation: false,
 };
 
@@ -320,7 +326,11 @@ function resolvePathASettings(cfg: Record<string, unknown>): PathASettings {
 
 let warnedForgettingLegacyKeys = false;
 
-function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSettings {
+export function isForgettingExecutorRealApplyEnabled(value: unknown): value is true {
+  return value === true;
+}
+
+export function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSettings {
   const f = (cfg.forgetting as Record<string, unknown>) ?? {};
   const legacyKeys = ["decayShadow", "demoteShadow", "autoDemote"] as const;
   const hasEnabled = Object.prototype.hasOwnProperty.call(f, "enabled");
@@ -332,6 +342,9 @@ function resolveForgettingSettings(cfg: Record<string, unknown>): ForgettingSett
   const migratedEnabled = legacyKeys.some((key) => asBoolean(f[key], false));
   return {
     enabled: hasEnabled ? asBoolean(f.enabled, DEFAULT_FORGETTING_SETTINGS.enabled) : migratedEnabled,
+    // Deliberately stricter than the older boolean settings: missing, null,
+    // strings such as "true", numbers, and every other type fail closed.
+    executorRealApplyEnabled: isForgettingExecutorRealApplyEnabled(f.executorRealApplyEnabled),
     instrumentation: asBoolean(f.instrumentation, DEFAULT_FORGETTING_SETTINGS.instrumentation),
   };
 }

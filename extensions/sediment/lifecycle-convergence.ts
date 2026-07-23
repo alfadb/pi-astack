@@ -7,18 +7,26 @@ import { normalizeLifecycleProposalRow } from "./entry-lifecycle-proposals";
 import { archiveMultiviewPending, loadMultiviewPending } from "./multiview-staging-io";
 import { retryCapForState, STALE_DAYS_MULTIVIEW_PENDING, type MultiviewPendingEntry } from "./multiview-staging-types";
 import type { StagingEntry } from "./staging-types";
+import {
+  LIFECYCLE_COHORT_CUTOVER_UTC,
+  ensureMultiviewLifecycleMetadata,
+  lifecycleCohortFor as cohortFor,
+  lifecycleItemId,
+  multiviewLifecycleFailureClass as failureClassForMultiview,
+  scheduleLifecycleRetry as scheduleFor,
+  validLifecycleIso as validIso,
+  type LifecycleCohort,
+  type LifecycleFailureClass,
+  type LifecycleQueueKind,
+} from "./lifecycle-source-metadata";
 
+export { LIFECYCLE_COHORT_CUTOVER_UTC } from "./lifecycle-source-metadata";
+export type { LifecycleCohort, LifecycleFailureClass, LifecycleQueueKind } from "./lifecycle-source-metadata";
 export const LIFECYCLE_CONVERGENCE_SCHEMA_VERSION = "lifecycle-convergence/v1" as const;
-export const LIFECYCLE_COHORT_CUTOVER_UTC = "2026-07-16T18:55:00.000Z" as const;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const MINUTE_MS = 60 * 1000;
 const MAX_WRITER_RETRY_ATTEMPTS = 24;
 const LIFECYCLE_PROPOSAL_MAX_ROWS = 1000;
-
-export type LifecycleQueueKind = "provisional_correction" | "multiview_pending" | "entry_lifecycle_proposal";
-export type LifecycleCohort = "legacy" | "fresh";
-export type LifecycleFailureClass = "none" | "provider" | "transient" | "parse" | "conflict" | "writer" | "semantic_defer";
 
 export interface LifecycleConvergenceRow {
   schema_version: typeof LIFECYCLE_CONVERGENCE_SCHEMA_VERSION;
@@ -131,20 +139,6 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function validIso(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value.trim()) return undefined;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : undefined;
-}
-
-function cohortFor(arrivalAt: string): LifecycleCohort {
-  return Date.parse(arrivalAt) < Date.parse(LIFECYCLE_COHORT_CUTOVER_UTC) ? "legacy" : "fresh";
-}
-
-function lifecycleItemId(queueKind: LifecycleQueueKind, stableParts: unknown[]): string {
-  return `lc-${queueKind.replace(/_/g, "-")}-${sha256(stableParts.map((part) => String(part ?? "")).join("\0")).slice(0, 24)}`;
-}
-
 function sourceFingerprint(value: unknown): string {
   return sha256(JSON.stringify(value));
 }
@@ -161,42 +155,6 @@ export function lifecycleConvergencePath(abrainHome = resolveUserGlobalAbrainHom
 
 function lifecycleConvergenceLockPath(abrainHome: string): string {
   return path.join(path.resolve(abrainHome), ".state", "sediment", "locks", "lifecycle-convergence.lock");
-}
-
-function boundedRetryDelayMs(failureClass: LifecycleFailureClass, attempt: number): number {
-  const exponent = Math.max(0, Math.min(10, Math.floor(attempt) - 1));
-  const config: Record<LifecycleFailureClass, { base: number; max: number }> = {
-    none: { base: 5 * MINUTE_MS, max: 60 * MINUTE_MS },
-    provider: { base: 60 * MINUTE_MS, max: DAY_MS },
-    transient: { base: 15 * MINUTE_MS, max: 6 * 60 * MINUTE_MS },
-    parse: { base: 6 * 60 * MINUTE_MS, max: DAY_MS },
-    conflict: { base: 6 * 60 * MINUTE_MS, max: DAY_MS },
-    writer: { base: MINUTE_MS, max: 60 * MINUTE_MS },
-    semantic_defer: { base: DAY_MS, max: 14 * DAY_MS },
-  };
-  const selected = config[failureClass];
-  return Math.min(selected.max, selected.base * 2 ** exponent);
-}
-
-function scheduleFor(now: Date, failureClass: LifecycleFailureClass, attempt: number, horizonMs: number): { next: string; deadline: string } {
-  const nextMs = now.getTime() + boundedRetryDelayMs(failureClass, Math.max(1, attempt));
-  return {
-    next: new Date(nextMs).toISOString(),
-    deadline: new Date(nextMs + horizonMs).toISOString(),
-  };
-}
-
-function failureClassForMultiview(entry: MultiviewPendingEntry): LifecycleFailureClass {
-  if (entry.approved_decision || (entry.writer_retry_attempts ?? 0) > 0 || entry.brain_write_intent_at_iso) return "writer";
-  switch (entry.multiview_state) {
-    case "reviewer_unavailable": return "provider";
-    case "pass1_unparseable":
-    case "pass2_unparseable": return "parse";
-    case "deferred": return "semantic_defer";
-    case "pass1_call_failed":
-    case "pass2_call_failed":
-    case "synthesis_call_failed": return "transient";
-  }
 }
 
 function provisionalTerminal(entry: ProvisionalLifecycleEntry): { at: string; reason: string; state: string } | undefined {
@@ -344,10 +302,16 @@ export function reconcileStagingLifecycleSources(options: { abrainHome?: string;
         const entry = rawEntry as unknown as MultiviewLifecycleEntry;
         const arrival = validIso(entry.created);
         if (!arrival) { corruptRecords++; return; }
-        entry.lifecycle_item_id = entry.lifecycle_item_id ?? lifecycleItemId("multiview_pending", [arrival, entry.slug, entry.originating_device]);
-        entry.lifecycle_cohort = entry.lifecycle_cohort ?? cohortFor(arrival);
-        if (abandoned) {
-          if (!entry.lifecycle_terminal_at) {
+        const terminalAt = validIso(entry.lifecycle_terminal_at);
+        if (entry.lifecycle_terminal_at !== undefined && !terminalAt) { corruptRecords++; return; }
+        if (terminalAt || abandoned) {
+          entry.lifecycle_item_id = entry.lifecycle_item_id ?? lifecycleItemId("multiview_pending", [arrival, entry.slug, entry.originating_device]);
+          entry.lifecycle_cohort = entry.lifecycle_cohort ?? cohortFor(arrival);
+          entry.lifecycle_attempt = Math.max(0, entry.lifecycle_attempt ?? ((entry.retry_attempts ?? 0) + (entry.writer_retry_attempts ?? 0)));
+          if (terminalAt) {
+            entry.lifecycle_terminal_at = terminalAt;
+            entry.lifecycle_terminal_reason = entry.lifecycle_terminal_reason ?? "terminal_recovery";
+          } else {
             entry.lifecycle_terminal_at = now.toISOString();
             entry.lifecycle_terminal_reason = "legacy_abandoned_migration";
             abandonedMigrated++;
@@ -356,19 +320,8 @@ export function reconcileStagingLifecycleSources(options: { abrainHome?: string;
           delete entry.lifecycle_next_retry_not_before;
           delete entry.lifecycle_deadline;
           delete entry.lifecycle_new_evidence_trigger;
-        } else if (!entry.lifecycle_terminal_at) {
-          const failureClass = failureClassForMultiview(entry);
-          const attempt = Math.max(0, entry.retry_attempts ?? 0) + Math.max(0, entry.writer_retry_attempts ?? 0);
-          const horizon = failureClass === "writer" ? DAY_MS : 14 * DAY_MS;
-          const schedule = scheduleFor(now, failureClass, Math.max(1, attempt), horizon);
-          const next = validIso(entry.next_retry_not_before_iso) ?? validIso(entry.lifecycle_next_retry_not_before) ?? schedule.next;
-          entry.lifecycle_attempt = attempt;
-          entry.lifecycle_failure_class = failureClass;
-          entry.lifecycle_next_retry_not_before = next;
-          entry.lifecycle_deadline = validIso(entry.lifecycle_deadline) ?? schedule.deadline;
-          entry.lifecycle_new_evidence_trigger = entry.lifecycle_new_evidence_trigger ?? (failureClass === "writer"
-            ? "writer_or_storage_recovered|retry_due"
-            : "reviewer_or_provider_recovered|retry_due|origin_project_session");
+        } else {
+          ensureMultiviewLifecycleMetadata(entry, now);
         }
         if (JSON.stringify(parsed) !== before) {
           writeStagingFileAtomic(file, parsed);

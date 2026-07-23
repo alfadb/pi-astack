@@ -677,7 +677,7 @@
         "autoLlmWriteEnabled": {
           "enum": [true, false, "staging-only", "staging", "true", "false"],
           "default": true,
-          "description": "Tristate switch for ADR 0024/0025 sediment auto-write. true = full pipeline (classifier + extractor + curator + writer). \"staging-only\"/\"staging\" = classifier still observes and may write provisional staging, but durable auto-write is skipped. false = hard kill switch; classifier also stops. Runtime also accepts string \"true\"/\"false\" for backward-compatible config parsing."
+          "description": "Tristate switch for ADR 0024/0025 sediment auto-write. true = full pipeline (classifier + extractor + curator + writer). \"staging-only\"/\"staging\" = classifier still observes and may write provisional staging, but durable auto-write is skipped. false = hard kill switch; classifier also stops. Runtime retains backward-compatible string parsing. Forgetting real demote uses the same effective true semantics for its global write authority: boolean true and legacy string \"true\" enable that half of the AND gate; staging-only, false/\"false\", missing, and malformed values fail closed."
         },
 
         "autoWriteRawAuditChars": {
@@ -1406,13 +1406,18 @@
         "forgetting": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0031 forgetting-autonomy subsystem. Two orthogonal runtime switches: enabled gates decay evaluation, forgetting-side writes, and mutation; instrumentation gates read-side usage observation only. Anti-runaway ceilings, including the per-batch cap, are build-time welded structural floors. Archive reactivation is independent and remains governed by sediment.autoLlmWriteEnabled.",
+          "description": "ADR 0031 forgetting-autonomy subsystem. enabled gates decay evaluation and proposal planning; executorRealApplyEnabled is the independent fail-closed real demote authorization gate, and real demote additionally requires effective sediment.autoLlmWriteEnabled=true (boolean true or legacy string \"true\") as the global write emergency stop. Neither gate authorizes alone. instrumentation gates read-side usage observation only. Anti-runaway ceilings, including the per-batch cap, are build-time welded structural floors. Archive reactivation keeps its existing sediment.autoLlmWriteEnabled semantics.",
           "properties": {
             "_comment": { "type": "string" },
             "enabled": {
               "type": "boolean",
               "default": false,
-              "description": "Master switch for forgetting evaluation and mutation. false = no decay assessment scheduling, zero forgetting-side writes, and zero mutation. Does not control read-side instrumentation and does not gate archive reactivation."
+              "description": "Master switch for forgetting evaluation and proposal planning. false = no decay assessment scheduling, zero forgetting-side writes, and zero mutation. Real demote mutation still requires literal boolean executorRealApplyEnabled=true AND effective sediment.autoLlmWriteEnabled=true (boolean true or legacy string \"true\"). Does not control read-side instrumentation and does not gate archive reactivation."
+            },
+            "executorRealApplyEnabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "RM-FORGET-001 dedicated fail-closed real-apply gate. Literal boolean true is necessary but insufficient: agent_end and executor also require effective sediment.autoLlmWriteEnabled=true (boolean true or legacy string \"true\"). Missing, null, strings, numbers, and old settings normalize this dedicated gate to false. This gate never controls archive reactivation."
             },
             "instrumentation": {
               "type": "boolean",

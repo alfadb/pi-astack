@@ -1,7 +1,9 @@
 // ADR 0031 Phase 3 — gated forgetting executor(dry-run + real demote 两模式)。
 // 注:此件含**真实** active→archived 编排路径(非 skeleton/非只读)——运行模式
-// 由 settings.forgetting.enabled 决定; enabled=false 时不调度、不写遗忘侧审计、不 mutation。
-// enabled=true 且 orchestrator 注入 archiveEntry 时可真实 demote,否则退化 dry-run。
+// 由 settings.forgetting.enabled、独立 executorRealApplyEnabled 授权门与 sediment
+// 全局写 authority 决定。enabled=false 时不调度、不写遗忘侧审计、不 mutation；
+// real demote 只有在 dedicated gate 为字面 true、global authority 按既有 auto-write
+// 语义有效，且 orchestrator 注入 archiveEntry 时运行。
 //
 // 消费**既有** pending `op=archive` lifecycle proposal(`entry-lifecycle-proposals.ts`,
 // 已是 §4.2 独立证据门控的 affirmative 通道 —— disuse-only 永不进入,故 executor
@@ -12,12 +14,15 @@
 // 两种运行模式:
 //   - **dry-run**(`runForgettingExecutorDryRun`, flag `enabled`):只读 + 算 plan +
 //     写 shadow audit,**绝不 mutate**。
-//   - **real**(`runForgettingExecutor`, flag `enabled` 且 orchestrator 注入 archiveEntry):
+//   - **real**(`runForgettingExecutor`, flags `enabled` +
+//     `executorRealApplyEnabled===true` + effective global write authority，且 orchestrator
+//     注入 archiveEntry):
 //     真实 active→archived,但 executor **自身仍不 import writer** —— 实际归档由注入的
 //     archiveEntry callback 完成(orchestrator 持 writer + expected_status:"active" CAS),
 //     executor 只编排门控 + markProposalsExecuted + setEntryHysteresis + 反失控断路器 + audit。
 // 真实落地仍受:(1) data-gate(Phase 0 数据 + 影子回归绿);(2) graduation-gate(decay-scorer
-// 跨厂商去相关, ADR 0031 §5);flag `enabled` 默认 off + 冷启动 fail-safe(见下)。
+// 跨厂商去相关, ADR 0031 §5);(3) 默认 false 的 executor real-apply gate；
+// (4) sediment 全局写急停保持 true；以及冷启动 fail-safe(见下)。
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -27,7 +32,7 @@ import { readLifecycleProposals, markProposalsExecuted, reconcileLegacyDecayProp
 import { getEntryTelemetry, setEntryHysteresis } from "./entry-telemetry";
 import { resurrectionRateReport } from "./resurrection-rate-monitor";
 import { kindDistributionReport, type KindDistributionBucket } from "./kind-distribution-monitor";
-import type { MemorySettings } from "../memory/settings";
+import { isForgettingExecutorRealApplyEnabled, type MemorySettings } from "../memory/settings";
 
 // 构建时焊死的反失控结构地板(INV-REVERSIBLE-AUTONOMY:大脑自治决定「忘什么」,这些
 // 非可调策略,只 bound「多快/多狠」防 curator/proposal 失控批量;可逆性不豁免限速。
@@ -445,6 +450,32 @@ function appendDryRunAudit(projectRoot: string, plan: DemotePlan, now: Date): vo
   } catch { /* best-effort: audit 绝不阻塞/抛错 */ }
 }
 
+function appendRealApplyHoldAudit(projectRoot: string, plan: DemotePlan, holdReason: string, now: Date): void {
+  try {
+    if (plan.demote.length === 0) return;
+    const file = forgettingDryRunAuditPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const ids = proposalIds(plan.demote);
+    const row = {
+      ...spreadAnchor(getCurrentAnchor()),
+      schema_version: 1,
+      row_kind: "real_apply_hold",
+      idempotency_key: idempotencyKey(projectRoot, `real-apply-hold-${holdReason}`, ids),
+      ts: formatLocalIsoTimestamp(now),
+      project_root: path.resolve(projectRoot),
+      dry_run: true,
+      hold_reason: holdReason,
+      would_demote_count: plan.demote.length,
+      skipped_count: plan.skipped.length,
+      would_demote_proposal_ids: ids,
+      resurrection_backoff: plan.resurrection_backoff,
+      batch_cap: plan.batch_cap,
+      would_demote_slugs: plan.demote.map((d) => d.slug),
+    };
+    fs.appendFileSync(file, JSON.stringify(row) + "\n", "utf-8");
+  } catch { /* best-effort: hold audit never blocks agent_end */ }
+}
+
 export interface ForgettingExecutorResult {
   ok: boolean;
   enabled: boolean;
@@ -498,6 +529,10 @@ export interface ForgettingExecutorRealResult {
   ok: boolean;
   enabled: boolean;
   dry_run: boolean;
+  /** Effective AND of the dedicated gate and global write authority. */
+  real_apply_gate_enabled?: boolean;
+  executor_real_apply_gate_enabled?: boolean;
+  global_write_authority_enabled?: boolean;
   reason?: string;
   plan?: DemotePlan;
   demoted?: string[];
@@ -507,14 +542,16 @@ export interface ForgettingExecutorRealResult {
   legacy_kind_compatibility?: ReconcileLegacyDecayProposalKindsResult;
 }
 
-/** Real-capable 入口(orchestrator 用)。未注入 archiveEntry → 退化为
- *  dry-run(写 shadow audit, 零 mutation)。enabled + 注入 + 断路器未跳 → 逐条 archiveEntry
- *  (CAS active→archived)+ markProposalsExecuted + setEntryHysteresis + ledger。
+/** Real-capable 入口(orchestrator 用)。dedicated gate、global write authority
+ *  任一未有效开启，或未注入 archiveEntry → 退化为 dry-run(写 hold/plan audit,
+ *  零 mutation)。两道授权门 + 注入 + 断路器未跳 → 逐条
+ *  archiveEntry(CAS active→archived)+ markProposalsExecuted +
+ *  setEntryHysteresis + ledger。
  *  per-target fail-open:单条失败不阻断其余, 失败条目留 pending(下轮重试)。 */
 export async function runForgettingExecutor(
   projectRoot: string | undefined,
   settings: MemorySettings,
-  deps: { archiveEntry?: ArchiveEntryFn; activeCorpusSize?: number } = {},
+  deps: { archiveEntry?: ArchiveEntryFn; activeCorpusSize?: number; globalWriteAuthority?: boolean } = {},
   now: Date = new Date(),
 ): Promise<ForgettingExecutorRealResult> {
   if (!settings.forgetting?.enabled) return { ok: true, enabled: false, dry_run: true, reason: "forgetting_disabled" };
@@ -540,16 +577,52 @@ export async function runForgettingExecutor(
     }), now);
     evaluateKindDistributionAudit(projectRoot, now);
 
+    const realApplyGateEnabled = isForgettingExecutorRealApplyEnabled(
+      (settings.forgetting as { executorRealApplyEnabled?: unknown } | undefined)?.executorRealApplyEnabled,
+    );
+    const globalWriteAuthorityEnabled = deps.globalWriteAuthority === true;
+    if (!realApplyGateEnabled) {
+      const reason = "executor_real_apply_gate_closed";
+      appendRealApplyHoldAudit(projectRoot, plan, reason, now);
+      return {
+        ok: true,
+        enabled: true,
+        dry_run: true,
+        real_apply_gate_enabled: false,
+        executor_real_apply_gate_enabled: false,
+        global_write_authority_enabled: globalWriteAuthorityEnabled,
+        reason,
+        plan,
+        legacy_kind_compatibility: legacyKindCompatibility,
+      };
+    }
+    if (!globalWriteAuthorityEnabled) {
+      const reason = "global_write_authority_gate_closed";
+      appendRealApplyHoldAudit(projectRoot, plan, reason, now);
+      return {
+        ok: true,
+        enabled: true,
+        dry_run: true,
+        real_apply_gate_enabled: false,
+        executor_real_apply_gate_enabled: true,
+        global_write_authority_enabled: false,
+        reason,
+        plan,
+        legacy_kind_compatibility: legacyKindCompatibility,
+      };
+    }
+
     const wantReal = typeof deps.archiveEntry === "function";
     if (!wantReal) {
       appendDryRunAudit(projectRoot, plan, now);
-      return { ok: true, enabled: true, dry_run: true, plan, legacy_kind_compatibility: legacyKindCompatibility };
+      return { ok: true, enabled: true, dry_run: true, real_apply_gate_enabled: true, executor_real_apply_gate_enabled: true, global_write_authority_enabled: true, reason: "archive_entry_unavailable", plan, legacy_kind_compatibility: legacyKindCompatibility };
     }
 
     const breaker = evalCircuitBreaker(now.getTime(), deps.activeCorpusSize, plan.demote.length);
     if (breaker.tripped) {
-      appendRealAudit(projectRoot, plan, [], [], [], breaker, now);
-      return { ok: true, enabled: true, dry_run: true, reason: `circuit_breaker_${breaker.reason}`, plan, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
+      const reason = `circuit_breaker_${breaker.reason}`;
+      appendRealApplyHoldAudit(projectRoot, plan, reason, now);
+      return { ok: true, enabled: true, dry_run: true, real_apply_gate_enabled: true, executor_real_apply_gate_enabled: true, global_write_authority_enabled: true, reason, plan, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
     }
 
     const demoted: string[] = [];
@@ -583,7 +656,7 @@ export async function runForgettingExecutor(
     }
     appendRealAudit(projectRoot, plan, demoted, failed, abandoned, breaker, now);
     appendDemoteActionSummary(projectRoot, plan, demoted, failed, abandoned, breaker, now);
-    return { ok: true, enabled: true, dry_run: false, plan, demoted, failed, abandoned, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
+    return { ok: true, enabled: true, dry_run: false, real_apply_gate_enabled: true, executor_real_apply_gate_enabled: true, global_write_authority_enabled: true, plan, demoted, failed, abandoned, circuit_breaker: breaker, legacy_kind_compatibility: legacyKindCompatibility };
   } catch (e) {
     return { ok: false, enabled: true, dry_run: true, reason: e instanceof Error ? e.message : String(e) };
   }

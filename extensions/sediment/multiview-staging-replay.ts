@@ -86,7 +86,8 @@ export type ReplayOutcome =
   | "succeeded"             // mvResult clean → brain write executed (or skip honored)
   | "re_staged"             // mvResult still staged → original entry retry++ on disk
   | "terminal_max_retries"  // retry_attempts ≥ retryCapForState → deleted
-  | "terminal_stale"        // age ≥ STALE_DAYS_MULTIVIEW_PENDING → deleted
+  | "terminal_stale"        // age ≥ STALE_DAYS_MULTIVIEW_PENDING → archived
+  | "terminal_deadline_expired" // lifecycle deadline elapsed → archived by global sweep
   | "deferred_other_project"// current binding does not own this entry
   | "terminal_no_origin"    // S1: project-scope candidate has no captured origin → cannot place safely → soft-archived
   | "skipped_backoff"       // next_retry_not_before_iso is still in future
@@ -123,6 +124,7 @@ export interface ReplayBatchResult {
   re_staged: number;
   terminal_max_retries: number;
   terminal_stale: number;
+  terminal_deadline_expired: number;
   deferred_other_project: number;
   terminal_no_origin: number;
   skipped_backoff: number;
@@ -490,6 +492,7 @@ export async function replayMultiviewPending(deps: ReplayDeps): Promise<ReplayBa
     re_staged: 0,
     terminal_max_retries: terminalSweep.retry_cap,
     terminal_stale: terminalSweep.stale,
+    terminal_deadline_expired: terminalSweep.deadline_expired,
     deferred_other_project: 0,
     terminal_no_origin: 0,
     skipped_backoff: 0,

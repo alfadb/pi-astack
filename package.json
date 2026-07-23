@@ -1,7 +1,7 @@
 {
   "name": "@alfadb/pi-astack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi workflow + memory infrastructure. Current architecture: L1 evidence events + L2 markdown projections + L3 rebuildable indexes in ~/.abrain; main session reads via memory_search/get/list/decide; sediment is the dedicated writer; abrain provides strict project binding and vault; vendor submodules are retired reference-on-demand; gbrain is retired.",
+  "description": "alfadb's personal pi workflow + memory infrastructure. Current architecture: L1 evidence events + L2 markdown projections + L3 rebuildable indexes in ~/.abrain; main session reads via memory_search/abrain_get/memory_list/memory_decide; sediment is the dedicated writer; abrain provides strict project binding and vault; vendor submodules are retired reference-on-demand; gbrain is retired.",
   "keywords": [
     "pi-package",
     "alfadb",
@@ -37,6 +37,7 @@
     "smoke:archived-dense": "node scripts/smoke-memory-archived-dense.mjs",
     "dossier:rm-lifecycle-001-production": "node scripts/dossier-rm-lifecycle-001-production.mjs",
     "dossier:rm-lifecycle-002-production": "node scripts/dossier-rm-lifecycle-002-production.mjs",
+    "dossier:rm-forget-001-gate-production": "node scripts/dossier-rm-forget-001-gate-production.mjs",
     "smoke:stage0-pool": "node scripts/smoke-stage0-candidate-pool.mjs",
     "oracle:stage0": "node scripts/oracle-stage0-replay.mjs",
     "oracle:compact-surface": "node scripts/oracle-compact-surface.mjs",
@@ -57,6 +58,7 @@
     "smoke:forgetting-executor": "node scripts/smoke-forgetting-executor.mjs",
     "smoke:forgetting-mutation-primitives": "node scripts/smoke-forgetting-mutation-primitives.mjs",
     "smoke:forgetting-executor-real": "node scripts/smoke-forgetting-executor-real.mjs",
+    "smoke:forgetting-real-apply-gate": "node scripts/smoke-forgetting-real-apply-gate.mjs",
     "smoke:forgetting-demote-e2e": "node scripts/smoke-forgetting-demote-e2e.mjs",
     "smoke:forgetting-production-readonly": "node scripts/smoke-forgetting-production-readonly.mjs",
     "smoke:decay-shadow": "node scripts/smoke-decay-shadow.mjs",

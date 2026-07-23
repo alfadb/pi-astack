@@ -87,7 +87,7 @@ fs.writeFileSync(reactLedger, [
 ].join("\n") + "\n", "utf-8");
 
 const forgettingSettings = {
-  forgetting: { enabled: true, instrumentation: false },
+  forgetting: { enabled: true, executorRealApplyEnabled: true, instrumentation: false },
 };
 
 const BODY = [
@@ -136,7 +136,7 @@ try {
   check("proposal carries join fields", !!queued?.proposal_id && queued.evidence_source === "aggregator_promoted_advisory" && queued.evidence_type === "superseded_by", JSON.stringify(queued));
 
   // 3) Run the REAL executor with the REAL archiveEntry closure.
-  const r = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
+  const r = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { globalWriteAuthority: true, archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
   check("executor ran in REAL mode (dry_run=false)", r.dry_run === false, JSON.stringify({ dry_run: r.dry_run, cb: r.circuit_breaker }));
   check("executor reports the entry demoted", (r.demoted || []).includes(slug), JSON.stringify(r.demoted));
   const ledgerRow = readJsonl(fx.forgettingDemoteLedgerPath()).find((row) => row.slug === slug);
@@ -151,7 +151,7 @@ try {
   check("proposal marked executed", elp.readLifecycleProposals(projectRoot).find((p) => p.slug === slug)?.status === "executed");
 
   // 5) Idempotent: re-run demotes nothing (proposal executed + hysteresis).
-  const r2 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
+  const r2 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { globalWriteAuthority: true, archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
   check("re-run is a no-op (idempotent)", (r2.demoted || []).length === 0, JSON.stringify(r2.demoted));
 
   // 6) CAS proof on the real closure: archiving an already-archived entry is
@@ -180,7 +180,7 @@ try {
   const e1 = elp.readLifecycleProposals(projectRoot).find((p) => p.slug === supSlug);
   check("E1 proposal is execution_ready with expected_status=superseded", e1?.disposition === "execution_ready" && e1?.expected_status === "superseded", JSON.stringify(e1));
   check("E1 proposal carries frontmatter join fields", !!e1?.proposal_id && e1.evidence_source === "frontmatter_superseded" && e1.evidence_type === "superseded_by", JSON.stringify(e1));
-  const r3 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
+  const r3 = await fx.runForgettingExecutor(projectRoot, forgettingSettings, { globalWriteAuthority: true, archiveEntry, activeCorpusSize: 1000 }, new Date(NOW));
   check("executor demoted the superseded E1 entry", (r3.demoted || []).includes(supSlug), JSON.stringify(r3.demoted));
   const supAfter = fs.readFileSync(supFile, "utf-8");
   check("superseded E1 entry .md flipped to archived", /^status: archived$/m.test(supAfter), supAfter.slice(0, 160));

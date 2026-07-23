@@ -42,7 +42,7 @@ read model 每次持久化前必须读取上一版 persisted model 的稳定 `it
 
 ### 2. 有界 pending 与失败分类
 
-所有非 terminal 项必须同时具备下一触发和 deadline，不允许 `pending + no schedule + no deadline`：
+所有非 terminal 项必须同时具备下一触发和 deadline，不允许 `pending + no schedule + no deadline`。该约束从 source 创建完成时即成立，不能等待下一次 `agent_end` 或 read-model rebuild：multiview 的所有 transient creation branch 必须经统一 IO writer，在与 source 文件相同的 mutation lock/原子创建内写入稳定 item/cohort/attempt/failure/schedule/deadline/trigger。creation 与历史 reconcile 必须复用同一纯 metadata helper，避免循环依赖与 ID 漂移。`multiview_state` 必须属于声明的有限联合；未知/损坏 state 不得隐式映射为 `undefined` 或默认 retry class，而要显式 throw，并由 source projection 计为 corruption、fail-closed 保留 last-good model。
 
 | failure class | 调度语义 |
 |---|---|
@@ -80,7 +80,7 @@ read model 每次持久化前必须读取上一版 persisted model 的稳定 `it
 
 ### 4. Terminal 必须保留全文且可逆
 
-Staging terminal 采用明确 disposition + 原子 move 到 `abandoned/`。终态记录保留完整 candidate、reason、timestamps 与原 provenance，live loader 不再拾取它。重复 sweep/archive 是幂等成功。
+Staging terminal 采用明确 disposition + 原子 move 到 `abandoned/`。终态记录保留完整 candidate、reason、timestamps 与原 provenance，live loader 不再拾取它。重复 sweep/archive 是幂等成功。若崩溃留下仍位于 live 目录但已有有效 `lifecycle_terminal_at` 的残留，source reconcile 必须先按 terminal 分支清除 retry/deadline/trigger，禁止调用 pending metadata ensure 重新挂 schedule；后续 sweep 再按同一 terminal metadata 全文归档。
 
 E1 的 `lifecycle_deadline_expired` 兼容终态或 `lifecycle_retry_cap_reached` 新终态不是永久死亡状态。当且仅当该 E1 所属的规范化 `project_root` 再次执行 frontmatter scan，并在同次 scan 中仍观察到该 slug 为 `status=superseded` 且具有 valid non-self successor 时，scan 作为 target-project executor-capacity/session trigger，可以把同一 proposal identity 原地重开为 `pending/execution_ready` 并启动新的 bounded retry epoch。全局 reconcile 和其他 project 的 scan 都不得重开它；同名跨项目 slug 必须严格隔离。该机制不新增队列，不扩大 forgetting executor 权限，也不改变 E2 的三种证据迁移。
 
@@ -143,8 +143,8 @@ unbounded_pending = 0
 
 2026-07-23 跨供应商 T0 复核通过，无未解决 P0/P1；本阶段为 `completed / authorized`，fully authorized（transition-register machine enum: `authorized`）。该授权只覆盖本 ADR 的生命周期收敛面，不授权 `staging.hard-delete`，不新增 Lane G、人审/operator queue，也不扩大 forgetting executor 权限。
 
-规范性回归入口为 `npm run smoke:lifecycle-convergence` 与 `npm run smoke:entry-lifecycle-proposals`。它们必须覆盖 legacy/fresh、双项目同 slug E2 隔离、E2 三态、provider/transient/writer backoff、+1d/+7d deadline source action、E1 首次 expiry bounded pending retry、E1 retry-cap terminal、其他 project scan 不重开、目标 project valid scan 原 identity 重开并可被 executor 消费、stale/retry-cap terminal、全文保留、幂等 sweep/rebuild、source corruption/cap/continuity fail-closed、restart stable IDs、守恒与无 Lane G/operator queue。
+规范性回归入口为 `npm run smoke:lifecycle-convergence` 与 `npm run smoke:entry-lifecycle-proposals`。它们必须覆盖七种 multiview creation state 在 reconcile 前立即具备完整 lifecycle metadata 且 `unbounded_pending=0`、legacy/fresh、双项目同 slug E2 隔离、E2 三态、provider/transient/writer backoff、+1d/+7d deadline source action、E1 首次 expiry bounded pending retry、E1 retry-cap terminal、其他 project scan 不重开、目标 project valid scan 原 identity 重开并可被 executor 消费、stale/retry-cap terminal、全文保留、幂等 sweep/rebuild、source corruption/cap/continuity fail-closed、fresh module restart stable IDs、守恒与无 Lane G/operator queue。
 
-Production dossier 必须把 `continuity_holds=true` 与 missing count zero 纳入 acceptance。若首轮执行实际迁移 source，dossier 必须分开记录 first-pass mutation 和后续 idempotent replay；若 source 已迁移，本次只可称 `idempotent_verification_only`，不得冒充首次 migration evidence。2026-07-23 最终 production evidence 属于 `idempotent_verification_only`，不声明首次 migration 证据。`self_sha256` 的 canonical convention 是：递归按 object key 排序、array 保序、compact JSON 序列化，计算时排除尚未写入的 `self_sha256` 字段，再对 UTF-8 bytes 做 SHA-256。
+Production dossier 必须把 `continuity_holds=true` 与 missing count zero 纳入 acceptance。v2 证据模型在 `historical_retained_evidence` 中保留首次 35-row source transition 的完整旧 dossier preimage，且每次重跑都机械重算该嵌套 dossier 的 `self_sha256`，验证 `unbounded_pending: 1→0`、剥离 `lifecycle_*` 后 payload 不变和 durable 不变。每次真实 wall-clock invocation 另在 `current_run` 下记录自己的 evidence mode、before/actions/after、source/hash transition 与同 invocation 的 idempotency replay；如果当前 before 已无 initial unbounded，只要求 after 仍为 0，不要求或伪造 `before>0`。当前出现新的 deadline/source action 时必须按本次 action 计数和 hash transition 如实记录，`historical_35_row_migration_claimed` 保持 false，不得把它误称首次 35-row 迁移。terminal move 的路径变化与内容保真分别通过 path-sensitive inventory 和 payload-content multiset hash 表达。`self_sha256` 的 canonical convention 是：递归按 object key 排序、array 保序、compact JSON 序列化，计算时排除尚未写入的 `self_sha256` 字段，再对 UTF-8 bytes 做 SHA-256。
 
 相关决策：[ADR 0024](./0024-second-brain-from-natural-conversation.md)、[ADR 0025](./0025-sediment-meta-curator-subsystem.md)、[ADR 0031](./0031-autonomous-self-calibrating-forgetting.md)。

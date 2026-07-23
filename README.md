@@ -78,10 +78,15 @@ pi-astack 的运行时配置不走 `piStack` namespace，也不依赖官方 sett
 {
   "$schema": "./agent/skills/pi-astack/pi-astack-settings.schema.json",
   "sediment": { "enabled": true, "autoLlmWriteEnabled": true },
-  "memory": { "search": { "stage1Model": "deepseek/deepseek-v4-flash" } },
+  "memory": {
+    "search": { "stage1Model": "deepseek/deepseek-v4-flash" },
+    "forgetting": { "enabled": true, "executorRealApplyEnabled": false }
+  },
   "vision": { "modelPreferences": ["openai/gpt-5.5", "anthropic/claude-opus-4-7"] }
 }
 ```
+
+`memory.forgetting.enabled` 只开启 decay/proposal planning；真实 demote 同时要求 dedicated gate `executorRealApplyEnabled` 为字面布尔 `true`，且 global authority `sediment.autoLlmWriteEnabled` 满足既有有效语义：布尔 `true` 或 legacy 字符串 `"true"`。任一门缺失、关闭或类型错误都 fail-closed，且 dedicated gate 不控制 archive reactivation；reactivation 继续使用既有 `autoLlmWriteEnabled` 语义。
 
 ### ADR0040 production Policy stable view
 

@@ -477,6 +477,21 @@ function loadPiStackSettings(): Record<string, unknown> {
   }
 }
 
+/**
+ * Global durable-write authority used by forgetting real demote. Match the
+ * existing sediment auto-write value semantics, including legacy string
+ * "true", while using a fail-closed fallback for missing or malformed input.
+ */
+export function isSedimentGlobalWriteAuthorityEnabled(value: unknown): boolean {
+  return resolveAutoLlmWriteEnabled(value, false) === true;
+}
+
+export function resolveSedimentGlobalWriteAuthority(): boolean {
+  const root = loadPiStackSettings();
+  const cfg = root.sediment as Record<string, unknown> | undefined;
+  return isSedimentGlobalWriteAuthorityEnabled(cfg?.autoLlmWriteEnabled);
+}
+
 export function resolveSedimentSettings(): SedimentSettings {
   const root = loadPiStackSettings();
   const cfg = (root.sediment as Record<string, unknown>) ?? {};

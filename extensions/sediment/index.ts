@@ -40,7 +40,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { buildPromptVersionAudit, resolveSedimentSettings, type SedimentSettings } from "./settings";
+import { buildPromptVersionAudit, resolveSedimentGlobalWriteAuthority, resolveSedimentSettings, type SedimentSettings } from "./settings";
 import {
   buildDurableCandidateKey,
   buildRunWindow,
@@ -75,9 +75,7 @@ import { summarizeClassifierHealth } from "./health";
 import { runAndWriteSedimentAggregatorIfDue } from "./aggregator";
 import { mergeEntryTelemetryIfDue } from "./entry-telemetry";
 import { runArchiveReactivationIfDue } from "./archive-reactivation";
-import { runForgettingExecutor } from "./forgetting-executor";
-import { appendSupersededMarkdownFrontmatterProposals, reconcileLifecycleProposalDeferrals, type LifecycleProposalExpectedStatus } from "./entry-lifecycle-proposals";
-import { refreshLifecycleConvergenceReadModel } from "./lifecycle-convergence";
+import { runForgettingAgentEndPass } from "./forgetting-agent-end";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
@@ -2711,14 +2709,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         catch { /* advisory-only; telemetry failure never affects sediment */ }
       });
 
-      // ADR 0031 Phase 3(gated): forgetting executor。enabled on → 跑 executor。
-      // autoLlmWriteEnabled≠true → DRY-RUN(读 pending archive proposal + hysteresis +
-      // resurrection → 算 plan + 写 shadow audit, **零 mutation**)。enabled on 且全自动写
-      // → 真实 archive:executor 编排 §4.2 门控 proposal + resurrection fail-safe +
-      // 反失控断路器, 实际归档由这里注入的 archiveEntry 完成(updateProjectEntry
-      // status=archived + proposal.expected_status CAS —— legacy active proposal 仅当仍 active 才归,
-      // D* E1 superseded proposal 仅当仍 superseded 才归;archived 全文留盘可复活, 无 git rm)。
-      // enabled=false → 连调度都不发生。fire-and-forget, 绝不阻断 agent_end。
+      // RM-FORGET-001: forgetting.enabled keeps bridge/reconcile/convergence and
+      // proposal planning live. Real active/superseded -> archived mutation has
+      // its own fail-closed memory.forgetting.executorRealApplyEnabled gate and
+      // also requires effective sediment auto-write global authority (boolean
+      // true or legacy string "true"). Neither gate can authorize real demote by itself.
+      // Archive reactivation remains on its independent block below.
       const memForgettingSettings = resolveMemorySettings();
       if (memForgettingSettings.forgetting?.enabled) {
         const scheduleForgetting = typeof setImmediate === "function"
@@ -2727,57 +2723,41 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         scheduleForgetting(() => {
           void (async () => {
             try {
-              // 真实 demote 要求 memory.forgetting.enabled 且 autoLlmWriteEnabled===true
-              // (staging-only/false 一律退化 dry-run, 尊重既有写 kill-switch 层级)。
-              const wantReal = settings.autoLlmWriteEnabled === true;
-              try {
-                appendSupersededMarkdownFrontmatterProposals({ projectRoot: cwd });
-                reconcileLifecycleProposalDeferrals();
-                refreshLifecycleConvergenceReadModel();
-              } catch { /* frontmatter bridge is advisory; executor still runs */ }
-              let allEntries: Array<{ slug: string; status: string; scope?: string }> = [];
-              try { allEntries = (await loadEntries(cwd, memForgettingSettings, undefined)) as typeof allEntries; }
-              catch { /* active corpus stays unknown; real executor fail-closes via corpus floor */ }
-              if (!wantReal) {
-                await runForgettingExecutor(cwd, memForgettingSettings);
-                return;
-              }
-              // real path: 从已加载条目解析 per-slug scope + active 语料规模(断路器用)。
-              const activeCorpusSize = allEntries.length > 0 ? allEntries.filter((e) => e.status === "active").length : undefined;
-              const scopeOf = new Map(allEntries.map((e) => [e.slug, e.scope === "world" ? "world" : "project"] as const));
-              const archiveEntry = async (target: { slug: string; kind: string; reason: string; expected_status?: LifecycleProposalExpectedStatus }) => {
-                try {
-                  const scope = scopeOf.get(target.slug) ?? "project";
-                  const expectedStatus = target.expected_status ?? "active";
-                  const res = await updateProjectEntry(
-                    target.slug,
-                    {
-                      status: "archived",
-                      // CAS: proposal pins the observed current status; E1 uses superseded, legacy demote uses active.
-                      expected_status: expectedStatus,
-                      timelineAction: "archived",
-                      timelineNote: `forgetting-executor v1(${target.reason}; expected_status=${expectedStatus})`,
-                      sessionId,
-                    },
-                    {
-                      projectRoot: cwd,
-                      abrainHome,
-                      projectId,
-                      settings,
-                      scope,
-                      dryRun: false,
-                      auditOperation: "forgetting_demote_apply",
-                    },
-                  );
-                  const okk = res.status !== "rejected";
-                  // rejected=true → CAS 预条件未过(条目非 active: 已 archived 或已复活)→
-                  // executor 放弃重试(标 executed), 防孤儿 pending 重放 demote 已复活条目。
-                  return { ok: okk, status: okk ? "archived" : "active", error: res.reason, rejected: !okk };
-                } catch (e) {
-                  return { ok: false, error: e instanceof Error ? e.message : String(e) };
-                }
-              };
-              await runForgettingExecutor(cwd, memForgettingSettings, { archiveEntry, activeCorpusSize });
+              await runForgettingAgentEndPass({
+                projectRoot: cwd,
+                memorySettings: memForgettingSettings,
+                globalWriteAuthority: resolveSedimentGlobalWriteAuthority(),
+                loadEntries: () => loadEntries(cwd, memForgettingSettings, undefined),
+                createArchiveEntry: (scopeOf) => async (target) => {
+                  try {
+                    const scope = scopeOf.get(target.slug) ?? "project";
+                    const expectedStatus = target.expected_status ?? "active";
+                    const res = await updateProjectEntry(
+                      target.slug,
+                      {
+                        status: "archived",
+                        expected_status: expectedStatus,
+                        timelineAction: "archived",
+                        timelineNote: `forgetting-executor v1(${target.reason}; expected_status=${expectedStatus})`,
+                        sessionId,
+                      },
+                      {
+                        projectRoot: cwd,
+                        abrainHome,
+                        projectId,
+                        settings,
+                        scope,
+                        dryRun: false,
+                        auditOperation: "forgetting_demote_apply",
+                      },
+                    );
+                    const ok = res.status !== "rejected";
+                    return { ok, status: ok ? "archived" : "active", error: res.reason, rejected: !ok };
+                  } catch (error) {
+                    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+                  }
+                },
+              });
             } catch { /* advisory only; never affects sediment/agent_end */ }
           })();
         });
@@ -6366,6 +6346,7 @@ function scheduleMultiviewReplay(args: {
         re_staged: replayResult.re_staged,
         terminal_max_retries: replayResult.terminal_max_retries,
         terminal_stale: replayResult.terminal_stale,
+        terminal_deadline_expired: replayResult.terminal_deadline_expired,
         deferred_other_project: replayResult.deferred_other_project,
         terminal_no_origin: replayResult.terminal_no_origin,
         skipped_backoff: replayResult.skipped_backoff,

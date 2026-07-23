@@ -29,6 +29,7 @@ async function check(name, fn) {
 
 const jiti = createJiti(import.meta.url, { interopDefault: true, moduleCache: false });
 const lifecycle = await jiti.import(path.join(repoRoot, "extensions/sediment/lifecycle-convergence.ts"));
+const lifecycleMetadata = await jiti.import(path.join(repoRoot, "extensions/sediment/lifecycle-source-metadata.ts"));
 const proposal = await jiti.import(path.join(repoRoot, "extensions/sediment/entry-lifecycle-proposals.ts"));
 const multiviewIo = await jiti.import(path.join(repoRoot, "extensions/sediment/multiview-staging-io.ts"));
 const ageout = await jiti.import(path.join(repoRoot, "extensions/sediment/staging-ageout.ts"));
@@ -61,6 +62,8 @@ function writeProvisional(slug, created, extra = {}) {
 }
 
 function writePending(slug, created, state, retryAttempts = 0, extra = {}) {
+  const hasPass1 = ["pass2_call_failed", "pass2_unparseable", "deferred", "synthesis_call_failed"].includes(state);
+  const hasPass2 = ["deferred", "synthesis_call_failed"].includes(state);
   return multiviewIo.writeMultiviewPending({
     slug,
     status: "provisional",
@@ -79,9 +82,11 @@ function writePending(slug, created, state, retryAttempts = 0, extra = {}) {
     candidate_snapshot: { title: `Fixture ${slug}`, kind: "fact", status: "active", confidence: 9, compiledTruth: `fixture full candidate ${slug}` },
     correction_signal: null,
     neighbor_slugs: [],
-    ...(state === "deferred" ? {
+    ...(hasPass1 ? {
       pass1_verdict: { op: "create", scope: "project", slug_target: null, reasoning: "fixture", raw: "{}" },
-      pass2_verdict: { verdict: "defer", rationale: "fixture", raw: "{}" },
+    } : {}),
+    ...(hasPass2 ? {
+      pass2_verdict: { verdict: state === "deferred" ? "defer" : "confirm_pass1", rationale: "fixture", raw: "{}" },
     } : {}),
     ...extra,
   });
@@ -90,6 +95,121 @@ function writePending(slug, created, state, retryAttempts = 0, extra = {}) {
 console.log("Smoke: RM-LIFECYCLE-002 convergence\n");
 
 try {
+  await check("new multiview sources are bounded atomically across every creation state", async () => {
+    const creationRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-lifecycle-creation-"));
+    process.env.ABRAIN_ROOT = creationRoot;
+    try {
+      const states = [
+        "reviewer_unavailable",
+        "pass1_call_failed",
+        "pass1_unparseable",
+        "pass2_call_failed",
+        "pass2_unparseable",
+        "deferred",
+        "synthesis_call_failed",
+      ];
+      const expectedFailure = {
+        reviewer_unavailable: "provider",
+        pass1_call_failed: "transient",
+        pass1_unparseable: "parse",
+        pass2_call_failed: "transient",
+        pass2_unparseable: "parse",
+        deferred: "semantic_defer",
+        synthesis_call_failed: "transient",
+      };
+      const created = now.toISOString();
+      const ids = [];
+      for (const state of states) {
+        const slug = `multiview-immediate-${state}`;
+        const file = writePending(slug, created, state);
+        const entry = JSON.parse(fs.readFileSync(file, "utf8")).entry;
+        const expectedId = `lc-multiview-pending-${sha([created, slug, "smoke"].join("\0")).slice(0, 24)}`;
+        assert.equal(entry.lifecycle_item_id, expectedId);
+        assert.equal(entry.lifecycle_cohort, "fresh");
+        assert.equal(entry.lifecycle_attempt, 0);
+        assert.equal(entry.lifecycle_failure_class, expectedFailure[state]);
+        assert.ok(Date.parse(entry.lifecycle_next_retry_not_before) > Date.parse(created));
+        assert.ok(Date.parse(entry.lifecycle_deadline) > Date.parse(entry.lifecycle_next_retry_not_before));
+        assert.ok(entry.lifecycle_new_evidence_trigger);
+        assert.equal("next_retry_not_before_iso" in entry, false);
+        ids.push(entry.lifecycle_item_id);
+      }
+      const immediate = lifecycle.rebuildLifecycleConvergence({ abrainHome: creationRoot, now, persist: false });
+      assert.equal(immediate.ok, true);
+      assert.equal(immediate.read_model.metrics.queues.multiview_pending.pending, states.length);
+      assert.equal(immediate.read_model.metrics.unbounded_pending, 0);
+      assert.deepEqual(immediate.read_model.rows.map((row) => row.item_id).sort(), [...ids].sort());
+      const restartedJiti = createJiti(import.meta.url, { interopDefault: true, moduleCache: false });
+      const restarted = await restartedJiti.import(path.join(repoRoot, "extensions/sediment/lifecycle-convergence.ts"));
+      const afterRestart = restarted.rebuildLifecycleConvergence({ abrainHome: creationRoot, now, persist: false });
+      assert.equal(afterRestart.ok, true);
+      assert.deepEqual(afterRestart.read_model.rows.map((row) => row.item_id).sort(), [...ids].sort());
+    } finally {
+      process.env.ABRAIN_ROOT = root;
+      fs.rmSync(creationRoot, { recursive: true, force: true });
+    }
+  });
+
+  await check("unknown multiview state throws and corrupt source fails closed", () => {
+    const corruptRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-lifecycle-corrupt-state-"));
+    process.env.ABRAIN_ROOT = corruptRoot;
+    try {
+      const file = writePending("multiview-corrupt-state", now.toISOString(), "pass1_call_failed");
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      parsed.entry.multiview_state = "unknown_corrupt_state";
+      fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`);
+      assert.throws(
+        () => lifecycleMetadata.multiviewLifecycleFailureClass(parsed.entry),
+        /unknown multiview lifecycle state: unknown_corrupt_state/,
+      );
+      const model = lifecycle.rebuildLifecycleConvergence({ abrainHome: corruptRoot, now, persist: false });
+      assert.equal(model.ok, false);
+      assert.equal(model.error, "corrupt_lifecycle_source");
+      assert.equal(model.read_model.metrics.source.corrupt_records, 1);
+    } finally {
+      process.env.ABRAIN_ROOT = root;
+      fs.rmSync(corruptRoot, { recursive: true, force: true });
+    }
+  });
+
+  await check("terminal live residue clears schedules before reversible archive", () => {
+    const terminalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-lifecycle-terminal-live-"));
+    process.env.ABRAIN_ROOT = terminalRoot;
+    try {
+      const file = writePending("multiview-terminal-live", isoDaysAgo(1), "pass1_call_failed");
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+      parsed.entry.lifecycle_terminal_at = now.toISOString();
+      parsed.entry.lifecycle_terminal_reason = "fixture_terminal_live";
+      parsed.entry.lifecycle_next_retry_not_before = new Date(now.getTime() + DAY).toISOString();
+      parsed.entry.lifecycle_deadline = new Date(now.getTime() + 2 * DAY).toISOString();
+      parsed.entry.lifecycle_new_evidence_trigger = "stale_pending_schedule";
+      fs.writeFileSync(file, `${JSON.stringify(parsed, null, 2)}\n`);
+
+      const reconciled = lifecycle.reconcileStagingLifecycleSources({ abrainHome: terminalRoot, now });
+      assert.equal(reconciled.ok, true);
+      assert.equal(reconciled.updated, 1);
+      const healed = JSON.parse(fs.readFileSync(file, "utf8")).entry;
+      assert.equal(healed.lifecycle_terminal_at, now.toISOString());
+      assert.equal(healed.lifecycle_terminal_reason, "fixture_terminal_live");
+      assert.equal(healed.lifecycle_failure_class, "none");
+      assert.equal("lifecycle_next_retry_not_before" in healed, false);
+      assert.equal("lifecycle_deadline" in healed, false);
+      assert.equal("lifecycle_new_evidence_trigger" in healed, false);
+      assert.match(healed.candidate_snapshot.compiledTruth, /fixture full candidate/);
+
+      const swept = lifecycle.sweepMultiviewTerminalEntries({ now });
+      assert.equal(swept.already_terminal_archived, 1);
+      assert.equal(multiviewIo.loadMultiviewPending().totalFound, 0);
+      const abandoned = fs.readdirSync(path.join(loader.stagingDir(), "abandoned"));
+      assert.equal(abandoned.length, 1);
+      const archived = JSON.parse(fs.readFileSync(path.join(loader.stagingDir(), "abandoned", abandoned[0]), "utf8")).entry;
+      assert.match(archived.candidate_snapshot.compiledTruth, /fixture full candidate/);
+    } finally {
+      process.env.ABRAIN_ROOT = root;
+      fs.rmSync(terminalRoot, { recursive: true, force: true });
+    }
+  });
+
   await check("multiview replay totalPending includes already-terminal live rows swept before reload", async () => {
     const replayRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-smoke-lifecycle-replay-total-"));
     process.env.ABRAIN_ROOT = replayRoot;
@@ -189,7 +309,8 @@ try {
     const swept = lifecycle.sweepMultiviewTerminalEntries({ now });
     assert.equal(swept.ok, true);
     assert.equal(swept.terminal, 2);
-    assert.equal(swept.stale, 1);
+    assert.equal(swept.stale, 0);
+    assert.equal(swept.deadline_expired, 1);
     assert.equal(swept.retry_cap, 1);
     const live = multiviewIo.loadMultiviewPending().entries;
     assert.deepEqual(live.map((entry) => entry.slug), ["multiview-fresh-pending"]);
@@ -331,10 +452,10 @@ try {
     assert.equal(proposal.readLifecycleProposals(projectRoot).find((item) => item.slug === slug).status, "pending");
   });
 
-  await check("source reconciliation is idempotent and schedules every live item", () => {
+  await check("creation-time bounds make source reconciliation immediately idempotent", () => {
     const first = lifecycle.reconcileStagingLifecycleSources({ abrainHome: root, now });
     assert.equal(first.ok, true);
-    assert.ok(first.updated > 0);
+    assert.equal(first.updated, 0);
     const mirrored = multiviewIo.loadMultiviewPending().entries.find((entry) => entry.slug === "multiview-fresh-pending");
     assert.ok(mirrored.lifecycle_next_retry_not_before);
     assert.equal("next_retry_not_before_iso" in mirrored, false);
