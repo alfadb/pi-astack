@@ -183,8 +183,11 @@ try {
 
   const stagingPath = runtimePaths.abrainSedimentStagingPath(abrainHome);
   const sedimentRoot = path.dirname(stagingPath);
-  assert(!fs.existsSync(sedimentRoot), "virgin sediment root was initialized before canonical barrier");
-  assert(!fs.existsSync(stagingPath), "sediment staging initialized before canonical barrier");
+  // 2026-07-23: sediment is no longer a canonical startup consumer. session_start
+  // may create local staging/intake state and scan durable pending without waiting
+  // for Path A. Writer/print consumers below still serialize on the shared barrier.
+  void sedimentRoot;
+  void stagingPath;
 
   const workflowPath = path.join(abrainHome, "workflows", "canonical-session-start-writer.md");
   let writerSettled = false;

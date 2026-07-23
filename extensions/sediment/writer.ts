@@ -5,7 +5,48 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
-import { appendKnowledgeEvidenceForWrite, knowledgeEvidenceEventRelativePath, knowledgeProjectionOutputHashFromMarkdownBytes, knowledgeProjectionRoot, readKnowledgeEvidenceL1Head, readKnowledgeStableViewStores, type AppendKnowledgeEvidenceForWriteResult, type KnowledgeEvidenceL1Head } from "./knowledge-evidence";
+import { listSedimentIntakePendingForSession, sedimentIntakePendingPath } from "./intake";
+import {
+  appendKnowledgeEvidenceForWrite,
+  knowledgeEvidenceEventRelativePath,
+  knowledgeIdentityDescriptor,
+  knowledgeProjectionOutputHashFromMarkdownBytes,
+  knowledgeProjectionRoot,
+  planKnowledgeProjectionFromValidatedSet,
+  readKnowledgeEvidenceL1Head,
+  readKnowledgeStableViewStores,
+  type AppendKnowledgeEvidenceForWriteResult,
+  type KnowledgeEvidenceEventBodyV1,
+  type KnowledgeEvidenceEnvelopeV1,
+  type KnowledgeEvidenceL1Head,
+  type KnowledgeEventNode,
+  type KnowledgeIdentityDescriptor,
+  type KnowledgeProjectionPlan,
+} from "./knowledge-evidence";
+import {
+  buildPublicationOutboxItem,
+  computePublicationOutboxItemId,
+  freezePublicationOutboxBatch,
+  schedulePublicationOutboxBatchDrain,
+  writePublicationOutboxItem,
+  type PublicationOutboxItem,
+  type PublicationOutboxPendingRow,
+} from "./publication-outbox";
+import {
+  convergeExactCohortIndex,
+  prepareExactCohortCommit,
+  publishExactCohortCommit,
+  resolveRef,
+  snapshotIndexEntries,
+  type CohortPlanEntry,
+} from "../_shared/git-exact-cohort";
+import {
+  canonicalL1EnvelopeJson,
+  isCanonicalCohortPath,
+  loadL1SchemaRegistry,
+  validateL1Envelope,
+} from "../_shared/l1-schema-registry";
+import { readGitTreeBlobs, type GitTreeBlob } from "../_shared/git-tree-snapshot";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, type ProvenanceClass, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
@@ -41,6 +82,7 @@ import type { Jsonish } from "../memory/types";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
 import {
   canonicalMutationBarrierHeld,
+  tryWithCanonicalMutationBarrier,
   withCanonicalMutationBarrier,
   withoutCanonicalMutationBarrierContext,
 } from "../_shared/canonical-mutation-barrier";
@@ -138,6 +180,13 @@ export interface WriterAuditContext {
   sessionId?: string;
   correlationId?: string;
   candidateId?: string;
+  /** Immutable timestamp of the candidate's source session entry/window. */
+  sourceTimestampUtc?: string;
+  /** Durable intake window that produced this accepted Knowledge mutation. */
+  windowId?: string;
+  /** Internal all-event publication group for event-first merge replay. */
+  publicationBatchId?: string;
+  publicationBatchSize?: number;
 }
 
 export interface WriteProjectEntryOptions {
@@ -356,10 +405,33 @@ async function checkKnowledgeStableViewWatermarkCas(args: {
     slug: args.slug,
   });
   if (!l1) return { ok: false, detail: "missing_l1_head", l2, l1: null };
-  if (l1.projectionKind === "delete") return { ok: false, detail: "l1_head_deleted", l2, l1 };
-  if (l1.winnerEventId !== watermarkEventId) return { ok: false, detail: "watermark_event_id_mismatch", l2, l1 };
-  if (l1.inputEventSetHash !== inputEventSetHash) return { ok: false, detail: "input_event_set_hash_mismatch", l2, l1 };
-  return { ok: true, l2, l1 };
+  if (l1.winnerEventId === watermarkEventId && l1.inputEventSetHash === inputEventSetHash) {
+    return { ok: true, l2, l1 };
+  }
+
+  // Event-first concurrency invariant: a stable view may be an ancestor of
+  // newer same-identity L1 events while publication is busy. That lag is not a
+  // failed CAS. Prove the projected watermark event still exists and belongs
+  // to this identity, then let the new event join the same causal layer. The
+  // topo fold, not a second lock-held L2 freshness check, chooses the winner.
+  try {
+    const watermarkPath = path.join(path.resolve(args.abrainHome), knowledgeEvidenceEventRelativePath(watermarkEventId));
+    const envelope = JSON.parse(await fs.readFile(watermarkPath, "utf-8")) as {
+      event_id?: string;
+      body_hash?: string;
+      body?: { scope?: { kind?: string; project_id?: string }; payload?: { slug?: string } };
+    };
+    const body = envelope.body;
+    const identityMatches = body?.payload?.slug === args.slug
+      && body.scope?.kind === args.scope
+      && (args.scope === "world" || body.scope?.project_id === args.projectId);
+    if (envelope.event_id !== watermarkEventId || envelope.body_hash !== watermarkEventId || !identityMatches) {
+      return { ok: false, detail: "watermark_event_identity_mismatch", l2, l1 };
+    }
+  } catch {
+    return { ok: false, detail: "watermark_event_missing", l2, l1 };
+  }
+  return { ok: true, detail: "projected_ancestor", l2, l1 };
 }
 
 function draftFromEntryMarkdown(raw: string, fallbackSlug: string, fallbackPatch?: ProjectEntryUpdateDraft): ProjectEntryDraft {
@@ -387,6 +459,45 @@ function draftFromEntryMarkdown(raw: string, fallbackSlug: string, fallbackPatch
   };
 }
 
+/** Immutable chronology from an existing entry. Never wall-clock of the write. */
+export function immutableSourceTimestampFromEntryMarkdown(raw: string): string | undefined {
+  const { frontmatterText, body } = splitFrontmatter(raw);
+  const frontmatter = parseFrontmatter(frontmatterText);
+  const candidates = [
+    scalarString(frontmatter.created),
+    scalarString(frontmatter.archive_at),
+    scalarString(frontmatter.updated),
+  ];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const parsed = Date.parse(candidate);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  const { timeline } = splitCompiledTruth(body);
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const match = /^[-*]\s+(\d{4}-\d{2}-\d{2}T[^\s|]+)/.exec(timeline[index] ?? "");
+    if (!match?.[1]) continue;
+    const parsed = Date.parse(match[1]);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  return undefined;
+}
+
+/** Prefer explicit caller timestamps; fall back to immutable entry chronology. */
+export function resolveKnowledgeEvidenceSourceTimestamp(args: {
+  createdAtUtc?: string;
+  auditContext?: WriterAuditContext;
+  entryMarkdown?: string;
+}): string | undefined {
+  const direct = args.createdAtUtc || args.auditContext?.sourceTimestampUtc;
+  if (direct) {
+    const parsed = Date.parse(direct);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  if (args.entryMarkdown) return immutableSourceTimestampFromEntryMarkdown(args.entryMarkdown);
+  return undefined;
+}
+
 async function appendKnowledgeEvidenceForMarkdown(args: {
   abrainHome: string;
   projectId: string;
@@ -399,10 +510,20 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
   patch?: ProjectEntryUpdateDraft;
   operation: "update" | "merge" | "archive" | "supersede" | "delete";
   causalParents?: string[];
+  createdAtUtc?: string;
+  deferPublication?: boolean;
 }): Promise<AppendKnowledgeEvidenceForWriteResult | undefined> {
   if (args.settings.knowledgeEvidenceEventWriter.enabled !== true) return undefined;
   const draft = draftFromEntryMarkdown(args.raw, args.fallbackSlug, args.patch);
   const legacyMarkdownDisabled = knowledgeLegacyMarkdownWriteDisabled(args.settings);
+  const sourceTimestampUtc = resolveKnowledgeEvidenceSourceTimestamp({
+    createdAtUtc: args.createdAtUtc,
+    auditContext: args.auditContext,
+    entryMarkdown: args.raw,
+  });
+  const auditContext: WriterAuditContext | undefined = sourceTimestampUtc
+    ? { ...(args.auditContext ?? {}), sourceTimestampUtc }
+    : args.auditContext;
   return appendKnowledgeEvidenceForWrite({
     abrainHome: args.abrainHome,
     projectId: args.projectId,
@@ -410,10 +531,12 @@ async function appendKnowledgeEvidenceForMarkdown(args: {
     draft,
     result: args.result,
     settings: args.settings,
-    auditContext: args.auditContext,
+    auditContext,
     sessionId: args.patch?.sessionId,
     operation: args.operation,
     causalParents: args.causalParents,
+    ...(args.deferPublication ? { deferPublication: true } : {}),
+    ...(sourceTimestampUtc ? { createdAtUtc: sourceTimestampUtc } : {}),
     ...(legacyMarkdownDisabled ? { legacyParallelWrite: { attempted: false, status: args.result.status, reason: "legacy_markdown_write_disabled" } } : {}),
   }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
     append: {
@@ -431,6 +554,634 @@ function knowledgeEvidenceWrittenPaths(...events: Array<AppendKnowledgeEvidenceF
     event?.projection?.manifestPath,
   ]);
   return Array.from(new Set(paths.filter((p): p is string => typeof p === "string" && p.length > 0)));
+}
+
+/**
+ * Phase-1 accepted durability: after create-only L1, enqueue a create-only
+ * publication outbox item for async L2/Git. Outbox is not semantic truth.
+ */
+async function enqueueKnowledgePublicationOutbox(args: {
+  abrainHome: string;
+  event: AppendKnowledgeEvidenceForWriteResult | undefined;
+  sessionId?: string;
+  windowId?: string;
+  candidateKey: string;
+  operation: string;
+  slug: string;
+  projectId?: string;
+  scope: "project" | "world";
+  projectKnowledge: boolean;
+  publishGit: boolean;
+  batchId?: string;
+  batchSize?: number;
+}): Promise<{ item?: PublicationOutboxItem; status?: string; filePath?: string }> {
+  const eventId = args.event?.append.eventId;
+  if (!eventId || !args.event?.append.ok) return {};
+  const item = buildPublicationOutboxItem({
+    domain: "knowledge",
+    sessionId: args.sessionId || "unknown-session",
+    ...(args.windowId ? { windowId: args.windowId } : {}),
+    eventId,
+    // Knowledge publication derives its immutable L1 path from eventId. Never
+    // copy the event body or a mutable projection payload into publication work.
+    artifactPaths: [],
+    candidateKey: args.candidateKey,
+    operation: args.operation,
+    slug: args.slug,
+    ...(args.projectId ? { projectId: args.projectId } : {}),
+    scope: args.scope,
+    projectKnowledge: args.projectKnowledge,
+    publishGit: args.publishGit,
+    ...(args.event.body?.created_at_utc ? { sourceTimestampUtc: args.event.body.created_at_utc } : {}),
+    ...(args.batchId ? { batchId: args.batchId, batchSize: args.batchSize } : {}),
+    note: "accepted_pending_publication",
+  });
+  const written = await writePublicationOutboxItem(args.abrainHome, item);
+  if (written.status === "collision") {
+    throw new Error(`publication outbox identity collision: ${written.itemId}`);
+  }
+  return { item: written.item, status: written.status, filePath: written.filePath };
+}
+
+interface AcceptedKnowledgeMutation {
+  ok: true;
+  event: AppendKnowledgeEvidenceForWriteResult;
+  publication: WriterPublicationResult;
+}
+
+interface RejectedKnowledgeMutation {
+  ok: false;
+  reason: "knowledge_evidence_append_failed" | "publication_outbox_write_failed" | "stable_view_watermark_missing" | "source_timestamp_unavailable";
+  detail?: string;
+  event?: AppendKnowledgeEvidenceForWriteResult;
+}
+
+function stableViewWatermarkEventId(raw: string): string | undefined {
+  const frontmatter = parseFrontmatter(splitFrontmatter(raw).frontmatterText);
+  const eventId = scalarString(frontmatter.sediment_watermark_event_id);
+  return isSha256Hex(eventId) ? eventId : undefined;
+}
+
+/** Complete the event-first accepted transaction: L1 first, then work receipt. */
+async function acceptKnowledgeMutationViaOutbox(args: {
+  abrainHome: string;
+  projectId: string;
+  scope: "project" | "world";
+  raw: string;
+  slug: string;
+  result: WriteProjectEntryResult;
+  settings: SedimentSettings;
+  operation: "update" | "merge" | "archive" | "supersede" | "delete";
+  patch?: ProjectEntryUpdateDraft;
+  auditContext?: WriterAuditContext;
+  sessionId?: string;
+}): Promise<AcceptedKnowledgeMutation | RejectedKnowledgeMutation> {
+  const causalParent = stableViewWatermarkEventId(args.raw);
+  if (!causalParent) return { ok: false, reason: "stable_view_watermark_missing" };
+
+  const event = await appendKnowledgeEvidenceForMarkdown({
+    abrainHome: args.abrainHome,
+    projectId: args.projectId,
+    scope: args.scope,
+    raw: args.raw,
+    fallbackSlug: args.slug,
+    result: args.result,
+    settings: args.settings,
+    auditContext: args.auditContext,
+    patch: args.patch,
+    operation: args.operation,
+    causalParents: [causalParent],
+    deferPublication: true,
+  });
+  if (!event?.append.ok || !event.append.eventId) {
+    const reason = /source timestamp unavailable/i.test(event?.append.error ?? "")
+      ? "source_timestamp_unavailable" as const
+      : "knowledge_evidence_append_failed" as const;
+    return { ok: false, reason, event };
+  }
+
+  const candidateKey = args.auditContext?.candidateId
+    || args.auditContext?.correlationId
+    || `knowledge:${args.operation}:${args.slug}:${event.append.eventId}`;
+  try {
+    const outbox = await enqueueKnowledgePublicationOutbox({
+      abrainHome: args.abrainHome,
+      event,
+      sessionId: args.sessionId || args.auditContext?.sessionId,
+      windowId: args.auditContext?.windowId,
+      candidateKey,
+      operation: args.operation,
+      slug: args.slug,
+      projectId: args.projectId,
+      scope: args.scope,
+      projectKnowledge: args.settings.knowledgeProjector.enabled === true,
+      publishGit: args.settings.gitCommit !== false,
+      batchId: args.auditContext?.publicationBatchId,
+      batchSize: args.auditContext?.publicationBatchSize,
+    });
+    return {
+      ok: true,
+      event,
+      publication: {
+        status: "durable_pending",
+        commit: null,
+        localCommit: "not_published",
+        drainStatus: "publication_outbox_enqueued",
+        reason: outbox.status ? `outbox_${outbox.status}` : "outbox_enqueued",
+        candidate: candidateKey,
+        canonical: canonicalGitRuntimeEnabled(),
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: "publication_outbox_write_failed",
+      detail: err instanceof Error ? err.message : String(err),
+      event,
+    };
+  }
+}
+
+function updateKnowledgeEventOperation(
+  auditOperation: string | undefined,
+  patch: ProjectEntryUpdateDraft,
+): "update" | "merge" | "archive" | "supersede" | "delete" {
+  if (auditOperation === "delete" && patch.status === "archived") return "archive";
+  if (auditOperation === "merge" || auditOperation === "archive" || auditOperation === "supersede" || auditOperation === "delete") {
+    return auditOperation;
+  }
+  return "update";
+}
+
+function updateKnowledgeResultStatus(
+  operation: "update" | "merge" | "archive" | "supersede" | "delete",
+): WriteProjectEntryResult["status"] {
+  if (operation === "merge") return "merged";
+  if (operation === "archive") return "archived";
+  if (operation === "supersede") return "superseded";
+  if (operation === "delete") return "deleted";
+  return "updated";
+}
+
+const KNOWLEDGE_L1_ROOT = "l1/events/sha256";
+const KNOWLEDGE_L2_ROOT = "l2/views/knowledge";
+const KNOWLEDGE_L2_LATEST = `${KNOWLEDGE_L2_ROOT}/latest`;
+const KNOWLEDGE_MANIFEST_PATH = `${KNOWLEDGE_L2_LATEST}/manifest.json`;
+const KNOWLEDGE_PUBLICATION_BATCH_LIMIT = 64;
+
+interface FrozenKnowledgeHeadSnapshot {
+  blobs: ReadonlyMap<string, GitTreeBlob>;
+  knowledgeNodes: readonly KnowledgeEventNode[];
+  knowledgeEventIds: ReadonlySet<string>;
+}
+
+export interface KnowledgeHeadClosureViolation {
+  path: string;
+  reason: "watermark_missing_from_head_l1" | "event_id_missing_from_head_l1" | "manifest_closure_mismatch";
+  eventId?: string;
+  identity?: string;
+}
+
+interface KnowledgePublicationTestHooks {
+  afterFreeze?: (context: { frozenCommit: string; selectedItemIds: readonly string[] }) => Promise<void> | void;
+  afterRefCas?: (context: { frozenCommit: string; candidate: string }) => Promise<void> | void;
+}
+
+let knowledgePublicationTestHooks: KnowledgePublicationTestHooks = {};
+
+export function _setKnowledgePublicationTestHooksForTests(hooks: KnowledgePublicationTestHooks): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") throw new Error("knowledge publication test hooks require PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  knowledgePublicationTestHooks = { ...hooks };
+}
+
+function safeKnowledgeRefName(refName: string): boolean {
+  return /^refs\/heads\/[A-Za-z0-9._\/-]+$/.test(refName) && !refName.includes("..") && !refName.endsWith("/");
+}
+
+async function resolveKnowledgePublicationRef(repo: string): Promise<string> {
+  const refName = await execFileAsync("git", ["-C", repo, "symbolic-ref", "-q", "HEAD"], {
+    env: gitReadEnvironment(),
+    timeout: 5_000,
+    maxBuffer: 128 * 1024,
+    encoding: "utf-8",
+  }).then((result) => String(result.stdout).trim()).catch(() => "");
+  if (!safeKnowledgeRefName(refName)) throw new Error(`unsafe HEAD ref for publication: ${refName || "detached"}`);
+  return refName;
+}
+
+async function readFrozenKnowledgeHead(repo: string, frozenCommit: string): Promise<FrozenKnowledgeHeadSnapshot> {
+  const treeBlobs = await readGitTreeBlobs({
+    repo,
+    commit: frozenCommit,
+    roots: [KNOWLEDGE_L1_ROOT, KNOWLEDGE_L2_ROOT],
+  });
+  const registry = loadL1SchemaRegistry();
+  const blobs = new Map(treeBlobs.map((blob) => [blob.path, blob]));
+  const knowledgeNodes: KnowledgeEventNode[] = [];
+  const knowledgeEventIds = new Set<string>();
+  for (const blob of treeBlobs) {
+    if (!blob.path.startsWith(`${KNOWLEDGE_L1_ROOT}/`)) continue;
+    if (blob.mode !== "100644") throw new Error(`tracked L1 event has unsupported mode ${blob.mode}: ${blob.path}`);
+    let parsed: unknown;
+    try { parsed = JSON.parse(blob.content.toString("utf-8")); }
+    catch { throw new Error(`tracked L1 event is not JSON: ${blob.path}`); }
+    const validated = validateL1Envelope(parsed, { registry, relativePath: blob.path });
+    if (
+      validated.registration.domain === "knowledge"
+      && validated.registration.role === "canonical"
+      && validated.registration.phase === "active"
+      && validated.registration.fold_eligible
+    ) {
+      if (knowledgeEventIds.has(validated.eventId)) throw new Error(`duplicate tracked Knowledge event: ${validated.eventId}`);
+      knowledgeEventIds.add(validated.eventId);
+      knowledgeNodes.push({
+        eventId: validated.eventId,
+        body: validated.body as unknown as KnowledgeEvidenceEventBodyV1,
+      });
+    }
+  }
+  return Object.freeze({
+    blobs,
+    knowledgeNodes: Object.freeze(knowledgeNodes),
+    knowledgeEventIds,
+  });
+}
+
+function knowledgeIdentityFromL2Path(relativePath: string): KnowledgeIdentityDescriptor | undefined {
+  const world = new RegExp(`^${KNOWLEDGE_L2_LATEST}/world/([^/]+)\\.md$`).exec(relativePath);
+  if (world?.[1]) return { key: `world::${world[1]}`, scopeKind: "world", slug: world[1] };
+  const project = new RegExp(`^${KNOWLEDGE_L2_LATEST}/projects/([^/]+)/([^/]+)\\.md$`).exec(relativePath);
+  if (project?.[1] && project[2]) {
+    return { key: `project:${project[1]}:${project[2]}`, scopeKind: "project", projectId: project[1], slug: project[2] };
+  }
+  return undefined;
+}
+
+function expectedManifestBytes(plan: KnowledgeProjectionPlan): Buffer | undefined {
+  const manifest = plan.entries.find((entry) => entry.relativePath === "latest/manifest.json");
+  return manifest?.op === "put" ? Buffer.from(manifest.content!, "utf-8") : undefined;
+}
+
+function inspectFrozenKnowledgeL2References(snapshot: FrozenKnowledgeHeadSnapshot): KnowledgeHeadClosureViolation[] {
+  const violations: KnowledgeHeadClosureViolation[] = [];
+  for (const [relativePath, blob] of snapshot.blobs) {
+    if (!relativePath.startsWith(`${KNOWLEDGE_L2_LATEST}/`) || !relativePath.endsWith(".md")) continue;
+    const identity = knowledgeIdentityFromL2Path(relativePath);
+    if (!identity) throw new Error(`unsupported tracked Knowledge L2 path: ${relativePath}`);
+    const frontmatter = parseFrontmatter(splitFrontmatter(blob.content.toString("utf-8")).frontmatterText);
+    const watermark = scalarString(frontmatter.sediment_watermark_event_id);
+    const eventId = scalarString(frontmatter.sediment_event_id);
+    if (!watermark || !snapshot.knowledgeEventIds.has(watermark)) {
+      violations.push({
+        path: relativePath,
+        reason: "watermark_missing_from_head_l1",
+        ...(watermark ? { eventId: watermark } : {}),
+        identity: identity.key,
+      });
+    } else if (!eventId || !snapshot.knowledgeEventIds.has(eventId)) {
+      violations.push({
+        path: relativePath,
+        reason: "event_id_missing_from_head_l1",
+        ...(eventId ? { eventId } : {}),
+        identity: identity.key,
+      });
+    }
+  }
+  return violations;
+}
+
+function inspectFrozenKnowledgeManifest(
+  snapshot: FrozenKnowledgeHeadSnapshot,
+  plan: KnowledgeProjectionPlan,
+): KnowledgeHeadClosureViolation | undefined {
+  const expectedManifest = expectedManifestBytes(plan);
+  const actualManifest = snapshot.blobs.get(KNOWLEDGE_MANIFEST_PATH)?.content;
+  if (
+    (!expectedManifest || (actualManifest && actualManifest.equals(expectedManifest)))
+    && (expectedManifest || !actualManifest)
+  ) return undefined;
+  let eventId: string | undefined;
+  if (actualManifest) {
+    try {
+      const parsed = JSON.parse(actualManifest.toString("utf-8")) as { latestEventId?: unknown };
+      if (typeof parsed.latestEventId === "string") eventId = parsed.latestEventId;
+    } catch { /* mismatch is already explicit */ }
+  }
+  return {
+    path: KNOWLEDGE_MANIFEST_PATH,
+    reason: "manifest_closure_mismatch",
+    ...(eventId ? { eventId } : {}),
+  };
+}
+
+function sortKnowledgeClosureViolations(
+  violations: readonly KnowledgeHeadClosureViolation[],
+): KnowledgeHeadClosureViolation[] {
+  return [...violations].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : left.reason.localeCompare(right.reason));
+}
+
+function inspectFrozenKnowledgeClosureSnapshot(snapshot: FrozenKnowledgeHeadSnapshot): KnowledgeHeadClosureViolation[] {
+  const plan = planKnowledgeProjectionFromValidatedSet({ nodes: snapshot.knowledgeNodes, affectedIdentities: [] });
+  const manifestViolation = inspectFrozenKnowledgeManifest(snapshot, plan);
+  return sortKnowledgeClosureViolations([
+    ...inspectFrozenKnowledgeL2References(snapshot),
+    ...(manifestViolation ? [manifestViolation] : []),
+  ]);
+}
+
+/** Read-only HEAD closure inspector used by dossiers and tests. */
+export async function inspectKnowledgeHeadClosure(
+  abrainHome: string,
+  commit?: string,
+): Promise<{ commit: string; knowledgeL1Count: number; violations: readonly KnowledgeHeadClosureViolation[] }> {
+  const repo = path.resolve(abrainHome);
+  const frozenCommit = commit ?? await resolveRef(repo, "HEAD");
+  const snapshot = await readFrozenKnowledgeHead(repo, frozenCommit);
+  return Object.freeze({
+    commit: frozenCommit,
+    knowledgeL1Count: snapshot.knowledgeNodes.length,
+    violations: Object.freeze(inspectFrozenKnowledgeClosureSnapshot(snapshot)),
+  });
+}
+
+async function readFrozenBatchKnowledgeEvents(
+  repo: string,
+  rows: readonly PublicationOutboxPendingRow[],
+): Promise<{ nodes: readonly KnowledgeEventNode[]; l1Plan: readonly CohortPlanEntry[] }> {
+  const registry = loadL1SchemaRegistry();
+  const nodes = new Map<string, KnowledgeEventNode>();
+  const plans = new Map<string, CohortPlanEntry>();
+  for (const row of rows) {
+    const item = row.item;
+    if (item.itemId !== row.itemId || computePublicationOutboxItemId(item) !== row.itemId) {
+      throw new Error(`publication outbox identity mismatch: ${row.itemId}`);
+    }
+    if (!item.eventId) throw new Error(`Knowledge publication item has no eventId: ${row.itemId}`);
+    const relativePath = knowledgeEvidenceEventRelativePath(item.eventId);
+    const filePath = path.join(repo, ...relativePath.split("/"));
+    const content = await fs.readFile(filePath);
+    let envelope: KnowledgeEvidenceEnvelopeV1;
+    try { envelope = JSON.parse(content.toString("utf-8")) as KnowledgeEvidenceEnvelopeV1; }
+    catch { throw new Error(`batch Knowledge L1 is not JSON: ${relativePath}`); }
+    const validated = validateL1Envelope(envelope, {
+      registry,
+      abrainHome: repo,
+      filePath,
+      relativePath,
+      expected: { domain: "knowledge", role: "canonical", phase: "active", requireWriteEnabled: true },
+    });
+    if (!content.equals(Buffer.from(canonicalL1EnvelopeJson(envelope), "utf-8"))) {
+      throw new Error(`batch Knowledge L1 bytes are not canonical: ${relativePath}`);
+    }
+    if (validated.eventId !== item.eventId) throw new Error(`batch eventId mismatch: ${item.eventId}`);
+    const body = validated.body as unknown as KnowledgeEvidenceEventBodyV1;
+    if (
+      (item.slug && item.slug !== body.payload.slug)
+      || (item.scope && item.scope !== body.scope.kind)
+      || (item.projectId && item.projectId !== body.scope.project_id)
+    ) {
+      throw new Error(`publication item identity does not match Knowledge L1: ${row.itemId}`);
+    }
+    const existingPlan = plans.get(relativePath);
+    if (existingPlan?.op === "put" && !Buffer.from(existingPlan.content!).equals(content)) {
+      throw new Error(`batch Knowledge L1 byte collision: ${relativePath}`);
+    }
+    plans.set(relativePath, { path: relativePath, op: "put", mode: "100644", content: Buffer.from(content) });
+    nodes.set(validated.eventId, { eventId: validated.eventId, body });
+  }
+  return Object.freeze({
+    nodes: Object.freeze([...nodes.values()]),
+    l1Plan: Object.freeze([...plans.values()]),
+  });
+}
+
+function mergeKnowledgeClosure(
+  headNodes: readonly KnowledgeEventNode[],
+  batchNodes: readonly KnowledgeEventNode[],
+): readonly KnowledgeEventNode[] {
+  const nodes = new Map(headNodes.map((node) => [node.eventId, node]));
+  for (const node of batchNodes) {
+    const existing = nodes.get(node.eventId);
+    if (existing && JSON.stringify(existing.body) !== JSON.stringify(node.body)) {
+      throw new Error(`HEAD/batch Knowledge event collision: ${node.eventId}`);
+    }
+    nodes.set(node.eventId, node);
+  }
+  return Object.freeze([...nodes.values()]);
+}
+
+function buildKnowledgeBatchProjectionPlan(args: {
+  snapshot: FrozenKnowledgeHeadSnapshot;
+  closureNodes: readonly KnowledgeEventNode[];
+  batchNodes: readonly KnowledgeEventNode[];
+  settings: SedimentSettings;
+}): { plan?: KnowledgeProjectionPlan; violations: readonly KnowledgeHeadClosureViolation[] } {
+  if (!args.settings.knowledgeProjector.enabled || args.settings.knowledgeProjector.l2OutputRoot !== "repo") {
+    return { violations: [] };
+  }
+  const referenceViolations = inspectFrozenKnowledgeL2References(args.snapshot);
+  const affected = new Map<string, KnowledgeIdentityDescriptor>();
+  for (const node of args.batchNodes) {
+    const identity = knowledgeIdentityDescriptor(node.body);
+    affected.set(identity.key, identity);
+  }
+  for (const violation of referenceViolations) {
+    if (!violation.identity) continue;
+    const identity = knowledgeIdentityFromL2Path(violation.path);
+    if (identity) affected.set(identity.key, identity);
+  }
+  const plan = planKnowledgeProjectionFromValidatedSet({
+    nodes: args.closureNodes,
+    affectedIdentities: [...affected.values()],
+  });
+  const manifestViolation = inspectFrozenKnowledgeManifest(args.snapshot, plan);
+  const violations = sortKnowledgeClosureViolations([
+    ...referenceViolations,
+    ...(manifestViolation ? [manifestViolation] : []),
+  ]);
+  if (args.batchNodes.length === 0 && violations.length === 0) return { violations };
+  return { plan, violations };
+}
+
+function projectionCohortEntries(plan: KnowledgeProjectionPlan | undefined): CohortPlanEntry[] {
+  if (!plan) return [];
+  return plan.entries.map((entry): CohortPlanEntry => {
+    const relativePath = `${KNOWLEDGE_L2_ROOT}/${entry.relativePath}`;
+    if (!isCanonicalCohortPath(relativePath)) throw new Error(`invalid projection cohort path: ${relativePath}`);
+    return entry.op === "put"
+      ? { path: relativePath, op: "put", mode: "100644", content: Buffer.from(entry.content!, "utf-8") }
+      : { path: relativePath, op: "delete" };
+  });
+}
+
+async function materializeKnowledgeProjectionPlanHeld(
+  repo: string,
+  settings: SedimentSettings,
+  plan: KnowledgeProjectionPlan | undefined,
+): Promise<void> {
+  if (!plan) return;
+  if (!canonicalMutationBarrierHeld(repo)) throw new Error("Knowledge projection materialization requires held OFD");
+  const root = knowledgeProjectionRoot(repo, settings);
+  for (const entry of plan.entries) {
+    const outputPath = path.join(root, ...entry.relativePath.split("/"));
+    const relative = path.relative(root, outputPath);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`projection path escaped root: ${entry.relativePath}`);
+    if (entry.op === "delete") await fs.rm(outputPath, { force: true });
+    else await atomicWrite(outputPath, entry.content!);
+  }
+}
+
+function effectiveCohortPlan(
+  plan: readonly CohortPlanEntry[],
+  headBlobs: ReadonlyMap<string, GitTreeBlob>,
+): CohortPlanEntry[] {
+  return plan.filter((entry) => {
+    const head = headBlobs.get(entry.path);
+    if (entry.op === "delete") return head !== undefined;
+    const content = typeof entry.content === "string" ? Buffer.from(entry.content, "utf-8") : entry.content!;
+    return !head || head.mode !== (entry.mode ?? "100644") || !head.content.equals(content);
+  });
+}
+
+async function runFrozenKnowledgePublicationBatch(
+  repo: string,
+  settings: SedimentSettings,
+): Promise<{
+  processed: number;
+  doneItemIds?: readonly string[];
+  failedItems?: readonly { itemId: string; reason: string }[];
+  lastError?: string;
+}> {
+  const frozen = await freezePublicationOutboxBatch(repo, {
+    maxItems: KNOWLEDGE_PUBLICATION_BATCH_LIMIT,
+    isReady: async (row) => {
+      const windowId = row.item.windowId;
+      if (typeof windowId === "string" && /^[0-9a-f]{64}$/.test(windowId)) {
+        // Hold only while the exact durable intake window path still exists.
+        // Path presence is the durable pending signal; different same-session
+        // windows must not block later receipts.
+        try {
+          await fs.access(sedimentIntakePendingPath(repo, windowId));
+          return false;
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+          throw err;
+        }
+      }
+      // Legacy receipts without windowId keep the conservative session fallback.
+      return (await listSedimentIntakePendingForSession(repo, row.item.sessionId)).length === 0;
+    },
+  });
+  const unknown = frozen.selected.filter((row) => row.item.domain !== "knowledge");
+  const batchRows = frozen.selected.filter((row) => row.item.domain === "knowledge");
+  const failedItems = unknown.map((row) => ({
+    itemId: row.itemId,
+    reason: `unknown_publication_domain:${row.item.domain}`,
+  }));
+  const processed = frozen.selected.length;
+
+  let refName: string;
+  let frozenCommit: string;
+  try {
+    refName = await resolveKnowledgePublicationRef(repo);
+    frozenCommit = await resolveRef(repo, refName);
+  } catch (err) {
+    // Detached / unborn / symbolic-ref-unavailable and other temporary HEAD
+    // states stay pending for a later one-shot. Only content/schema/identity/
+    // path validation terminals may move items to failed/.
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      processed,
+      failedItems,
+      lastError: `publication_ref_unavailable:${reason}`,
+    };
+  }
+
+  let batch: Awaited<ReturnType<typeof readFrozenBatchKnowledgeEvents>>;
+  try {
+    batch = await readFrozenBatchKnowledgeEvents(repo, batchRows);
+  } catch (err) {
+    const reason = `knowledge_publication_validation_failed:${err instanceof Error ? err.message : String(err)}`;
+    return {
+      processed,
+      failedItems: [...failedItems, ...batchRows.map((row) => ({ itemId: row.itemId, reason }))],
+      lastError: reason,
+    };
+  }
+
+  await knowledgePublicationTestHooks.afterFreeze?.({
+    frozenCommit,
+    selectedItemIds: Object.freeze(batchRows.map((row) => row.itemId)),
+  });
+
+  const snapshot = await readFrozenKnowledgeHead(repo, frozenCommit);
+  const closureNodes = mergeKnowledgeClosure(snapshot.knowledgeNodes, batch.nodes);
+  const projected = buildKnowledgeBatchProjectionPlan({ snapshot, closureNodes, batchNodes: batch.nodes, settings });
+  const planMap = new Map<string, CohortPlanEntry>();
+  for (const entry of [...batch.l1Plan, ...projectionCohortEntries(projected.plan)]) {
+    if (planMap.has(entry.path)) throw new Error(`duplicate frozen cohort path: ${entry.path}`);
+    planMap.set(entry.path, entry);
+  }
+  const exactPlan = [...planMap.values()].sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const publishGit = settings.gitCommit !== false && (
+    batchRows.some((row) => row.item.publishGit)
+    || (batchRows.length === 0 && projected.violations.length > 0)
+  );
+
+  if (publishGit && exactPlan.length > 0) {
+    const cohortPaths = exactPlan.map((entry) => entry.path);
+    const frozenIndexSnapshot = await snapshotIndexEntries(repo, cohortPaths);
+    const effective = effectiveCohortPlan(exactPlan, snapshot.blobs);
+    if (effective.length > 0) {
+      const prepared = await prepareExactCohortCommit({
+        repo,
+        refName,
+        frozenCommit,
+        plan: effective,
+        message: `sediment: frozen publication batch ${batchRows.length}`,
+      });
+      const published = await publishExactCohortCommit({
+        repo,
+        refName,
+        candidate: prepared.candidate,
+        frozenCommit,
+      });
+      if (published.status === "cas_conflict") {
+        return { processed, failedItems, lastError: "ref CAS conflict during frozen publication batch" };
+      }
+      await knowledgePublicationTestHooks.afterRefCas?.({ frozenCommit, candidate: prepared.candidate });
+    }
+    await convergeExactCohortIndex({
+      repo,
+      refName,
+      cohortPaths,
+      frozenIndexSnapshot,
+    });
+  }
+
+  await materializeKnowledgeProjectionPlanHeld(repo, settings, projected.plan);
+  return {
+    processed,
+    doneItemIds: batchRows.map((row) => row.itemId),
+    failedItems,
+  };
+}
+
+/**
+ * One-shot stateless publisher. It acquires OFD once, freezes one bounded batch
+ * plus HEAD, publishes one exact cohort, converges the index, and only then
+ * makes batch items ack-eligible. It intentionally does not push.
+ */
+export function scheduleKnowledgePublicationOutboxDrain(
+  abrainHome: string,
+  settings: SedimentSettings,
+) {
+  const repo = path.resolve(abrainHome);
+  return schedulePublicationOutboxBatchDrain(repo, async () => {
+    const attempted = await tryWithCanonicalMutationBarrier(repo, () => runFrozenKnowledgePublicationBatch(repo, settings));
+    if (attempted.status === "busy") return { processed: 0, lastError: "canonical mutation barrier busy" };
+    return attempted.value;
+  });
 }
 
 async function resetKnowledgeEvidenceIndex(abrainHome: string, event: AppendKnowledgeEvidenceForWriteResult | undefined): Promise<void> {
@@ -1587,6 +2338,33 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   return auditPath;
 }
 
+export function knowledgeMergePublicationBatchContext(args: {
+  targetSlug: string;
+  sourceSlugs: string[];
+  compiledTruth: string;
+  sessionId?: string;
+  auditContext?: WriterAuditContext;
+}): Pick<WriterAuditContext, "publicationBatchId" | "publicationBatchSize"> | undefined {
+  const sources = Array.from(new Set(args.sourceSlugs.map((slug) => slugify(slug)).filter(Boolean)))
+    .filter((slug) => slug !== slugify(args.targetSlug));
+  if (sources.length === 0) return undefined;
+  const identity = {
+    operation: "merge",
+    targetSlug: slugify(args.targetSlug),
+    sourceSlugs: sources.slice().sort(),
+    compiledTruthHash: createHash("sha256").update(args.compiledTruth, "utf-8").digest("hex"),
+    sessionId: args.auditContext?.sessionId || args.sessionId || "unknown-session",
+    windowId: args.auditContext?.windowId || null,
+    candidateId: args.auditContext?.candidateId || null,
+    correlationId: args.auditContext?.correlationId || null,
+    sourceTimestampUtc: args.auditContext?.sourceTimestampUtc || null,
+  };
+  return {
+    publicationBatchId: createHash("sha256").update(JSON.stringify(identity), "utf-8").digest("hex"),
+    publicationBatchSize: sources.length + 1,
+  };
+}
+
 export async function mergeProjectEntries(
   targetSlugRaw: string,
   sourceSlugRaws: string[],
@@ -1597,6 +2375,18 @@ export async function mergeProjectEntries(
   const sources = Array.from(new Set(sourceSlugRaws.map((slug) => slugify(slug)).filter(Boolean)));
   const nonTargetSources = sources.filter((slug) => slug !== targetSlug);
   const reason = patch.reason || patch.timelineNote || "merged by sediment curator";
+  const publicationBatch = knowledgeLegacyMarkdownWriteDisabled(opts.settings)
+    ? knowledgeMergePublicationBatchContext({
+        targetSlug,
+        sourceSlugs: nonTargetSources,
+        compiledTruth: patch.compiledTruth,
+        sessionId: patch.sessionId,
+        auditContext: opts.auditContext,
+      })
+    : undefined;
+  const mergeAuditContext = publicationBatch
+    ? { ...(opts.auditContext ?? {}), ...publicationBatch }
+    : opts.auditContext;
   // P1 fix (2026-05-14 audit): thread opts.scope through so world-scoped
   // merge target resolution uses abrainKnowledgeDir instead of
   // abrainProjectDir.
@@ -1615,15 +2405,20 @@ export async function mergeProjectEntries(
     dryRun: opts.dryRun,
     auditOperation: "merge",
     auditExtras: { sources, reason },
-    auditContext: opts.auditContext,
+    auditContext: mergeAuditContext,
   });
 
+  const forceMergeHold = (result: WriteProjectEntryResult): WriteProjectEntryResult => (
+    knowledgeLegacyMarkdownWriteDisabled(opts.settings) && result.status === "rejected"
+      ? { ...result, reason: `merge_group_incomplete:${result.reason || "member_rejected"}` }
+      : result
+  );
   const results: WriteProjectEntryResult[] = [
-    { ...targetResult, status: targetResult.status === "dry_run" ? "dry_run" : targetResult.status === "rejected" ? "rejected" : "merged" },
+    forceMergeHold({ ...targetResult, status: targetResult.status === "dry_run" ? "dry_run" : targetResult.status === "rejected" ? "rejected" : "merged" }),
   ];
   if (targetResult.status === "rejected") return results;
   for (const source of nonTargetSources) {
-    results.push(await archiveProjectEntry(source, {
+    results.push(forceMergeHold(await archiveProjectEntry(source, {
       projectRoot: opts.projectRoot,
       abrainHome: opts.abrainHome,
       projectId: opts.projectId,
@@ -1636,8 +2431,8 @@ export async function mergeProjectEntries(
       // clobbering a concurrent reactivation/status change.
       expected_status: opts.sourceExpectedStatus?.[source],
       sessionId: patch.sessionId,
-      auditContext: opts.auditContext,
-    }));
+      auditContext: mergeAuditContext,
+    })));
   }
   return results;
 }
@@ -1699,6 +2494,9 @@ export async function deleteProjectEntry(
   slugRaw: string,
   opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string; expected_status?: EntryStatus },
 ): Promise<WriteProjectEntryResult> {
+  if (knowledgeLegacyMarkdownWriteDisabled(opts.settings)) {
+    return deleteProjectEntryUnlocked(slugRaw, opts);
+  }
   return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => deleteProjectEntryUnlocked(slugRaw, opts));
 }
 
@@ -1769,6 +2567,102 @@ async function deleteProjectEntryUnlocked(
 
   if (opts.dryRun) {
     return { slug, path: target, status: "dry_run", deleteMode: "hard", ...resultCtx };
+  }
+
+  if (knowledgeLegacyMarkdownWriteDisabled(opts.settings)) {
+    if (resolvedTarget?.source !== "stable_view") {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "stable_view_required",
+        target: `${targetPrefix}:${slug}`,
+        delete_mode: "hard",
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "stable_view_required", auditPath, deleteMode: "hard", ...resultCtx };
+    }
+    const originalRaw = await fs.readFile(target, "utf-8");
+    const watermarkCas = await checkKnowledgeStableViewWatermarkCas({ abrainHome, projectId: opts.projectId, scope, slug, raw: originalRaw });
+    if (!watermarkCas.ok) {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: "stale_projection",
+        stale_projection_detail: watermarkCas.detail,
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, target),
+        delete_mode: "hard",
+        stable_view_watermark_cas: watermarkCas,
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "stale_projection", auditPath, deleteMode: "hard", ...resultCtx };
+    }
+    if (opts.expected_status !== undefined) {
+      const actualStatusRaw = parseFrontmatter(splitFrontmatter(originalRaw).frontmatterText).status;
+      const actualStatus = typeof actualStatusRaw === "string" ? actualStatusRaw : null;
+      if (actualStatus !== opts.expected_status) {
+        const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+          operation: "reject",
+          reason: "status_precondition_failed",
+          target: `${targetPrefix}:${slug}`,
+          delete_mode: "hard",
+          detail: `expected status '${opts.expected_status}', found '${actualStatus ?? "(none)"}'`,
+          duration_ms: Date.now() - started,
+        }));
+        return { slug, path: target, status: "rejected", reason: "status_precondition_failed", auditPath, deleteMode: "hard", ...resultCtx };
+      }
+    }
+
+    const baseResult: WriteProjectEntryResult = {
+      slug,
+      path: target,
+      status: "deleted",
+      gitCommit: null,
+      deleteMode: "hard",
+      ...resultCtx,
+    };
+    const accepted = await acceptKnowledgeMutationViaOutbox({
+      abrainHome,
+      projectId: opts.projectId,
+      scope,
+      raw: originalRaw,
+      slug,
+      result: baseResult,
+      settings: opts.settings,
+      operation: "delete",
+      patch: { sessionId: opts.sessionId, timelineNote: reason },
+      auditContext: opts.auditContext,
+      sessionId: opts.sessionId,
+    });
+    if (!accepted.ok) {
+      const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+        operation: "reject",
+        reason: accepted.reason,
+        detail: accepted.detail,
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, target),
+        delete_mode: "hard",
+        ...(accepted.event ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(accepted.event) } : {}),
+        duration_ms: Date.now() - started,
+      }));
+      return { ...baseResult, status: "rejected", reason: accepted.reason, auditPath, ...(accepted.event ? { knowledgeEvidenceEvent: accepted.event } : {}) };
+    }
+    const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
+      operation: "delete",
+      target: `${targetPrefix}:${slug}`,
+      path: path.relative(auditRoot, target),
+      delete_mode: "hard",
+      reason,
+      stable_view_acceptance: "projected_ancestor_allowed",
+      knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(accepted.event),
+      legacy_markdown_write: legacyMarkdownSkippedAudit(accepted.event),
+      publication: accepted.publication,
+      duration_ms: Date.now() - started,
+    }));
+    return {
+      ...baseResult,
+      publication: accepted.publication,
+      auditPath,
+      knowledgeEvidenceEvent: accepted.event,
+    };
   }
 
   let lock: LockHandle | undefined;
@@ -2042,6 +2936,9 @@ export async function updateProjectEntry(
   patch: ProjectEntryUpdateDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
+  if (knowledgeLegacyMarkdownWriteDisabled(opts.settings)) {
+    return updateProjectEntryUnlocked(slugRaw, patch, opts);
+  }
   return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => updateProjectEntryUnlocked(slugRaw, patch, opts));
 }
 
@@ -2203,6 +3100,98 @@ async function updateProjectEntryUnlocked(
       sanitizedReplacements: preview.merged.sanitizedReplacements,
       ...resultCtx,
     };
+  }
+
+  if (knowledgeLegacyMarkdownWriteDisabled(opts.settings)) {
+    const prepared = await prepareMergedMarkdown();
+    if (!prepared.ok) return prepared.response;
+    const requestedNewSlug = patch.newSlug ? slugify(patch.newSlug) : "";
+    if (requestedNewSlug && requestedNewSlug !== slug) {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "legacy_markdown_rename_disabled",
+        target: `${targetPrefix}:${slug}`,
+        new_slug: requestedNewSlug,
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return {
+        slug,
+        path: prepared.target,
+        status: "rejected",
+        reason: "legacy_markdown_rename_disabled",
+        lintErrors: prepared.lintErrors,
+        lintWarnings: prepared.lintWarnings,
+        auditPath,
+        sanitizedReplacements: prepared.merged.sanitizedReplacements,
+        ...resultCtx,
+      };
+    }
+    if (prepared.source !== "stable_view") {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "stable_view_required",
+        target: `${targetPrefix}:${slug}`,
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { slug, path: prepared.target, status: "rejected", reason: "stable_view_required", auditPath, ...resultCtx };
+    }
+
+    const eventOperation = updateKnowledgeEventOperation(opts.auditOperation, patch);
+    const baseResult: WriteProjectEntryResult = {
+      slug,
+      path: prepared.target,
+      status: updateKnowledgeResultStatus(eventOperation),
+      lintErrors: prepared.lintErrors,
+      lintWarnings: prepared.lintWarnings,
+      gitCommit: null,
+      sanitizedReplacements: prepared.merged.sanitizedReplacements,
+      ...resultCtx,
+    };
+    const accepted = await acceptKnowledgeMutationViaOutbox({
+      abrainHome,
+      projectId: opts.projectId,
+      scope,
+      raw: prepared.merged.markdown,
+      slug,
+      result: baseResult,
+      settings: opts.settings,
+      operation: eventOperation,
+      patch,
+      auditContext: opts.auditContext,
+      sessionId: patch.sessionId,
+    });
+    if (!accepted.ok) {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: accepted.reason,
+        detail: accepted.detail,
+        target: `${targetPrefix}:${slug}`,
+        path: path.relative(auditRoot, prepared.target),
+        ...(accepted.event ? { knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(accepted.event) } : {}),
+        duration_ms: Date.now() - started,
+        ...(opts.auditExtras ?? {}),
+      }));
+      return { ...baseResult, status: "rejected", reason: accepted.reason, auditPath, ...(accepted.event ? { knowledgeEvidenceEvent: accepted.event } : {}) };
+    }
+    const result: WriteProjectEntryResult = {
+      ...baseResult,
+      publication: accepted.publication,
+      knowledgeEvidenceEvent: accepted.event,
+    };
+    const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
+      operation: opts.auditOperation || "update",
+      target: `${targetPrefix}:${slug}`,
+      path: path.relative(auditRoot, prepared.target),
+      stable_view_acceptance: "projected_ancestor_allowed",
+      knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(accepted.event),
+      legacy_markdown_write: legacyMarkdownSkippedAudit(accepted.event),
+      publication: accepted.publication,
+      duration_ms: Date.now() - started,
+      ...(opts.auditExtras ?? {}),
+    }));
+    return { ...result, auditPath };
   }
 
   let lock: LockHandle | undefined;
@@ -2546,6 +3535,13 @@ export async function writeProjectEntry(
   draft: ProjectEntryDraft,
   opts: WriteProjectEntryOptions,
 ): Promise<WriteProjectEntryResult> {
+  // Phase-1: event-first knowledge creates accept at create-only L1 + outbox.
+  // That accepted path must not wait on canonical startup / mutation barrier;
+  // Git/L2 drain is scheduled asynchronously and may stall as publication backlog.
+  const deferAcceptedPublication = knowledgeLegacyMarkdownWriteDisabled(opts.settings);
+  if (deferAcceptedPublication) {
+    return writeProjectEntryUnlocked(draft, opts);
+  }
   return withCanonicalWriterMutation(opts.abrainHome, opts.settings, () => writeProjectEntryUnlocked(draft, opts));
 }
 
@@ -2686,6 +3682,113 @@ async function writeProjectEntryUnlocked(
     };
   }
 
+  // Event-first cutover mode has no mutable legacy Markdown write. Its
+  // acceptance transaction is therefore only two create-only CAS writes:
+  // immutable L1, then the publication outbox receipt. Neither belongs under
+  // the sediment lock / canonical OFD barrier. Projection and Git are replayed
+  // from the outbox after acceptance and may remain pending while canonical is
+  // busy without blocking this writer or its session checkpoint.
+  const acceptViaPublicationOutbox = knowledgeLegacyMarkdownWriteDisabled(opts.settings);
+  if (acceptViaPublicationOutbox) {
+    const baseResult: WriteProjectEntryResult = {
+      slug,
+      path: target,
+      status: "created",
+      lintErrors,
+      lintWarnings,
+      gitCommit: null,
+      sanitizedReplacements,
+      ...resultCtx,
+    };
+    const eventResult = await appendKnowledgeEvidenceForWrite({
+      abrainHome,
+      projectId: opts.projectId,
+      scope,
+      draft: safeDraft,
+      result: baseResult,
+      settings: opts.settings,
+      auditContext: opts.auditContext,
+      sessionId: draft.sessionId,
+      operation: "create",
+      deferPublication: true,
+      legacyParallelWrite: { attempted: false, status: baseResult.status, reason: "legacy_markdown_write_disabled" },
+    }).catch((err: unknown): AppendKnowledgeEvidenceForWriteResult => ({
+      append: {
+        ok: false,
+        status: "write_failed",
+        error: err instanceof Error ? err.message : String(err),
+      },
+    }));
+    if (shouldBlockKnowledgeLegacyWrite(opts.settings, eventResult)) {
+      const rejectReason = /source timestamp unavailable/i.test(eventResult.append.error ?? "")
+        ? "source_timestamp_unavailable"
+        : "knowledge_evidence_append_failed";
+      const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+        operation: "reject",
+        reason: rejectReason,
+        target: targetId,
+        knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(eventResult),
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: rejectReason, lintErrors, lintWarnings, auditPath, knowledgeEvidenceEvent: eventResult, ...resultCtx };
+    }
+
+    const candidateKey = opts.auditContext?.candidateId
+      || opts.auditContext?.correlationId
+      || `knowledge:create:${slug}:${eventResult.append.eventId ?? "no-event"}`;
+    let outbox: Awaited<ReturnType<typeof enqueueKnowledgePublicationOutbox>>;
+    try {
+      outbox = await enqueueKnowledgePublicationOutbox({
+        abrainHome,
+        event: eventResult,
+        sessionId: draft.sessionId || opts.auditContext?.sessionId,
+        windowId: opts.auditContext?.windowId,
+        candidateKey,
+        operation: "create",
+        slug,
+        projectId: opts.projectId,
+        scope,
+        projectKnowledge: opts.settings.knowledgeProjector.enabled === true,
+        publishGit: opts.settings.gitCommit !== false,
+        batchId: opts.auditContext?.publicationBatchId,
+        batchSize: opts.auditContext?.publicationBatchSize,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+        operation: "reject",
+        reason: "publication_outbox_write_failed",
+        detail: reason,
+        target: targetId,
+        knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(eventResult),
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "publication_outbox_write_failed", lintErrors, lintWarnings, auditPath, knowledgeEvidenceEvent: eventResult, ...resultCtx };
+    }
+
+    const publication: WriterPublicationResult = {
+      status: "durable_pending",
+      commit: null,
+      localCommit: "not_published",
+      drainStatus: "publication_outbox_enqueued",
+      reason: outbox.status ? `outbox_${outbox.status}` : "outbox_enqueued",
+      candidate: candidateKey,
+      canonical: canonicalGitRuntimeEnabled(),
+    };
+    const result: WriteProjectEntryResult = { ...baseResult, publication };
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+      operation: "create",
+      target: targetId,
+      path: path.relative(auditRoot, target),
+      lint_result: "pass",
+      git_commit: null,
+      knowledge_evidence_event: summarizeKnowledgeEvidenceEvent(eventResult),
+      legacy_markdown_write: legacyMarkdownSkippedAudit(eventResult),
+      duration_ms: Date.now() - started,
+    }));
+    return { ...result, auditPath, knowledgeEvidenceEvent: eventResult };
+  }
+
   let lock: LockHandle | undefined;
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
@@ -2729,6 +3832,9 @@ async function writeProjectEntryUnlocked(
       sanitizedReplacements,
       ...resultCtx,
     };
+    // Single acceptViaOutbox path handles event-first deferred publication above.
+    // This locked path is the non-deferred create (legacy markdown still written,
+    // or projector/git both disabled). Never re-introduce a second outbox branch.
     if (isKnowledgeEvidenceEventFirst(opts.settings)) {
       const eventResult = await appendKnowledgeEvidenceForWrite({
         abrainHome,

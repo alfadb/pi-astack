@@ -1,0 +1,244 @@
+{
+  "title": "sediment production acceptance — frozen publisher repair-only + durable intake/publication phase-2",
+  "generated_at_utc": "2026-07-23T12:04:43.168198Z",
+  "mode": "production_acceptance_evidence",
+  "push": false,
+  "publisher_invoked_by_this_evidence_write": false,
+  "skill_repo": {
+    "path": "/home/worker/.pi/agent/skills/pi-astack",
+    "before_after_HEAD_note": "skill working tree uncommitted; base HEAD unchanged by evidence write",
+    "HEAD": "965f3f50cde69cc31739acac1d4da318f63ce6e0"
+  },
+  "source_master_evidence": {
+    "path": "/tmp/production-repair-only-frozen-publisher-MASTER.json",
+    "sha256": "28319972ffce35f80ab4022fd458da5a6202d7daf8eb16dd18f5749793036a07",
+    "bytes": 7526,
+    "title": "controlled production repair-only frozen publisher evidence",
+    "generated_at": "2026-07-23T11:56:01.674Z",
+    "entrypoint": "extensions/sediment/writer.ts#scheduleKnowledgePublicationOutboxDrain",
+    "calls": 1,
+    "push": false,
+    "all_green": true
+  },
+  "source_artifact_hashes": {
+    "preflight": {
+      "path": "/tmp/production-repair-only-frozen-publisher-preflight.json",
+      "sha256": "9003ba7ed2b4513ceb1707dafba6253669bc2179d22409fc07be44e4e86ca925",
+      "bytes": 34672
+    },
+    "preflight_immediate": {
+      "path": "/tmp/production-repair-only-frozen-publisher-preflight-immediate.json",
+      "sha256": "b0bf5fdd7805bde7e4efcb39da7be9177938b237e5ddbeb10ccf14570bfa8fe8",
+      "bytes": 4660
+    },
+    "evidence": {
+      "path": "/tmp/production-repair-only-frozen-publisher-evidence.json",
+      "sha256": "6e314823081f050c44d2ecb79805f401aea84413ac445041540e27cb277d28c2",
+      "bytes": 52781
+    },
+    "final_verification": {
+      "path": "/tmp/production-repair-only-frozen-publisher-final-verification.json",
+      "sha256": "702fdb95ef9d66cd182a7a7aadc8538472263667a4f799c38f5123e8e27bb3ec",
+      "bytes": 7531
+    },
+    "summary": {
+      "path": "/tmp/production-repair-only-frozen-publisher-summary.json",
+      "sha256": "a856fc10dd455ade5513ddced4b0360de234658d72a7f78d12c495066c0186e0",
+      "bytes": 1825
+    }
+  },
+  "production_repo": {
+    "path": "/home/worker/.abrain",
+    "before_HEAD": "ffac0533691c7760e79116ea8393798bcc65339f",
+    "after_HEAD": "621d4b15876d183e4aa4900b24d4a0e4eb7df85c",
+    "parent_of_after_HEAD": "ffac0533691c7760e79116ea8393798bcc65339f",
+    "live_HEAD_at_evidence_write": "621d4b15876d183e4aa4900b24d4a0e4eb7df85c",
+    "origin_main_before": "2f3725304237caccec60ac485fbcd07ffd5f1603",
+    "origin_main_after": "2f3725304237caccec60ac485fbcd07ffd5f1603",
+    "live_origin_main_at_evidence_write": "2f3725304237caccec60ac485fbcd07ffd5f1603",
+    "branch": "main"
+  },
+  "three_path_cohort": {
+    "predicted": [
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ],
+    "actual_diff_tree": [
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ],
+    "predicted_eq_actual": true,
+    "predicted_with_manifest": [
+      "l2/views/knowledge/latest/manifest.json",
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ]
+  },
+  "closure": {
+    "before_violations": 3,
+    "after_violations": 0,
+    "before_detail": [
+      {
+        "path": "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+        "reason": "watermark_missing_from_head_l1",
+        "eventId": "e1c6043c682a10fd18cbdc537a560af33ad73fbc34143f6bcae5306560e3aac4",
+        "identity": "project:sub2api:openai-创建账号表单必须以实际提交类型判断身份开关"
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+        "reason": "watermark_missing_from_head_l1",
+        "eventId": "bbc691aaabf50d8d2882bde7c6ad6451ebaedf32c8379090bb76a3bdaf9ee7bc",
+        "identity": "project:sub2api:sub2api-release-v0-9-234-validation"
+      },
+      {
+        "path": "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md",
+        "reason": "watermark_missing_from_head_l1",
+        "eventId": "496dd927797abd29e2adab192c51b6f29ef8d9e71896a57c4f949d97bd0cb98f",
+        "identity": "project:sub2api:sub2api-upstream-fixes-require-production-validation-before-pull-request"
+      }
+    ],
+    "closure_3_to_0": true
+  },
+  "l1_tail": {
+    "untracked_before": 827,
+    "untracked_after": 827,
+    "untracked_827_to_827": true,
+    "live_untracked_l1_json_at_evidence_write": 89
+  },
+  "outbox_intake": {
+    "outbox_pending_before_after": [
+      0,
+      0
+    ],
+    "outbox_done_before_after": [
+      12,
+      12
+    ],
+    "intake_pending_before_after": [
+      2,
+      2
+    ],
+    "live_outbox_pending": 0,
+    "live_outbox_done": 12,
+    "live_outbox_failed": 0,
+    "live_intake_pending": 2
+  },
+  "remote_index_locks": {
+    "remote_origin_main_unchanged": true,
+    "cohort_index_matches_HEAD": true,
+    "no_locks_at_master_run": true,
+    "live_lock_sample": [
+      "/home/worker/.abrain/.state/sediment/locks/constraint-shadow-auto-refresh.lock"
+    ]
+  },
+  "publisher_result": {
+    "status": "completed",
+    "processed": 0,
+    "drained": 0,
+    "terminalFailed": 0,
+    "pending": 0
+  },
+  "final_checks": {
+    "closure_violations_zero": true,
+    "head_advanced": true,
+    "parent_is_pre_HEAD": true,
+    "diff_tree_paths_exact_eq_predicted_violations": true,
+    "diff_tree_paths": [
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ],
+    "predicted_violation_paths": [
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ],
+    "predicted_with_manifest": [
+      "l2/views/knowledge/latest/manifest.json",
+      "l2/views/knowledge/latest/projects/sub2api/openai-创建账号表单必须以实际提交类型判断身份开关.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-release-v0-9-234-validation.md",
+      "l2/views/knowledge/latest/projects/sub2api/sub2api-upstream-fixes-require-production-validation-before-pull-request.md"
+    ],
+    "no_l1_in_commit": true,
+    "commit_message_is_deterministic_local_drain_v2": true,
+    "commit_message_note": "prepareExactCohortCommit ignores caller message and emits deterministicDrainCommitMessage; user phrase 'sediment frozen batch repair' is semantic repair-only intent",
+    "untracked_l1_not_bulk_reduced": true,
+    "untracked_l1_before": 827,
+    "untracked_l1_after": 827,
+    "outbox_pending_unchanged": true,
+    "outbox_done_unchanged": true,
+    "outbox_pending_before_after": [
+      0,
+      0
+    ],
+    "outbox_done_before_after": [
+      12,
+      12
+    ],
+    "intake_pending_before_after": [
+      2,
+      2
+    ],
+    "HEAD_eq_main": true,
+    "branch_main": true,
+    "no_locks": true,
+    "cohort_index_matches_HEAD": true,
+    "remote_origin_main_unchanged": true,
+    "non_cohort_dirty_lines_unchanged": true,
+    "dirty_non_l1_before": [
+      "M l2/views/knowledge/latest/projects/pi-global/abrain-bind-waits-for-canonical-startup.md",
+      " M \"l2/views/knowledge/latest/projects/sub2api/ollama-\\347\\275\\221\\351\\241\\265\\344\\274\\232\\350\\257\\235\\345\\256\\211\\345\\205\\250\\345\\255\\230\\345\\202\\250\\347\\272\\246\\346\\235\\237.md\""
+    ],
+    "dirty_non_l1_after": [
+      "M l2/views/knowledge/latest/projects/pi-global/abrain-bind-waits-for-canonical-startup.md",
+      " M \"l2/views/knowledge/latest/projects/sub2api/ollama-\\347\\275\\221\\351\\241\\265\\344\\274\\232\\350\\257\\235\\345\\256\\211\\345\\205\\250\\345\\255\\230\\345\\202\\250\\347\\272\\246\\346\\235\\237.md\""
+    ],
+    "publisher_processed_0_drained_0": true,
+    "second_readonly_would_noop": true
+  },
+  "notes_from_master": [
+    "repair-only: outbox processed=0 drained=0 pending remained 0; done dir stayed 12",
+    "exact cohort = 3 predicted L2 paths; no L1; no manifest rewrite needed",
+    "commit message is deterministicDrainCommitMessage (local-drain-recovery/v2); writer message arg unused by commit-tree",
+    "second check was read-only inspectKnowledgeHeadClosure only; publisher not called again",
+    "no production intake/outbox/L1 deleted; untracked L1 count 827->827",
+    "remote origin/main unchanged (no push)",
+    "pi-astack working tree not committed/pushed by this run"
+  ],
+  "commands_and_entrypoints": {
+    "production_repair_entrypoint": "extensions/sediment/writer.ts#scheduleKnowledgePublicationOutboxDrain",
+    "readonly_dossier_script": "scripts/dossier-sediment-intake-production-readonly.mjs",
+    "readonly_dossier_npm": "npm run dossier:sediment-intake-production-readonly -- --output docs/evidence/2026-07-23-sediment-intake-production-readonly.json",
+    "smokes": [
+      "npm run smoke:sediment-intake-publication",
+      "npm run smoke:sediment-knowledge-mutations",
+      "npm run smoke:memory",
+      "npm run smoke:sediment-agent-end-queue",
+      "npm run smoke:sediment-l2-withhold"
+    ],
+    "no_push": true,
+    "no_publisher_in_this_evidence_write": true
+  },
+  "acceptance_gate": {
+    "master_all_green": true,
+    "closure_3_to_0": true,
+    "l1_tail_827_to_827": true,
+    "cohort_exact": true,
+    "no_push": true,
+    "publisher_processed_0_drained_0": true,
+    "live_HEAD_matches_accepted_after_HEAD": true,
+    "live_origin_unchanged": true
+  },
+  "accepted": true,
+  "status": "accepted",
+  "remaining_known_limits": [
+    "ABOUT-ME Phase-3 identity L1 schema still absent; Lane G stays synchronous legacy-domain",
+    "constraint/outcome full mutation outbox not claimed by this acceptance",
+    "live production intake pending may remain for unrelated sessions; this acceptance did not consume them",
+    "forgetting gates/executor authority unchanged by this change",
+    "no timer/backoff was added to publication drain"
+  ]
+}

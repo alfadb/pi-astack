@@ -1400,6 +1400,17 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
             sessionId: options.sessionId,
           }];
         } else {
+          // Staging record created/updated is the immutable promotion source clock.
+          const promotionSourceTs =
+            (typeof entry.created === "string" && Number.isFinite(Date.parse(entry.created))
+              ? new Date(Date.parse(entry.created)).toISOString()
+              : undefined)
+            || (typeof entry.updated === "string" && Number.isFinite(Date.parse(entry.updated))
+              ? new Date(Date.parse(entry.updated)).toISOString()
+              : undefined)
+            || (typeof entry.promoted_at === "string" && Number.isFinite(Date.parse(entry.promoted_at))
+              ? new Date(Date.parse(entry.promoted_at)).toISOString()
+              : undefined);
           writeResults = await executeCuratorDecisionToBrain({
             decision: mvResult.final_decision,
             draft,
@@ -1412,6 +1423,8 @@ export async function runStagingPromotionIfDue(options: RunStagingPromotionOptio
             auditContext: {
               lane: "staging_promotion",
               sessionId: options.sessionId,
+              candidateId: `staging-promotion:${entry.slug}`,
+              ...(promotionSourceTs ? { sourceTimestampUtc: promotionSourceTs } : {}),
             },
             createTimelineNote: `Promoted from staging ${entry.slug} by multi-view gate`,
           });

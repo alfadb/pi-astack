@@ -100,6 +100,7 @@ const checkpoint = loadCJS(
   checkpointPath,
   new Map([
     ["../_shared/runtime", runtimeStub],
+    ["../_shared/durable-write", { durableAtomicWriteFile: async () => {} }],
     ["./settings", {}],
   ]),
 );

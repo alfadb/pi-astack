@@ -453,7 +453,7 @@ check("P1-B: sediment/index.ts reactivateEntry closure forwards scope to updateP
   // moved here from the patch).
   const closureIdx = idxSrc.search(/reactivateEntry:\s*canMutate/);
   if (closureIdx < 0) throw new Error("could not locate reactivateEntry closure in sediment/index.ts");
-  const closureBody = idxSrc.slice(closureIdx, closureIdx + 2500);
+  const closureBody = idxSrc.slice(closureIdx, closureIdx + 6000);
   if (!/^\s*scope,\s*$/m.test(closureBody)) {
     throw new Error("updateProjectEntry options must include `scope,` so world entries route correctly");
   }
@@ -1224,7 +1224,7 @@ check("R2 CRIT-2: auditOperation is in updateProjectEntry OPTIONS, not the patch
   const src = fs.readFileSync(path.join(repoRoot, "extensions/sediment/index.ts"), "utf-8");
   const closureIdx = src.search(/reactivateEntry:\s*canMutate/);
   if (closureIdx < 0) throw new Error("could not locate reactivateEntry closure");
-  const closureBody = src.slice(closureIdx, closureIdx + 2500);
+  const closureBody = src.slice(closureIdx, closureIdx + 6000);
   // Heuristic: find the updateProjectEntry call, split into draft + opts
   // by counting braces. Simpler: ensure `auditOperation: "archive_reactivation_apply"`
   // appears AFTER `scope,` (which we know is in the opts block).

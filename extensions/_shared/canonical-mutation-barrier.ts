@@ -50,6 +50,10 @@ export interface CanonicalMutationBarrierOptions {
   onProbe?: (probe: number) => void;
 }
 
+export type TryCanonicalMutationBarrierResult<T> =
+  | { status: "acquired"; value: T }
+  | { status: "busy" };
+
 export class CanonicalMutationBarrierError extends Error {
   readonly code: string;
   readonly detail?: Readonly<Record<string, unknown>>;
@@ -125,14 +129,11 @@ async function acquireWithRetry(
  * gitSingleFlight turn. Calling the outer helper from that callback would
  * enqueue behind itself and deadlock.
  */
-export async function withCanonicalMutationBarrierInSingleFlight<T>(
-  repoInput: string,
+async function runWithCanonicalLease<T>(
+  repo: string,
+  lock: RetainedDirectoryOfdLock & { status: "ACQUIRED" },
   operation: () => Promise<T>,
-  options: CanonicalMutationBarrierOptions = {},
 ): Promise<T> {
-  const repo = canonicalKey(repoInput);
-  if (canonicalMutationBarrierHeld(repo)) return operation();
-  const lock = await acquireWithRetry(repo, options);
   const parent = heldRepositories.getStore();
   const held = new Map(parent ?? []);
   const lease: BarrierLease = { active: true };
@@ -146,6 +147,40 @@ export async function withCanonicalMutationBarrierInSingleFlight<T>(
     lease.active = false;
     lock.close();
   }
+}
+
+export async function withCanonicalMutationBarrierInSingleFlight<T>(
+  repoInput: string,
+  operation: () => Promise<T>,
+  options: CanonicalMutationBarrierOptions = {},
+): Promise<T> {
+  const repo = canonicalKey(repoInput);
+  if (canonicalMutationBarrierHeld(repo)) return operation();
+  const lock = await acquireWithRetry(repo, options);
+  return runWithCanonicalLease(repo, lock, operation);
+}
+
+/**
+ * One-shot nonblocking barrier entry for background publishers. It does not
+ * enter gitSingleFlight or retry: local/cross-process contention returns busy
+ * immediately, leaving the durable outbox item pending for a later trigger.
+ */
+export async function tryWithCanonicalMutationBarrier<T>(
+  repoInput: string,
+  operation: () => Promise<T>,
+): Promise<TryCanonicalMutationBarrierResult<T>> {
+  const repo = canonicalKey(repoInput);
+  if (canonicalMutationBarrierHeld(repo)) return { status: "acquired", value: await operation() };
+  const lock = acquireRetainedDirectoryOfdLock(repo);
+  if (lock.status === "BUSY") return { status: "busy" };
+  return {
+    status: "acquired",
+    value: await runWithCanonicalLease(
+      repo,
+      lock as RetainedDirectoryOfdLock & { status: "ACQUIRED" },
+      operation,
+    ),
+  };
 }
 
 /** Process-local ordering is always acquired before the cross-process OFD lock. */

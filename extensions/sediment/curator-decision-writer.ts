@@ -24,6 +24,7 @@ function hasGitCommitFailure(result: WriteProjectEntryResult, settings: Sediment
     && result.status !== "rejected"
     && result.status !== "skipped"
     && result.status !== "dry_run"
+    && result.publication?.status !== "durable_pending"
     && result.gitCommit === null;
 }
 

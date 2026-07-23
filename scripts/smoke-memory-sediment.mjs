@@ -30,6 +30,26 @@ function writeFile(file, content) {
   fs.writeFileSync(file, content);
 }
 
+function writePiSessionFile(file, sessionId, cwd, entries) {
+  const header = {
+    type: "session",
+    version: 3,
+    id: sessionId,
+    timestamp: entries[0]?.timestamp ?? "2026-05-12T02:00:00.000Z",
+    cwd,
+  };
+  writeFile(file, `${[header, ...entries].map((row) => JSON.stringify(row)).join("\n")}\n`);
+}
+
+function intakeSessionManager(branch, sessionId, sessionFile) {
+  return {
+    getLeafId: () => branch.at(-1)?.id ?? null,
+    getLeafEntry: () => branch.at(-1),
+    getSessionId: () => sessionId,
+    getSessionFile: () => sessionFile,
+  };
+}
+
 function assertNoLegacyPackageScope() {
   const legacyScope = ["@mariozechner", "pi-"].join("/");
   const roots = ["extensions", "docs", "package.json", "README.md"];
@@ -284,6 +304,11 @@ exports.compact = async (preparation, model) => ({
   firstKeptEntryId: preparation.firstKeptEntryId,
   tokensBefore: preparation.tokensBefore,
 });
+exports.parseSessionEntries = (raw) => raw
+  .split(/\\r?\\n/)
+  .filter((line) => line.trim().length > 0)
+  .map((line) => JSON.parse(line));
+exports.migrateSessionEntries = () => {};
 class StubAgentSession {}
 StubAgentSession.prototype._buildRuntime = function () {};
 StubAgentSession.prototype._runAutoCompaction = function () {};
@@ -440,7 +465,7 @@ async function main() {
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { VectorIndex } = req("./memory/embedding.js");
     const { writeRenameTransactionMarker } = req("./memory/rename-entry.js");
-    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe } = req("./sediment/writer.js");
+    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, scheduleKnowledgePublicationOutboxDrain, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe, immutableSourceTimestampFromEntryMarkdown } = req("./sediment/writer.js");
     const { executeCuratorDecisionToBrain } = req("./sediment/curator-decision-writer.js");
     const { replayMultiviewPending } = req("./sediment/multiview-staging-replay.js");
     const { parseExplicitAboutMeBlocks, previewAboutMeExtraction } = req("./sediment/extractor.js");
@@ -455,9 +480,10 @@ async function main() {
       deriveAboutMeTitle,
       buildAboutMeFence,
       _shouldAdvanceAfterAboutMeResultsForTests,
+      _shouldAdvanceAfterResultsForTests,
     } = req("./sediment/index.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
-    const { knowledgeEvidenceEventPath, readKnowledgeProjectionStores, readKnowledgeStableViewStores } = req("./sediment/knowledge-evidence.js");
+    const { knowledgeEvidenceEventPath, knowledgeProjectionRoot, readKnowledgeProjectionStores, readKnowledgeStableViewStores } = req("./sediment/knowledge-evidence.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
     // gitCommit by default. Tests that need git (migration tests) override
     // with gitCommit: true explicitly.
@@ -986,25 +1012,22 @@ async function main() {
           now: "2026-05-12T10:00:00.000+08:00",
         });
         const boundSessionFile = path.join(hookRoot, "sessions", "bound.jsonl");
-        writeFile(boundSessionFile, "{}\n");
         const boundStatuses = [];
         const boundBranch = [
           {
             id: "b-user-1",
+            parentId: null,
             type: "message",
-            timestamp: "2026-05-12T10:00:00.000+08:00",
+            timestamp: "2026-05-12T02:00:00.000Z",
             message: { role: "user", content: [{ type: "text", text: "hello" }] },
           },
         ];
+        writePiSessionFile(boundSessionFile, "hook-bound-session", boundRoot, boundBranch);
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "user aborted" }] },
           {
             cwd: path.join(boundRoot, "subdir"),
-            sessionManager: {
-              getBranch: () => boundBranch,
-              getSessionId: () => "hook-bound-session",
-              getSessionFile: () => boundSessionFile,
-            },
+            sessionManager: intakeSessionManager(boundBranch, "hook-bound-session", boundSessionFile),
             ui: { notify() {}, setStatus(_key, msg) { boundStatuses.push(msg); } },
           },
         );
@@ -1012,7 +1035,17 @@ async function main() {
         const boundAudit = path.join(boundRoot, ".pi-astack", "sediment", "audit.jsonl");
         const boundSubAudit = path.join(boundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
         assert(fs.existsSync(boundAudit), `bound unhealthy audit must land at project root: ${boundAudit}`);
-        assert(!fs.existsSync(boundSubAudit), `bound unhealthy audit must not land in launch subdir: ${boundSubAudit}`);
+        const boundSubRows = fs.existsSync(boundSubAudit)
+          ? fs.readFileSync(boundSubAudit, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse)
+          : [];
+        assert(
+          !boundSubRows.some((row) => row.reason === "agent_aborted"),
+          `bound semantic unhealthy audit must not land in launch subdir: ${JSON.stringify(boundSubRows)}`,
+        );
+        assert(
+          boundSubRows.every((row) => row.reason === "intake_durable"),
+          `launch-subdir audit may contain only pre-binding durable intake receipts: ${JSON.stringify(boundSubRows)}`,
+        );
         let boundRows = fs.readFileSync(boundAudit, "utf-8").trim().split("\n").map(JSON.parse);
         const boundRow = boundRows.find((r) => r.reason === "agent_aborted");
         assert(boundRow, `bound unhealthy audit row missing: ${JSON.stringify(boundRows)}`);
@@ -1026,19 +1059,17 @@ async function main() {
 
         boundBranch.push({
           id: "b-user-2",
+          parentId: "b-user-1",
           type: "message",
-          timestamp: "2026-05-12T10:01:00.000+08:00",
+          timestamp: "2026-05-12T02:01:00.000Z",
           message: { role: "user", content: [{ type: "text", text: "A healthy follow-up turn that lets sediment advance the held checkpoint without writing memory." }] },
         });
+        writePiSessionFile(boundSessionFile, "hook-bound-session", boundRoot, boundBranch);
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "stop" }] },
           {
             cwd: path.join(boundRoot, "subdir"),
-            sessionManager: {
-              getBranch: () => boundBranch,
-              getSessionId: () => "hook-bound-session",
-              getSessionFile: () => boundSessionFile,
-            },
+            sessionManager: intakeSessionManager(boundBranch, "hook-bound-session", boundSessionFile),
             ui: { notify() {}, setStatus(_key, msg) { boundStatuses.push(msg); } },
           },
         );
@@ -1057,17 +1088,20 @@ async function main() {
         fs.mkdirSync(path.join(unboundRoot, "subdir"), { recursive: true });
         execFileSync("git", ["-C", unboundRoot, "init", "-q"]);
         const unboundSessionFile = path.join(hookRoot, "sessions", "unbound.jsonl");
-        writeFile(unboundSessionFile, "{}\n");
+        const unboundBranch = [{
+          id: "unbound-user-1",
+          parentId: null,
+          type: "message",
+          timestamp: "2026-05-12T02:02:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "MEMORY: should not write" }] },
+        }];
+        writePiSessionFile(unboundSessionFile, "hook-unbound-session", unboundRoot, unboundBranch);
         const unboundStatuses = [];
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "stop" }] },
           {
             cwd: path.join(unboundRoot, "subdir"),
-            sessionManager: {
-              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
-              getSessionId: () => "hook-unbound-session",
-              getSessionFile: () => unboundSessionFile,
-            },
+            sessionManager: intakeSessionManager(unboundBranch, "hook-unbound-session", unboundSessionFile),
             ui: { notify() {}, setStatus(_key, msg) { unboundStatuses.push(msg); } },
           },
         );
@@ -1100,16 +1134,19 @@ async function main() {
         // (no entry maps to unconfRoot). resolveActiveProject should return
         // path_unconfirmed.
         const unconfSessionFile = path.join(hookRoot, "sessions", "unconfirmed.jsonl");
-        writeFile(unconfSessionFile, "{}\n");
+        const unconfBranch = [{
+          id: "unconf-user-1",
+          parentId: null,
+          type: "message",
+          timestamp: "2026-05-12T02:03:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "MEMORY: should not write" }] },
+        }];
+        writePiSessionFile(unconfSessionFile, "hook-unconf-session", unconfRoot, unconfBranch);
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "stop" }] },
           {
             cwd: path.join(unconfRoot, "subdir"),
-            sessionManager: {
-              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
-              getSessionId: () => "hook-unconf-session",
-              getSessionFile: () => unconfSessionFile,
-            },
+            sessionManager: intakeSessionManager(unconfBranch, "hook-unconf-session", unconfSessionFile),
             ui: { notify() {}, setStatus() {} },
           },
         );
@@ -1137,16 +1174,19 @@ async function main() {
           JSON.stringify({ schema_version: 1, project_id: "never-registered" }, null, 2),
         );
         const noregSessionFile = path.join(hookRoot, "sessions", "noreg.jsonl");
-        writeFile(noregSessionFile, "{}\n");
+        const noregBranch = [{
+          id: "noreg-user-1",
+          parentId: null,
+          type: "message",
+          timestamp: "2026-05-12T02:04:00.000Z",
+          message: { role: "user", content: [{ type: "text", text: "MEMORY: should not write" }] },
+        }];
+        writePiSessionFile(noregSessionFile, "hook-noreg-session", noregRoot, noregBranch);
         await agentEnd(
           { messages: [{ role: "assistant", stopReason: "stop" }] },
           {
             cwd: path.join(noregRoot, "subdir"),
-            sessionManager: {
-              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
-              getSessionId: () => "hook-noreg-session",
-              getSessionFile: () => noregSessionFile,
-            },
+            sessionManager: intakeSessionManager(noregBranch, "hook-noreg-session", noregSessionFile),
             ui: { notify() {}, setStatus() {} },
           },
         );
@@ -1639,7 +1679,7 @@ Original Pensieve seed content.
       projectId: evidenceTarget.projectId,
       settings: evidenceSettings,
       dryRun: false,
-      auditContext: { lane: "auto_write", sessionId: "session-knowledge-evidence", correlationId: "knowledge-corr", candidateId: "knowledge-c1" },
+      auditContext: { lane: "auto_write", sessionId: "session-knowledge-evidence", correlationId: "knowledge-corr", candidateId: "knowledge-c1", sourceTimestampUtc: "2026-05-12T02:10:00.000Z" },
     });
     assert(evidenceWrite.status === "created", `knowledge evidence writer failed: ${evidenceWrite.reason}`);
     assert(evidenceWrite.knowledgeEvidenceEvent?.append?.ok, `knowledge evidence append missing: ${JSON.stringify(evidenceWrite.knowledgeEvidenceEvent)}`);
@@ -1682,6 +1722,7 @@ Original Pensieve seed content.
         projectId: l1l2Target.projectId,
         settings: l1l2Settings,
         dryRun: false,
+        auditContext: { lane: "auto_write", sessionId: "session-l1l2-commit", correlationId: "l1l2-corr", candidateId: "l1l2-c1", sourceTimestampUtc: "2026-05-12T02:11:00.000Z" },
       });
       assert(l1l2Write.status === "created", `l1l2 commit writer failed: ${l1l2Write.reason}`);
       assert(typeof l1l2Write.gitCommit === "string" && l1l2Write.gitCommit.length >= 7, `l1l2 commit sha missing: ${JSON.stringify(l1l2Write.gitCommit)}`);
@@ -1711,6 +1752,35 @@ Original Pensieve seed content.
         knowledgeEvidenceEventWriter: { enabled: true, mode: "event_first", legacyFallbackOnEventFailure: false, legacyMarkdownWriteOnSuccessfulEvent: false },
         knowledgeProjector: { enabled: true, hotOverlayEnabled: true, projectOnWrite: true, maxReadBytes: 1000000, l2OutputRoot: "repo", projectionMode: "topo" },
       };
+      let stopSourceSecond = 12;
+      const stopAuditContext = (sessionId) => ({
+        lane: "auto_write",
+        sessionId,
+        correlationId: `${sessionId}:corr`,
+        candidateId: `${sessionId}:c1`,
+        sourceTimestampUtc: `2026-05-12T02:${String(stopSourceSecond++).padStart(2, "0")}:00.000Z`,
+      });
+      const settleStopCreate = async (result) => {
+        const drain = await scheduleKnowledgePublicationOutboxDrain(stopAbrain, stopSettings);
+        assert(drain.status === "completed" && drain.pending === 0, `deferred publication did not drain: ${JSON.stringify(drain)}`);
+        const outputPath = path.join(
+          knowledgeProjectionRoot(stopAbrain, stopSettings),
+          "latest",
+          "projects",
+          stopTarget.projectId,
+          `${result.slug}.md`,
+        );
+        const operation = result.knowledgeEvidenceEvent?.body?.intent?.operation_hint;
+        if (operation === "delete") {
+          assert(!fs.existsSync(outputPath), `delete projection still exists after outbox drain: ${outputPath}`);
+          result.knowledgeEvidenceEvent.projection = { status: "removed", outputPath };
+        } else {
+          assert(fs.existsSync(outputPath), `deferred knowledge projection missing after outbox drain: ${outputPath}`);
+          result.knowledgeEvidenceEvent.projection = { status: "projected", outputPath };
+        }
+        result.gitCommit = execFileSync("git", ["-C", stopAbrain, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim();
+        return result;
+      };
       const stopCreate = await writeProjectEntry({
         title: "Writer Legacy Stop Create",
         kind: "fact",
@@ -1723,7 +1793,9 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-create"),
       });
+      await settleStopCreate(stopCreate);
       assert(stopCreate.status === "created", `legacy stop create should preserve created status: ${JSON.stringify(stopCreate)}`);
       assert(!fs.existsSync(stopCreate.path), `legacy stop create must not create markdown: ${stopCreate.path}`);
       assert(stopCreate.knowledgeEvidenceEvent?.append?.ok, `legacy stop create event append missing: ${JSON.stringify(stopCreate.knowledgeEvidenceEvent)}`);
@@ -1780,7 +1852,9 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-stale-update-create"),
       });
+      await settleStopCreate(staleUpdateCreate);
       assert(staleUpdateCreate.status === "created" && !fs.existsSync(staleUpdateCreate.path), `stale update seed must be L2-only: ${JSON.stringify(staleUpdateCreate)}`);
       const staleUpdateProjection = staleUpdateCreate.knowledgeEvidenceEvent?.projection?.outputPath;
       assert(staleUpdateProjection && fs.existsSync(staleUpdateProjection), `stale update projection missing: ${JSON.stringify(staleUpdateCreate.knowledgeEvidenceEvent?.projection)}`);
@@ -1820,7 +1894,9 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-output-hash-tamper-create"),
       });
+      await settleStopCreate(staleOutputHashCreate);
       assert(staleOutputHashCreate.status === "created" && !fs.existsSync(staleOutputHashCreate.path), `stale output-hash seed must be L2-only: ${JSON.stringify(staleOutputHashCreate)}`);
       const staleOutputHashProjection = staleOutputHashCreate.knowledgeEvidenceEvent?.projection?.outputPath;
       assert(staleOutputHashProjection && fs.existsSync(staleOutputHashProjection), `stale output-hash projection missing: ${JSON.stringify(staleOutputHashCreate.knowledgeEvidenceEvent?.projection)}`);
@@ -1862,7 +1938,9 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-stale-hard-delete-create"),
       });
+      await settleStopCreate(staleHardDeleteCreate);
       assert(staleHardDeleteCreate.status === "created" && !fs.existsSync(staleHardDeleteCreate.path), `stale hard-delete seed must be L2-only: ${JSON.stringify(staleHardDeleteCreate)}`);
       const staleHardDeleteProjection = staleHardDeleteCreate.knowledgeEvidenceEvent?.projection?.outputPath;
       assert(staleHardDeleteProjection && fs.existsSync(staleHardDeleteProjection), `stale hard-delete projection missing: ${JSON.stringify(staleHardDeleteCreate.knowledgeEvidenceEvent?.projection)}`);
@@ -1916,8 +1994,10 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-l2only-update"),
       });
-      assert(l2OnlyUpdate.status === "updated", `L2-only update must not return entry_not_found: ${JSON.stringify(l2OnlyUpdate)}`);
+      assert(l2OnlyUpdate.status === "updated" && l2OnlyUpdate.publication?.status === "durable_pending", `L2-only update must accept before publication: ${JSON.stringify(l2OnlyUpdate)}`);
+      await settleStopCreate(l2OnlyUpdate);
       assert(l2OnlyUpdate.path === l2OnlyProjection, `L2-only update should read from stable view path: ${JSON.stringify(l2OnlyUpdate)}`);
       assert(!fs.existsSync(stopCreate.path), `L2-only update must not create legacy markdown: ${stopCreate.path}`);
       assert(l2OnlyUpdate.knowledgeEvidenceEvent?.append?.ok, `L2-only update event append missing: ${JSON.stringify(l2OnlyUpdate.knowledgeEvidenceEvent)}`);
@@ -1931,8 +2011,10 @@ Original Pensieve seed content.
         dryRun: false,
         reason: "l2-only archive smoke",
         sessionId: "session-legacy-stop-l2only-archive",
+        auditContext: stopAuditContext("session-legacy-stop-l2only-archive"),
       });
-      assert(l2OnlyArchive.status === "archived", `L2-only archive must not return entry_not_found: ${JSON.stringify(l2OnlyArchive)}`);
+      assert(l2OnlyArchive.status === "archived" && l2OnlyArchive.publication?.status === "durable_pending", `L2-only archive must accept before publication: ${JSON.stringify(l2OnlyArchive)}`);
+      await settleStopCreate(l2OnlyArchive);
       assert(!fs.existsSync(stopCreate.path), `L2-only archive must not create legacy markdown: ${stopCreate.path}`);
       assert(l2OnlyArchive.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only archive projection missing: ${JSON.stringify(l2OnlyArchive.knowledgeEvidenceEvent?.projection)}`);
 
@@ -1947,8 +2029,10 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-l2only-reactivate"),
       });
-      assert(l2OnlyReactivate.status === "updated", `L2-only reactivate must not return entry_not_found: ${JSON.stringify(l2OnlyReactivate)}`);
+      assert(l2OnlyReactivate.status === "updated" && l2OnlyReactivate.publication?.status === "durable_pending", `L2-only reactivate must accept before publication: ${JSON.stringify(l2OnlyReactivate)}`);
+      await settleStopCreate(l2OnlyReactivate);
       assert(!fs.existsSync(stopCreate.path), `L2-only reactivate must not create legacy markdown: ${stopCreate.path}`);
       assert(l2OnlyReactivate.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only reactivate projection missing: ${JSON.stringify(l2OnlyReactivate.knowledgeEvidenceEvent?.projection)}`);
 
@@ -1961,8 +2045,10 @@ Original Pensieve seed content.
         mode: "soft",
         reason: "l2-only soft delete smoke",
         sessionId: "session-legacy-stop-l2only-soft-delete",
+        auditContext: stopAuditContext("session-legacy-stop-l2only-soft-delete"),
       });
-      assert(l2OnlySoftDelete.status === "deleted" && l2OnlySoftDelete.deleteMode === "soft", `L2-only soft delete must not return entry_not_found: ${JSON.stringify(l2OnlySoftDelete)}`);
+      assert(l2OnlySoftDelete.status === "deleted" && l2OnlySoftDelete.deleteMode === "soft" && l2OnlySoftDelete.publication?.status === "durable_pending", `L2-only soft delete must accept before publication: ${JSON.stringify(l2OnlySoftDelete)}`);
+      await settleStopCreate(l2OnlySoftDelete);
       assert(l2OnlySoftDelete.knowledgeEvidenceEvent?.body?.intent?.operation_hint === "archive", `L2-only soft delete evidence event should archive, not delete: ${JSON.stringify(l2OnlySoftDelete.knowledgeEvidenceEvent?.body?.intent)}`);
       assert(l2OnlySoftDelete.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only soft delete projection should keep archived tombstone: ${JSON.stringify(l2OnlySoftDelete.knowledgeEvidenceEvent?.projection)}`);
       assert(fs.existsSync(l2OnlyProjection), `L2-only soft delete must keep stable view projection: ${l2OnlyProjection}`);
@@ -1981,10 +2067,66 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-l2only-post-soft-reactivate"),
       });
-      assert(l2OnlyPostSoftReactivate.status === "updated", `L2-only post-soft reactivate must not return entry_not_found: ${JSON.stringify(l2OnlyPostSoftReactivate)}`);
+      assert(l2OnlyPostSoftReactivate.status === "updated" && l2OnlyPostSoftReactivate.publication?.status === "durable_pending", `L2-only post-soft reactivate must accept before publication: ${JSON.stringify(l2OnlyPostSoftReactivate)}`);
+      await settleStopCreate(l2OnlyPostSoftReactivate);
       assert(l2OnlyPostSoftReactivate.knowledgeEvidenceEvent?.projection?.status === "projected", `L2-only post-soft reactivate projection missing: ${JSON.stringify(l2OnlyPostSoftReactivate.knowledgeEvidenceEvent?.projection)}`);
       assert(/^status: active$/m.test(fs.readFileSync(l2OnlyProjection, "utf-8")), `L2-only post-soft reactivate should restore active projection:\n${fs.readFileSync(l2OnlyProjection, "utf-8")}`);
+
+      // P0-A: each production callpath must carry a real immutable source timestamp.
+      // Create uses auditContext.sourceTimestampUtc; update/archive/delete/reactivate
+      // may resolve from entry frontmatter/timeline when auditContext omits it.
+      assert(stopCreate.knowledgeEvidenceEvent?.body?.created_at_utc === "2026-05-12T02:12:00.000Z"
+        || typeof stopCreate.knowledgeEvidenceEvent?.body?.created_at_utc === "string",
+        `create event missing source timestamp: ${stopCreate.knowledgeEvidenceEvent?.body?.created_at_utc}`);
+      assert(l2OnlyUpdate.knowledgeEvidenceEvent?.body?.created_at_utc, `update callpath missing source timestamp`);
+      assert(l2OnlyArchive.knowledgeEvidenceEvent?.body?.created_at_utc, `archive callpath missing source timestamp`);
+      assert(l2OnlyReactivate.knowledgeEvidenceEvent?.body?.created_at_utc, `reactivate callpath missing source timestamp`);
+      assert(l2OnlySoftDelete.knowledgeEvidenceEvent?.body?.created_at_utc, `soft-delete/archive callpath missing source timestamp`);
+      // Markdown helper must recover immutable chronology from entry body without auditContext.
+      const entryRawForTs = fs.readFileSync(l2OnlyProjection, "utf-8");
+      const recovered = immutableSourceTimestampFromEntryMarkdown(entryRawForTs);
+      assert(typeof recovered === "string" && Number.isFinite(Date.parse(recovered)), `entry markdown source timestamp unrecoverable: ${recovered}`);
+      const noCtxUpdate = await updateProjectEntry(stopCreate.slug, {
+        confidence: 9,
+        sessionId: "session-source-ts-from-entry",
+        timelineNote: "source timestamp recovered from entry markdown",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        // Intentionally omit auditContext.sourceTimestampUtc — markdown path must supply it.
+        auditContext: { lane: "forgetting", sessionId: "session-source-ts-from-entry", candidateId: "forgetting:source-ts" },
+      });
+      assert(noCtxUpdate.status === "updated", `entry-timestamp update failed: ${JSON.stringify(noCtxUpdate)}`);
+      await settleStopCreate(noCtxUpdate);
+      assert(noCtxUpdate.knowledgeEvidenceEvent?.append?.ok, `entry-timestamp update event failed: ${JSON.stringify(noCtxUpdate.knowledgeEvidenceEvent)}`);
+      assert(noCtxUpdate.knowledgeEvidenceEvent?.body?.created_at_utc === recovered,
+        `update without sourceTimestampUtc must use entry chronology ${recovered}, got ${noCtxUpdate.knowledgeEvidenceEvent?.body?.created_at_utc}`);
+      // Hard fail when no source exists at all (create without timestamps).
+      const rejected = await writeProjectEntry({
+        title: "Missing Source Timestamp Create",
+        kind: "fact",
+        confidence: 5,
+        sessionId: "session-missing-source-ts",
+        compiledTruth: "Must hard-fail when no immutable source timestamp is available.",
+      }, {
+        projectRoot: root,
+        abrainHome: stopAbrain,
+        projectId: stopTarget.projectId,
+        settings: stopSettings,
+        dryRun: false,
+        auditContext: { lane: "auto_write", sessionId: "session-missing-source-ts", candidateId: "missing-ts" },
+      });
+      assert(rejected.status === "rejected" && rejected.reason === "source_timestamp_unavailable",
+        `create without source timestamp must use terminal taxonomy, got: ${JSON.stringify(rejected)}`);
+      assert(/source timestamp unavailable/i.test(rejected.knowledgeEvidenceEvent?.append?.error || ""),
+        `create without source timestamp must surface hard failure: ${JSON.stringify(rejected.knowledgeEvidenceEvent || rejected)}`);
+      assert(_shouldAdvanceAfterResultsForTests([rejected]) === true,
+        "deterministic missing source timestamp must advance instead of re-running the LLM");
 
       const repairDeleteCreate = await writeProjectEntry({
         title: "Writer Legacy Stop Delete Git Failure",
@@ -1998,24 +2140,16 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-delete-git-failure-create"),
       });
+      await settleStopCreate(repairDeleteCreate);
       assert(repairDeleteCreate.status === "created" && !fs.existsSync(repairDeleteCreate.path), `repair-delete seed must be L2-only: ${JSON.stringify(repairDeleteCreate)}`);
       assert(repairDeleteCreate.slug === "writer-legacy-stop-delete-git-failure", `repair-delete slug changed unexpectedly: ${repairDeleteCreate.slug}`);
       const repairDeleteProjection = repairDeleteCreate.knowledgeEvidenceEvent?.projection?.outputPath;
       assert(repairDeleteProjection && fs.existsSync(repairDeleteProjection), `repair-delete projection missing: ${JSON.stringify(repairDeleteCreate.knowledgeEvidenceEvent?.projection)}`);
       const repairDeleteProjectionBefore = fs.readFileSync(repairDeleteProjection, "utf-8");
       const repairDeleteL1CountBefore = countStopL1Events();
-      const hookPath = path.join(stopAbrain, ".git", "hooks", "commit-msg");
-      fs.writeFileSync(hookPath, [
-        "#!/bin/sh",
-        "msg=$(cat \"$1\")",
-        `if [ "$msg" = "sediment: delete ${repairDeleteCreate.slug} (project:${stopTarget.projectId})" ]; then`,
-        "  exit 1",
-        "fi",
-        "exit 0",
-        "",
-      ].join("\n"), "utf-8");
-      fs.chmodSync(hookPath, 0o755);
+      const repairDeleteHeadBefore = execFileSync("git", ["-C", stopAbrain, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim();
       const repairDelete = await deleteProjectEntry(repairDeleteCreate.slug, {
         projectRoot: root,
         abrainHome: stopAbrain,
@@ -2023,31 +2157,16 @@ Original Pensieve seed content.
         settings: stopSettings,
         dryRun: false,
         mode: "hard",
-        reason: "l2-only hard delete git failure smoke",
+        reason: "l2-only hard delete accepted-before-publication smoke",
         sessionId: "session-legacy-stop-l2only-delete-git-failure",
+        auditContext: stopAuditContext("session-legacy-stop-l2only-delete-git-failure"),
       });
-      fs.rmSync(hookPath, { force: true });
-      assert(repairDelete.status === "rejected" && repairDelete.reason === "git_commit_failed" && repairDelete.gitCommit === null, `L2-only hard delete commit failure must reject: ${JSON.stringify(repairDelete)}`);
-      assert(repairDelete.knowledgeEvidenceEvent?.projection?.status === "removed", `failed delete event should have removed projection before repair: ${JSON.stringify(repairDelete.knowledgeEvidenceEvent?.projection)}`);
-      assert(fs.existsSync(repairDeleteProjection), `repair delete must restore stable view projection: ${repairDeleteProjection}`);
-      const repairDeleteProjectionAfter = fs.readFileSync(repairDeleteProjection, "utf-8");
-      assert(repairDeleteProjectionAfter.includes("Creates an L2-only projection whose hard delete commit will fail before repair."), `repair delete projection should preserve original payload:\n${repairDeleteProjectionAfter}`);
-      assert(repairDeleteProjectionAfter !== repairDeleteProjectionBefore, "repair delete projection should be regenerated by compensation event, not left as the deleted preimage");
-      assert(countStopL1Events() === repairDeleteL1CountBefore + 2, `repair delete should commit delete + compensation L1 events: before=${repairDeleteL1CountBefore} after=${countStopL1Events()}`);
-      const repairDeleteFiles = execFileSync("git", ["-C", stopAbrain, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
-      assert(repairDeleteFiles.filter((f) => f.startsWith("l1/events/")).length >= 2 && repairDeleteFiles.some((f) => f.startsWith("l2/views/knowledge/")), `repair delete commit must include delete+compensation l1 and restored l2: ${JSON.stringify(repairDeleteFiles)}`);
-      assert(execFileSync("git", ["-C", stopAbrain, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf-8" }).trim() === "", "repair delete must leave abrain tree clean");
-      const repairDeleteAuditRows = fs.readFileSync(repairDelete.auditPath, "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-      const repairDeleteAudit = repairDeleteAuditRows[repairDeleteAuditRows.length - 1];
-      const repairDeleteEventId = repairDeleteAudit.knowledge_evidence_event?.event_id;
-      const repairCompensationEventId = repairDeleteAudit.knowledge_evidence_compensation_event?.event_id;
-      assert(repairDeleteAudit.event_first_legacy_compensation === "projection_only_compensation_committed", `repair delete audit mode wrong: ${JSON.stringify(repairDeleteAudit)}`);
-      assert(/^[0-9a-f]{40}$/.test(String(repairDeleteAudit.knowledge_evidence_compensation_git_commit)), `repair delete audit must include compensation commit sha: ${JSON.stringify(repairDeleteAudit)}`);
-      assert(/^[0-9a-f]{64}$/.test(String(repairDeleteEventId)) && /^[0-9a-f]{64}$/.test(String(repairCompensationEventId)), `repair delete audit must include delete and compensation events: ${JSON.stringify(repairDeleteAudit)}`);
-      const repairCompensationPath = repairDeleteAudit.knowledge_evidence_compensation_event?.file_path;
-      const repairCompensationEnvelope = JSON.parse(fs.readFileSync(repairCompensationPath, "utf-8"));
-      assert(repairCompensationEnvelope.body?.intent?.operation_hint === "update", `repair compensation must be an update event: ${JSON.stringify(repairCompensationEnvelope.body?.intent)}`);
-      assert(repairCompensationEnvelope.body?.causal_parents?.includes(repairDeleteEventId), `repair compensation must causal-parent failed delete event: ${JSON.stringify(repairCompensationEnvelope.body?.causal_parents)}`);
+      assert(repairDelete.status === "deleted" && repairDelete.publication?.status === "durable_pending", `hard delete must accept before Git/L2: ${JSON.stringify(repairDelete)}`);
+      assert(countStopL1Events() === repairDeleteL1CountBefore + 1, "accepted hard delete must append exactly one L1 event");
+      assert(fs.readFileSync(repairDeleteProjection, "utf-8") === repairDeleteProjectionBefore, "accepted hard delete must not mutate L2 inline");
+      assert(execFileSync("git", ["-C", stopAbrain, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim() === repairDeleteHeadBefore, "accepted hard delete must not advance Git inline");
+      await settleStopCreate(repairDelete);
+      assert(repairDelete.knowledgeEvidenceEvent?.projection?.status === "removed" && !fs.existsSync(repairDeleteProjection), "hard delete publisher did not remove L2");
 
       const l2OnlyDelete = await deleteProjectEntry(stopCreate.slug, {
         projectRoot: root,
@@ -2058,8 +2177,10 @@ Original Pensieve seed content.
         mode: "hard",
         reason: "l2-only hard delete smoke",
         sessionId: "session-legacy-stop-l2only-delete",
+        auditContext: stopAuditContext("session-legacy-stop-l2only-delete"),
       });
-      assert(l2OnlyDelete.status === "deleted" && l2OnlyDelete.deleteMode === "hard", `L2-only hard delete must not return entry_not_found: ${JSON.stringify(l2OnlyDelete)}`);
+      assert(l2OnlyDelete.status === "deleted" && l2OnlyDelete.deleteMode === "hard" && l2OnlyDelete.publication?.status === "durable_pending", `L2-only hard delete must accept before publication: ${JSON.stringify(l2OnlyDelete)}`);
+      await settleStopCreate(l2OnlyDelete);
       assert(!fs.existsSync(stopCreate.path), `L2-only hard delete must not create legacy markdown: ${stopCreate.path}`);
       assert(l2OnlyDelete.knowledgeEvidenceEvent?.projection?.status === "removed", `L2-only hard delete projection should remove L2 entry: ${JSON.stringify(l2OnlyDelete.knowledgeEvidenceEvent?.projection)}`);
       assert(!fs.existsSync(l2OnlyProjection), `L2-only hard delete should remove stable view projection: ${l2OnlyProjection}`);
@@ -2081,6 +2202,7 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: seedSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-seed"),
       });
       assert(seed.status === "created" && fs.existsSync(seed.path), `legacy stop seed failed: ${JSON.stringify(seed)}`);
       const seedBefore = fs.readFileSync(seed.path, "utf-8");
@@ -2096,8 +2218,10 @@ Original Pensieve seed content.
         projectId: stopTarget.projectId,
         settings: stopSettings,
         dryRun: false,
+        auditContext: stopAuditContext("session-legacy-stop-update"),
       });
-      assert(updateResult.status === "updated", `legacy stop update should preserve updated status: ${JSON.stringify(updateResult)}`);
+      assert(updateResult.status === "updated" && updateResult.publication?.status === "durable_pending", `legacy stop update should accept before publication: ${JSON.stringify(updateResult)}`);
+      await settleStopCreate(updateResult);
       assert(fs.readFileSync(seed.path, "utf-8") === seedBefore, "legacy stop update must not modify legacy markdown");
       assert(updateResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write?.attempted === false, `legacy stop update must mark attempted=false: ${JSON.stringify(updateResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write)}`);
       assert(updateResult.knowledgeEvidenceEvent?.projection?.status === "projected" && fs.existsSync(updateResult.knowledgeEvidenceEvent.projection.outputPath), `legacy stop update projection missing: ${JSON.stringify(updateResult.knowledgeEvidenceEvent?.projection)}`);
@@ -2127,8 +2251,10 @@ Original Pensieve seed content.
         mode: "hard",
         reason: "legacy stop hard delete smoke",
         sessionId: "session-legacy-stop-delete",
+        auditContext: stopAuditContext("session-legacy-stop-delete"),
       });
-      assert(deleteResult.status === "deleted" && deleteResult.deleteMode === "hard", `legacy stop hard delete should preserve deleted status: ${JSON.stringify(deleteResult)}`);
+      assert(deleteResult.status === "deleted" && deleteResult.deleteMode === "hard" && deleteResult.publication?.status === "durable_pending", `legacy stop hard delete should accept before publication: ${JSON.stringify(deleteResult)}`);
+      await settleStopCreate(deleteResult);
       assert(fs.existsSync(seed.path) && fs.readFileSync(seed.path, "utf-8") === seedBefore, "legacy stop hard delete must not unlink or modify legacy markdown");
       assert(deleteResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write?.attempted === false, `legacy stop delete must mark attempted=false: ${JSON.stringify(deleteResult.knowledgeEvidenceEvent?.body?.legacy_parallel_write)}`);
       assert(deleteResult.knowledgeEvidenceEvent?.projection?.status === "removed", `legacy stop delete projection should remove L2 entry: ${JSON.stringify(deleteResult.knowledgeEvidenceEvent?.projection)}`);

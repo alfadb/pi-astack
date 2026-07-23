@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type { SedimentSettings } from "./settings";
+import { durableAtomicWriteFile } from "../_shared/durable-write";
 import {
   ensureSedimentLegacyMigrated,
   formatLocalIsoTimestamp,
@@ -327,15 +327,9 @@ async function loadCheckpointFile(projectRoot: string): Promise<CheckpointFile> 
 async function atomicWriteCheckpoint(projectRoot: string, file: CheckpointFile): Promise<void> {
   const dest = checkpointPath(projectRoot);
   await fs.mkdir(path.dirname(dest), { recursive: true });
-  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-  // Round 8 P1 (deepseek R8 audit): finally-cleanup tmp file so a crash
-  // between writeFile and rename doesn't leak `checkpoint.json.tmp-*`.
-  try {
-    await fs.writeFile(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
-    await fs.rename(tmp, dest);
-  } finally {
-    await fs.unlink(tmp).catch(() => {});
-  }
+  // Checkpoint coverage authorizes intake ack, so rename-only durability is
+  // insufficient. fsync the temp file and containing directory.
+  await durableAtomicWriteFile(dest, JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
 }
 
 /**

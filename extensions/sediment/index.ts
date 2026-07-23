@@ -2,12 +2,12 @@
  * sediment extension for pi-astack — project-only markdown writer.
  *
  * agent_end pipeline (in order):
- *   1. The awaited pi handler snapshots plain session/event inputs, enqueues
- *      them in a process-level coalescing serial queue, and returns without
- *      awaiting canonical startup or any sediment I/O/LLM work.
- *   2. The detached worker awaits canonical startup, claims the latest full
- *      branch snapshot for that session, and restores the trigger-time anchor.
- *      Per-session checkpoint replay makes pre-claim coalescing lossless.
+ *   1. The awaited pi handler persists a small create-only intake receipt,
+ *      enqueues it in a process-level coalescing queue, and returns without
+ *      awaiting semantic evaluation, canonical startup, L2, or Git.
+ *   2. The detached worker claims the latest durable receipt for that session,
+ *      restores its exact branch from Pi JSONL, and restores the trigger-time
+ *      anchor. Per-session checkpoint replay makes coalescing lossless.
  *   3. Ephemeral sessions (--no-session, dispatch_agent subprocesses, CI)
  *      record one audit row and return from the detached worker.
  *   4. buildRunWindow over the per-session checkpoint slot.
@@ -58,7 +58,7 @@ import { curateProjectDraft, type CuratorAudit } from "./curator";
 import type { EntryStatus } from "./validation";
 import { executeCuratorDecisionToBrain } from "./curator-decision-writer";
 import { detectProjectDuplicate } from "./dedupe";
-import { parseExplicitAboutMeBlocks, parseExplicitMemoryBlocks, previewExtraction, type ExtractedAboutMeDraft } from "./extractor";
+import { parseExplicitAboutMeBlocks, parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import {
   runLlmExtractor,
   summarizeLlmExtractorResult,
@@ -108,13 +108,7 @@ import { LANE_G_ALLOWED_REGIONS, type AboutMeRegion } from "./about-me-router";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
-import {
-  canonicalGitRuntimeEnabled,
-  getCanonicalStartupPromise,
-  reportCanonicalStartupConsumer,
-  scheduleCanonicalStartupConsumer,
-  type CanonicalStartupHostMode,
-} from "../_shared/canonical-git-runtime";
+import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 import { schedulePropositionPolicyStableViewRecovery } from "../_shared/proposition-policy-stable-view-recovery";
@@ -123,8 +117,21 @@ import {
   enqueueDetachedAgentEnd,
   resetDetachedAgentEndQueueForTests,
   waitForDetachedAgentEndQueueIdle,
-  wakeParkedDetachedAgentEnd,
 } from "./agent-end-queue";
+import {
+  ackSedimentIntake,
+  buildSedimentIntakeRecord,
+  listSedimentIntakePending,
+  listSedimentIntakePendingForSession,
+  readSedimentIntakeRecord,
+  restoreSedimentIntakeBranch,
+  tryClaimSedimentIntake,
+  writeSedimentIntakeRecord,
+  writeSedimentIntakeRecoveryStatus,
+  type SedimentIntakeRecord,
+} from "./intake";
+import { listPublicationOutboxPending } from "./publication-outbox";
+import { scheduleKnowledgePublicationOutboxDrain } from "./writer";
 
 /** Per-turn window budget for frozen-snapshot backlog inside one queue claim. */
 const AGENT_END_BACKLOG_WINDOWS_PER_TURN = 8;
@@ -326,10 +333,15 @@ export interface SedimentAgentEndSnapshotForTests {
   readonly anchor: ReturnType<typeof getCurrentAnchor>;
   readonly boundaryUntrusted: boolean;
   readonly boundaryDiagnostic?: ReturnType<typeof getSubAgentBoundaryUntrustedDiagnostic>;
+  readonly intakeRecord?: SedimentIntakeRecord;
+}
+
+interface SedimentAgentEndCapture {
+  readonly record: SedimentIntakeRecord;
+  readonly modelRegistry?: unknown;
 }
 
 interface SedimentAgentEndTestHooks {
-  waitUntilReady?: (snapshot: SedimentAgentEndSnapshotForTests) => Promise<boolean>;
   run?: (snapshot: SedimentAgentEndSnapshotForTests) => Promise<void | { more: true }>;
 }
 
@@ -366,13 +378,7 @@ function refreshSedimentReporter(ui: {
   stashConstraintCompileSetStatus(setStatusRaw);
 }
 
-/**
- * Honest bound for detached agent_end snapshots: structuredClone of the full
- * branch is O(branch size). Typical interactive sessions stay well under the
- * 100ms handler budget; multi-MB / multi-10k-entry branches are NOT guaranteed
- * <100ms. We record approx bytes + latency for observability and never claim
- * a hard bound the runtime cannot keep.
- */
+/** Legacy export name retained for focused regression metrics. */
 const cloneMetrics = {
   lastBytes: 0,
   lastMs: 0,
@@ -381,115 +387,261 @@ const cloneMetrics = {
   samples: 0,
 };
 
-function estimateBranchBytes(branch: unknown[]): number {
-  // Cheap structural estimate — not a full JSON stringify on the hot path.
-  let bytes = 0;
-  for (const entry of branch) {
-    if (entry == null) continue;
-    if (typeof entry === "string") {
-      bytes += entry.length;
-      continue;
-    }
-    if (typeof entry !== "object") {
-      bytes += 8;
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
-    if (typeof record.id === "string") bytes += record.id.length;
-    const message = record.message;
-    if (message && typeof message === "object") {
-      const content = (message as Record<string, unknown>).content;
-      if (typeof content === "string") bytes += content.length;
-      else if (Array.isArray(content)) {
-        for (const part of content) {
-          if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-            bytes += ((part as { text: string }).text).length;
-          }
-        }
-      }
-    }
-    bytes += 64; // structural overhead allowance per entry
-  }
-  return bytes;
-}
-
-function cloneDetachedBranch(branch: unknown[]): unknown[] {
-  const started = performance.now();
-  const approxBytes = estimateBranchBytes(branch);
-  try {
-    const cloned = structuredClone(branch);
-    const ms = performance.now() - started;
-    cloneMetrics.lastBytes = approxBytes;
-    cloneMetrics.lastMs = ms;
-    cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
-    cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, ms);
-    cloneMetrics.samples += 1;
-    return cloned;
-  } catch {
-    const seen = new WeakSet<object>();
-    const json = JSON.stringify(branch, (_key, value: unknown) => {
-      if (typeof value === "bigint") return value.toString();
-      if (typeof value === "function" || typeof value === "symbol") return undefined;
-      if (value && typeof value === "object") {
-        if (seen.has(value)) return "[Circular]";
-        seen.add(value);
-      }
-      return value;
-    });
-    const parsed = JSON.parse(json) as unknown;
-    if (!Array.isArray(parsed)) throw new Error("session branch snapshot did not clone to an array");
-    const ms = performance.now() - started;
-    cloneMetrics.lastBytes = approxBytes;
-    cloneMetrics.lastMs = ms;
-    cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
-    cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, ms);
-    cloneMetrics.samples += 1;
-    return parsed;
-  }
-}
-
 export function _detachedBranchCloneMetricsForTests(): Readonly<typeof cloneMetrics> {
   return Object.freeze({ ...cloneMetrics });
 }
 
-function captureSedimentAgentEndSnapshot(
+/** Production worker body shared by live intake and lifecycle recovery. */
+type SedimentAgentEndPassRunner = (
+  snapshot: SedimentAgentEndSnapshotForTests,
+  opts?: { intakeWindowId?: string; fromRecovery?: boolean },
+) => Promise<void | { more: true }>;
+let sedimentAgentEndPassRunner: SedimentAgentEndPassRunner | undefined;
+
+function anchorFromIntake(record: SedimentIntakeRecord): ReturnType<typeof getCurrentAnchor> {
+  return record.anchor
+    ? {
+        session_id: String(record.anchor.session_id || record.sessionId),
+        turn_id: typeof record.anchor.turn_id === "number" ? record.anchor.turn_id : Number(record.anchor.turn_id) || 0,
+        ...(record.anchor.subturn !== undefined ? { subturn: Number(record.anchor.subturn) || 0 } : {}),
+        ...(record.anchor.sub_agent_label ? { sub_agent_label: String(record.anchor.sub_agent_label) } : {}),
+      }
+    : { session_id: record.sessionId, turn_id: 0 };
+}
+
+function diagnosticSnapshotFromIntake(record: SedimentIntakeRecord, modelRegistry?: unknown): SedimentAgentEndSnapshotForTests {
+  return Object.freeze({
+    cwd: record.cwd,
+    sessionId: record.sessionId,
+    sessionFile: record.sessionFile,
+    branchEntries: Object.freeze([]),
+    messages: Object.freeze([]),
+    modelRegistry,
+    anchor: anchorFromIntake(record),
+    boundaryUntrusted: record.captureBoundary.boundaryUntrusted,
+    intakeRecord: record,
+  });
+}
+
+function snapshotFromRestoredIntake(
+  record: SedimentIntakeRecord,
+  branchEntries: readonly unknown[],
+  modelRegistry?: unknown,
+): SedimentAgentEndSnapshotForTests {
+  const stopReason = record.captureBoundary.terminalAssistantStopReason;
+  return Object.freeze({
+    cwd: record.cwd,
+    sessionId: record.sessionId,
+    sessionFile: record.sessionFile,
+    branchEntries: Object.freeze(branchEntries.slice()),
+    messages: Object.freeze(stopReason ? [{ role: "assistant", stopReason }] : []),
+    modelRegistry,
+    anchor: anchorFromIntake(record),
+    boundaryUntrusted: record.captureBoundary.boundaryUntrusted,
+    intakeRecord: record,
+  });
+}
+
+function enqueueSedimentIntakeRecord(args: {
+  record: SedimentIntakeRecord;
+  modelRegistry?: unknown;
+  fromRecovery: boolean;
+  reason: string;
+}): void {
+  const abrainHome = resolveAbrainHomeForSediment();
+  const diagnostic = diagnosticSnapshotFromIntake(args.record, args.modelRegistry);
+  enqueueDetachedAgentEnd({
+    key: `session:${args.record.sessionId}`,
+    run: async () => {
+      const owner = `pid:${process.pid}:session:${args.record.sessionId}:window:${args.record.windowId}`;
+      const claim = tryClaimSedimentIntake(abrainHome, args.record.windowId, owner);
+      if (!claim.claimed) return;
+      try {
+        const restored = await restoreSedimentIntakeBranch(args.record);
+        if (!restored.ok) {
+          await writeSedimentIntakeRecoveryStatus(abrainHome, args.record, restored.status, restored.detail).catch(() => undefined);
+          await appendAudit(args.record.cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: restored.status,
+            detail: sanitizeAuditText(restored.detail, 500),
+            session_id: args.record.sessionId,
+            intake_window_id: args.record.windowId,
+            recovery_reason: args.reason,
+            checkpoint_advanced: false,
+            background_async: true,
+          }).catch(() => {});
+          return;
+        }
+        await writeSedimentIntakeRecoveryStatus(abrainHome, args.record, "ready").catch(() => undefined);
+        const snapshot = snapshotFromRestoredIntake(args.record, restored.branchEntries, args.modelRegistry);
+        if (!sedimentAgentEndPassRunner) {
+          await appendAudit(snapshot.cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: "intake_recovery_runner_unavailable",
+            session_id: snapshot.sessionId,
+            intake_window_id: args.record.windowId,
+            recovery_reason: args.reason,
+            checkpoint_advanced: false,
+            background_async: true,
+          }).catch(() => {});
+          return;
+        }
+        let passResult: void | { more: true } = undefined;
+        try {
+          passResult = await sedimentAgentEndPassRunner(snapshot, {
+            intakeWindowId: args.record.windowId,
+            fromRecovery: args.fromRecovery,
+          });
+          return passResult;
+        } finally {
+          if (!passResult || passResult.more !== true) {
+            void triggerKnowledgePublicationOneShot(snapshot.sessionId, "completed");
+          }
+        }
+      } finally {
+        claim.release();
+      }
+    },
+    onError: (error) => auditSedimentAgentEndQueueError(diagnostic, error),
+  });
+}
+
+/** Scan durable pending triggers; latest same-session tip coalesces in memory. */
+async function schedulePendingIntakeRecovery(opts?: {
+  sessionId?: string;
+  reason?: string;
+  modelRegistry?: unknown;
+}): Promise<number> {
+  if (!resolveSedimentSettings().enabled) return 0;
+  const abrainHome = resolveAbrainHomeForSediment();
+  const pending = opts?.sessionId
+    ? await listSedimentIntakePendingForSession(abrainHome, opts.sessionId)
+    : await listSedimentIntakePending(abrainHome);
+  // Recovery schedules only the newest trigger per session. Its frozen branch
+  // contains historical same-lineage tips, and checkpoint coverage later acks
+  // all of them. Older branch-switch tips remain pending because they are not
+  // on that branch. Building this map before enqueue prevents the queue pump
+  // from claiming an older record while the scan is still reading newer ones.
+  const newestBySession = new Map<string, (typeof pending)[number]>();
+  for (const item of pending) newestBySession.set(item.sessionId, item);
+  let scheduled = 0;
+  for (const item of newestBySession.values()) {
+    try {
+      const record = await readSedimentIntakeRecord(abrainHome, item.windowId);
+      if (!record) continue;
+      enqueueSedimentIntakeRecord({
+        record,
+        modelRegistry: opts?.modelRegistry,
+        fromRecovery: true,
+        reason: opts?.reason || "scan",
+      });
+      scheduled += 1;
+    } catch {
+      // Corrupt records stay pending for operator inspection.
+    }
+  }
+  return scheduled;
+}
+
+async function triggerKnowledgePublicationOneShot(
+  sessionId: string | undefined,
+  settleState: "idle" | "completed",
+): Promise<void> {
+  const abrainHome = resolveAbrainHomeForSediment();
+  try {
+    const pendingBefore = await listPublicationOutboxPending(abrainHome);
+    if (pendingBefore.length === 0) return;
+    applySedimentStatus(dynamicSedimentSetStatus, sessionId, "publication_backlog", `${pendingBefore.length} pending`);
+    const result = await scheduleKnowledgePublicationOutboxDrain(abrainHome, resolveSedimentSettings());
+    if (result.status === "busy") return;
+    if (result.terminalFailed > 0) {
+      applySedimentStatus(dynamicSedimentSetStatus, sessionId, "failed", `${result.terminalFailed} publication failed`);
+      return;
+    }
+    if (result.pending > 0) {
+      applySedimentStatus(dynamicSedimentSetStatus, sessionId, "publication_backlog", `${result.pending} pending`);
+      return;
+    }
+    applySedimentStatus(dynamicSedimentSetStatus, sessionId, settleState);
+  } catch (err) {
+    const detail = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
+    applySedimentStatus(dynamicSedimentSetStatus, sessionId, "failed", `publication: ${detail || "unknown"}`);
+  }
+}
+
+function captureSedimentAgentEndIntake(
   event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
   ctx: {
     cwd?: string;
     sessionManager?: {
-      getBranch(): unknown[];
+      getLeafId?(): string | null;
+      getLeafEntry?(): unknown;
       getSessionId?(): string | undefined | null;
       getSessionFile?(): string | undefined | null;
     };
     modelRegistry?: unknown;
   },
-): SedimentAgentEndSnapshotForTests | undefined {
+): SedimentAgentEndCapture | undefined {
   const sm = ctx.sessionManager;
-  if (!sm?.getBranch) return undefined;
-  let branchEntries: unknown[];
-  try { branchEntries = cloneDetachedBranch(sm.getBranch()); }
-  catch { return undefined; }
+  const sessionId = readSessionId(sm);
   let sessionFile: string | undefined;
+  let leafId: string | null | undefined;
+  let leaf: unknown;
   try {
-    const value = sm.getSessionFile?.();
+    const value = sm?.getSessionFile?.();
     if (typeof value === "string" && value) sessionFile = value;
-  } catch { /* ephemeral/stale-at-entry */ }
+    leafId = sm?.getLeafId?.();
+    leaf = sm?.getLeafEntry?.();
+  } catch {
+    return undefined;
+  }
+  if (!sessionId || !sessionFile || !leafId || !leaf || typeof leaf !== "object") return undefined;
+  const entry = leaf as Record<string, unknown>;
+  if (entry.id !== leafId || typeof entry.type !== "string" || typeof entry.timestamp !== "string") return undefined;
+  if (entry.parentId !== null && typeof entry.parentId !== "string") return undefined;
+
+  let terminalAssistant: AgentEndMessageSnapshot | undefined;
+  const runMessages = event.messages ?? [];
+  for (let index = runMessages.length - 1; index >= 0; index -= 1) {
+    if (runMessages[index]?.role === "assistant") {
+      terminalAssistant = runMessages[index];
+      break;
+    }
+  }
   const boundaryUntrusted = isSubAgentBoundaryUntrusted();
-  return Object.freeze({
-    cwd: path.resolve(ctx.cwd || process.cwd()),
-    sessionId: readSessionId(sm),
+  const boundaryDiagnostic = boundaryUntrusted ? getSubAgentBoundaryUntrustedDiagnostic() : undefined;
+  const anchor = getCurrentAnchor();
+  const record = buildSedimentIntakeRecord({
+    sessionId,
     sessionFile,
-    branchEntries: Object.freeze(branchEntries),
-    messages: Object.freeze((event.messages ?? []).map((message) => Object.freeze({
-      ...(typeof message.role === "string" ? { role: message.role } : {}),
-      ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
-      ...(typeof message.errorMessage === "string" ? { errorMessage: message.errorMessage } : {}),
-    }))),
-    modelRegistry: ctx.modelRegistry,
-    anchor: getCurrentAnchor(),
-    boundaryUntrusted,
-    ...(boundaryUntrusted ? { boundaryDiagnostic: getSubAgentBoundaryUntrustedDiagnostic() } : {}),
+    cwd: path.resolve(ctx.cwd || process.cwd()),
+    branchTip: {
+      id: leafId,
+      parentId: entry.parentId as string | null,
+      type: entry.type,
+      timestampUtc: entry.timestamp,
+    },
+    ...(anchor ? {
+      anchor: {
+        session_id: anchor.session_id,
+        turn_id: anchor.turn_id,
+        ...(anchor.subturn !== undefined ? { subturn: anchor.subturn } : {}),
+        ...(anchor.sub_agent_label ? { sub_agent_label: anchor.sub_agent_label } : {}),
+      },
+    } : {}),
+    captureBoundary: {
+      kind: "agent_end",
+      ...(terminalAssistant?.stopReason ? { terminalAssistantStopReason: terminalAssistant.stopReason } : {}),
+      ...(terminalAssistant?.errorMessage
+        ? { terminalAssistantErrorDigest: createHash("sha256").update(terminalAssistant.errorMessage).digest("hex") }
+        : {}),
+      boundaryUntrusted,
+      ...(boundaryDiagnostic?.reason ? { boundaryDiagnosticCode: boundaryDiagnostic.reason } : {}),
+    },
   });
+  return Object.freeze({ record, modelRegistry: ctx.modelRegistry });
 }
 
 function detachedSessionManager(snapshot: SedimentAgentEndSnapshotForTests) {
@@ -521,24 +673,6 @@ async function waitForDetachedSedimentWorkIdle(
   }
 }
 
-async function waitForSedimentAgentEndStartup(snapshot: SedimentAgentEndSnapshotForTests): Promise<boolean> {
-  if (sedimentAgentEndTestHooks?.waitUntilReady) {
-    return sedimentAgentEndTestHooks.waitUntilReady(snapshot);
-  }
-  if (!canonicalGitRuntimeEnabled()) return true;
-  const runtime = { abrainHome: resolveAbrainHomeForSediment() };
-  const startup = await getCanonicalStartupPromise(runtime);
-  if (startup.startup === "ready") return true;
-  reportCanonicalStartupConsumer({
-    runtime,
-    consumerId: "sediment-runtime",
-    message: `sediment agent_end deferred queue blocked: ${startup.blockedReason ?? "unknown"}`,
-    type: "warning",
-    diagnostics: startup,
-  });
-  return false;
-}
-
 async function auditSedimentAgentEndQueueError(snapshot: SedimentAgentEndSnapshotForTests, error: unknown): Promise<void> {
   const message = sanitizeAuditText(error instanceof Error ? error.message : String(error), 500);
   console.error(`[sediment] detached agent_end job failed: ${message}`);
@@ -549,48 +683,6 @@ async function auditSedimentAgentEndQueueError(snapshot: SedimentAgentEndSnapsho
     reason: "agent_end_queue_job_failed",
     session_id: snapshot.sessionId,
     error: message,
-    checkpoint_advanced: false,
-    background_async: true,
-  }).catch(() => {});
-}
-
-async function auditSedimentAgentEndQueueNotReady(
-  snapshot: SedimentAgentEndSnapshotForTests,
-  info: { key: string; version: number },
-): Promise<void> {
-  await appendAudit(snapshot.cwd, {
-    operation: "skip",
-    lane: "system",
-    reason: "agent_end_queue_not_ready",
-    session_id: snapshot.sessionId,
-    queue_key: info.key,
-    queue_version: info.version,
-    parked: true,
-    checkpoint_advanced: false,
-    background_async: true,
-    clone_metrics: {
-      last_bytes: cloneMetrics.lastBytes,
-      last_ms: Number(cloneMetrics.lastMs.toFixed(3)),
-      max_bytes: cloneMetrics.maxBytes,
-      max_ms: Number(cloneMetrics.maxMs.toFixed(3)),
-      samples: cloneMetrics.samples,
-    },
-  }).catch(() => {});
-}
-
-async function auditSedimentAgentEndParkEvicted(
-  snapshot: SedimentAgentEndSnapshotForTests,
-  info: { key: string; version: number; reason: "ttl" | "count" | "bytes" },
-): Promise<void> {
-  await appendAudit(snapshot.cwd, {
-    operation: "skip",
-    lane: "system",
-    reason: "agent_end_queue_park_evicted",
-    session_id: snapshot.sessionId,
-    queue_key: info.key,
-    queue_version: info.version,
-    eviction_reason: info.reason,
-    parked: false,
     checkpoint_advanced: false,
     background_async: true,
   }).catch(() => {});
@@ -642,6 +734,68 @@ async function frozenSnapshotStillHasBacklog(
   return true;
 }
 
+function intakeTipMatchesBranchEntry(record: SedimentIntakeRecord, entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const row = entry as Record<string, unknown>;
+  return row.id === record.branchTip.id
+    && row.parentId === record.branchTip.parentId
+    && row.type === record.branchTip.type
+    && row.timestamp === record.branchTip.timestampUtc;
+}
+
+/**
+ * Ack every same-source pending window proven covered by this durable
+ * checkpoint. Pending tips on another branch/source remain untouched.
+ */
+async function ackCheckpointCoveredIntake(args: {
+  abrainHome: string;
+  sessionId: string;
+  sessionFile: string;
+  branch: readonly unknown[];
+  checkpoint: SedimentCheckpoint;
+  auditCwd: string;
+}): Promise<string[]> {
+  if (!args.checkpoint.lastProcessedEntryId) return [];
+  const indexById = new Map<string, number>();
+  args.branch.forEach((entry, index) => {
+    if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+      indexById.set((entry as { id: string }).id, index);
+    }
+  });
+  const coveredThrough = indexById.get(args.checkpoint.lastProcessedEntryId);
+  if (coveredThrough === undefined) return [];
+
+  const acked: string[] = [];
+  const pending = await listSedimentIntakePendingForSession(args.abrainHome, args.sessionId);
+  for (const item of pending) {
+    const tipIndex = indexById.get(item.branchTipId);
+    if (tipIndex === undefined || tipIndex > coveredThrough) continue;
+    try {
+      const record = await readSedimentIntakeRecord(args.abrainHome, item.windowId);
+      if (!record || record.captureBoundary.boundaryUntrusted) continue;
+      if (path.resolve(record.sessionFile) !== path.resolve(args.sessionFile)) continue;
+      if (!intakeTipMatchesBranchEntry(record, args.branch[tipIndex])) continue;
+      const result = await ackSedimentIntake(args.abrainHome, item.windowId);
+      if (result.status === "acked" || result.status === "missing") acked.push(item.windowId);
+    } catch {
+      // Fail closed: malformed/foreign/failed-ack records remain pending.
+    }
+  }
+  if (acked.length > 0) {
+    await appendAudit(args.auditCwd, {
+      operation: "skip",
+      lane: "system",
+      reason: "intake_covered_acked",
+      session_id: args.sessionId,
+      intake_window_ids: acked,
+      checkpoint_entry_id: args.checkpoint.lastProcessedEntryId,
+      checkpoint_advanced: true,
+      background_async: true,
+    }).catch(() => {});
+  }
+  return acked;
+}
+
 /**
  * Footer status state machine for the sediment extension.
  *
@@ -669,7 +823,20 @@ async function frozenSnapshotStillHasBacklog(
  *   - agent_end                              -> running -> completed/failed
  *   - bg work drain completes + no inflight  -> idle
  */
-type SedimentStatus = "idle" | "running" | "completed" | "failed";
+/**
+ * Footer / audit phase labels for the ground-truth-tiered pipeline.
+ * "running" remains the umbrella for in-flight work; finer labels distinguish
+ * LLM evaluation from accepted-but-unpublished and pure publication backlog.
+ * Canonical busy must NEVER be reported as sediment skipped.
+ */
+type SedimentStatus =
+  | "idle"
+  | "running"
+  | "evaluating"
+  | "accepted_pending_publication"
+  | "publication_backlog"
+  | "completed"
+  | "failed";
 
 const sedimentStatusBySession = new Map<string, SedimentStatus>();
 
@@ -685,6 +852,12 @@ export function renderSedimentStatus(
         return "💤 sediment";
       case "running":
         return "📝 sediment";
+      case "evaluating":
+        return "🧠 sediment evaluating";
+      case "accepted_pending_publication":
+        return "📦 sediment accepted_pending_publication";
+      case "publication_backlog":
+        return "📤 sediment publication_backlog";
       case "completed":
         return "✅ sediment";
       case "failed":
@@ -1624,17 +1797,23 @@ async function applyRuleOutcomeEdge(args: {
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
   const terminalReasons = new Set([
-    "duplicate_slug", "validation_error", "lint_error",
-    // CAS guard (ADR 0027 C3'): a status_precondition_failed means the entry
-    // changed under us; retrying the same expected_status transition cannot
-    // succeed without fresh intent, so treat it as terminal (advance the
-    // checkpoint) to avoid an unbounded retry loop.
+    "duplicate_slug",
+    "duplicate_slug_race",
+    "entry_not_found",
+    "lint_error",
+    // CAS guard: replaying the same stale precondition cannot succeed without
+    // fresh intent, so it is terminal rather than a permanent HOLD.
     "status_precondition_failed",
+    // Immutable chronology is part of event identity. A legacy source with no
+    // timestamp fails closed once and advances instead of re-running an LLM.
+    "source_timestamp_unavailable",
   ]);
   return results.every((result) => {
     if (result.status === "created" || result.status === "updated" || result.status === "merged" || result.status === "archived" || result.status === "superseded" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
     if (!result.reason) return false;
-    return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
+    return terminalReasons.has(result.reason)
+      || result.reason.startsWith("validation_error")
+      || result.reason.startsWith("credential pattern detected");
   });
 }
 
@@ -2034,7 +2213,6 @@ function registerSedimentCommand(pi: ExtensionAPI) {
     ) {
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const settings = resolveSedimentSettings();
-      const sessionId = readSessionId(ctx.sessionManager);
       const [subcommand = "status", ...rest] = args.trim()
         ? args.trim().split(/\s+/)
         : [];
@@ -2214,7 +2392,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           notify?(message: string, type?: "info" | "warning" | "error"): void;
         };
         cwd?: string;
-        mode?: CanonicalStartupHostMode;
         modelRegistry?: unknown;
       },
     ) => {
@@ -2263,6 +2440,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         applySedimentStatus(setStatus, sessionId, "idle");
       }
 
+      // Durable intake recovery is independent of canonical startup. Pending
+      // windows must evaluate even while Git/canonical is busy; publication
+      // backlog is the only place canonical may stall.
+      try {
+        await schedulePendingIntakeRecovery({
+          reason: "session_start",
+          modelRegistry: ctx.modelRegistry,
+        });
+      } catch (err) {
+        console.error(`[sediment] intake recovery scan failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // One lifecycle edge, one publisher attempt. Busy returns immediately;
+      // pending work stays durable for the next session_start/agent_end edge.
+      void triggerKnowledgePublicationOneShot(sessionId, "idle");
+
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const modelRegistry = ctx.modelRegistry;
       const initializeAfterCanonicalBarrier = async (canonicalReady = false): Promise<void> => {
@@ -2302,25 +2494,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         })().catch((err) => {
           console.error(`[sediment] constraint shadow startup recovery failed: ${err instanceof Error ? err.message : String(err)}`);
         });
-        // Production startup ready → wake every parked agent_end. Active
-        // windows do not lose the wake (queue version-bumps in-flight keys).
-        try { wakeParkedDetachedAgentEnd(); } catch { /* best-effort */ }
       };
 
-      if (canonicalGitRuntimeEnabled()) {
-        const notify = ctx.ui?.notify?.bind(ctx.ui);
-        await scheduleCanonicalStartupConsumer({
-          runtime: { abrainHome },
-          consumerId: "sediment-runtime",
-          mode: ctx.mode,
-          reporter: notify,
-          blockedMessage: (startup) => `sediment canonical startup blocked: ${startup.blockedReason ?? "unknown"}`,
-          errorMessage: (error) => `sediment canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
-          onReady: () => initializeAfterCanonicalBarrier(true),
-        });
-      } else {
-        await initializeAfterCanonicalBarrier();
-      }
+      // Durable intake and one-shot publishers own their own OFD attempts.
+      // Sediment startup does not subscribe to the canonical startup consumer.
+      await initializeAfterCanonicalBarrier(canonicalGitRuntimeEnabled());
     },
   );
 
@@ -2353,7 +2531,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       c.drainCount = 0; // reset drain counter for new agent cycle
       sessionAgentCycle.set(sessionId, c);
       const prev = sedimentStatusBySession.get(sessionId);
-      if (prev !== "completed" && prev !== "failed") return; // running -> stay; idle -> already idle
+      // Keep in-flight evaluation/publication indicators; only clear terminal-ish states.
+      if (
+        prev !== "completed"
+        && prev !== "failed"
+        && prev !== "accepted_pending_publication"
+        && prev !== "publication_backlog"
+      ) return; // running/evaluating -> stay; idle -> already idle
       const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
       const setStatus = setStatusRaw
         ? (msg?: string) => {
@@ -2375,49 +2559,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
     },
   );
 
-  pi.on(
-    "agent_end",
-    (
-      event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
-      liveCtx: {
-        cwd?: string;
-        sessionManager?: {
-          getBranch(): unknown[];
-          getSessionId?(): string | undefined | null;
-          getSessionFile?(): string | undefined | null;
-        };
-        modelRegistry?: unknown;
-        ui?: {
-          notify(message: string, type?: string): void;
-          setStatus?(extId: string, message?: string): void;
-        };
-      },
-    ) => {
-      // pi awaits agent_end listeners before agent_settled. This handler must
-      // therefore do only bounded synchronous capture and enqueue work.
-      const boundaryUntrusted = isSubAgentBoundaryUntrusted();
-      if (!boundaryUntrusted && isSubAgentSession(liveCtx)) return;
-      if (!boundaryUntrusted && !resolveSedimentSettings().enabled) return;
-      refreshSedimentReporter(liveCtx.ui);
-      const snapshot = captureSedimentAgentEndSnapshot(event, liveCtx);
-      if (!snapshot) return;
-
-      if (snapshot.sessionId) {
-        const cycle = sessionAgentCycle.get(snapshot.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
-        cycle.ended += 1;
-        sessionAgentCycle.set(snapshot.sessionId, cycle);
-      }
-
-      const queueKey = snapshot.sessionId
-        ? `session:${snapshot.sessionId}`
-        : `ephemeral:${snapshot.sessionFile ?? snapshot.cwd}`;
-      enqueueDetachedAgentEnd({
-        key: queueKey,
-        approxBytes: estimateBranchBytes(snapshot.branchEntries as unknown[]),
-        waitUntilReady: () => waitForSedimentAgentEndStartup(snapshot),
-        onNotReady: (info) => auditSedimentAgentEndQueueNotReady(snapshot, info),
-        onParkEvicted: (info) => auditSedimentAgentEndParkEvicted(snapshot, info),
-        run: async () => {
+  // Production worker shared by live agent_end enqueue and intake recovery.
+  const runSedimentAgentEndPass: SedimentAgentEndPassRunner = async (snapshot, passOpts) => {
           // Each claimed pass gets a fresh drain budget so ready-pending
           // continuation can keep walking the frozen snapshot tip.
           if (snapshot.sessionId) {
@@ -2446,6 +2589,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             const hookResult = await sedimentAgentEndTestHooks.run(snapshot);
             return hookResult;
           }
+
+          applySedimentStatus(
+            dynamicSedimentSetStatus,
+            snapshot.sessionId,
+            "evaluating",
+            passOpts?.fromRecovery ? "intake_recovery" : undefined,
+          );
+
+          const passIntakeWindowId = passOpts?.intakeWindowId;
+          const passIntakeWindowFields = passIntakeWindowId ? { windowId: passIntakeWindowId } : {};
 
           const event = { messages: snapshot.messages };
           const ctx = {
@@ -2732,6 +2885,23 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   try {
                     const scope = scopeOf.get(target.slug) ?? "project";
                     const expectedStatus = target.expected_status ?? "active";
+                    // Immutable chronology from the live entry / authorization
+                    // evidence — never mint a wall-clock for knowledge events.
+                    const liveEntries = await loadEntries(cwd, memForgettingSettings, undefined);
+                    const live = liveEntries.find((entry) => entry.slug === target.slug);
+                    const sourceTimestampUtc =
+                      (typeof live?.created === "string" && Number.isFinite(Date.parse(live.created)) ? new Date(Date.parse(live.created)).toISOString() : undefined)
+                      || (typeof live?.updated === "string" && Number.isFinite(Date.parse(live.updated)) ? new Date(Date.parse(live.updated)).toISOString() : undefined)
+                      || (typeof live?.frontmatter?.archive_at === "string" && Number.isFinite(Date.parse(live.frontmatter.archive_at)) ? new Date(Date.parse(live.frontmatter.archive_at)).toISOString() : undefined)
+                      || (live?.timeline?.length
+                        ? (() => {
+                            for (let i = live.timeline.length - 1; i >= 0; i -= 1) {
+                              const m = /^[-*]\s+(\d{4}-\d{2}-\d{2}T[^\s|]+)/.exec(live.timeline[i] ?? "");
+                              if (m?.[1] && Number.isFinite(Date.parse(m[1]))) return new Date(Date.parse(m[1])).toISOString();
+                            }
+                            return undefined;
+                          })()
+                        : undefined);
                     const res = await updateProjectEntry(
                       target.slug,
                       {
@@ -2749,6 +2919,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         scope,
                         dryRun: false,
                         auditOperation: "forgetting_demote_apply",
+                        auditContext: {
+                          lane: "forgetting",
+                          sessionId,
+                          candidateId: target.proposal_id || `forgetting:${target.slug}:${target.reason}`,
+                          ...(sourceTimestampUtc ? { sourceTimestampUtc } : {}),
+                          ...passIntakeWindowFields,
+                        },
                       },
                     );
                     const ok = res.status !== "rejected";
@@ -3082,6 +3259,29 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // to operation="update", so `jq 'select(.operation
                       // == "archive_reactivation_apply")'` against audit.jsonl
                       // returned zero results.
+                      const archivedSource = archived.find((entry: { slug: string }) => entry.slug === slug) as {
+                        slug: string;
+                        created?: string;
+                        updated?: string;
+                        frontmatter?: Record<string, unknown>;
+                        timeline?: string[];
+                      } | undefined;
+                      const archiveAt = typeof archivedSource?.frontmatter?.archive_at === "string"
+                        ? archivedSource.frontmatter.archive_at
+                        : undefined;
+                      const sourceTimestampUtc =
+                        (archiveAt && Number.isFinite(Date.parse(archiveAt)) ? new Date(Date.parse(archiveAt)).toISOString() : undefined)
+                        || (typeof archivedSource?.created === "string" && Number.isFinite(Date.parse(archivedSource.created)) ? new Date(Date.parse(archivedSource.created)).toISOString() : undefined)
+                        || (typeof archivedSource?.updated === "string" && Number.isFinite(Date.parse(archivedSource.updated)) ? new Date(Date.parse(archivedSource.updated)).toISOString() : undefined)
+                        || (archivedSource?.timeline?.length
+                          ? (() => {
+                              for (let i = archivedSource.timeline.length - 1; i >= 0; i -= 1) {
+                                const m = /^[-*]\s+(\d{4}-\d{2}-\d{2}T[^\s|]+)/.exec(archivedSource.timeline[i] ?? "");
+                                if (m?.[1] && Number.isFinite(Date.parse(m[1]))) return new Date(Date.parse(m[1])).toISOString();
+                              }
+                              return undefined;
+                            })()
+                          : undefined);
                       const res = await updateProjectEntry(
                         slug,
                         {
@@ -3108,6 +3308,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           scope,
                           dryRun: false,
                           auditOperation: "archive_reactivation_apply",
+                          auditContext: {
+                            lane: "archive_reactivation",
+                            sessionId,
+                            candidateId: `archive-reactivation:${slug}`,
+                            ...(sourceTimestampUtc ? { sourceTimestampUtc } : {}),
+                            ...passIntakeWindowFields,
+                          },
                         },
                       );
                       return { ok: res.status !== "rejected", error: res.reason };
@@ -3602,7 +3809,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         lane: "explicit",
                         candidateIndex: i,
                         title: draft.title,
-                        body: draft.body ?? draft.compiledTruth,
+                        body: draft.compiledTruth,
                       });
                       if (checkpointHasProcessedKey(drainCp, idemKey)) {
                         explicitResults.push({
@@ -3618,6 +3825,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         sessionId,
                         correlationId: explicitCorrId,
                         candidateId,
+                        sourceTimestampUtc: stableRunWindowTimestamp(win),
+                        ...passIntakeWindowFields,
                       };
                       const result = await writeProjectEntry(
                         {
@@ -3771,6 +3980,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         // PR-A2 (F5): drain windows are normal-sized — the
                         // extractor follow-up applies here too.
                         tier1ExtractorFollowUp: true,
+                        intakeWindowId: passIntakeWindowId,
                         correctionSignal: (() => {
                           const stored = takeSessionCorrectionForCurator(sessionId);
                           return stored ? recordConsumedSessionCorrection("drain", corrId, stored) : null;
@@ -4083,6 +4293,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   cwd, sessionId, settings, window: effectiveWindow, modelRegistry,
                   signal: undefined, correlationId: shortCorrelationId, abrainHome, projectId,
                   branchEntries: branch, sessionManager: sessMgr,
+                  intakeWindowId: passIntakeWindowId,
                   correctionSignal: escForwarded ?? classifierResult.signal ?? undefined,
                 });
                 // No-loss invariant (audit P0, 2026-06-07, gpt-5.5 2 rounds): advance the
@@ -4293,6 +4504,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               // PR-A2 (F5): Tier-1 hit no longer preempts the window — the
               // lane re-enters for the extractor pass (R1' disjoint authority).
               tier1ExtractorFollowUp: true,
+              intakeWindowId: passIntakeWindowId,
               // Await the fire-and-forget classifier promise (started before lane branching).
               // If classifier hasn't finished yet, wait for it; if it failed or wasn't
               // started, fall back to null signal (curator works without it).
@@ -4481,27 +4693,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   );
                 } catch {}
               }
-              const createdCount = auto.results.filter(
-                (r) => r.status === "created",
-              ).length;
-              const updatedCount = auto.results.filter(
-                (r) => r.status === "updated",
-              ).length;
-              const mergedCount = auto.results.filter(
-                (r) => r.status === "merged",
-              ).length;
-              const archivedCount = auto.results.filter(
-                (r) => r.status === "archived",
-              ).length;
-              const supersededCount = auto.results.filter(
-                (r) => r.status === "superseded",
-              ).length;
-              const skippedCount = auto.results.filter(
-                (r) => r.status === "skipped",
-              ).length;
-              const deletedCount = auto.results.filter(
-                (r) => r.status === "deleted",
-              ).length;
               const rejectedCount = auto.results.filter(
                 (r) => r.status === "rejected",
               ).length;
@@ -4720,7 +4911,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             lane: "explicit",
             candidateIndex: i,
             title: draft.title,
-            body: draft.body ?? draft.compiledTruth,
+            body: draft.compiledTruth,
           });
           if (checkpointHasProcessedKey(explicitCp, idemKey)) {
             results.push({
@@ -4736,6 +4927,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             sessionId,
             correlationId: explicitCorrelationId,
             candidateId: candidateIdFor(explicitCorrelationId, i),
+            sourceTimestampUtc: stableRunWindowTimestamp(window),
+            ...passIntakeWindowFields,
           };
           const result = await writeProjectEntry( /* writer-call: auto-write-block */
             {
@@ -5103,8 +5296,17 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         }
         return parts.join(", ") || "no changes";
       })();
+      const anyAcceptedPendingPub = [
+        ...results,
+        ...aboutMeResults,
+      ].some((r) => {
+        const pub = r ? (r as WriteProjectEntryResult).publication : undefined;
+        return pub?.status === "durable_pending" || pub?.drainStatus === "publication_outbox_enqueued";
+      });
       if (anyRejected || !combinedShouldAdvance) {
         applySedimentStatus(setStatus, sessionId, "failed", compactCombined);
+      } else if (anyAcceptedPendingPub) {
+        applySedimentStatus(setStatus, sessionId, "accepted_pending_publication", compactCombined);
       } else {
         applySedimentStatus(setStatus, sessionId, "completed", compactCombined);
       }
@@ -5122,13 +5324,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // transient HOLD) complete the slot — never tight-spin. Budget
           // exhaustion yields via queue setImmediate (next macro tick).
           const backlogSettings = resolveSedimentSettings();
+          let endCheckpoint: SedimentCheckpoint | undefined;
           if (
             backlogSettings.enabled
             && snapshot.sessionId
             && passProjectRoot
             && passStartCheckpoint
           ) {
-            const endCheckpoint = await loadSessionCheckpoint(passProjectRoot, snapshot.sessionId);
+            endCheckpoint = await loadSessionCheckpoint(passProjectRoot, snapshot.sessionId);
             const advanced = checkpointAdvancedSince(passStartCheckpoint, endCheckpoint);
             if (
               advanced
@@ -5139,13 +5342,128 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 backlogSettings,
               )
             ) {
-              // Budget enforced via drainCount; more=true yields (setImmediate).
+              // The OFD claim is released by the queue wrapper before the next
+              // yielded pass. Pending intake remains the durable work source.
               return { more: true as const };
             }
           }
-        },
-        onError: (error) => auditSedimentAgentEndQueueError(snapshot, error),
-      });
+
+          // A crash may happen after checkpoint and before ack, so coverage is
+          // proven from the current durable checkpoint even when this pass did
+          // not itself advance it. Ack all covered same-source windows, not
+          // only the latest coalesced trigger.
+          if (
+            passIntakeWindowId
+            && endCheckpoint
+            && snapshot.sessionId
+            && snapshot.sessionFile
+          ) {
+            await ackCheckpointCoveredIntake({
+              abrainHome: resolveAbrainHomeForSediment(),
+              sessionId: snapshot.sessionId,
+              sessionFile: snapshot.sessionFile,
+              branch: snapshot.branchEntries,
+              checkpoint: endCheckpoint,
+              auditCwd: passProjectRoot || snapshot.cwd,
+            });
+          }
+
+  };
+  sedimentAgentEndPassRunner = runSedimentAgentEndPass;
+
+  pi.on(
+    "agent_end",
+    async (
+      event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
+      liveCtx: {
+        cwd?: string;
+        sessionManager?: {
+          getLeafId?(): string | null;
+          getLeafEntry?(): unknown;
+          getSessionId?(): string | undefined | null;
+          getSessionFile?(): string | undefined | null;
+        };
+        modelRegistry?: unknown;
+        ui?: {
+          notify(message: string, type?: string): void;
+          setStatus?(extId: string, message?: string): void;
+        };
+      },
+    ) => {
+      // pi awaits agent_end listeners before agent_settled. Capture is bounded;
+      // durable intake fsync is the only awaited local IO (target p99 <100ms).
+      const boundaryUntrusted = isSubAgentBoundaryUntrusted();
+      if (!boundaryUntrusted && isSubAgentSession(liveCtx)) return;
+      if (!boundaryUntrusted && !resolveSedimentSettings().enabled) return;
+      refreshSedimentReporter(liveCtx.ui);
+      if (boundaryUntrusted) {
+        const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
+        const message = `sediment intake blocked: sub-agent boundary untrusted (${diagnostic?.reason ?? "unknown"})`;
+        console.error(`[sediment] ${message}`);
+        dynamicSedimentNotify(message, "error");
+        applySedimentStatus(dynamicSedimentSetStatus, readSessionId(liveCtx.sessionManager), "failed", "subagent_boundary_untrusted");
+        void appendAudit(path.resolve(liveCtx.cwd || process.cwd()), {
+          operation: "skip",
+          lane: "system",
+          reason: "subagent_boundary_untrusted",
+          session_id: readSessionId(liveCtx.sessionManager),
+          boundary_diagnostic: diagnostic,
+          checkpoint_advanced: false,
+          background_async: false,
+        }).catch(() => {});
+        return;
+      }
+
+      const capture = captureSedimentAgentEndIntake(event, liveCtx);
+      if (!capture) return;
+      const { record } = capture;
+      const cycle = sessionAgentCycle.get(record.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
+      cycle.ended += 1;
+      sessionAgentCycle.set(record.sessionId, cycle);
+
+      const started = performance.now();
+      try {
+        const written = await writeSedimentIntakeRecord(resolveAbrainHomeForSediment(), record);
+        const elapsed = performance.now() - started;
+        const approxBytes = Buffer.byteLength(JSON.stringify(written.record), "utf-8");
+        cloneMetrics.lastBytes = approxBytes;
+        cloneMetrics.lastMs = elapsed;
+        cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
+        cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, elapsed);
+        cloneMetrics.samples += 1;
+        if (written.status === "collision") throw new Error(`intake identity collision: ${written.windowId}`);
+        void appendAudit(record.cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "intake_durable",
+          session_id: record.sessionId,
+          intake_window_id: record.windowId,
+          intake_status: written.status,
+          intake_write_ms: written.durationMs,
+          checkpoint_advanced: false,
+          background_async: false,
+        }).catch(() => {});
+        enqueueSedimentIntakeRecord({
+          record: written.record,
+          modelRegistry: capture.modelRegistry,
+          fromRecovery: false,
+          reason: "agent_end",
+        });
+      } catch (err) {
+        const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
+        console.error(`[sediment] intake write failed; window not enqueued: ${error}`);
+        dynamicSedimentNotify(`sediment intake write failed: ${error}`, "error");
+        applySedimentStatus(dynamicSedimentSetStatus, record.sessionId, "failed", "intake_write_failed");
+        void appendAudit(record.cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "intake_write_failed",
+          session_id: record.sessionId,
+          error,
+          checkpoint_advanced: false,
+          background_async: false,
+        }).catch(() => {});
+      }
     },
   );
 }
@@ -5476,7 +5794,7 @@ function stableRunWindowTimestamp(window: RunWindow): string {
     const parsed = Date.parse(timestamp);
     if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
   }
-  return "1970-01-01T00:00:00.000Z";
+  throw new Error("run window source timestamp unavailable");
 }
 
 function stableRunWindowTurnId(window: RunWindow): string {
@@ -5533,8 +5851,11 @@ async function tryAutoWriteLane(args: {
    *  Injected into curator context for better update/merge decisions.
    *  null when classifier didn't run (ephemeral session) or found no signal. */
   correctionSignal?: CorrectionSignal | null;
+  /** Durable intake window owning this agent_end pass's Knowledge receipts. */
+  intakeWindowId?: string;
 }): Promise<AutoWriteLaneOutcome> {
   const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId, branchEntries, sessionManager } = args;
+  const intakeWindowFields = args.intakeWindowId ? { windowId: args.intakeWindowId } : {};
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
   // ADR 0025 §5.3 P5.5 tristate gate:
@@ -5594,6 +5915,7 @@ async function tryAutoWriteLane(args: {
       sessionId,
       correlationId,
       candidateId: tier1CandidateId,
+      ...intakeWindowFields,
     };
     let constraintEvidenceEvent: Awaited<ReturnType<typeof appendTier1ConstraintEvidenceEvent>> | undefined;
     let constraintEvidenceAppendError: string | undefined;
@@ -5943,6 +6265,8 @@ async function tryAutoWriteLane(args: {
       sessionId,
       correlationId,
       candidateId,
+      sourceTimestampUtc: stableRunWindowTimestamp(window),
+      ...intakeWindowFields,
     };
     let curated: Awaited<ReturnType<typeof curateProjectDraft>>;
     try {
@@ -6107,7 +6431,6 @@ export function _resetDetachedAgentEndQueueForTests(): void {
 }
 
 export const _detachedAgentEndQueueStatsForTests = detachedAgentEndQueueStats;
-export const _wakeParkedDetachedAgentEndForTests = wakeParkedDetachedAgentEnd;
 
 /**
  * Test-only export of `tryAutoWriteLane` so smoke can drive the
@@ -6123,6 +6446,7 @@ export const _wakeParkedDetachedAgentEndForTests = wakeParkedDetachedAgentEnd;
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
 export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
 export const _shouldAdvanceAfterAutoOutcomeForTests = shouldAdvanceAfterAutoOutcome;
+export const _shouldAdvanceAfterResultsForTests = shouldAdvanceAfterResults;
 export const _shouldAdvanceAfterAboutMeResultsForTests = shouldAdvanceAfterAboutMeResults;
 export const _auditDirectiveRecallForTests = auditDirectiveRecall;
 export const _applyRuleOutcomeEdgeForTests = applyRuleOutcomeEdge;
@@ -6262,13 +6586,22 @@ function scheduleMultiviewReplay(args: {
           const bySlug = new Map(filtered.map((entry) => [entry.slug, entry]));
           return slugs.map((slug) => bySlug.get(slug)).filter((entry): entry is NonNullable<typeof entry> => !!entry);
         },
-        writeApprovedToBrain: async (decision, candidate, neighborStatusBySlug) => {
+        writeApprovedToBrain: async (decision, candidate, neighborStatusBySlug, replaySource) => {
           const replayCorrelationId = makeCorrelationId("replay", replaySessionId, {
+            entries: [],
             lastEntryId: `multiview-replay-${candidate.title}`,
           });
           let results: WriteProjectEntryResult[] = [];
           let dispatcherError: unknown;
           try {
+            // Pending multiview capture timestamp is the immutable source clock.
+            const captured =
+              (typeof replaySource?.created === "string" && Number.isFinite(Date.parse(replaySource.created))
+                ? new Date(Date.parse(replaySource.created)).toISOString()
+                : undefined)
+              || (typeof replaySource?.updated === "string" && Number.isFinite(Date.parse(replaySource.updated))
+                ? new Date(Date.parse(replaySource.updated)).toISOString()
+                : undefined);
             results = await executeCuratorDecisionToBrain({
               decision,
               draft: candidate,
@@ -6283,6 +6616,7 @@ function scheduleMultiviewReplay(args: {
                 sessionId: replaySessionId,
                 correlationId: replayCorrelationId,
                 candidateId: candidateIdFor(replayCorrelationId, 0),
+                ...(captured ? { sourceTimestampUtc: captured } : {}),
               },
               sessionId: replaySessionId,
               createTimelineNote: "captured from multi-view staging replay",

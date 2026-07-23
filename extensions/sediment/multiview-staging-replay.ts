@@ -177,6 +177,8 @@ export interface ReplayDeps {
     decision: CuratorDecision,
     candidate: ProjectEntryDraft,
     neighborStatusBySlug?: Record<string, EntryStatus>,
+    /** Pending multiview capture source — carries immutable created/updated. */
+    source?: Pick<MultiviewPendingEntry, "slug" | "created" | "updated">,
   ) => Promise<void>;
   signal?: AbortSignal;
 }
@@ -936,7 +938,11 @@ async function retryApprovedWriterOnly(
       return;
     }
 
-    await deps.writeApprovedToBrain(finalDecision, draft, neighborStatusBySlug);
+    await deps.writeApprovedToBrain(finalDecision, draft, neighborStatusBySlug, {
+      slug: entry.slug,
+      created: entry.created,
+      ...(entry.updated ? { updated: entry.updated } : {}),
+    });
     const completedAtIso = new Date().toISOString();
     if (!markMultiviewPendingBrainWriteCompleted(entry.slug, completedAtIso, finalDecision)) {
       inMemoryBrainCompleted.set(inMemoryKey(entry), completedAtIso);

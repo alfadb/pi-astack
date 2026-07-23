@@ -1,0 +1,101 @@
+{
+  "generated_at_utc": "2026-07-23T12:06:33.594Z",
+  "mode": "production_readonly",
+  "abrainHome": "/home/worker/.abrain",
+  "notes": [
+    "Read-only probe only. No production files were created, modified, or deleted.",
+    "Missing intake/outbox directories are expected before the phase-1 pipeline has run in production.",
+    "This dossier is generated only by this explicit command; no lifecycle hook invokes it.",
+    "HEAD closure is read through structured Git tree/blob APIs and excludes every unpublished worktree tail.",
+    "Default stdout only; pass --output <path> to persist. Does not invoke publisher or consume live intake/outbox.",
+    "Production acceptance evidence lives at docs/evidence/2026-07-23-sediment-production-acceptance.json when gates pass."
+  ],
+  "layout": {
+    "sediment_state": {
+      "exists": true,
+      "isDirectory": true,
+      "entries": 34,
+      "sample": [
+        "adr0039-l3",
+        "aggregator-ledger.jsonl",
+        "archive-reactivation-ledger.jsonl",
+        "audit.jsonl",
+        "constraint-events"
+      ]
+    },
+    "intake_pending": {
+      "exists": true,
+      "isDirectory": true,
+      "entries": 2,
+      "sample": [
+        "a304086cfea249126a23c5b39123ea24f5a9d78b9d1457bf205f1fd79be824a9.json",
+        "a77f48969ed7d5183911accef6b44a08e14334cb06f9fad393ffc19fb34bfc93.json"
+      ]
+    },
+    "intake_acked": {
+      "exists": true,
+      "isDirectory": true,
+      "entries": 7,
+      "sample": [
+        "1bc998cb7ba3b69182ce7c93c599db7fe33029e214d9332177e3db8c969d949e.json",
+        "2a95260b0a84085c6df3b23d2e71bfb10013c34814b31f935ae4f8075123e322.json",
+        "7ecef7a33aea97a8d8ed5dc6f2d362cb7b68caf20e493c6666d2fe2f67525308.json",
+        "921975fedb8f7a98f65c527850547c63826847e22b5db71659d64078093637d2.json",
+        "9a4d3bd05b3ae8b3023bc300e412f00662c684fdf80370c06b2da9af35b82984.json"
+      ]
+    },
+    "publication_outbox_pending": {
+      "exists": true,
+      "isDirectory": true,
+      "entries": 0,
+      "sample": []
+    },
+    "l1_events": {
+      "exists": true,
+      "isDirectory": true,
+      "entries": 1,
+      "sample": [
+        "sha256"
+      ]
+    }
+  },
+  "scans": {
+    "intake_pending_count": 2,
+    "intake_scan_ms": 6.331,
+    "outbox_pending_count": 0,
+    "outbox_scan_ms": 0.454,
+    "head_knowledge_l1_count": 4787,
+    "head_closure_violation_count": 0,
+    "head_closure_scan_ms": 4006.093,
+    "l1_json_files": 8508,
+    "l1_walk_nodes": 16788,
+    "l1_walk_ms": 729.146
+  },
+  "head_knowledge_closure": {
+    "commit": "621d4b15876d183e4aa4900b24d4a0e4eb7df85c",
+    "violations": []
+  },
+  "format_compatibility": {
+    "intake_schema": "sediment-intake/v2",
+    "outbox_schema": "sediment-publication-outbox/v2",
+    "intake_pending_path_pattern": "<abrain>/.state/sediment/intake/pending/<windowIdsha256>.json",
+    "outbox_pending_path_pattern": "<abrain>/.state/sediment/publication-outbox/pending/<itemIdsha256>.json",
+    "knowledge_l1_path_pattern": "<abrain>/l1/events/sha256/<aa>/<bb>/<eventId>.json",
+    "knowledge_l1_write_primitive": "durableAtomicCreateFile (create-only CAS)"
+  },
+  "sample_pending_intake": [
+    {
+      "windowId": "a304086cfea249126a23c5b39123ea24f5a9d78b9d1457bf205f1fd79be824a9",
+      "sessionIdSha256": "a925b41287229a4b72d8800026b5f90ab74d37fc561b9a6e12fc9be8d875ae03",
+      "approxBytes": 736,
+      "mtimeMs": 1784798604847.2837
+    },
+    {
+      "windowId": "a77f48969ed7d5183911accef6b44a08e14334cb06f9fad393ffc19fb34bfc93",
+      "sessionIdSha256": "a925b41287229a4b72d8800026b5f90ab74d37fc561b9a6e12fc9be8d875ae03",
+      "approxBytes": 736,
+      "mtimeMs": 1784798752362.3833
+    }
+  ],
+  "pending_outbox": []
+}

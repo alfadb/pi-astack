@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { durableAtomicWriteFile } from "../_shared/durable-write";
+import { durableAtomicCreateFile, durableAtomicWriteFile } from "../_shared/durable-write";
 import {
   CURRENT_KNOWLEDGE_L2,
   knowledgeProjectionEntryRelativePathV1,
@@ -135,6 +135,12 @@ export interface AppendKnowledgeEvidenceForWriteOptions {
   turnId?: string;
   createdAtUtc?: string;
   projectEvent?: boolean;
+  /**
+   * When true, skip inline L2 projection even if projectOnWrite is enabled.
+   * Caller is responsible for durable publication-outbox enqueue so L2/Git
+   * can drain asynchronously without blocking accepted L1 durability.
+   */
+  deferPublication?: boolean;
   causalParents?: string[];
   sanitizer?: KnowledgeEvidenceEventBodyV1["sanitizer"];
   legacyParallelWrite?: {
@@ -150,6 +156,8 @@ export interface AppendKnowledgeEvidenceForWriteResult {
   body?: KnowledgeEvidenceEventBodyV1;
   append: AppendKnowledgeEvidenceEventResult;
   projection?: ProjectKnowledgeEvidenceResult;
+  /** True when L1 is durable and L2/Git were intentionally deferred. */
+  publicationDeferred?: boolean;
 }
 
 export function sha256Hex(input: string): string {
@@ -307,50 +315,63 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
   const content = knowledgeEvidenceEnvelopeJson(envelope);
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const existing = await fs.readFile(filePath, "utf-8").catch((err: NodeJS.ErrnoException) => err.code === "ENOENT" ? null : Promise.reject(err));
-    if (existing !== null) {
-      if (existing === content || canonicalizeExistingEnvelopeJson(existing) === content) {
-        return {
-          ok: true,
-          status: "idempotent_duplicate",
-          eventId,
-          filePath,
-          envelope,
-          diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
-        };
-      }
-      const stat = await fs.stat(filePath);
-      if (stat.size === 0) {
-        await durableAtomicWriteFile(filePath, content);
-        return {
-          ok: true,
-          status: "appended",
-          eventId,
-          filePath,
-          envelope,
-          recoveredEmptyResidue: true,
-          diagnostics: [knowledgeEvidenceDiagnostic("KE_RECOVERED_EMPTY_RESIDUE", "knowledge evidence event recovered an empty crash residue", { eventId, filePath, recovered: "recovered_empty_residue" })],
-        };
-      }
-      const reason = knowledgeCollisionReason(existing, content);
+    // Create-only CAS: concurrent publishers observe created | identical |
+    // collision. Never rename-overwrite an existing non-empty L1 event.
+    const createStatus = await durableAtomicCreateFile(filePath, content);
+    if (createStatus === "created") {
       return {
-        ok: false,
-        status: "collision",
+        ok: true,
+        status: "appended",
         eventId,
         filePath,
         envelope,
-        error: `knowledge evidence event path collision: ${reason}`,
-        diagnostics: [knowledgeEvidenceDiagnostic("KE_HASH_PATH_COLLISION", "knowledge evidence event path already exists with different content", { eventId, filePath, reason })],
+        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_OK", "knowledge evidence event appended", { eventId, filePath })],
       };
     }
-    await durableAtomicWriteFile(filePath, content);
+    if (createStatus === "identical") {
+      return {
+        ok: true,
+        status: "idempotent_duplicate",
+        eventId,
+        filePath,
+        envelope,
+        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
+      };
+    }
+    // collision: allow empty crash residue recovery only; never clobber bytes.
+    const existing = await fs.readFile(filePath, "utf-8").catch(() => null);
+    if (existing !== null && (existing === content || canonicalizeExistingEnvelopeJson(existing) === content)) {
+      return {
+        ok: true,
+        status: "idempotent_duplicate",
+        eventId,
+        filePath,
+        envelope,
+        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
+      };
+    }
+    const stat = await fs.stat(filePath).catch(() => null);
+    if (stat && stat.size === 0) {
+      await durableAtomicWriteFile(filePath, content);
+      return {
+        ok: true,
+        status: "appended",
+        eventId,
+        filePath,
+        envelope,
+        recoveredEmptyResidue: true,
+        diagnostics: [knowledgeEvidenceDiagnostic("KE_RECOVERED_EMPTY_RESIDUE", "knowledge evidence event recovered an empty crash residue", { eventId, filePath, recovered: "recovered_empty_residue" })],
+      };
+    }
+    const reason = existing == null ? "content_mismatch" : knowledgeCollisionReason(existing, content);
     return {
-      ok: true,
-      status: "appended",
+      ok: false,
+      status: "collision",
       eventId,
       filePath,
       envelope,
-      diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_OK", "knowledge evidence event appended", { eventId, filePath })],
+      error: `knowledge evidence event path collision: ${reason}`,
+      diagnostics: [knowledgeEvidenceDiagnostic("KE_HASH_PATH_COLLISION", "knowledge evidence event path already exists with different content", { eventId, filePath, reason })],
     };
   } catch (err) {
     return { ok: false, status: "write_failed", eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
@@ -503,10 +524,26 @@ export interface KnowledgeEventNode {
   body: KnowledgeEvidenceEventBodyV1;
 }
 
+export interface KnowledgeIdentityDescriptor {
+  key: string;
+  scopeKind: KnowledgeEvidenceScope;
+  projectId?: string;
+  slug: string;
+}
+
 export function knowledgeIdentityKey(body: KnowledgeEvidenceEventBodyV1): string {
   return body.scope.kind === "world"
     ? `world::${body.payload.slug}`
     : `project:${body.scope.project_id || "unknown"}:${body.payload.slug}`;
+}
+
+export function knowledgeIdentityDescriptor(body: KnowledgeEvidenceEventBodyV1): KnowledgeIdentityDescriptor {
+  return {
+    key: knowledgeIdentityKey(body),
+    scopeKind: body.scope.kind,
+    ...(body.scope.kind === "project" && body.scope.project_id ? { projectId: body.scope.project_id } : {}),
+    slug: body.payload.slug,
+  };
 }
 
 /** Canonical-path R3.4.2 P1-S3: whole-L1 scan through the central schema-role
@@ -733,6 +770,112 @@ export interface RenderedKnowledgeProjectionManifest {
   identityWinnerEventIds: readonly string[];
 }
 
+export interface KnowledgeProjectionPlanEntry {
+  /** Path relative to the Knowledge projection root (l2/views/knowledge). */
+  relativePath: string;
+  op: "put" | "delete";
+  content?: string;
+  identity?: string;
+}
+
+export interface KnowledgeProjectionPlan {
+  entries: readonly KnowledgeProjectionPlanEntry[];
+  closureEventIds: readonly string[];
+  affectedIdentities: readonly string[];
+  manifest?: RenderedKnowledgeProjectionManifest;
+}
+
+function assertSafeProjectionRelativePath(relativePath: string): void {
+  if (
+    path.isAbsolute(relativePath)
+    || relativePath.includes("\\")
+    || relativePath.split("/").some((part) => !part || part === "." || part === "..")
+  ) {
+    throw new Error(`unsafe Knowledge projection path: ${relativePath}`);
+  }
+}
+
+/**
+ * Pure deterministic projection over one explicit validated closure. It never
+ * scans disk and never writes bytes. Callers select affected identities, while
+ * the manifest is always rendered from the same complete closure.
+ */
+export function planKnowledgeProjectionFromValidatedSet(args: {
+  nodes: readonly KnowledgeEventNode[];
+  affectedIdentities: readonly KnowledgeIdentityDescriptor[];
+}): KnowledgeProjectionPlan {
+  const nodeById = new Map<string, KnowledgeEventNode>();
+  const byIdentity = new Map<string, KnowledgeEventNode[]>();
+  for (const node of args.nodes) {
+    if (!/^[0-9a-f]{64}$/.test(node.eventId)) throw new Error(`invalid Knowledge event id in projection closure: ${node.eventId}`);
+    const existing = nodeById.get(node.eventId);
+    if (existing) {
+      if (canonicalJson(toJsonValue(existing.body)) !== canonicalJson(toJsonValue(node.body))) {
+        throw new Error(`Knowledge event id collision in projection closure: ${node.eventId}`);
+      }
+      continue;
+    }
+    nodeById.set(node.eventId, node);
+    const identity = knowledgeIdentityKey(node.body);
+    const set = byIdentity.get(identity) ?? [];
+    set.push(node);
+    byIdentity.set(identity, set);
+  }
+
+  const descriptors = new Map<string, KnowledgeIdentityDescriptor>();
+  for (const descriptor of args.affectedIdentities) {
+    const expectedKey = descriptor.scopeKind === "world"
+      ? `world::${descriptor.slug}`
+      : `project:${descriptor.projectId || "unknown"}:${descriptor.slug}`;
+    if (descriptor.key !== expectedKey) throw new Error(`Knowledge identity descriptor mismatch: ${descriptor.key}`);
+    const previous = descriptors.get(descriptor.key);
+    if (previous && canonicalJson(toJsonValue(previous)) !== canonicalJson(toJsonValue(descriptor))) {
+      throw new Error(`conflicting Knowledge identity descriptors: ${descriptor.key}`);
+    }
+    descriptors.set(descriptor.key, descriptor);
+  }
+
+  // Fold each closure identity exactly once. Affected outputs and the manifest
+  // share this immutable map instead of independently re-folding the corpus.
+  const projectionByIdentity = new Map<string, KnowledgeSetProjection>();
+  for (const [identity, set] of byIdentity) projectionByIdentity.set(identity, renderKnowledgeProjectionFromSet(set));
+
+  const entries: KnowledgeProjectionPlanEntry[] = [];
+  for (const descriptor of [...descriptors.values()].sort((left, right) => compareUtf16CodeUnits(left.key, right.key))) {
+    const relativePath = knowledgeProjectionEntryRelativePathV1({
+      scopeKind: descriptor.scopeKind,
+      projectId: descriptor.projectId,
+      slug: descriptor.slug,
+    });
+    assertSafeProjectionRelativePath(relativePath);
+    const projection = projectionByIdentity.get(descriptor.key);
+    if (!projection) {
+      entries.push({ relativePath, op: "delete", identity: descriptor.key });
+      continue;
+    }
+    entries.push(projection.kind === "delete"
+      ? { relativePath, op: "delete", identity: descriptor.key }
+      : { relativePath, op: "put", content: projection.markdown!, identity: descriptor.key });
+  }
+
+  const manifestRelativePath = knowledgeProjectionManifestRelativePathV1();
+  assertSafeProjectionRelativePath(manifestRelativePath);
+  const closure = [...nodeById.values()];
+  const manifest = closure.length > 0
+    ? renderKnowledgeProjectionManifestFromFoldedSet(closure, projectionByIdentity)
+    : undefined;
+  entries.push(manifest
+    ? { relativePath: manifestRelativePath, op: "put", content: manifest.json }
+    : { relativePath: manifestRelativePath, op: "delete" });
+
+  return Object.freeze({
+    entries: Object.freeze(entries.map((entry) => Object.freeze(entry))),
+    closureEventIds: Object.freeze([...nodeById.keys()].sort(compareUtf16CodeUnits)),
+    affectedIdentities: Object.freeze([...descriptors.keys()].sort(compareUtf16CodeUnits)),
+    ...(manifest ? { manifest } : {}),
+  });
+}
+
 export function resolveKnowledgeManifestOutputPath(projectionRoot: string, manifest: KnowledgeProjectionManifestV1): string {
   const normalized = manifest.latestOutputPath.split("/");
   if (
@@ -775,19 +918,13 @@ export function renderKnowledgeProjectionFromSet(nodes: KnowledgeEventNode[]): K
 /** Pure manifest renderer over the complete validated Knowledge event set.
  *  Each identity is folded first; the manifest watermark is selected from
  *  those winners. No wall clock or caller event can affect canonical bytes. */
-export function renderKnowledgeProjectionManifestFromSet(
-  nodes: KnowledgeEventNode[],
+function renderKnowledgeProjectionManifestFromFoldedSet(
+  nodes: readonly KnowledgeEventNode[],
+  projectionByIdentity: ReadonlyMap<string, KnowledgeSetProjection>,
 ): RenderedKnowledgeProjectionManifest {
-  if (nodes.length === 0) throw new Error("renderKnowledgeProjectionManifestFromSet: empty event set");
-  const byIdentity = new Map<string, KnowledgeEventNode[]>();
-  for (const node of nodes) {
-    const identity = knowledgeIdentityKey(node.body);
-    const current = byIdentity.get(identity) ?? [];
-    current.push(node);
-    byIdentity.set(identity, current);
-  }
+  if (nodes.length === 0) throw new Error("renderKnowledgeProjectionManifestFromFoldedSet: empty event set");
   const byId = new Map(nodes.map((node) => [node.eventId, node]));
-  const identityWinners = [...byIdentity.values()].map((set) => renderKnowledgeProjectionFromSet(set).winnerEventId);
+  const identityWinners = [...projectionByIdentity.values()].map((projection) => projection.winnerEventId);
   const winnerNodes = identityWinners.map((eventId) => byId.get(eventId)!).sort((left, right) => {
     const keyOrder = compareUtf16CodeUnits(sameLayerKey(left), sameLayerKey(right));
     return keyOrder || compareUtf16CodeUnits(left.eventId, right.eventId);
@@ -809,6 +946,22 @@ export function renderKnowledgeProjectionManifestFromSet(
     winnerEventId: winner.eventId,
     identityWinnerEventIds: Object.freeze(identityWinners.slice().sort(compareUtf16CodeUnits)),
   };
+}
+
+export function renderKnowledgeProjectionManifestFromSet(
+  nodes: KnowledgeEventNode[],
+): RenderedKnowledgeProjectionManifest {
+  if (nodes.length === 0) throw new Error("renderKnowledgeProjectionManifestFromSet: empty event set");
+  const byIdentity = new Map<string, KnowledgeEventNode[]>();
+  for (const node of nodes) {
+    const identity = knowledgeIdentityKey(node.body);
+    const current = byIdentity.get(identity) ?? [];
+    current.push(node);
+    byIdentity.set(identity, current);
+  }
+  const projectionByIdentity = new Map<string, KnowledgeSetProjection>();
+  for (const [identity, set] of byIdentity) projectionByIdentity.set(identity, renderKnowledgeProjectionFromSet(set));
+  return renderKnowledgeProjectionManifestFromFoldedSet(nodes, projectionByIdentity);
 }
 
 export async function readKnowledgeEvidenceL1Head(args: {
@@ -871,13 +1024,56 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
 }
 
 export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<KnowledgeEvidenceEventBodyV1> {
-  const now = args.createdAtUtc || new Date().toISOString();
   const slug = args.result.slug || slugify(args.draft.title);
   const sessionId = args.sessionId || args.auditContext?.sessionId || args.draft.sessionId || "unknown-session";
-  const turnId = args.turnId || "unknown-turn";
-  const deviceId = await readOrCreateDeviceId(args.abrainHome);
+  // Event identity must be stable across window/candidate replay. Never mint a
+  // fresh wall-clock or bare "unknown-turn" that would hash to a new event_id.
+  const candidateKey = args.auditContext?.candidateId
+    || args.auditContext?.correlationId
+    || `${args.operation || "create"}:${slug}:${sha256Hex(args.draft.compiledTruth || args.draft.title || slug).slice(0, 16)}`;
+  const turnId = args.turnId
+    || (typeof args.auditContext?.candidateId === "string" && args.auditContext.candidateId.includes(":")
+      ? `candidate:${args.auditContext.candidateId}`
+      : undefined)
+    || `stable:${sessionId}:${candidateKey}`;
+  // created_at participates in the v1 body hash and L2 tie-break, so it must
+  // be a real immutable source timestamp. Content-derived pseudo-dates are not
+  // chronology. Create callers must thread the pi branch/window timestamp.
+  const sourceTimestamp = args.createdAtUtc || args.auditContext?.sourceTimestampUtc;
+  const parsedSourceTimestamp = sourceTimestamp ? Date.parse(sourceTimestamp) : Number.NaN;
+  if (!Number.isFinite(parsedSourceTimestamp)) {
+    throw new Error("knowledge evidence source timestamp unavailable");
+  }
+  const now = new Date(parsedSourceTimestamp).toISOString();
   const legacyWrite = args.legacyParallelWrite;
-  const producerNonce = `knowledge:${now}:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${sha256Hex(JSON.stringify({ result: args.result.status, path: args.result.path ?? "", legacyWriteAttempted: legacyWrite?.attempted ?? true }))}`;
+  // producer_nonce is the stable replay key and intentionally excludes
+  // causal_parents/device_id. A merge may be replayed after publication has
+  // advanced the stable watermark; the accepted semantic event must still be
+  // reused instead of minting a child with a new event_id.
+  const identitySeed = sha256Hex(canonicalJson(toJsonValue({
+    sessionId,
+    turnId,
+    slug,
+    operation: args.operation || "create",
+    candidateKey,
+    created_at_utc: now,
+    title: args.draft.title,
+    kind: args.draft.kind,
+    status: args.draft.status || "provisional",
+    provenance: args.draft.provenance || "assistant-observed",
+    confidence: Math.min(10, Math.max(0, Math.round(args.draft.confidence ?? 3))),
+    compiled_truth_hash: sha256Hex(args.draft.compiledTruth || ""),
+    trigger_phrases: args.draft.triggerPhrases ?? [],
+    derives_from: args.draft.derivesFrom ?? [],
+    timeline_note: args.draft.timelineNote ?? null,
+    scope: args.scope,
+    projectId: args.projectId,
+    legacy_attempted: legacyWrite?.attempted ?? true,
+    legacy_status: legacyWrite?.status ?? args.result.status,
+    legacy_reason: legacyWrite?.reason ?? args.result.reason ?? null,
+  })));
+  const deviceId = await readOrCreateDeviceId(args.abrainHome);
+  const producerNonce = `knowledge:${sessionId}:${turnId}:${slug}:${args.operation || "create"}:${identitySeed.slice(0, 24)}`;
   const llmExtraction = knowledgeLlmExtractionForWrite(args, slug);
   return {
     event_schema_version: "knowledge-evidence-event/v1",
@@ -931,11 +1127,47 @@ export async function buildKnowledgeEvidenceBodyForWrite(args: AppendKnowledgeEv
   };
 }
 
+async function findKnowledgeEvidenceReplay(
+  abrainHome: string,
+  body: KnowledgeEvidenceEventBodyV1,
+): Promise<AppendKnowledgeEvidenceEventResult | undefined> {
+  if (!body.producer_nonce) return undefined;
+  const nodes = await collectKnowledgeEventSet(abrainHome, knowledgeIdentityKey(body));
+  const existing = nodes.find((node) => node.body.producer_nonce === body.producer_nonce);
+  if (!existing) return undefined;
+  const filePath = knowledgeEvidenceEventPath(abrainHome, existing.eventId);
+  const envelope = JSON.parse(await fs.readFile(filePath, "utf-8")) as KnowledgeEvidenceEnvelopeV1;
+  const verified = verifyKnowledgeEvidenceEnvelope(envelope);
+  if (!verified.ok || envelope.event_id !== existing.eventId) {
+    throw new Error(`knowledge replay event invalid: ${existing.eventId}:${verified.ok ? "id_mismatch" : verified.reason}`);
+  }
+  return {
+    ok: true,
+    status: "idempotent_duplicate",
+    eventId: existing.eventId,
+    filePath,
+    envelope,
+    diagnostics: [knowledgeEvidenceDiagnostic(
+      "KE_APPEND_IDEMPOTENT_DUPLICATE",
+      "knowledge evidence producer nonce already has a durable event",
+      { eventId: existing.eventId, filePath },
+    )],
+  };
+}
+
 export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<AppendKnowledgeEvidenceForWriteResult> {
   if (!args.settings.knowledgeEvidenceEventWriter.enabled) return { append: { ok: false, status: "write_failed", error: "knowledge_event_writer_disabled" } };
-  const body = await buildKnowledgeEvidenceBodyForWrite(args);
-  const append = await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body });
-  const projection = append.ok && append.envelope && args.projectEvent !== false && args.settings.knowledgeProjector.projectOnWrite
+  const proposedBody = await buildKnowledgeEvidenceBodyForWrite(args);
+  const replay = await findKnowledgeEvidenceReplay(args.abrainHome, proposedBody);
+  const append = replay ?? await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body: proposedBody });
+  const body = append.envelope?.body ?? proposedBody;
+  const wantProject = append.ok && append.envelope && args.projectEvent !== false && args.settings.knowledgeProjector.projectOnWrite;
+  if (wantProject && args.deferPublication === true) {
+    // Accepted durability stops at create-only L1 (+ caller's outbox). Do not
+    // mutate mutable L2 or wait on Git/canonical from this path.
+    return { body, append, publicationDeferred: true };
+  }
+  const projection = wantProject && append.envelope
     ? await projectKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, envelope: append.envelope, settings: args.settings })
     : undefined;
   return { body, append, ...(projection ? { projection } : {}) };
