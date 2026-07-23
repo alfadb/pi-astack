@@ -162,10 +162,13 @@ check("dispatch progress uses onUpdate details.dispatchProgress, not global widg
   }
 });
 
-check("dispatch tool schemas accept optional task name for tool-block labels", () => {
-  const matches = dispatchSrc.match(/name:\s*Type\.Optional\(Type\.String\(\{ description:\s*"Short task name shown in the dispatch tool block/g) ?? [];
+check("dispatch tool schemas require short task title name for tool-block labels", () => {
+  const matches = dispatchSrc.match(/name:\s*Type\.String\(\{\s*description:\s*"Required short human-readable task title shown in the Task table \/ dispatch tool block\./g) ?? [];
   if (matches.length < 2) {
-    throw new Error("dispatch_agent and dispatch_parallel task schemas must both accept optional name");
+    throw new Error("dispatch_agent and dispatch_parallel task schemas must both require short task title name");
+  }
+  if (/name:\s*Type\.Optional\(Type\.String\(\{\s*description:\s*"(?:Short task name|Required short human-readable task title)/.test(dispatchSrc)) {
+    throw new Error("dispatch task name must not remain Type.Optional");
   }
 });
 

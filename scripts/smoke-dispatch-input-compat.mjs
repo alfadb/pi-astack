@@ -150,9 +150,14 @@ check("normalizeTaskSpec canonicalizes legacy memory_get before dispatch schema 
   if (r.tools !== "memory_search,abrain_get") throw new Error(`tools not canonicalized: ${JSON.stringify(r)}`);
 });
 
-check("normalizeTaskSpec preserves optional tool-block display name", () => {
+check("normalizeTaskSpec preserves provided task title name (pass-through only)", () => {
   const r = normalizeTaskSpec({ model: "provider-a/model-a", thinking: "high", prompt: "hi", name: "schema audit" });
   if (r.name !== "schema audit") throw new Error(`name lost: ${JSON.stringify(r)}`);
+});
+
+check("normalizeTaskSpec does not invent a title when name is absent", () => {
+  const r = normalizeTaskSpec({ model: "provider-a/model-a", thinking: "high", prompt: "first line title\nmore" });
+  if (r.name !== undefined) throw new Error(`unexpected derived name: ${JSON.stringify(r)}`);
 });
 
 for (const profile of ["reviewer", "read_only", "research", "implementation", "heavy"]) {
@@ -202,7 +207,7 @@ function prepareArguments(args) {
           ? `string of length ${rawTasks.length} starting with ${JSON.stringify(rawTasks.slice(0, 40))}`
           : `${typeof rawTasks} (${Array.isArray(rawTasks) ? "empty array" : "non-array"})`;
     throw new Error(
-      `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
+      `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt, name}. ` +
         `Got ${got}. ` +
         `Pass tasks directly as a JSON array — do NOT wrap the entire array in a JSON string.`,
     );
@@ -234,6 +239,39 @@ check("prepareArguments accepts well-formed array (smoke)", () => {
   if (r.tasks.length !== 1) throw new Error("did not preserve task");
   if (r.tasks[0].model !== "provider-a/model-a") throw new Error("model lost");
   if (r.tasks[0].name !== "schema audit") throw new Error("name lost");
+});
+
+check("dispatch schemas require short task title name (source contract)", () => {
+  const dispatchSrc = fs.readFileSync(path.join(repoRoot, "extensions/dispatch/index.ts"), "utf-8");
+  const requiredName = /name:\s*Type\.String\(\{\s*description:\s*"Required short human-readable task title shown in the Task table \/ dispatch tool block\./g;
+  const matches = dispatchSrc.match(requiredName) ?? [];
+  if (matches.length < 2) {
+    throw new Error(`expected required name on dispatch_agent + parallel task, found ${matches.length}`);
+  }
+  if (/name:\s*Type\.Optional\(Type\.String\(\{\s*description:\s*"(?:Short task name|Required short human-readable task title)/.test(dispatchSrc)) {
+    throw new Error("dispatch name must not remain Type.Optional");
+  }
+  if (!/promptSnippet:\s*"dispatch_agent\(model, thinking, prompt, name, tools\?, timeoutMs\?\)/.test(dispatchSrc)) {
+    throw new Error("dispatch_agent promptSnippet must list required name");
+  }
+  if (!/promptSnippet:\s*"dispatch_parallel\(\[\{model, thinking, prompt, name\}/.test(dispatchSrc)) {
+    throw new Error("dispatch_parallel promptSnippet must list required name");
+  }
+  if (!/task objects \{model, thinking, prompt, name\}/.test(dispatchSrc)) {
+    throw new Error("prepareArguments error text must mention required name");
+  }
+  if (!/Always pass name as a short human-readable task title/.test(dispatchSrc)) {
+    throw new Error("dispatch_agent guidelines must require short task title");
+  }
+  if (!/Every task must include name as a short human-readable task title/.test(dispatchSrc)) {
+    throw new Error("dispatch_parallel guidelines must require short task title");
+  }
+  if (!/name:'docs audit'/.test(dispatchSrc) || !/name:'code audit'/.test(dispatchSrc)) {
+    throw new Error("dispatch_parallel example must include per-task name titles");
+  }
+  if (!/model\/thinking\/prompt\/name\/timeoutMs parameters/.test(dispatchSrc)) {
+    throw new Error("single-task rejection text must list required name among parameters");
+  }
 });
 
 check("dispatch_parallel concurrency is settings-driven, not fixed global worker count", () => {

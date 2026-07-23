@@ -2487,9 +2487,10 @@ export default function (pi: ExtensionAPI) {
       "The sub-agent is an independent in-process AgentSession (not a subprocess), capable of multi-turn " +
       "tool calling (read, grep, find, ls by default; bash/edit/write available via explicit tools=). " +
       "Nested execution, prompt_user, and vault_release are rejected; capability-bound workers may only evaluate a non-delegating dispatch shadow.",
-    promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
+    promptSnippet: "dispatch_agent(model, thinking, prompt, name, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
       "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
+      "Always pass name as a short human-readable task title (shown in the Task table / dispatch tool block). Do not omit it or rely on prompt first-line fallback.",
       "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
       "Sub-agents default to read,grep,find,ls,web_search,web_fetch + memory read. To let a worker edit code, pass tools= including bash/edit/write; requested names must exist in that worker session's registry.",
       "Root dispatch creates an independent AgentSession whose context does not count against the caller token budget; a capability-bound shadow call creates no session.",
@@ -2499,7 +2500,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
+      name: Type.String({ description: "Required short human-readable task title shown in the Task table / dispatch tool block. Keep it concise; do not paste the full prompt." }),
       tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/workflow_run/prompt_user/vault_release are disabled." })),
       taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default.")),
       profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
@@ -2801,10 +2802,11 @@ export default function (pi: ExtensionAPI) {
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
       "bash/edit/write and registered extension tools are available via explicit per-task tools=; nested execution and the permanent structural tools are rejected. " +
       `Up to ${MAX_PARALLEL} tasks per call; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4).`,
-    promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
+    promptSnippet: "dispatch_parallel([{model, thinking, prompt, name}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
       "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
-      "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together. Isolated contexts are the invariant; prefer cross-vendor blind reviews when multiple vendors are available, then degrade to cross-model or same-model isolated instances.",
+      "Every task must include name as a short human-readable task title (shown in the Task table / dispatch tool block). Do not omit it or rely on prompt first-line fallback.",
+      "Example: dispatch_parallel([{model:'provider-a/model-a', thinking:'high', prompt:'audit docs', name:'docs audit'}, {model:'provider-b/model-b', thinking:'high', prompt:'audit code', name:'code audit'}, {model:'provider-c/model-c', thinking:'high', prompt:'audit architecture', name:'arch audit'}]) → all 3 run concurrently, results returned together. Isolated contexts are the invariant; prefer cross-vendor blind reviews when multiple vendors are available, then degrade to cross-model or same-model isolated instances.",
       `Concurrency: up to ${MAX_PARALLEL} tasks accepted; same-provider tasks are capped by dispatch.maxProviderConcurrency (default 4), while different providers can run together. Prefer DIFFERENT providers for diversity when available; isolation is still useful when only one provider is available.`,
       "For reasoning-only tasks, omit tools (sub-agent uses built-in read/grep/find/ls).",
       "Output budget is internal: each task always sends its model registry maxTokens as the provider request cap; callers cannot lower it.",
@@ -2815,7 +2817,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model in `provider/model-id` format. Must be a model registered in pi-astack-settings.json → modelCurator.providers.' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
+          name: Type.String({ description: "Required short human-readable task title shown in the Task table / dispatch tool block. Keep it concise; do not paste the full prompt." }),
           tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Names must be registered in the target session; structural disabled tools are rejected." })),
           taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy.")),
           profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
@@ -2839,7 +2841,7 @@ export default function (pi: ExtensionAPI) {
               ? `string of length ${rawTasks.length} starting with ${JSON.stringify(rawTasks.slice(0, 40))}`
               : `${typeof rawTasks} (${Array.isArray(rawTasks) ? "empty array" : "non-array"})`;
         throw new Error(
-          `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
+          `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt, name}. ` +
             `Got ${got}. ` +
             `Pass tasks directly as a JSON array — do NOT wrap the entire array in a JSON string. ` +
             `If your prompt contains quote characters, the host's tool-call serializer handles escaping; ` +
@@ -2893,7 +2895,7 @@ export default function (pi: ExtensionAPI) {
             type: "text" as const,
             text: `❌ dispatch_parallel requires 2+ tasks. You provided 1 task.\n\n` +
               `For a single task, use dispatch_agent instead — it has the same ` +
-              `model/thinking/prompt/timeoutMs parameters and returns a simpler result. ` +
+              `model/thinking/prompt/name/timeoutMs parameters and returns a simpler result. ` +
               `dispatch_parallel exists ONLY for parallel multi-model analysis; ` +
               `calling it with 1 task wastes the parallelism infrastructure and makes ` +
               `the output harder to read (table format for a single row).`,
