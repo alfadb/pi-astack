@@ -223,14 +223,27 @@ await check("substring-only bash commands never produce independent outcomes", a
 
 await check("footnote, exposure, silence, and ordinary tool success have no independent authority", async () => {
   const weakBranch = [
-    assistantCalls([toolCall("mem-weak", "memory_get", { slug: "weak-memory" }), toolCall("read-weak", "read", { path: "README.md" })]),
-    toolResult("mem-weak", "memory_get", JSON.stringify({ slug: "weak-memory" })),
+    assistantCalls([toolCall("mem-weak", "abrain_get", { slug: "weak-memory" }), toolCall("read-weak", "read", { path: "README.md" })]),
+    toolResult("mem-weak", "abrain_get", JSON.stringify({ slug: "weak-memory" })),
     toolResult("read-weak", "read", "ordinary output", { ok: true }),
     { role: "assistant", content: "```memory-footnote\nslug: weak-memory\n```" },
   ];
   const result = await outcome.collectAndAppendOutcomeEvidence({ abrainHome, projectRoot, sessionId: "session-c", turnId: "3", branch: weakBranch });
   assert(result.exposures.length === 1 && result.outcomes.length === 0 && result.rejudges.length === 0, JSON.stringify(result));
   assert(outcome.resolveIndependentOutcomeEvidenceEventIds(result.exposures, projectRoot, { abrainHome }).length === 0, "exposure gained independent authority");
+});
+
+await check("historical and current entry-read tool names both create memory exposures", async () => {
+  const branch = [
+    assistantCalls([
+      toolCall("mem-current", "abrain_get", { slug: "current-memory" }),
+      toolCall("mem-legacy", "memory_get", { slug: "legacy-memory" }),
+    ]),
+    toolResult("mem-current", "abrain_get", JSON.stringify({ slug: "current-memory" })),
+    toolResult("mem-legacy", "memory_get", JSON.stringify({ slug: "legacy-memory" })),
+  ];
+  const result = await outcome.collectAndAppendOutcomeEvidence({ abrainHome, projectRoot, sessionId: "session-tool-name-history", turnId: "3b", branch });
+  assert(result.exposures.length === 2, JSON.stringify(result));
 });
 
 await check("user-authored natural correction is independent but unknown without a reliable target join", async () => {

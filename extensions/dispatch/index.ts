@@ -38,6 +38,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
+import { canonicalizeToolNames } from "../_shared/tool-name-compat";
 import {
   DISPATCH_TASK_PROFILES,
   isDispatchTaskProfile,
@@ -148,7 +149,7 @@ export function providerFromModel(model: string): string {
 }
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
-const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide";
+const DEFAULT_SUBAGENT_TOOLS = "read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide";
 
 /** Minimal structural boundary applied before session creation and again by
  *  the SDK execution layer through excludeTools. Dispatch does not maintain a
@@ -728,11 +729,12 @@ function parseToolCsv(toolsStr: string): string[] {
     seen.add(name);
     names.push(name);
   }
-  return names;
+  return canonicalizeToolNames(names);
 }
 
 /** Resolve the exact SDK tool names for a sub-agent session. Tool names remain
- *  case-sensitive; trim and exact-value deduplication are the only changes. */
+ *  case-sensitive; legacy memory_get is canonicalized to abrain_get before
+ *  exact-value deduplication and activation. */
 export function resolveSubAgentTools(toolsStr: string | undefined): string[] {
   return parseToolCsv(toolsStr || DEFAULT_SUBAGENT_TOOLS);
 }
@@ -1732,7 +1734,7 @@ export async function runInProcess(
   //   - memory_list is a broad-inventory/management tool, not targeted
   //     retrieval. sub-agent workers don't need to enumerate the entire
   //     brain; they need to look up specific things (memory_search) or
-  //     read a specific entry (memory_get) or get a decision brief
+  //     read a specific entry (abrain_get) or get a decision brief
   //     (memory_decide).
   //   - DeepSeek + GPT-5.5 T0 votes both flagged memory_list as too wide.
   //
@@ -2498,7 +2500,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
-      tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/workflow_run/prompt_user/vault_release are disabled." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/workflow_run/prompt_user/vault_release are disabled." })),
       taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default.")),
       profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
@@ -2814,7 +2816,7 @@ export default function (pi: ExtensionAPI) {
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
           name: Type.Optional(Type.String({ description: "Short task name shown in the dispatch tool block. If omitted, pi derives a label from id/role/prompt." })),
-          tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide). Names must be registered in the target session; structural disabled tools are rejected." })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Names must be registered in the target session; structural disabled tools are rejected." })),
           taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy.")),
           profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),

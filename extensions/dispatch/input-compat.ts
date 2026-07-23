@@ -15,6 +15,7 @@ import {
   resolveDispatchTaskProfileAliases,
   type DispatchTaskProfile,
 } from "./task-profile";
+import { canonicalizeToolCsv } from "../_shared/tool-name-compat";
 
 // ── types ──────────────────────────────────────────────────────
 
@@ -64,8 +65,8 @@ export function unwrapStringified(value: unknown, maxDepth = 2): unknown {
 export function normalizeTools(raw: unknown): string | undefined {
   if (raw === undefined || raw === null) return undefined;
   const unwrapped = unwrapStringified(raw);
-  if (Array.isArray(unwrapped)) return unwrapped.join(",");
-  if (typeof unwrapped === "string") return unwrapped;
+  if (Array.isArray(unwrapped)) return canonicalizeToolCsv(unwrapped.join(","));
+  if (typeof unwrapped === "string") return canonicalizeToolCsv(unwrapped);
   return undefined;
 }
 

@@ -1,7 +1,7 @@
 # Worker Prompt 模板
 
 主控（orchestrator）为每个子问题填充本模板，作为 `dispatch_parallel` 单个 task 的 `prompt`。
-模型在各 task 间跨 provider 分散；tools 建议 `web_search,web_fetch,memory_search,memory_get,read`。
+模型在各 task 间跨 provider 分散；tools 建议 `web_search,web_fetch,memory_search,abrain_get,read`。
 
 ---
 
@@ -15,7 +15,7 @@
 <一句话总课题 + 已知结论摘要，可选>
 
 【检索顺序（务必先内部后外部）】
-1. 先 memory_search（必要时 memory_get）查第二大脑里是否已有结论/决策/踩坑。
+1. 先 memory_search（必要时 abrain_get）查第二大脑里是否已有结论/决策/踩坑。
 2. 再 web_search 找候选源；对关键源用 web_fetch 读全文，别只凭 snippet 下结论。
 3. 优先权威主源（官方文档、一手论文、原始公告）>二手转述。
 

@@ -55,6 +55,7 @@ npm run smoke:paths
 
 # Memory / sediment / second-brain changes
 npm run smoke:memory
+npm run smoke:memory-tool-rename
 npm run smoke:derive-provenance
 npm run smoke:tier1-directive-defer
 npm run smoke:pr1-adr0028
@@ -95,6 +96,8 @@ npm run smoke:script-registry-drift
 ```
 
 `smoke:sediment-agent-end-queue` drives the real registered extension handler through an awaited fake pi runner. It injects delayed and never-settling startup gates, asserts typical <100ms return with a 5,000-entry branch snapshot (clone bytes/latency metrics recorded; no false hard bound for multi-MB branches), verifies pre-claim coalescing and post-claim ordering, replays 43 entries oldest-first across count/char caps with exact-once ordering, proves same-lineage compaction oldest replay + legacy/unproven lineage fail-closed + branch-switch fail-closed, `ready=false→park→wake` and parked TTL eviction with audit, ready-pending backlog ≥12 windows without a next `agent_end`, multi-session never-ready non-blocking concurrency, global cross-key concurrency cap, `--unhandled-rejections=strict` classifier/correction reject containment with onError/audit, rejects retained ctx/session/UI surfaces, and proves audited rejection containment plus later-job recovery without `unhandledRejection`.
+
+`smoke:memory-tool-rename` locks the `abrain_get` model-visible registration, legacy dispatch/workflow canonicalization, root and child active tool names, generated memory prompt, historical name recognition, and an Anthropic serializer payload snapshot with no `memory_get` tool definition.
 
 `smoke:memory` / sediment writer regressions also cover: ABOUT-ME staging basename free of wall-clock date/`Date.now`/random (fake clock 2026-01-01→01-02 same draft/session/source → 0 new files/commits, `staging_idempotent`); staging auditable metadata in frontmatter; main-lane partial-window `processedCandidateKeys` without watermark advance when candidate1 succeeds and candidate2 is transient, then retry skips candidate1 and advances after candidate2 success.
 

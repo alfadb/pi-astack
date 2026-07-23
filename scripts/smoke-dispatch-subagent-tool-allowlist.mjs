@@ -41,7 +41,7 @@ function check(condition, success, failure = success) {
 const EXPECTED_DEFAULT = [
   "read", "grep", "find", "ls",
   "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_decide",
+  "memory_search", "abrain_get", "memory_decide",
 ];
 const DISABLED = [
   "dispatch_agent",
@@ -110,10 +110,10 @@ check(
   JSON.stringify(resolvedDefault) === JSON.stringify(EXPECTED_DEFAULT),
   "undefined tools resolves to the unchanged default set",
 );
-const exactNames = dispatch.resolveSubAgentTools(" read,read, Read , dynamic_extension_tool, dynamic_extension_tool ");
+const exactNames = dispatch.resolveSubAgentTools(" read,read, Read , memory_get,abrain_get, dynamic_extension_tool, dynamic_extension_tool ");
 check(
-  JSON.stringify(exactNames) === JSON.stringify(["read", "Read", "dynamic_extension_tool"]),
-  "tool parsing trims and exact-deduplicates without case normalization",
+  JSON.stringify(exactNames) === JSON.stringify(["read", "Read", "abrain_get", "dynamic_extension_tool"]),
+  "tool parsing canonicalizes legacy memory_get, trims, and exact-deduplicates without case normalization",
 );
 for (const name of DISABLED) {
   const verdict = dispatch.validateTools(`  ${name.toUpperCase()}  `);
@@ -162,7 +162,7 @@ const dynamicNames = [
   "web_search",
   "web_fetch",
   "memory_search",
-  "memory_get",
+  "abrain_get",
   "memory_decide",
   "dynamic_extension_tool",
   "lsp_diagnostics",

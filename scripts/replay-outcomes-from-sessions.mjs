@@ -177,6 +177,9 @@ function parseMemoryFootnote(text) {
   return { entries, dropped };
 }
 
+// Historical sessions may contain either side of the 2026-07-23 tool rename.
+const MEMORY_ENTRY_READ_TOOL_NAMES = new Set(["abrain_get", "memory_get"]);
+
 function collectOutcomes(branch, sessionId, ts) {
   const rows = [];
   const dropped = [];
@@ -191,7 +194,7 @@ function collectOutcomes(branch, sessionId, ts) {
     const text = extractText(msg.content);
     if (role === "toolResult") {
       const toolName = msg.toolName ?? "";
-      if (!["memory_search", "memory_get", "memory_decide"].includes(toolName)) continue;
+      if (toolName !== "memory_search" && toolName !== "memory_decide" && !MEMORY_ENTRY_READ_TOOL_NAMES.has(toolName)) continue;
       let results = [];
       let decisionBriefId;
       const absorbParsedToolResult = (parsed) => {

@@ -535,15 +535,16 @@ async function main() {
     memoryExt(makePi("memory", true));
     sedimentExt(makePi("sediment", false));
     compactionTunerExt(makePi("compactionTuner", false));
-    // memory_search / memory_get / memory_list / memory_decide / memory_activity
+    // memory_search / abrain_get / memory_list / memory_decide / memory_activity
     // (memory_decide added by ADR 0026 P0a; memory_neighbors removed 2026-06-16
     //  as an unused read tool — vector search covers related-entry recall; 5 → 4;
     //  memory_activity added by the activity/attention L2 on-demand reader,
     //  4 → 5 — bump this count when the tool set changes again).
     assert(tools.size === 5, `expected 5 memory tools, got ${tools.size}`);
-    for (const name of ["memory_search", "memory_get", "memory_list", "memory_decide", "memory_activity"]) {
+    for (const name of ["memory_search", "abrain_get", "memory_list", "memory_decide", "memory_activity"]) {
       assert(tools.has(name), `missing tool: ${name}`);
     }
+    assert(!tools.has("memory_get"), "legacy memory_get must not be registered or advertised");
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");
 
     // === before_agent_start system-prompt injection contract ===
@@ -586,6 +587,7 @@ async function main() {
       assert(!sedFirst.systemPrompt.includes("gbrain"), "sediment injection must not mention retired gbrain tool");
       assert(!sedFirst.systemPrompt.includes(".pensieve/"), "sediment injection must not reference legacy .pensieve location");
       assert(!sedFirst.systemPrompt.includes("/about-me") && !sedFirst.systemPrompt.includes("MEMORY-ABOUT-ME"), "sediment main-session prompt must not enumerate explicit brain-management entry names");
+      assert(sedFirst.systemPrompt.includes("abrain_get") && !sedFirst.systemPrompt.includes("memory_get"), "sediment generated system prompt must advertise only abrain_get");
       const sedSecond = await sedimentHandlers[0]({ systemPrompt: sedFirst.systemPrompt });
       assert(sedSecond === undefined, "sediment injector must be idempotent (return undefined when marker already present)");
 
@@ -599,6 +601,7 @@ async function main() {
       assert(memFirst.systemPrompt.includes("retrieved-unused") && memFirst.systemPrompt.includes("不要静默省略"), "memory-footnote prompt must capture retrieved-but-unused entries instead of positive-only self-reports");
       assert(memFirst.systemPrompt.includes("decisive") && memFirst.systemPrompt.includes("confirmatory") && memFirst.systemPrompt.includes("retrieved-unused"), "memory injection must enumerate the used taxonomy");
       assert(memFirst.systemPrompt.includes("高价值决策时可拉取") && !memFirst.systemPrompt.includes("在遇到以下场景**之前**"), "memory_decide prompt must stay Path-B advisory, not pseudo Path-A mandatory trigger");
+      assert(memFirst.systemPrompt.includes("abrain_get") && !memFirst.systemPrompt.includes("memory_get"), "memory generated system prompt must advertise only abrain_get");
       const memSecond = await footnoteHandler({ systemPrompt: memFirst.systemPrompt });
       assert(memSecond === undefined, "memory injector must be idempotent (return undefined when marker already present)");
 
@@ -1253,7 +1256,14 @@ async function main() {
     writeFile(path.join(root, ".pensieve", "staging", "beta.md"), makeEntry({ title: "Beta Smell", kind: "smell", status: "provisional", confidence: 2 }));
 
     const search = tools.get("memory_search");
+    const getEntry = tools.get("abrain_get");
     const decide = tools.get("memory_decide");
+    const preparedGet = getEntry.prepareArguments({ id: "alpha", includeRelated: true });
+    assert(preparedGet.slug === "alpha" && preparedGet.options.include_related === true, `abrain_get prepareArguments contract regressed: ${JSON.stringify(preparedGet)}`);
+    const getRaw = await getEntry.execute("smoke-abrain-get", preparedGet, new AbortController().signal, null, { cwd: root });
+    assert(getRaw.isError, `projection_only fixture should retain exact-lookup not-found semantics: ${JSON.stringify(getRaw)}`);
+    const getPayload = JSON.parse(getRaw.content[0].text);
+    assert(getPayload.ok === false && getPayload.slug === "alpha" && String(getPayload.error).includes("memory entry not found"), `abrain_get original not-found return/error contract regressed: ${JSON.stringify(getPayload)}`);
     const mockModelRegistry = {
       find(provider, id) {
         return {
@@ -9151,13 +9161,21 @@ Body.
             message: {
               role: "toolResult",
               toolName: "memory_get",
-              content: [{ type: "text", text: JSON.stringify({ slug: "cold-slug-never-seen" }) }],
+              content: [{ type: "text", text: JSON.stringify({ slug: "legacy-cold-slug" }) }],
+            },
+          },
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "abrain_get",
+              content: [{ type: "text", text: JSON.stringify({ slug: "current-cold-slug" }) }],
             },
           },
         ];
         writeOutcomeLedger(collectOutcomes(longerBranch, "session-memory-decide-smoke").rows, "/tmp/pi-astack-smoke-project");
         const dedupedRows = readOutcomeLedger().filter((r) => r.session_id === "session-memory-decide-smoke" && r.source === "tool-result");
-        assert(dedupedRows.length === 3, `writeOutcomeLedger should dedupe prior full-branch rows and add only the new event, got ${JSON.stringify(dedupedRows)}`);
+        assert(dedupedRows.length === 4, `historical and current entry-read names should both parse while prior rows dedupe, got ${JSON.stringify(dedupedRows)}`);
 
         // Verify memory_decide retrieval query includes all decision inputs,
         // not only `context`. This guards ADR 0026 recall quality: option

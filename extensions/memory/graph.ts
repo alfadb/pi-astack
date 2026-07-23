@@ -62,7 +62,7 @@ export interface GraphSnapshot {
      * present in the project but IS present in global abrain
      * (`<abrainHome>/knowledge/` or `<abrainHome>/workflows/`). Tracked
      * separately from `dead_links` because they're navigable via
-     * memory_search / memory_get, just not in-scope for project graph.
+     * memory_search / abrain_get, just not in-scope for project graph.
      * Empty array when target is not an abrain project (legacy
      * .pensieve / global abrain target / arbitrary markdown tree).
      */

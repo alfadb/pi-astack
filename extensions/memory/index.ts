@@ -8,7 +8,7 @@
  * L2 Markdown is a deterministic projection/audit view, and L3 runtime indexes
  * are derived/rebuildable.
  *
- * LLM-facing tools (memory_search/get/list) are strictly read-only.
+ * LLM-facing tools (memory_search/abrain_get/memory_list) are strictly read-only.
  * `/memory migrate --go` performs one-shot B4 migration; it does not write
  * canonical knowledge entries — that is sediment's exclusive role. (The
  * `/memory rebuild` slash was retired 2026-06-15 as an unused brain-management
@@ -336,7 +336,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   // ── Sub-pi enforce ──────────────────────────────────────────
   // ADR 0014 §6 defense-in-depth: sub-pi should not register
-  // memory_search/get/list (though dispatch's --tools
+  // memory_search/abrain_get/memory_list (though dispatch's --tools
   // allowlist also blocks them).
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
@@ -374,7 +374,7 @@ export default function (pi: ExtensionAPI) {
       "Write query as a natural-language retrieval prompt that states the full intent, not just terse keywords.",
       "Mixed-language retrieval prompts work: e.g. '找关于知识沉淀 extractor prompt 的 durable rule' can match both Chinese and English entries.",
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
-      "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
+      "Search results are summaries. Call abrain_get(slug) when you need the full compiled truth or timeline.",
       "Default results exclude archived/superseded entries; legacy deprecated entries fold to superseded at parse time, so pass filters.status if the user explicitly asks for replaced/history entries.",
       "Current production search is stage0 hybrid candidate recall feeding stage2 LLM rerank; stage1 is normally skipped and used only as a bounded safety net.",
       "LLM rerank hard-errors if its configured model is unavailable; there is no grep degradation path because accuracy is the contract.",
@@ -423,14 +423,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "memory_get",
+    name: "abrain_get",
     label: "Get Memory Entry",
     description:
       "Read one markdown memory entry by bare slug. Returns the full canonical entry " +
       "including scope and source_path because this is an exact lookup/debug view, not a ranking surface.",
-    promptSnippet: "memory_get(slug, options?: { include_related?: boolean })",
+    promptSnippet: "abrain_get(slug, options?: { include_related?: boolean })",
     promptGuidelines: [
-      "Call memory_get after memory_search when a result looks relevant and you need details.",
+      "Call abrain_get after memory_search when a result looks relevant and you need details.",
       "Slug is bare (e.g. avoid-long-argv-prompts), not project:/world:-prefixed.",
       "Set include_related=true when nearby decisions/patterns could affect interpretation.",
     ],
@@ -440,7 +440,7 @@ export default function (pi: ExtensionAPI) {
         description: "Optional: { include_related?: boolean }",
       })),
     }),
-    renderResult: renderMemoryToolResult("memory_get", "memory entry"),
+    renderResult: renderMemoryToolResult("abrain_get", "memory entry"),
     prepareArguments(rawArgs: unknown) {
       const args = asRecord(rawArgs);
       const options = (parseMaybeJson(args.options) as Record<string, unknown>) ?? {};
@@ -739,7 +739,7 @@ export default function (pi: ExtensionAPI) {
   // Why this lives in the memory extension (not the user's AGENTS.md):
   //
   // The footnote protocol is a cross-tool convention spanning the
-  // memory_search / memory_get / memory_decide trio — it has no meaning
+  // memory_search / abrain_get / memory_decide trio — it has no meaning
   // when those tools aren't loaded, and its taxonomy (decisive /
   // confirmatory / retrieved-unused) is tied to the outcome-collector
   // schema in extensions/sediment/outcome-collector.ts. Pinning the
@@ -802,7 +802,7 @@ export default function (pi: ExtensionAPI) {
 ## memory 工具：sub-agent 使用说明
 
 你现在是一个 sub-agent worker（由 dispatch_agent / dispatch_parallel 产生）。
-你可以用 \`memory_search\` / \`memory_get\` /
+你可以用 \`memory_search\` / \`abrain_get\` /
 \`memory_decide\` 拉取用户的长期记忆、偏好、架构决策、已知坑点。
 
 什么时候调：
@@ -810,7 +810,7 @@ export default function (pi: ExtensionAPI) {
   → 先 \`memory_search\` 查相关偏好
 - 任务中遇到**反转成本不低**的决策点（技术/架构/工作流选择）
   → \`memory_decide(context=...)\` 拉决策简报
-- 需要某个 entry 的完整内容（而不仅是 search snippet）→ \`memory_get\`
+- 需要某个 entry 的完整内容（而不仅是 search snippet）→ \`abrain_get\`
 
 什么时候不需要：
 - 执行类指令（读某个文件、grep某个模式）
@@ -837,7 +837,7 @@ export default function (pi: ExtensionAPI) {
 <!-- protocol_version: ${MEMORY_FOOTNOTE_PROTOCOL_VERSION} -->
 ## memory-footnote：使用记忆条目的自我报告
 
-当你在回复过程中调用了 \`memory_search\` / \`memory_get\` /
+当你在回复过程中调用了 \`memory_search\` / \`abrain_get\` /
 \`memory_decide\` 并获得了记忆条目时，在回复最末尾为每条你实际
 纳入判断的条目附加一个 \`memory-footnote\` fenced block：用过就标
 \`decisive\` / \`confirmatory\`，检索到了但最终没用就标

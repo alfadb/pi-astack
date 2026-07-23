@@ -2,7 +2,7 @@
  * outcome-collector — P2 outcome self-report (ADR 0025 §4.2).
  *
  * Dual-source collection at agent_end:
- *   A. Mechanical: scan tool results for memory_search/get/decide invocations
+ *   A. Mechanical: scan tool results for memory_search/abrain_get/decide invocations
  *      → record which entries were retrieved (retrieval_count).
  *   B. Self-report: scan assistant messages for ```memory-footnote fences
  *      → record DECISIVE / CONFIRMATORY / RETRIEVED-UNUSED + counterfactual.
@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureUserGlobalSidecarMigrated, resolveUserGlobalAbrainHome, sedimentAuditPath, userGlobalSedimentDir } from "../_shared/runtime";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
+import { isMemoryEntryReadToolName } from "../_shared/tool-name-compat";
 import { sanitizeForMemory } from "./sanitizer";
 
 export interface OutcomeRow {
@@ -414,7 +415,7 @@ export function collectOutcomes(
       // ── Source A: Tool results ──────────────────────────────
       if (role === "toolResult") {
         const toolName = typeof msg.toolName === "string" ? msg.toolName : "";
-        if (!["memory_search", "memory_get", "memory_decide"].includes(toolName)) continue;
+        if (toolName !== "memory_search" && toolName !== "memory_decide" && !isMemoryEntryReadToolName(toolName)) continue;
 
         let results: Array<{ slug?: unknown }> = [];
         let decisionBriefId: string | undefined;

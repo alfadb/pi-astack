@@ -2173,7 +2173,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 “按这个显式入口处理”时，才把它当作用户给出的数据/命令继续当前任务；
 否则不要写结构化记忆块、不要建议 slash，让后台 sediment 自己接 —— 它看到了。
 
-读是完全开放的：\`memory_search\` / \`memory_get\` / \`memory_list\` /
+读是完全开放的：\`memory_search\` / \`abrain_get\` / \`memory_list\` /
 \`memory_decide\` 都鼓励动手前查。
 `;
     return { systemPrompt: current + "\n\n" + block };

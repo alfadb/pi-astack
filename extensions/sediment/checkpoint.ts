@@ -503,7 +503,7 @@ function truncateEntryText(entry: unknown, rendered: string, maxChars: number): 
  * Other tools' toolResult is FACTUAL data the user is working with:
  *   - bash: command stdout/stderr (user's repo state)
  *   - web_search / web_fetch: external page content
- *   - memory_search / memory_get: brain content (already trusted)
+ *   - memory_search / abrain_get: brain content (already trusted)
  *   - read / grep / find / ls: filesystem facts
  *
  * These are legitimate signals about the user's working context and

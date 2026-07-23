@@ -13,7 +13,7 @@ metadata:
 检索、各自写摘要回传，**原文不进你的 context**，你只综合摘要。
 
 核心原则（来自业界共识 + pi 差异化）：
-1. **内部源优先**：先查第二大脑（`memory_search`/`memory_get`），私有、权威、免费；
+1. **内部源优先**：先查第二大脑（`memory_search`/`abrain_get`），私有、权威、免费；
    再用公网补缺。这是 pi 相对其它 deep-research 的差异点——别只做"又一个网页调研"。
 2. **Orchestrator-worker + context 隔离**：worker 只回压缩摘要 + 引用，绝不回原文。
 3. **强制引用**：每条结论必须附 `URL` 或 memory `slug`，无源的断言不写进报告。
@@ -37,7 +37,7 @@ metadata:
 
 ## Step 1 — 内部先行（第二大脑）
 
-主控自己先跑 `memory_search`（必要时 `memory_get`），把已知结论、已有决策、
+主控自己先跑 `memory_search`（必要时 `abrain_get`），把已知结论、已有决策、
 踩过的坑捞出来。作用：① 避免重复调研已知内容；② 给 worker 的子问题划定真正的缺口；
 ③ 若是决策类问题，可叠加 `memory_decide` 取一份脑内建议。
 
@@ -65,7 +65,7 @@ metadata:
   - `deep`：中档做检索，把**最强模型（`claude-opus-4-8` / `gpt-5.5`）留给综合
     与 Step 5 的 citation pass**；
   - 同一轮内尽量轮换不同 provider。
-- worker tools 给 `web_search,web_fetch,memory_search,memory_get,read`（worker 不能 mutate）；
+- worker tools 给 `web_search,web_fetch,memory_search,abrain_get,read`（worker 不能 mutate）；
 - worker prompt 用模板：见 [worker prompt 模板](references/worker-prompt.md)，逐个填入子问题。
 
 worker 返回结构化摘要（findings + 每条的 source + confidence + gaps + 建议追问）。

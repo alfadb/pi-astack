@@ -29,7 +29,7 @@ const IGNORE_DIRS = new Set([
 //     intended for memory_search.
 //   - `rules/` has a dedicated push-injection path. Leaving it in the
 //     pull-search corpus would duplicate rules as ordinary knowledge and
-//     could make memory_get(scoped listed slug) ambiguous.
+//     could make abrain_get(scoped listed slug) ambiguous.
 // listFilesWithRg already excludes these via --glob; the walker fallback
 // must mirror that behaviour or the safety contract regresses whenever
 // rg is missing/timeout/failed.

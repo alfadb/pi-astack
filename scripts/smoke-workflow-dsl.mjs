@@ -47,6 +47,15 @@ await check("valid minimal: single agent stage; report shows plan", async () => 
   assert(report.includes("execution channel disabled"), "disabled-channel footer present");
 });
 
+await check("persisted legacy memory_get canonicalizes to advertised abrain_get", async () => {
+  const parsed = D.parseWorkflowJson(JSON.stringify(doc([agent("a", { tools: ["memory_search", "memory_get", "abrain_get"] })])));
+  assert(parsed.doc, parsed.error);
+  assert(JSON.stringify(parsed.doc.stages[0].tools) === JSON.stringify(["memory_search", "abrain_get"]), JSON.stringify(parsed.doc));
+  const validated = D.validateWorkflow(parsed.doc, RO);
+  assert(validated.ok, errsOf(validated));
+  assert(D.READONLY_TOOLS.has("abrain_get") && !D.READONLY_TOOLS.has("memory_get"), "allowlist must advertise only abrain_get");
+});
+
 await check("schema_version: unknown rejected; JSON parse errors structured", async () => {
   assert(!D.validateWorkflow(doc([agent("a")], { schema_version: 2 }), RO).ok, "v2 rejected");
   assert(!D.validateWorkflow(doc([agent("a")], { schema_version: "1" }), RO).ok, "string version rejected");

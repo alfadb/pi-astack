@@ -15,12 +15,14 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 | `dispatch_parallel({tasks, timeoutMs?})` | Run multiple independent in-process sub-agents in parallel. | Both fields live inside the same top-level object; per-task `tools` allowlist supported. Use for 2+ independent tasks. `timeoutMs` is the default per-task idle timeout. |
 | `memory_search(query, filters?)` | Semantic retrieval over project + world memory. | ADR 0015 LLM retrieval; hard error if model unavailable. |
 | `memory_decide(context, options?, constraints?)` | Synthesize a decision brief from relevant memories. | ADR 0026 Path B: use for high-value decisions where documented history may change the choice. |
-| `memory_get(slug, options?)` | Exact entry lookup. | May expose scope/source_path for debug/provenance. |
+| `abrain_get(slug, options?)` | Exact entry lookup. | May expose scope/source_path for debug/provenance. |
 | `memory_list(filters?)` | Metadata browsing. | Not relevance-ranked. |
 | `memory_activity(options?)` | Read bounded recent activity / attention timeline summaries. | Use only for recent activity, attention timeline, or project allocation questions. |
 | `vault_release(key, scope?, reason?)` | Release secret plaintext into LLM context after user authorization. | Do not use for shell commands; prefer `$VAULT_*` injection. |
 | `vision(imageBase64? | path?, prompt, mimeType?)` | Analyze image with best available vision model. | For screenshots/photos/diagrams when the current model cannot process images. |
 | `imagine(prompt, imagePath?, size?, quality?, style?, inputFidelity?, model?)` | Generate or image-to-image edit via OpenAI image model. | `imagePath` enables local reference-image editing; output saved under `.pi-astack/imagine/`. |
+
+`memory_get` is a configuration/history compatibility name only. Dispatch CSV and persisted workflow JSON load it as `abrain_get`; historical outcome/evidence/replay readers accept both. It is not registered or advertised to models. A resumed historical branch that emits a new `memory_get` tool call cannot execute it because pi has no hidden alias; start a new turn or fork and use `abrain_get`.
 
 ## 2. Human slash command groups
 
@@ -118,8 +120,8 @@ These govern what `dispatch_agent` / `dispatch_parallel` sub-pi processes can do
 
 | Scenario | Effective `tools` |
 |---|---|
-| Main session calls `dispatch_agent` / `dispatch_parallel` without `tools` | **Default `read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide`**. Not `[]`. |
-| `tools: "read,grep,find,ls,web_search,web_fetch,memory_search,memory_get,memory_decide"` | Explicitly matches the default read-only file/search, web, and targeted memory facade. |
+| Main session calls `dispatch_agent` / `dispatch_parallel` without `tools` | **Default `read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide`**. Not `[]`. |
+| `tools: "read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide"` | Explicitly matches the default read-only file/search, web, and targeted memory facade. |
 | `tools` includes any of `bash` / `edit` / `write` | **Accepted** (2026-06-16): swarm workers may edit/write/run shell when the caller explicitly lists them. The old `PI_MULTI_AGENT_ALLOW_MUTATING` env gate was removed from the dispatch path (rationale: brain writes are git-recoverable; single-user threat model; see ADR 0003). The **workflow** channel keeps its own env gate via `enforceMutatingEnvGate` (ADR 0033 W9). |
 | Sub-agent tries to call `dispatch_agent` / `dispatch_parallel` | **Always rejected.** Nested dispatch is unconditionally blocked. |
 

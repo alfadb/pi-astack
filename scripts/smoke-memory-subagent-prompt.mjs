@@ -14,7 +14,7 @@
  *         — asking them to write footnotes is asking them to spend tokens
  *         on signal that nothing consumes)
  *
- *   - dispatch default tool allowlist includes memory_search, memory_get,
+ *   - dispatch default tool allowlist includes memory_search, abrain_get,
  *     memory_decide (NOT memory_list — broad-inventory tool, not needed
  *     for L2 workers)
  *
@@ -145,7 +145,7 @@ const disSrc = readFileSync(resolve(repoRoot, "extensions/dispatch/index.ts"), "
 const defaultConstMatch = disSrc.match(/const DEFAULT_SUBAGENT_TOOLS\s*=\s*"([^"]+)"/);
 if (defaultConstMatch) {
   const defaults = defaultConstMatch[1].split(",").map((s) => s.trim());
-  for (const tool of ["memory_search", "memory_get", "memory_decide"]) {
+  for (const tool of ["memory_search", "abrain_get", "memory_decide"]) {
     if (defaults.includes(tool)) ok(`default allowlist includes ${tool}`);
     else bad(`default allowlist missing ${tool}`);
   }

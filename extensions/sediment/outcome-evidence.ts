@@ -12,6 +12,7 @@ import {
 } from "../_shared/l1-schema-registry";
 import { resolveUserGlobalAbrainHome } from "../_shared/runtime";
 import { atomicWriteText, withFileLock } from "../_shared/sync-file-lock";
+import { isMemoryEntryReadToolName } from "../_shared/tool-name-compat";
 import { sanitizeForMemory } from "./sanitizer";
 
 export const OUTCOME_EVIDENCE_ENVELOPE_SCHEMA = "outcome-evidence-envelope/v1" as const;
@@ -934,7 +935,7 @@ export async function collectAndAppendOutcomeEvidence(args: {
 
   const parsed = extractCallsAndResults(args.branch);
   for (const result of parsed.results) {
-    if (!["memory_search", "memory_get", "memory_decide"].includes(result.name)) continue;
+    if (result.name !== "memory_search" && result.name !== "memory_decide" && !isMemoryEntryReadToolName(result.name)) continue;
     for (const slug of memorySlugsFromToolResult(result)) {
       const exposure = await appendExposure({
         abrainHome,

@@ -44,7 +44,7 @@ for (const name of ["web_search", "web_fetch"]) {
   ok(!!block, `web-search/index.ts registers ${name}`);
   ok(!!block && /renderResult\s*:/.test(block), `${name} registerTool() has renderResult wired`);
 }
-for (const name of ["memory_search", "memory_get", "memory_list", "memory_activity", "memory_decide"]) {
+for (const name of ["memory_search", "abrain_get", "memory_list", "memory_activity", "memory_decide"]) {
   const block = toolBlock(memorySrc, name);
   ok(!!block, `memory/index.ts registers ${name}`);
   ok(!!block && /renderResult\s*:/.test(block), `${name} registerTool() has renderResult wired`);

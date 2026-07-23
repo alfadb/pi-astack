@@ -38,7 +38,7 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | `goal/` | `goal_status/set/pause/resume/stop/clear`、`goal_check`；`/goal`；auto-continue（`goal.autoContinue`，default off）经 keyed detached queue + continuation ack，不阻塞 `agent_end` awaited 链 | ✓ |
 | `imagine/` | `imagine` | ✓ |
 | `llm-audit/` | hook（无 LLM tool/slash） | ✓ |
-| `memory/` | `memory_search/get/list/decide`、`memory_activity`；`/memory` | ✓ |
+| `memory/` | `memory_search/abrain_get/memory_list/memory_decide`、`memory_activity`；`/memory` | ✓ |
 | `model-curator/` | model snapshot 注入；`/curator-reload` | ✓ |
 | `model-fallback/` | error hooks | ✓ |
 | `openai-service-tier/` | hook（无 LLM tool/slash） | ✓ |
@@ -98,7 +98,9 @@ active project 是 pi 启动/会话绑定时的快照；shell 中 `cd` 不会自
 
 ## 5. Memory read path（契约）
 
-LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide` / `memory_activity`（只读 facade）。
+LLM 只用：`memory_search` / `abrain_get` / `memory_list` / `memory_decide` / `memory_activity`（只读 facade）。旧 dispatch tools CSV 与 persisted workflow JSON 中的 `memory_get` 在载入时转换为 `abrain_get`；模型注册面不保留旧名。
+
+历史 outcome/evidence/replay 读取同时识别新旧名。已保存旧会话记录可继续解析，但历史分支若未来再次产生新的 `memory_get` tool call 将因 SDK 无 alias 而不可执行；需要进入新 turn 或 fork 后改用 `abrain_get`。
 
 `memory_search` 语义契约：
 
@@ -108,7 +110,7 @@ LLM 只用：`memory_search` / `memory_get` / `memory_list` / `memory_decide` / 
 - embedding 索引当前启用多向量（`multiVector=true`，每 entry 最多 `multiVectorMaxChunks` 个 sub-vector）；`archived` vector 只向 `sedimentDedup` 提供 dense candidate surface，默认 active/user-facing retrieval 保持排除 archived/superseded。搜索时 `autoReconcile=true` 会按冷却与 backlog 门限修补 stale/add/orphan-prune；archived-dense 调用必须传完整 lifecycle corpus，否则 fail-closed 不产生 reconcile 信号。索引仍是 L3 可重建派生物。
 - `bestEffortOnNone=true` 时，stage2 判 `none` 且扩召后仍无命中，可以返回 stage0 排序 top-K 低置信结果；调用方需要自行判断相关性。
 - 默认排除 `status=archived` 与 `superseded`（`deprecated` 在解析期折叠为 `superseded`，一并排除）；要纳入被替代/历史条目须显式传 `filters.status`（传 `active` 则只看活跃）。
-- 返回 normalized cards，**不暴露 backend/source_path/scope**（`memory_get` exact lookup 作 debug 才暴露）。
+- 返回 normalized cards，**不暴露 backend/source_path/scope**（`abrain_get` exact lookup 作 debug 才暴露）。
 - **LLM 精排模型不可用时 hard error；没有 grep/BM25 fallback**（accuracy-is-contract，ADR 0015）。stage0 embedding 不可用只会熔断为 sparse-only 候选，召回面收窄但仍必须经过 LLM 精排或显式 best-effort 边界。
 
 `memory_decide` 语义契约：面向高价值决策点，内部先检索再合成 ≤500 token decision brief；result 暴露 `decisionBriefId`/`entrySlugs` 供 memory-footnote / outcome-ledger 归因；失败不等于"无相关记忆"，应修检索/模型可用性或退回 `memory_search` + 手工综合。

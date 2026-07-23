@@ -1,0 +1,173 @@
+{
+  "schema_version": "pi-astack.anthropic-memory-tool-rename-evidence.v1",
+  "created_at": "2026-07-23T01:32:00.074Z",
+  "updated_at": "2026-07-23T01:48:36.360Z",
+  "purpose": "Verify an Anthropic/sub2api-safe replacement for the model-visible memory_get tool name.",
+  "privacy": {
+    "contains_credentials": false,
+    "contains_memory_content": false,
+    "contains_prompt_or_response_content": false,
+    "recorded_fields": [
+      "timestamp",
+      "provider",
+      "model",
+      "api",
+      "endpoint_origin",
+      "auth_source",
+      "pi_reports_oauth",
+      "tool_names",
+      "http_status",
+      "result_status",
+      "stop_reason",
+      "error_class"
+    ]
+  },
+  "production_path": {
+    "pi_version": "0.81.1",
+    "provider": "anthropic",
+    "model": "claude-sonnet-5",
+    "api": "anthropic-messages",
+    "endpoint_origin": "https://sub2api.alfadb.cn",
+    "auth_source": "models_json_command",
+    "pi_reports_oauth": false,
+    "note": "The configured production sub2api route was used. Pi classifies the local credential resolver as an API-key command rather than stored OAuth; no credential value was read into evidence or output."
+  },
+  "selected_name": "abrain_get",
+  "selection_reason": "The preferred candidate passed 100% of real pre-change requests and preserves the exact-entry retrieval meaning.",
+  "pre_change_capability_probe": {
+    "started_at": "2026-07-23T01:31:54.019Z",
+    "completed_at": "2026-07-23T01:32:00.074Z",
+    "request_kind": "minimal real provider request with exactly two no-op tool definitions",
+    "attempts": [
+      {
+        "timestamp": "2026-07-23T01:31:54.019Z",
+        "tool_names": ["memory_search", "memory_get"],
+        "attempt": 1,
+        "payload_tools_match": true,
+        "http_status": 400,
+        "http_status_source": "sanitized provider error status",
+        "result_status": "error",
+        "stop_reason": "error",
+        "error_class": "extra_usage"
+      },
+      {
+        "timestamp": "2026-07-23T01:31:54.757Z",
+        "tool_names": ["memory_search", "memory_get"],
+        "attempt": 2,
+        "payload_tools_match": true,
+        "http_status": 400,
+        "http_status_source": "sanitized provider error status",
+        "result_status": "error",
+        "stop_reason": "error",
+        "error_class": "extra_usage"
+      },
+      {
+        "timestamp": "2026-07-23T01:31:55.296Z",
+        "tool_names": ["memory_search", "abrain_get"],
+        "attempt": 1,
+        "payload_tools_match": true,
+        "http_status": 200,
+        "result_status": "success",
+        "stop_reason": "stop"
+      },
+      {
+        "timestamp": "2026-07-23T01:31:56.711Z",
+        "tool_names": ["memory_search", "abrain_get"],
+        "attempt": 2,
+        "payload_tools_match": true,
+        "http_status": 200,
+        "result_status": "success",
+        "stop_reason": "stop"
+      },
+      {
+        "timestamp": "2026-07-23T01:31:58.629Z",
+        "tool_names": ["memory_search", "abrain_entry"],
+        "attempt": 1,
+        "payload_tools_match": true,
+        "http_status": 200,
+        "result_status": "success",
+        "stop_reason": "stop"
+      },
+      {
+        "timestamp": "2026-07-23T01:32:00.074Z",
+        "tool_names": ["memory_search", "abrain_entry"],
+        "attempt": 2,
+        "payload_tools_match": true,
+        "http_status": 200,
+        "result_status": "success",
+        "stop_reason": "stop"
+      }
+    ],
+    "summary": {
+      "memory_search+memory_get": { "attempts": 2, "successes": 0, "http_statuses": [400, 400] },
+      "memory_search+abrain_get": { "attempts": 2, "successes": 2, "http_statuses": [200, 200] },
+      "memory_search+abrain_entry": { "attempts": 2, "successes": 2, "http_statuses": [200, 200] }
+    }
+  },
+  "post_change_acceptance": {
+    "first_completed_run_at": "2026-07-23T01:47:26.207Z",
+    "completed_at": "2026-07-23T01:48:36.360Z",
+    "runtime": "modified pi-astack memory extension loaded through pi SDK DefaultResourceLoader; real ModelRuntime production route",
+    "active_tools": ["memory_search", "abrain_get"],
+    "runs": [
+      {
+        "label": "01-search",
+        "timestamp": "2026-07-23T01:47:26.207Z",
+        "provider_request_count": 2,
+        "http_statuses": [200, 200],
+        "payload_tool_sets": [["memory_search", "abrain_get"], ["memory_search", "abrain_get"]],
+        "actual_tool_calls": [{ "name": "memory_search", "result_count": 10, "slug_sha256_16": "5004ef5d870a2ac4", "real_memory_verified": true }],
+        "success": true
+      },
+      {
+        "label": "02-get",
+        "timestamp": "2026-07-23T01:47:33.195Z",
+        "provider_request_count": 2,
+        "http_statuses": [200, 200],
+        "payload_tool_sets": [["memory_search", "abrain_get"], ["memory_search", "abrain_get"]],
+        "actual_tool_calls": [{ "name": "abrain_get", "result_count": 1, "slug_sha256_16": "5004ef5d870a2ac4", "real_memory_verified": true }],
+        "success": true
+      },
+      {
+        "label": "03-search",
+        "timestamp": "2026-07-23T01:47:58.060Z",
+        "provider_request_count": 2,
+        "http_statuses": [200, 200],
+        "payload_tool_sets": [["memory_search", "abrain_get"], ["memory_search", "abrain_get"]],
+        "actual_tool_calls": [{ "name": "memory_search", "result_count": 10, "slug_sha256_16": "340a73d25173c0d9", "real_memory_verified": true }],
+        "success": true
+      },
+      {
+        "label": "04-get",
+        "timestamp": "2026-07-23T01:48:02.708Z",
+        "provider_request_count": 2,
+        "http_statuses": [200, 200],
+        "payload_tool_sets": [["memory_search", "abrain_get"], ["memory_search", "abrain_get"]],
+        "actual_tool_calls": [{ "name": "abrain_get", "result_count": 1, "slug_sha256_16": "340a73d25173c0d9", "real_memory_verified": true }],
+        "success": true
+      },
+      {
+        "label": "05-search-get",
+        "timestamp": "2026-07-23T01:48:36.360Z",
+        "provider_request_count": 3,
+        "http_statuses": [200, 200, 200],
+        "payload_tool_sets": [["memory_search", "abrain_get"], ["memory_search", "abrain_get"], ["memory_search", "abrain_get"]],
+        "actual_tool_calls": [
+          { "name": "memory_search", "result_count": 10, "slug_sha256_16": "5004ef5d870a2ac4", "real_memory_verified": true },
+          { "name": "abrain_get", "result_count": 1, "slug_sha256_16": "5004ef5d870a2ac4", "real_memory_verified": true }
+        ],
+        "success": true
+      }
+    ],
+    "summary": {
+      "runs": 5,
+      "successes": 5,
+      "provider_requests": 11,
+      "all_http_200": true,
+      "all_payloads_without_memory_get": true,
+      "search_runs_with_real_data": 3,
+      "get_runs_with_real_data": 3,
+      "extra_usage_400_count": 0
+    }
+  }
+}

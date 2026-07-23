@@ -72,11 +72,16 @@ function loadModuleFromString(code, fakePath) {
 
 const inputCompatSrc = path.join(repoRoot, "extensions/dispatch/input-compat.ts");
 const taskProfileSrc = path.join(repoRoot, "extensions/dispatch/task-profile.ts");
+const toolNameCompatSrc = path.join(repoRoot, "extensions/_shared/tool-name-compat.ts");
 const compiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-input-compat-"));
-const tmpFile = path.join(tmpDir, "input-compat.cjs");
+const dispatchDir = path.join(tmpDir, "dispatch");
+fs.mkdirSync(dispatchDir, { recursive: true });
+fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
+const tmpFile = path.join(dispatchDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, compiled);
-fs.writeFileSync(path.join(tmpDir, "task-profile.js"), transpileTsToCjs(taskProfileSrc));
+fs.writeFileSync(path.join(dispatchDir, "task-profile.js"), transpileTsToCjs(taskProfileSrc));
+fs.writeFileSync(path.join(tmpDir, "_shared", "tool-name-compat.js"), transpileTsToCjs(toolNameCompatSrc));
 const { coerceTasksParam, normalizeTaskSpec } = loadModuleFromString(
   compiled,
   tmpFile,
@@ -138,6 +143,11 @@ check("triple-stringified exceeds maxDepth=2 → returns []", () => {
 check("undefined input returns []", () => {
   const r = coerceTasksParam(undefined);
   if (!Array.isArray(r) || r.length !== 0) throw new Error("not empty array");
+});
+
+check("normalizeTaskSpec canonicalizes legacy memory_get before dispatch schema validation", () => {
+  const r = normalizeTaskSpec({ model: "x/y", prompt: "p", tools: ["memory_search", "memory_get", "abrain_get"] });
+  if (r.tools !== "memory_search,abrain_get") throw new Error(`tools not canonicalized: ${JSON.stringify(r)}`);
 });
 
 check("normalizeTaskSpec preserves optional tool-block display name", () => {

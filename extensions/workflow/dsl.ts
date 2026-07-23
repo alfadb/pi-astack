@@ -30,6 +30,7 @@ import {
   resolveDispatchTaskProfileAliases,
   type DispatchTaskProfile,
 } from "../dispatch/task-profile";
+import { canonicalizeToolNames } from "../_shared/tool-name-compat";
 
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
 
@@ -45,7 +46,7 @@ export const WORKFLOW_MAX_CONCURRENCY = 4;
 export const READONLY_TOOLS = new Set([
   "read", "grep", "find", "ls",
   "web_search", "web_fetch",
-  "memory_search", "memory_get", "memory_decide",
+  "memory_search", "abrain_get", "memory_decide",
   // memory_list is an opt-in read tool: dispatch accepts the exact name when
   // the target sub-agent session actually registers it.
   "memory_list",
@@ -88,6 +89,19 @@ export interface WorkflowDoc {
   stages: WorkflowStage[];
 }
 
+/** Canonicalize persisted workflow tool names before validation or activation. */
+export function canonicalizeWorkflowTools(doc: WorkflowDoc): WorkflowDoc {
+  const canonicalizeStage = (stage: WorkflowStage): WorkflowStage => ({
+    ...stage,
+    ...(Array.isArray(stage.tools) ? { tools: canonicalizeToolNames(stage.tools) } : {}),
+    ...(Array.isArray(stage.children) ? { children: stage.children.map(canonicalizeStage) } : {}),
+  });
+  return {
+    ...doc,
+    ...(Array.isArray(doc.stages) ? { stages: doc.stages.map(canonicalizeStage) } : {}),
+  };
+}
+
 export interface WorkflowValidationResult {
   ok: boolean;
   errors: string[];
@@ -127,7 +141,7 @@ export function parseWorkflowJson(raw: string): { doc?: WorkflowDoc; error?: str
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return { error: "root must be a JSON object" };
   }
-  return { doc: parsed as WorkflowDoc };
+  return { doc: canonicalizeWorkflowTools(parsed as WorkflowDoc) };
 }
 
 /** Deterministic v1 validation per ADR 0032 §7. `readOnly` is the
