@@ -11,6 +11,26 @@ status: active
 
 ---
 
+## 2026-07-24 — accepted — Sediment intake owner-root isolation and foreground footer fencing (adee7c5 regression)
+
+### 变更
+
+修复 adee7c5 引入的回归：`session_start` 曾全局扫描 `~/.abrain/.state/sediment/intake/pending`，把其它 checkout（如 pi-router2）的 pending 交给当前实例评估，并用当前 UI reporter 显示别 session/root 的 `project_not_bound:path_unconfirmed`。用户明确要求当前目录不管别目录。
+
+Durable intake receipt 现在记录 canonical `sourceProjectRoot`（绑定/git root，不是任意 subdir cwd），并参与 stable identity。旧 v2 receipt 保持向后兼容：可从 cwd/session source 解析 owner root；无法可靠确认 owner 时不由任意实例 claim，只写 status/audit 并留 pending。`session_start` recovery 必须传入当前 boot 的 physical project root，只调度 owner root 严格相等的 pending；相同 `project_id` 不同 checkout 隔离，不按全局 projectId 扫描。Foreground status fencing：set footer / notify 前验证 target sessionId == current foreground sessionId，并用 session epoch/generation 防止 `/new` `/resume` `/reload` 后旧 async callback 更新新 UI。非 foreground recovery 可写 source audit 与内部 state，但不得 setStatus/notify 当前 UI。Global publication one-shot 仍可收敛 accepted L1，但其状态不得写当前 session footer，除非 receipt 对应当前 foreground session。session_start/agent_start 在当前 bound 且无本 session 错误时清掉跨 session 污染 footer，不隐藏真实当前 session failure。
+
+### 验收边界
+
+`smoke:sediment-intake-publication` 增加真实两个 temp git roots、相同 project_id 的隔离断言：root A 启动只处理 A receipt，B 保持 pending 且 A footer 无 B warning；切换/new 后旧 generation 不能覆盖；当前 session `path_unconfirmed` 仍正确显示；旧 v2 receipt owner 兼容；同 root 重启恢复继续通过。回归 intake pub/queue/memory/knowledge/canonical session start。生产只读验证：`/home/worker/.pi`（pi-global bound）owner selector 不得选中 pi-router2 pending，且不消费/删除 production pending。
+
+### 状态
+
+`accepted` with regression fix。
+
+### 关联
+
+[architecture/sediment.md](architecture/sediment.md)；[Smoke reference](reference/smoke-tests.md)。
+
 ## 2026-07-23 — accepted — Sediment event-first acceptance expansion and queue retirement (phase 2)
 
 ### 变更

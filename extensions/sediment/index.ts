@@ -36,6 +36,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -109,7 +110,7 @@ import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
 import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
-import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, resolveActiveProject } from "../_shared/runtime";
+import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, normalizeProjectRoot, resolveActiveProject } from "../_shared/runtime";
 import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
 import { schedulePropositionPolicyStableViewRecovery } from "../_shared/proposition-policy-stable-view-recovery";
 import {
@@ -121,10 +122,11 @@ import {
 import {
   ackSedimentIntake,
   buildSedimentIntakeRecord,
-  listSedimentIntakePending,
   listSedimentIntakePendingForSession,
   readSedimentIntakeRecord,
+  resolveSedimentIntakeOwnerProjectRoot,
   restoreSedimentIntakeBranch,
+  selectSedimentIntakePendingForOwnerRoot,
   tryClaimSedimentIntake,
   writeSedimentIntakeRecord,
   writeSedimentIntakeRecoveryStatus,
@@ -298,6 +300,18 @@ const _G = globalThis as typeof globalThis & {
    *  indicator visible) from cross-session /new bg completion (flip
    *  the new session's stuck 'running (prev session)' back to idle). */
   __sediment_currentSessionId?: string | undefined;
+  /**
+   * Monotonic foreground UI generation. Incremented on every session_start so
+   * /new, /resume, and /reload invalidate stale async callbacks that still
+   * hold an older reporter. Same-session legitimate async keeps the current
+   * generation and may update the footer.
+   */
+  __sediment_sessionEpoch?: number;
+  /** Session id the latest setStatus/notify reporters were bound for. */
+  __sediment_latestSetStatusSessionId?: string | undefined;
+  __sediment_latestSetStatusEpoch?: number;
+  __sediment_latestNotifySessionId?: string | undefined;
+  __sediment_latestNotifyEpoch?: number;
   /** pi-astack: setStatus bound to the constraint-compile footer slot, stashed
    *  here so the async constraint auto-refresh (which has no ctx.ui of its own)
    *  can drive a live 约束编译中 indicator while a minutes-long background compile
@@ -347,34 +361,121 @@ interface SedimentAgentEndTestHooks {
 
 let sedimentAgentEndTestHooks: SedimentAgentEndTestHooks | undefined;
 
-function dynamicSedimentNotify(message: string, type?: string): void {
+function currentForegroundSessionId(): string | undefined {
+  return _G.__sediment_currentSessionId;
+}
+
+function currentForegroundEpoch(): number {
+  return _G.__sediment_sessionEpoch ?? 0;
+}
+
+/** True only when target session is the live foreground UI generation. */
+function isForegroundUiTarget(sessionId: string | undefined, epoch?: number): boolean {
+  if (!sessionId) return false;
+  if (currentForegroundSessionId() !== sessionId) return false;
+  if (epoch !== undefined && currentForegroundEpoch() !== epoch) return false;
+  return true;
+}
+
+function dynamicSedimentNotify(message: string, type?: string, sessionId?: string): void {
+  // Non-foreground recovery may audit/write internal state but must never
+  // notify the current UI about a foreign session/root.
+  if (sessionId !== undefined && !isForegroundUiTarget(sessionId)) return;
+  if (
+    _G.__sediment_latestNotifySessionId
+    && sessionId
+    && _G.__sediment_latestNotifySessionId !== sessionId
+  ) return;
+  if (
+    _G.__sediment_latestNotifyEpoch !== undefined
+    && _G.__sediment_latestNotifyEpoch !== currentForegroundEpoch()
+  ) return;
   const reporter = _G.__sediment_latestNotify;
   if (!reporter) return;
   try { reporter(message, type); } catch { /* stale current UI is best-effort */ }
 }
 
-function dynamicSedimentSetStatus(message?: string): void {
+function dynamicSedimentSetStatus(message?: string, sessionId?: string): void {
+  if (sessionId !== undefined && !isForegroundUiTarget(sessionId)) return;
+  if (
+    _G.__sediment_latestSetStatusSessionId
+    && sessionId
+    && _G.__sediment_latestSetStatusSessionId !== sessionId
+  ) return;
+  if (
+    _G.__sediment_latestSetStatusEpoch !== undefined
+    && _G.__sediment_latestSetStatusEpoch !== currentForegroundEpoch()
+  ) return;
   const reporter = _G.__sediment_latestSetStatus;
   if (!reporter) return;
   try { reporter(message); } catch { /* stale current UI is best-effort */ }
+}
+
+function bindForegroundSedimentReporter(
+  ui: {
+    notify?(message: string, type?: string): void;
+    setStatus?(extId: string, message?: string): void;
+  } | undefined,
+  sessionId: string | undefined,
+  opts?: { bumpEpoch?: boolean },
+): {
+  setStatus: ((msg?: string) => void) | undefined;
+  epoch: number;
+} {
+  if (opts?.bumpEpoch !== false) {
+    _G.__sediment_sessionEpoch = currentForegroundEpoch() + 1;
+  }
+  const epoch = currentForegroundEpoch();
+  _G.__sediment_currentSessionId = sessionId;
+  const notify = ui?.notify?.bind(ui);
+  _G.__sediment_latestNotify = notify
+    ? (message: string, type?: string) => {
+        if (!isForegroundUiTarget(sessionId, epoch)) return;
+        try { notify(message, type); } catch { /* replaced session UI may already be stale */ }
+      }
+    : undefined;
+  _G.__sediment_latestNotifySessionId = sessionId;
+  _G.__sediment_latestNotifyEpoch = epoch;
+  const setStatusRaw = ui?.setStatus?.bind(ui);
+  const setStatus = setStatusRaw
+    ? (message?: string) => {
+        if (!isForegroundUiTarget(sessionId, epoch)) return;
+        try { setStatusRaw(SEDIMENT_STATUS_KEY, message); } catch { /* replaced session UI may already be stale */ }
+      }
+    : undefined;
+  _G.__sediment_latestSetStatus = setStatus;
+  _G.__sediment_latestSetStatusSessionId = sessionId;
+  _G.__sediment_latestSetStatusEpoch = epoch;
+  stashConstraintCompileSetStatus(setStatusRaw);
+  return { setStatus, epoch };
 }
 
 function refreshSedimentReporter(ui: {
   notify?(message: string, type?: string): void;
   setStatus?(extId: string, message?: string): void;
 } | undefined): void {
+  // Keep epoch/session binding; only refresh the raw UI handles when the
+  // current foreground still matches the last bound generation.
+  const sessionId = currentForegroundSessionId();
+  const epoch = currentForegroundEpoch();
   const notify = ui?.notify?.bind(ui);
   _G.__sediment_latestNotify = notify
     ? (message: string, type?: string) => {
+        if (!isForegroundUiTarget(sessionId, epoch)) return;
         try { notify(message, type); } catch { /* replaced session UI may already be stale */ }
       }
     : undefined;
+  _G.__sediment_latestNotifySessionId = sessionId;
+  _G.__sediment_latestNotifyEpoch = epoch;
   const setStatusRaw = ui?.setStatus?.bind(ui);
   _G.__sediment_latestSetStatus = setStatusRaw
     ? (message?: string) => {
+        if (!isForegroundUiTarget(sessionId, epoch)) return;
         try { setStatusRaw(SEDIMENT_STATUS_KEY, message); } catch { /* replaced session UI may already be stale */ }
       }
     : undefined;
+  _G.__sediment_latestSetStatusSessionId = sessionId;
+  _G.__sediment_latestSetStatusEpoch = epoch;
   stashConstraintCompileSetStatus(setStatusRaw);
 }
 
@@ -508,17 +609,47 @@ function enqueueSedimentIntakeRecord(args: {
   });
 }
 
-/** Scan durable pending triggers; latest same-session tip coalesces in memory. */
-async function schedulePendingIntakeRecovery(opts?: {
+/** Scan durable pending triggers owned by the current physical project root. */
+async function schedulePendingIntakeRecovery(opts: {
+  /** Physical bind/git root of the booting instance. Required for ownership. */
+  ownerProjectRoot: string;
   sessionId?: string;
   reason?: string;
   modelRegistry?: unknown;
 }): Promise<number> {
   if (!resolveSedimentSettings().enabled) return 0;
   const abrainHome = resolveAbrainHomeForSediment();
-  const pending = opts?.sessionId
-    ? await listSedimentIntakePendingForSession(abrainHome, opts.sessionId)
-    : await listSedimentIntakePending(abrainHome);
+  const ownerProjectRoot = path.resolve(opts.ownerProjectRoot);
+  // Ownership is physical root equality only. Same project_id with different
+  // checkouts (pi-router vs pi-router2) must never cross-evaluate.
+  const selection = await selectSedimentIntakePendingForOwnerRoot(abrainHome, ownerProjectRoot);
+  for (const item of selection.unconfirmedOwner) {
+    try {
+      const record = await readSedimentIntakeRecord(abrainHome, item.windowId);
+      if (!record) continue;
+      // Cannot reliably confirm owner → leave pending; status/audit only.
+      await writeSedimentIntakeRecoveryStatus(
+        abrainHome,
+        record,
+        "source_invalid",
+        "owner_root_unconfirmed",
+      ).catch(() => undefined);
+      await appendAudit(record.cwd, {
+        operation: "skip",
+        lane: "system",
+        reason: "owner_root_unconfirmed",
+        session_id: record.sessionId,
+        intake_window_id: record.windowId,
+        recovery_reason: opts.reason || "scan",
+        checkpoint_advanced: false,
+        background_async: true,
+      }).catch(() => {});
+    } catch {
+      // Corrupt records stay pending for operator inspection.
+    }
+  }
+  let pending = selection.selected;
+  if (opts.sessionId) pending = pending.filter((item) => item.sessionId === opts.sessionId);
   // Recovery schedules only the newest trigger per session. Its frozen branch
   // contains historical same-lineage tips, and checkpoint coverage later acks
   // all of them. Older branch-switch tips remain pending because they are not
@@ -531,11 +662,13 @@ async function schedulePendingIntakeRecovery(opts?: {
     try {
       const record = await readSedimentIntakeRecord(abrainHome, item.windowId);
       if (!record) continue;
+      const owner = resolveSedimentIntakeOwnerProjectRoot(record, { abrainHome });
+      if (!owner || path.resolve(owner) !== ownerProjectRoot) continue;
       enqueueSedimentIntakeRecord({
         record,
-        modelRegistry: opts?.modelRegistry,
+        modelRegistry: opts.modelRegistry,
         fromRecovery: true,
-        reason: opts?.reason || "scan",
+        reason: opts.reason || "scan",
       });
       scheduled += 1;
     } catch {
@@ -553,22 +686,94 @@ async function triggerKnowledgePublicationOneShot(
   try {
     const pendingBefore = await listPublicationOutboxPending(abrainHome);
     if (pendingBefore.length === 0) return;
-    applySedimentStatus(dynamicSedimentSetStatus, sessionId, "publication_backlog", `${pendingBefore.length} pending`);
+    // Shared publication substrate may always converge accepted L1. Footer
+    // status is evaluation-ownership sensitive: only receipts for the current
+    // foreground session may paint the live UI.
+    const relevantBefore = sessionId
+      ? pendingBefore.filter((row) => row.item.sessionId === sessionId)
+      : [];
+    if (relevantBefore.length > 0) {
+      applySedimentStatus(
+        (msg) => dynamicSedimentSetStatus(msg, sessionId),
+        sessionId,
+        "publication_backlog",
+        `${relevantBefore.length} pending`,
+      );
+    }
     const result = await scheduleKnowledgePublicationOutboxDrain(abrainHome, resolveSedimentSettings());
     if (result.status === "busy") return;
+    if (relevantBefore.length === 0) return;
     if (result.terminalFailed > 0) {
-      applySedimentStatus(dynamicSedimentSetStatus, sessionId, "failed", `${result.terminalFailed} publication failed`);
+      applySedimentStatus(
+        (msg) => dynamicSedimentSetStatus(msg, sessionId),
+        sessionId,
+        "failed",
+        `${result.terminalFailed} publication failed`,
+      );
       return;
     }
-    if (result.pending > 0) {
-      applySedimentStatus(dynamicSedimentSetStatus, sessionId, "publication_backlog", `${result.pending} pending`);
+    const pendingAfter = await listPublicationOutboxPending(abrainHome);
+    const relevantAfter = sessionId
+      ? pendingAfter.filter((row) => row.item.sessionId === sessionId)
+      : [];
+    if (relevantAfter.length > 0) {
+      applySedimentStatus(
+        (msg) => dynamicSedimentSetStatus(msg, sessionId),
+        sessionId,
+        "publication_backlog",
+        `${relevantAfter.length} pending`,
+      );
       return;
     }
-    applySedimentStatus(dynamicSedimentSetStatus, sessionId, settleState);
+    applySedimentStatus(
+      (msg) => dynamicSedimentSetStatus(msg, sessionId),
+      sessionId,
+      settleState,
+    );
   } catch (err) {
     const detail = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
-    applySedimentStatus(dynamicSedimentSetStatus, sessionId, "failed", `publication: ${detail || "unknown"}`);
+    applySedimentStatus(
+      (msg) => dynamicSedimentSetStatus(msg, sessionId),
+      sessionId,
+      "failed",
+      `publication: ${detail || "unknown"}`,
+    );
   }
+}
+
+/** Process-local owner-root cache: capture must stay lightweight (<100ms). */
+const sourceProjectRootByCwd = new Map<string, string>();
+
+/** Cheap .git walk for capture identity — avoids subprocess on the hot path. */
+function findGitRootByWalk(cwd: string): string | undefined {
+  let dir = path.resolve(cwd);
+  // Synchronous existsSync is intentional: capture budget is p99 <100ms and
+  // must not shell out to git for every agent_end.
+  for (;;) {
+    if (existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+function resolveCaptureSourceProjectRoot(cwd: string, abrainHome: string): string {
+  const key = `${path.resolve(abrainHome)}::${path.resolve(cwd)}`;
+  const cached = sourceProjectRootByCwd.get(key);
+  if (cached) return cached;
+  // Capture path must stay lightweight. Physical owner identity is the git
+  // (or cwd) root — never a launch subdirectory. Prefer a pure directory walk
+  // over `git rev-parse` so long-session agent_end stays under budget; fall
+  // back to normalizeProjectRoot only when the walk finds nothing.
+  const walked = findGitRootByWalk(cwd);
+  const sourceProjectRoot = path.resolve(walked ?? normalizeProjectRoot(cwd, { abrainHome }).projectRoot);
+  sourceProjectRootByCwd.set(key, sourceProjectRoot);
+  // Bound cache size; cwd churn is rare in a single process.
+  if (sourceProjectRootByCwd.size > 64) {
+    const first = sourceProjectRootByCwd.keys().next().value;
+    if (first) sourceProjectRootByCwd.delete(first);
+  }
+  return sourceProjectRoot;
 }
 
 function captureSedimentAgentEndIntake(
@@ -613,10 +818,14 @@ function captureSedimentAgentEndIntake(
   const boundaryUntrusted = isSubAgentBoundaryUntrusted();
   const boundaryDiagnostic = boundaryUntrusted ? getSubAgentBoundaryUntrustedDiagnostic() : undefined;
   const anchor = getCurrentAnchor();
+  const cwd = path.resolve(ctx.cwd || process.cwd());
+  const abrainHome = resolveAbrainHomeForSediment();
+  const sourceProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
   const record = buildSedimentIntakeRecord({
     sessionId,
     sessionFile,
-    cwd: path.resolve(ctx.cwd || process.cwd()),
+    cwd,
+    sourceProjectRoot,
     branchTip: {
       id: leafId,
       parentId: entry.parentId as string | null,
@@ -676,7 +885,7 @@ async function waitForDetachedSedimentWorkIdle(
 async function auditSedimentAgentEndQueueError(snapshot: SedimentAgentEndSnapshotForTests, error: unknown): Promise<void> {
   const message = sanitizeAuditText(error instanceof Error ? error.message : String(error), 500);
   console.error(`[sediment] detached agent_end job failed: ${message}`);
-  dynamicSedimentNotify(`sediment background job failed: ${message}`, "error");
+  dynamicSedimentNotify(`sediment background job failed: ${message}`, "error", snapshot.sessionId);
   await appendAudit(snapshot.cwd, {
     operation: "skip",
     lane: "system",
@@ -915,8 +1124,25 @@ function applySedimentStatus(
   state: SedimentStatus,
   detail?: string,
 ): void {
+  // Per-session internal state is always recorded so recovery/audit paths
+  // can reason about truth without touching the live TUI.
   if (sessionId) sedimentStatusBySession.set(sessionId, state);
   const msg = renderSedimentStatus(state, detail);
+
+  // Foreground fencing: only the current foreground session+epoch may
+  // mutate the live footer. Foreign-root recovery and post-/new stale
+  // callbacks keep writing audit/internal state above, never the UI.
+  if (!isForegroundUiTarget(sessionId)) return;
+  if (
+    _G.__sediment_latestSetStatusSessionId
+    && sessionId
+    && _G.__sediment_latestSetStatusSessionId !== sessionId
+  ) return;
+  if (
+    _G.__sediment_latestSetStatusEpoch !== undefined
+    && _G.__sediment_latestSetStatusEpoch !== currentForegroundEpoch()
+  ) return;
+
   if (setStatus) {
     try {
       setStatus(msg);
@@ -924,10 +1150,9 @@ function applySedimentStatus(
       /* stale ctx late fire is best-effort; fall through to globalThis */
     }
   }
-  // Fallback via globalThis: bg work from a PREVIOUS session (after
-  // /new) has a stale captured setStatus. globalThis survives pi's
-  // extension-module teardown/reload, so the current session's footer
-  // gets updated even when the calling module instance is dead.
+  // Fallback via globalThis: bg work from a PREVIOUS module instance after
+  // extension reload can still reach the current footer when the generation
+  // still matches. Cross-session updates are rejected above.
   if (_G.__sediment_latestSetStatus) {
     try { _G.__sediment_latestSetStatus(msg); } catch { /* best-effort */ }
   }
@@ -2401,7 +2626,23 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
       const settings = resolveSedimentSettings();
       if (!settings.enabled) return;
-      refreshSedimentReporter(ctx.ui);
+
+      const abrainHome = resolveAbrainHomeForSediment();
+      const sessionId = readSessionId(ctx.sessionManager);
+      const cwd = path.resolve(ctx.cwd || process.cwd());
+      const rootInfo = normalizeProjectRoot(cwd, { abrainHome });
+      const binding = resolveActiveProject(cwd, { abrainHome });
+      // Physical checkout root owns evaluation. Prefer strict bind root when
+      // available; otherwise the git root (or cwd) of this boot instance.
+      const ownerProjectRoot = path.resolve(
+        binding.activeProject?.projectRoot ?? rootInfo.projectRoot,
+      );
+      // Seed capture cache so the first agent_end does not pay git cold cost.
+      sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${cwd}`, ownerProjectRoot);
+
+      // Bump foreground generation and rebind reporters before any recovery so
+      // stale /new|/resume|/reload callbacks cannot paint this UI.
+      const { setStatus } = bindForegroundSedimentReporter(ctx.ui, sessionId, { bumpEpoch: true });
 
       // Canonical-path R3.4.2 P1-S3: validate the repo-owned machine
       // transition source at startup. This is read-only and warning-only; it
@@ -2418,33 +2659,29 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         }
       }
 
-      const abrainHome = resolveAbrainHomeForSediment();
-      const sessionId = readSessionId(ctx.sessionManager);
-      const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
-      const setStatus = setStatusRaw
-        ? (msg?: string) => {
-            try {
-              setStatusRaw(SEDIMENT_STATUS_KEY, msg);
-            } catch {}
-          }
-        : undefined;
-      // Footer-only setup is safe before canonical recovery and makes the
-      // current session replace stale global UI bindings immediately.
-      _G.__sediment_latestSetStatus = setStatus;
-      stashConstraintCompileSetStatus(setStatusRaw);
-      _G.__sediment_currentSessionId = sessionId;
-
-      if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
+      // Clear cross-session footer pollution when this boot is clean. Keep a
+      // real in-memory failure for THIS session visible (do not hide truth).
+      const localStatus = sessionId ? sedimentStatusBySession.get(sessionId) : undefined;
+      const keepLocalFailure = localStatus === "failed"
+        || localStatus === "publication_backlog"
+        || localStatus === "accepted_pending_publication";
+      if (keepLocalFailure && localStatus) {
+        applySedimentStatus(setStatus, sessionId, localStatus);
+      } else if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
         applySedimentStatus(setStatus, sessionId, "running", "prev session");
       } else {
+        // Bound or unbound: start clean. Own path_unconfirmed failures still
+        // surface later only from this root's evaluation.
         applySedimentStatus(setStatus, sessionId, "idle");
       }
 
       // Durable intake recovery is independent of canonical startup. Pending
       // windows must evaluate even while Git/canonical is busy; publication
-      // backlog is the only place canonical may stall.
+      // backlog is the only place canonical may stall. Only this physical
+      // owner root is scheduled — never a global projectId scan.
       try {
         await schedulePendingIntakeRecovery({
+          ownerProjectRoot,
           reason: "session_start",
           modelRegistry: ctx.modelRegistry,
         });
@@ -2453,9 +2690,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
       // One lifecycle edge, one publisher attempt. Busy returns immediately;
       // pending work stays durable for the next session_start/agent_end edge.
+      // Shared substrate may converge; footer only reflects this session.
       void triggerKnowledgePublicationOneShot(sessionId, "idle");
 
-      const cwd = path.resolve(ctx.cwd || process.cwd());
       const modelRegistry = ctx.modelRegistry;
       const initializeAfterCanonicalBarrier = async (canonicalReady = false): Promise<void> => {
         // Canonical mode reaches this initializer only after Path A; legacy
@@ -2538,17 +2775,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         && prev !== "accepted_pending_publication"
         && prev !== "publication_backlog"
       ) return; // running/evaluating -> stay; idle -> already idle
-      const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
-      const setStatus = setStatusRaw
-        ? (msg?: string) => {
-            try {
-              setStatusRaw(SEDIMENT_STATUS_KEY, msg);
-            } catch {}
-          }
-        : undefined;
-      _G.__sediment_latestSetStatus = setStatus;
-      stashConstraintCompileSetStatus(setStatusRaw);
-      _G.__sediment_currentSessionId = sessionId;
+      // Rebind reporters for this session without bumping epoch (same session
+      // continues). Clears cross-session pollution left on the live footer
+      // while preserving a real current-session failure until agent_start's
+      // intentional terminal-clear path below.
+      const { setStatus } = bindForegroundSedimentReporter(ctx.ui, sessionId, { bumpEpoch: false });
       // If bg work from a previous session is still inflight, keep
       // showing running instead of resetting to idle.
       if ((_G.__sediment_inflightCount ?? 0) > 0 || multiViewReplayInFlight.size > 0) {
@@ -2572,8 +2803,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             const diagnostic = snapshot.boundaryDiagnostic;
             const message = `sediment: sub-agent boundary untrusted; blocked agent_end writes (${diagnostic?.reason ?? "unknown"})`;
             console.error(`[sediment] ${message}`);
-            dynamicSedimentNotify(message, "error");
-            applySedimentStatus(dynamicSedimentSetStatus, snapshot.sessionId, "failed", "subagent_boundary_untrusted");
+            dynamicSedimentNotify(message, "error", snapshot.sessionId);
+            applySedimentStatus(
+              (msg) => dynamicSedimentSetStatus(msg, snapshot.sessionId),
+              snapshot.sessionId,
+              "failed",
+              "subagent_boundary_untrusted",
+            );
             await appendAudit(snapshot.cwd, {
               operation: "skip",
               lane: "system",
@@ -2591,7 +2827,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           }
 
           applySedimentStatus(
-            dynamicSedimentSetStatus,
+            (msg) => dynamicSedimentSetStatus(msg, snapshot.sessionId),
             snapshot.sessionId,
             "evaluating",
             passOpts?.fromRecovery ? "intake_recovery" : undefined,
@@ -2629,8 +2865,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // passes deliberately omit it rather than retain a stale session object;
       // branchEntries still provide the extractor's full transcript context.
       const sessMgr = undefined;
-      const notify = dynamicSedimentNotify;
-      const setStatus = dynamicSedimentSetStatus;
+      const notify = (message: string, type?: string) => dynamicSedimentNotify(message, type, sessionId);
+      const setStatus = (message?: string) => dynamicSedimentSetStatus(message, sessionId);
       const modelRegistry = snapshot.modelRegistry;
       const settingsSnapshot = snapshotSedimentSettings(settings);
 
@@ -5395,13 +5631,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const boundaryUntrusted = isSubAgentBoundaryUntrusted();
       if (!boundaryUntrusted && isSubAgentSession(liveCtx)) return;
       if (!boundaryUntrusted && !resolveSedimentSettings().enabled) return;
-      refreshSedimentReporter(liveCtx.ui);
+      // Live agent_end is the interactive foreground session. Rebind reporters
+      // without bumping epoch so same-session async and immediate failure
+      // notifies still reach the UI; foreign recovery remains fenced out.
+      const liveSessionId = readSessionId(liveCtx.sessionManager);
+      bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
+        bumpEpoch: currentForegroundSessionId() !== liveSessionId,
+      });
       if (boundaryUntrusted) {
         const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
         const message = `sediment intake blocked: sub-agent boundary untrusted (${diagnostic?.reason ?? "unknown"})`;
         console.error(`[sediment] ${message}`);
-        dynamicSedimentNotify(message, "error");
-        applySedimentStatus(dynamicSedimentSetStatus, readSessionId(liveCtx.sessionManager), "failed", "subagent_boundary_untrusted");
+        const blockedSessionId = readSessionId(liveCtx.sessionManager);
+        dynamicSedimentNotify(message, "error", blockedSessionId);
+        applySedimentStatus(
+          (msg) => dynamicSedimentSetStatus(msg, blockedSessionId),
+          blockedSessionId,
+          "failed",
+          "subagent_boundary_untrusted",
+        );
         void appendAudit(path.resolve(liveCtx.cwd || process.cwd()), {
           operation: "skip",
           lane: "system",
@@ -5452,8 +5700,13 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       } catch (err) {
         const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
         console.error(`[sediment] intake write failed; window not enqueued: ${error}`);
-        dynamicSedimentNotify(`sediment intake write failed: ${error}`, "error");
-        applySedimentStatus(dynamicSedimentSetStatus, record.sessionId, "failed", "intake_write_failed");
+        dynamicSedimentNotify(`sediment intake write failed: ${error}`, "error", record.sessionId);
+        applySedimentStatus(
+          (msg) => dynamicSedimentSetStatus(msg, record.sessionId),
+          record.sessionId,
+          "failed",
+          "intake_write_failed",
+        );
         void appendAudit(record.cwd, {
           operation: "skip",
           lane: "system",
@@ -6412,9 +6665,15 @@ export function _resetAutoWriteStateForTests(): void {
   sessionTaskLocalSet.clear();
   deferredStopBySession.clear();
   sedimentAgentEndTestHooks = undefined;
+  sourceProjectRootByCwd.clear();
   _G.__sediment_latestNotify = undefined;
   _G.__sediment_latestSetStatus = undefined;
   _G.__sediment_currentSessionId = undefined;
+  _G.__sediment_sessionEpoch = 0;
+  _G.__sediment_latestSetStatusSessionId = undefined;
+  _G.__sediment_latestSetStatusEpoch = undefined;
+  _G.__sediment_latestNotifySessionId = undefined;
+  _G.__sediment_latestNotifyEpoch = undefined;
   _G.__sediment_inflightCount = 0;
   _resetWarnedApisForTests();
 }

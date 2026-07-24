@@ -21,6 +21,7 @@ import {
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "../_shared/durable-write";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined } from "../_shared/jcs";
 import { acquireRetainedDirectoryOfdLock } from "../_shared/retained-directory-ofd-lock";
+import { normalizeProjectRoot } from "../_shared/runtime";
 
 export const SEDIMENT_INTAKE_SCHEMA = "sediment-intake/v2" as const;
 
@@ -54,6 +55,13 @@ export interface SedimentIntakeRecord {
   sessionId: string;
   sessionFile: string;
   cwd: string;
+  /**
+   * Canonical physical project root that owns evaluation for this receipt
+   * (bound/git root, never an arbitrary launch subdirectory). Participates in
+   * stable identity when present. Legacy v2 receipts omit this field; recovery
+   * may derive it from cwd/session source, and must not claim when unconfirmed.
+   */
+  sourceProjectRoot?: string;
   branchTip: SedimentIntakeBranchTip;
   /** Digest of the immutable pi source coordinates, not session file bytes. */
   sourceDigest: string;
@@ -145,12 +153,14 @@ function sourceCoordinates(args: {
   sessionId: string;
   sessionFile: string;
   cwd: string;
+  sourceProjectRoot?: string;
   branchTip: SedimentIntakeBranchTip;
 }): Record<string, unknown> {
   return {
     sessionId: args.sessionId,
     sessionFile: path.resolve(args.sessionFile),
     cwd: path.resolve(args.cwd),
+    ...(args.sourceProjectRoot ? { sourceProjectRoot: path.resolve(args.sourceProjectRoot) } : {}),
     branchTip: normalizedTip(args.branchTip),
   };
 }
@@ -161,6 +171,9 @@ function intakeIdentity(record: Omit<SedimentIntakeRecord, "windowId">): Record<
     sessionId: record.sessionId,
     sessionFile: record.sessionFile,
     cwd: record.cwd,
+    // Legacy v2 receipts omit sourceProjectRoot; only include when present so
+    // existing windowIds continue to validate.
+    ...(record.sourceProjectRoot ? { sourceProjectRoot: record.sourceProjectRoot } : {}),
     branchTip: record.branchTip,
     sourceDigest: record.sourceDigest,
     anchor: record.anchor ?? null,
@@ -172,6 +185,7 @@ export function computeSedimentIntakeWindowId(args: {
   sessionId: string;
   sessionFile: string;
   cwd: string;
+  sourceProjectRoot?: string;
   branchTip: SedimentIntakeBranchTip;
   anchor?: SedimentIntakeAnchor;
   captureBoundary: SedimentIntakeCaptureBoundary;
@@ -182,6 +196,7 @@ export function computeSedimentIntakeWindowId(args: {
     sessionId: args.sessionId,
     sessionFile: path.resolve(args.sessionFile),
     cwd: path.resolve(args.cwd),
+    ...(args.sourceProjectRoot ? { sourceProjectRoot: path.resolve(args.sourceProjectRoot) } : {}),
     branchTip: normalizedTip(args.branchTip),
     sourceDigest: canonicalHash(coordinates),
     ...(args.anchor ? { anchor: args.anchor } : {}),
@@ -194,18 +209,21 @@ export function buildSedimentIntakeRecord(args: {
   sessionId: string;
   sessionFile: string;
   cwd: string;
+  sourceProjectRoot?: string;
   branchTip: SedimentIntakeBranchTip;
   anchor?: SedimentIntakeAnchor;
   captureBoundary: SedimentIntakeCaptureBoundary;
 }): SedimentIntakeRecord {
   if (!args.sessionId) throw new Error("sediment intake sessionId is required");
   if (!args.sessionFile) throw new Error("sediment intake sessionFile is required");
-  const coordinates = sourceCoordinates(args);
+  const sourceProjectRoot = args.sourceProjectRoot ? path.resolve(args.sourceProjectRoot) : undefined;
+  const coordinates = sourceCoordinates({ ...args, sourceProjectRoot });
   const withoutId: Omit<SedimentIntakeRecord, "windowId"> = {
     schema: SEDIMENT_INTAKE_SCHEMA,
     sessionId: args.sessionId,
     sessionFile: path.resolve(args.sessionFile),
     cwd: path.resolve(args.cwd),
+    ...(sourceProjectRoot ? { sourceProjectRoot } : {}),
     branchTip: normalizedTip(args.branchTip),
     sourceDigest: canonicalHash(coordinates),
     ...(args.anchor ? { anchor: args.anchor } : {}),
@@ -226,6 +244,97 @@ export function buildSedimentIntakeRecord(args: {
   return { ...withoutId, windowId: canonicalHash(intakeIdentity(withoutId)) };
 }
 
+/**
+ * Resolve the physical evaluation-owner root for a durable intake receipt.
+ *
+ * Preference order:
+ *   1. explicit sourceProjectRoot (new receipts)
+ *   2. git/bind root derived from receipt cwd (legacy v2)
+ *   3. git/bind root derived from session JSONL header cwd (legacy fallback)
+ *
+ * Returns null when ownership cannot be confirmed reliably. Callers must not
+ * claim/evaluate such receipts from an arbitrary instance; leave pending and
+ * only write status/audit.
+ */
+export function resolveSedimentIntakeOwnerProjectRoot(
+  record: Pick<SedimentIntakeRecord, "cwd" | "sessionFile" | "sourceProjectRoot">,
+  opts?: { abrainHome?: string },
+): string | null {
+  if (typeof record.sourceProjectRoot === "string" && record.sourceProjectRoot.trim()) {
+    return path.resolve(record.sourceProjectRoot);
+  }
+  const abrainHome = opts?.abrainHome ?? path.join(path.resolve(process.env.HOME || "/"), ".abrain");
+  try {
+    const fromCwd = normalizeProjectRoot(record.cwd, { abrainHome });
+    if (fromCwd.projectRoot) return path.resolve(fromCwd.projectRoot);
+  } catch {
+    // fall through to session source
+  }
+  try {
+    const raw = fsSync.readFileSync(record.sessionFile, "utf-8");
+    const firstLine = raw.split(/\r?\n/).find((line) => line.trim().length > 0);
+    if (!firstLine) return null;
+    const header = JSON.parse(firstLine) as { type?: string; cwd?: string };
+    if (header?.type === "session" && typeof header.cwd === "string" && header.cwd.trim()) {
+      const fromSession = normalizeProjectRoot(header.cwd, { abrainHome });
+      if (fromSession.projectRoot) return path.resolve(fromSession.projectRoot);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export type SedimentIntakeOwnerSelection = {
+  selected: SedimentIntakeListItem[];
+  skippedForeign: SedimentIntakeListItem[];
+  unconfirmedOwner: SedimentIntakeListItem[];
+};
+
+/**
+ * Partition pending intake by physical owner root equality.
+ * Same project_id with different checkouts (e.g. pi-router vs pi-router2)
+ * stay isolated — never scan/select by projectId alone.
+ */
+export async function selectSedimentIntakePendingForOwnerRoot(
+  abrainHome: string,
+  ownerProjectRoot: string,
+): Promise<SedimentIntakeOwnerSelection> {
+  const want = path.resolve(ownerProjectRoot);
+  const pending = await listSedimentIntakePending(abrainHome);
+  const selected: SedimentIntakeListItem[] = [];
+  const skippedForeign: SedimentIntakeListItem[] = [];
+  const unconfirmedOwner: SedimentIntakeListItem[] = [];
+  for (const item of pending) {
+    let record: SedimentIntakeRecord | null = null;
+    try {
+      record = await readSedimentIntakeRecord(abrainHome, item.windowId);
+    } catch {
+      unconfirmedOwner.push(item);
+      continue;
+    }
+    if (!record) {
+      unconfirmedOwner.push(item);
+      continue;
+    }
+    const owner = resolveSedimentIntakeOwnerProjectRoot(record, { abrainHome });
+    if (!owner) {
+      unconfirmedOwner.push(item);
+      continue;
+    }
+    if (path.resolve(owner) === want) selected.push(item);
+    else skippedForeign.push(item);
+  }
+  return { selected, skippedForeign, unconfirmedOwner };
+}
+
+export async function listSedimentIntakePendingForOwnerRoot(
+  abrainHome: string,
+  ownerProjectRoot: string,
+): Promise<SedimentIntakeListItem[]> {
+  return (await selectSedimentIntakePendingForOwnerRoot(abrainHome, ownerProjectRoot)).selected;
+}
+
 function validateRecord(record: SedimentIntakeRecord, expectedWindowId?: string): void {
   if (!record || record.schema !== SEDIMENT_INTAKE_SCHEMA) throw new Error("unsupported sediment intake schema");
   if (expectedWindowId && record.windowId !== expectedWindowId) throw new Error("sediment intake filename/windowId mismatch");
@@ -233,6 +342,7 @@ function validateRecord(record: SedimentIntakeRecord, expectedWindowId?: string)
     sessionId: record.sessionId,
     sessionFile: record.sessionFile,
     cwd: record.cwd,
+    sourceProjectRoot: record.sourceProjectRoot,
     branchTip: record.branchTip,
     anchor: record.anchor,
     captureBoundary: record.captureBoundary,
