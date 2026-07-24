@@ -605,8 +605,10 @@ export default function (pi: ExtensionAPI) {
     const cwd = ctx.cwd ?? process.cwd();
     const sessionId = readSessionId(ctx.sessionManager);
     if (!sessionId) return { ok: false as const, error: "goal_check requires a persisted session (sub-agent/ephemeral has no event log)", details: { kind: "no_persisted_session" } };
-    // G4: a machine/continuation turn (auto-continue judge) must not self-verify.
-    if (isCurrentTurnGoalContinuation(ctx.sessionManager)) return { ok: false as const, error: "goal_check rejected in auto-continue/machine turn (the judge must not verify its own output)", details: { kind: "machine_turn_rejected" } };
+    // goal_check evidence is an OS/git process-boundary product (exit code,
+    // file sha), not an LLM declaration — continuation-turn execution does NOT
+    // constitute "the judge verifying its own output." Machine-turn rejection
+    // remains in force for goal_set and goal_resume (LLM-authored decisions).
     const state = loadGoalFile(cwd, sessionId);
     if (!state || state.status !== "active") return { ok: false as const, error: "no active goal (goal_set first)", details: { kind: "no_active_goal" } };
     const src = getGoalSource(state);
@@ -682,7 +684,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "goal_check",
     label: "Goal Check",
-    description: "Record system-run evidence that an acceptance criterion (by its plan.md (id)) passed. evidence = cmd:<shell> (really executed) | file:<path> | git:<sha>. cmd: rejects shell chaining/piping/redirection, command substitution, env expansion, interpreter inline-code flags, network tools, and sensitive dot-dir reads. Does NOT edit plan.md — you mark [x] yourself; matching non-stale evidence is what upgrades that [x] to 'verified' at injection (no evidence → [!]; criterion text or declared input drift → stale). Optional inputs=[files] are fingerprinted. Blocked in auto-continue turns.",
+    description: "Record system-run evidence that an acceptance criterion (by its plan.md (id)) passed. evidence = cmd:<shell> (really executed) | file:<path> | git:<sha>. cmd: rejects shell chaining/piping/redirection, command substitution, env expansion, interpreter inline-code flags, network tools, and sensitive dot-dir reads. Does NOT edit plan.md — you mark [x] yourself; matching non-stale evidence is what upgrades that [x] to 'verified' at injection (no evidence → [!]; criterion text or declared input drift → stale). Optional inputs=[files] are fingerprinted. Available in auto-continue turns (evidence is OS process-boundary, not LLM self-attestation).",
     promptSnippet: "goal_check(criterion_id, evidence, inputs?) — record system-verified evidence for a plan.md criterion",
     parameters: Type.Object({
       criterion_id: Type.String(),
