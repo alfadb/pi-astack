@@ -52,6 +52,7 @@ if (REAL_PNG_1X1[0] !== 0x89 || REAL_PNG_1X1.subarray(1, 4).toString("ascii") !=
 let moduleExports;
 let prodValidateImagePath;
 let prodResolveImage;
+let prodIsPathInside;
 try {
   // Append smoke-only exports so tests exercise production functions without
   // widening the production API surface of vision/index.ts.
@@ -59,7 +60,8 @@ try {
     transpile(visionSrc) +
     "\n// smoke-only exports (not part of production API)\n" +
     "exports.__smokeValidateImagePath = validateImagePath;\n" +
-    "exports.__smokeResolveImage = resolveImage;\n";
+    "exports.__smokeResolveImage = resolveImage;\n" +
+    "exports.__smokeIsPathInside = isPathInside;\n";
   // Wrap to extract exports / top-level functions we want to test
   // We use a VM context to avoid polluting global scope
   const vm = require("node:vm");
@@ -84,7 +86,7 @@ try {
       };
       throw new Error(`unexpected require: ${m}`);
     },
-    process: { cwd: () => os.tmpdir(), env: { PI_ABRAIN_DISABLED: "1" } },
+    process: { cwd: () => os.tmpdir(), env: { PI_ABRAIN_DISABLED: "1" }, platform: process.platform },
     console,
     setTimeout,
     clearTimeout,
@@ -99,10 +101,15 @@ try {
   moduleExports = ctx.module.exports;
   prodValidateImagePath = moduleExports.__smokeValidateImagePath;
   prodResolveImage = moduleExports.__smokeResolveImage;
-  if (typeof prodValidateImagePath !== "function" || typeof prodResolveImage !== "function") {
+  prodIsPathInside = moduleExports.__smokeIsPathInside;
+  if (
+    typeof prodValidateImagePath !== "function" ||
+    typeof prodResolveImage !== "function" ||
+    typeof prodIsPathInside !== "function"
+  ) {
     throw new Error(
       "smoke-only production exports missing " +
-      `(validateImagePath=${typeof prodValidateImagePath}, resolveImage=${typeof prodResolveImage})`,
+      `(validateImagePath=${typeof prodValidateImagePath}, resolveImage=${typeof prodResolveImage}, isPathInside=${typeof prodIsPathInside})`,
     );
   }
 } catch (err) {
@@ -124,9 +131,16 @@ const EXT_MIME = {
   ".gif": "image/gif",
 };
 
-function isPathInside(abs, root) {
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  return abs === root || abs.startsWith(rootWithSep);
+function isPathInside(abs, root, pathApi = path) {
+  const sep = pathApi.sep;
+  let a = abs;
+  let r = root;
+  if (sep === "\\") {
+    a = a.toLowerCase();
+    r = r.toLowerCase();
+  }
+  const rootWithSep = r.endsWith(sep) ? r : r + sep;
+  return a === r || a.startsWith(rootWithSep);
 }
 
 function validateImagePath(userPath, cwd) {
@@ -136,13 +150,19 @@ function validateImagePath(userPath, cwd) {
   }
   const rootRaw = path.resolve(cwd ?? process.cwd());
   const absRaw = path.resolve(rootRaw, userPath);
-  const tmpRaw = path.resolve("/tmp");
-  let root, abs, tmpRoot;
+  const tmpRawList =
+    process.platform === "win32"
+      ? [path.resolve(os.tmpdir())]
+      : [...new Set([path.resolve(os.tmpdir()), path.resolve("/tmp")])];
+  let root, abs;
+  const tmpRoots = [];
   try { root = fs.realpathSync(rootRaw); } catch { root = rootRaw; }
   try { abs = fs.realpathSync(absRaw); } catch { abs = absRaw; }
-  try { tmpRoot = fs.realpathSync(tmpRaw); } catch { tmpRoot = tmpRaw; }
-  if (!isPathInside(abs, root) && !isPathInside(abs, tmpRoot)) {
-    return { ok: false, error: `Image path resolves outside the project root and /tmp.` };
+  for (const tmpRaw of tmpRawList) {
+    try { tmpRoots.push(fs.realpathSync(tmpRaw)); } catch { tmpRoots.push(tmpRaw); }
+  }
+  if (!isPathInside(abs, root) && !tmpRoots.some((tmpRoot) => isPathInside(abs, tmpRoot))) {
+    return { ok: false, error: `Image path resolves outside the project root and system temporary directory.` };
   }
   return { ok: true, abs, ext };
 }
@@ -211,17 +231,20 @@ console.log("\n  validateImagePath (security):");
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-// Project root deliberately outside /tmp so /tmp allowance is not conflated
-// with ordinary project-root containment (mkdtemp under os.tmpdir often is /tmp).
-// These cases call the production validateImagePath from extensions/vision/index.ts
-// (smoke-only export on the transpiled module), not the local reimplementation above.
-console.log("\n  production validateImagePath (/tmp allowance + escape defense):");
+// Project root deliberately outside os.tmpdir() so temp-dir allowance is not
+// conflated with ordinary project-root containment (mkdtemp under os.tmpdir
+// often IS the system temp). These cases call the production validateImagePath
+// from extensions/vision/index.ts (smoke-only export), not the local reimpl.
+console.log("\n  production validateImagePath (system temp allowance + escape defense):");
 {
+  const sysTmp = os.tmpdir();
   const project = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-proj-"));
   const outsideHome = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-out-"));
-  const tmpImg = path.join("/tmp", `smoke-vision-allow-${process.pid}-${Date.now()}.png`);
+  const tmpImg = path.join(sysTmp, `smoke-vision-allow-${process.pid}-${Date.now()}.png`);
   const outsideImg = path.join(outsideHome, "secret.png");
-  const escapeLink = path.join("/tmp", `smoke-vision-escape-${process.pid}-${Date.now()}.png`);
+  const escapeLink = path.join(sysTmp, `smoke-vision-escape-${process.pid}-${Date.now()}.png`);
+  const tmpLookalike = (sysTmp.endsWith(path.sep) ? sysTmp.slice(0, -1) : sysTmp) + "-not-really";
+  const lookalikeImg = path.join(tmpLookalike, "evil.png");
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
@@ -236,26 +259,41 @@ console.log("\n  production validateImagePath (/tmp allowance + escape defense):
     fs.writeFileSync(tmpImg, REAL_PNG_1X1);
     fs.writeFileSync(outsideImg, REAL_PNG_1X1);
 
-    // success: absolute image under real /tmp while cwd is a non-/tmp project
+    // success: absolute image under real system temp while cwd is a non-temp project
     const rTmp = prodValidateImagePath(tmpImg, project);
-    if (rTmp.ok && rTmp.abs === fs.realpathSync(tmpImg)) ok("production accepts real image under /tmp");
-    else failMsg(`production rejected /tmp image: ${JSON.stringify(rTmp)}`);
+    if (rTmp.ok && rTmp.abs === fs.realpathSync(tmpImg)) ok("production accepts real image under system temp dir");
+    else failMsg(`production rejected system-temp image: ${JSON.stringify(rTmp)}`);
 
-    // reject: path outside both project root and /tmp
+    // reject: path outside both project root and system temp
     const rOut = prodValidateImagePath(outsideImg, project);
-    if (!rOut.ok && rOut.error.includes("outside")) ok("production rejects path outside project and /tmp");
+    if (!rOut.ok && rOut.error.includes("outside")) ok("production rejects path outside project and system temp");
     else failMsg(`production accepted outside path: ${JSON.stringify(rOut)}`);
 
-    // reject: /tmp symlink whose realpath target escapes allowed roots
-    fs.symlinkSync(outsideImg, escapeLink);
-    const rEsc = prodValidateImagePath(escapeLink, project);
-    if (!rEsc.ok && rEsc.error.includes("outside")) ok("production rejects /tmp symlink escape after realpath");
-    else failMsg(`production accepted /tmp symlink escape: ${JSON.stringify(rEsc)}`);
+    // reject: temp-dir symlink whose realpath target escapes allowed roots.
+    // On Windows, creating a file symlink often needs admin/Developer Mode;
+    // only EPERM/EACCES/ENOSYS are visible skips — other errors still fail.
+    let symlinkReady = false;
+    try {
+      fs.symlinkSync(outsideImg, escapeLink);
+      symlinkReady = true;
+    } catch (e) {
+      const code = e && e.code;
+      if (process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "ENOSYS")) {
+        ok(`skip temp symlink escape on Windows (${code}: cannot create file symlink)`);
+      } else {
+        failMsg(`temp symlink setup failed: ${code || e.message}`);
+      }
+    }
+    if (symlinkReady) {
+      const rEsc = prodValidateImagePath(escapeLink, project);
+      if (!rEsc.ok && rEsc.error.includes("outside")) ok("production rejects temp-dir symlink escape after realpath");
+      else failMsg(`production accepted temp-dir symlink escape: ${JSON.stringify(rEsc)}`);
+    }
 
-    // prefix guard: /tmp-not-really is not under /tmp
-    const rPrefix = prodValidateImagePath("/tmp-not-really/evil.png", project);
-    if (!rPrefix.ok && rPrefix.error.includes("outside")) ok("production rejects /tmp prefix lookalike");
-    else failMsg(`production accepted /tmp prefix lookalike: ${JSON.stringify(rPrefix)}`);
+    // prefix guard: <tmpdir>-not-really is not under system temp
+    const rPrefix = prodValidateImagePath(lookalikeImg, project);
+    if (!rPrefix.ok && rPrefix.error.includes("outside")) ok("production rejects system-temp prefix lookalike");
+    else failMsg(`production accepted system-temp prefix lookalike: ${JSON.stringify(rPrefix)}`);
   } finally {
     cleanup();
   }
@@ -376,15 +414,16 @@ async function resolveImage(input, cwd) {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-// Production resolveImage (/tmp read path) — calls the transpiled vision module
-// with real fs/promises so file bytes are actually loaded from disk.
-console.log("\n  production resolveImage (/tmp real PNG read):");
+// Production resolveImage (system-temp read path) — calls the transpiled vision
+// module with real fs/promises so file bytes are actually loaded from disk.
+console.log("\n  production resolveImage (system temp real PNG read):");
 {
+  const sysTmp = os.tmpdir();
   const project = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-resolve-"));
   const outsideHome = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-resolve-out-"));
-  const tmpImg = path.join("/tmp", `smoke-vision-resolve-${process.pid}-${Date.now()}.png`);
+  const tmpImg = path.join(sysTmp, `smoke-vision-resolve-${process.pid}-${Date.now()}.png`);
   const outsideImg = path.join(outsideHome, "secret.png");
-  const escapeLink = path.join("/tmp", `smoke-vision-resolve-escape-${process.pid}-${Date.now()}.png`);
+  const escapeLink = path.join(sysTmp, `smoke-vision-resolve-escape-${process.pid}-${Date.now()}.png`);
   let cleaned = false;
   const cleanup = () => {
     if (cleaned) return;
@@ -396,39 +435,53 @@ console.log("\n  production resolveImage (/tmp real PNG read):");
   };
 
   try {
-    // Runtime-created real PNG under /tmp; project cwd is deliberately not under /tmp.
+    // Runtime-created real PNG under system temp; project cwd is deliberately not under it.
     fs.writeFileSync(tmpImg, REAL_PNG_1X1);
     fs.writeFileSync(outsideImg, REAL_PNG_1X1);
     const onDisk = await fs.promises.readFile(tmpImg);
     if (!onDisk.equals(REAL_PNG_1X1)) {
-      failMsg("on-disk /tmp PNG bytes do not match fixture");
+      failMsg("on-disk system-temp PNG bytes do not match fixture");
     } else {
-      ok("wrote real PNG bytes under /tmp");
+      ok("wrote real PNG bytes under system temp dir");
     }
 
     const expected = REAL_PNG_1X1.toString("base64");
     const r7 = await prodResolveImage({ path: tmpImg, prompt: "test" }, project);
     if (r7 && !("ok" in r7 && r7.ok === false) && r7.base64 === expected && r7.mimeType === "image/png") {
-      ok("production resolveImage reads real /tmp PNG from non-/tmp cwd");
+      ok("production resolveImage reads real system-temp PNG from non-temp cwd");
     } else {
-      failMsg(`production /tmp resolveImage: ${JSON.stringify(r7)}`);
+      failMsg(`production system-temp resolveImage: ${JSON.stringify(r7)}`);
     }
 
-    // reject: outside both project and /tmp must not resolve through production path
+    // reject: outside both project and system temp must not resolve through production path
     const rOut = await prodResolveImage({ path: outsideImg, prompt: "test" }, project);
     if (rOut && rOut.ok === false && String(rOut.error || "").includes("outside")) {
-      ok("production resolveImage rejects path outside project and /tmp");
+      ok("production resolveImage rejects path outside project and system temp");
     } else {
       failMsg(`production resolveImage accepted outside path: ${JSON.stringify(rOut)}`);
     }
 
-    // reject: /tmp symlink escape must not load outside bytes
-    fs.symlinkSync(outsideImg, escapeLink);
-    const rEsc = await prodResolveImage({ path: escapeLink, prompt: "test" }, project);
-    if (rEsc && rEsc.ok === false && String(rEsc.error || "").includes("outside")) {
-      ok("production resolveImage rejects /tmp symlink escape");
-    } else {
-      failMsg(`production resolveImage accepted symlink escape: ${JSON.stringify(rEsc)}`);
+    // reject: temp-dir symlink escape must not load outside bytes.
+    // Windows file-symlink privilege failures are visible skips only for EPERM/EACCES/ENOSYS.
+    let symlinkReady = false;
+    try {
+      fs.symlinkSync(outsideImg, escapeLink);
+      symlinkReady = true;
+    } catch (e) {
+      const code = e && e.code;
+      if (process.platform === "win32" && (code === "EPERM" || code === "EACCES" || code === "ENOSYS")) {
+        ok(`skip resolveImage temp symlink escape on Windows (${code}: cannot create file symlink)`);
+      } else {
+        failMsg(`resolveImage temp symlink setup failed: ${code || e.message}`);
+      }
+    }
+    if (symlinkReady) {
+      const rEsc = await prodResolveImage({ path: escapeLink, prompt: "test" }, project);
+      if (rEsc && rEsc.ok === false && String(rEsc.error || "").includes("outside")) {
+        ok("production resolveImage rejects temp-dir symlink escape");
+      } else {
+        failMsg(`production resolveImage accepted symlink escape: ${JSON.stringify(rEsc)}`);
+      }
     }
   } finally {
     cleanup();
@@ -483,23 +536,128 @@ console.log("\n  modelRegistry null-guard (P0 fix):");
   else failMsg("error message does not reference modelRegistry");
 }
 
-// ── Test 5: production source keeps /tmp realpath allowance ─────
+// ── Test 5: production source keeps platform temp realpath allowance ─
 
-console.log("\n  production source (/tmp allowance contract):");
+console.log("\n  production source (system temp allowance contract):");
 {
   const source = fs.readFileSync(visionSrc, "utf8");
-  const hasTmpResolve = source.includes('path.resolve("/tmp")') || source.includes("path.resolve('/tmp')");
-  if (hasTmpResolve) ok("source realpath-roots /tmp");
-  else failMsg("vision/index.ts missing path.resolve(\"/tmp\")");
+  const hasTmpdir = source.includes("os.tmpdir()");
+  if (hasTmpdir) ok("source uses os.tmpdir() for temp root");
+  else failMsg("vision/index.ts missing os.tmpdir()");
+
+  // Must not treat path.resolve("/tmp") as the sole/cross-platform temp root.
+  const hardcodesOnlyTmp =
+    (source.includes('path.resolve("/tmp")') || source.includes("path.resolve('/tmp')")) &&
+    !source.includes("os.tmpdir()");
+  if (!hardcodesOnlyTmp) ok("source does not hardcode path.resolve(\"/tmp\") as sole temp root");
+  else failMsg("vision/index.ts still hardcodes path.resolve(\"/tmp\") without os.tmpdir()");
+
+  const hasWinGuard = source.includes('platform === "win32"') || source.includes("platform === 'win32'");
+  if (hasWinGuard) ok("source gates Unix /tmp with win32 platform check");
+  else failMsg("vision/index.ts missing win32 guard around /tmp");
 
   const hasDualContainment =
-    source.includes("isPathInside(abs, root)") && source.includes("isPathInside(abs, tmpRoot)");
-  if (hasDualContainment) ok("source allows project root or real /tmp only");
+    source.includes("isPathInside(abs, root)") &&
+    (source.includes("isPathInside(abs, tmpRoot)") || source.includes("tmpRoots.some"));
+  if (hasDualContainment) ok("source allows project root or real system temp only");
   else failMsg("vision/index.ts missing dual isPathInside containment");
 
-  const hasOutsideMsg = source.includes("outside the project root and /tmp");
-  if (hasOutsideMsg) ok("source error mentions project root and /tmp");
-  else failMsg("vision/index.ts rejection message missing /tmp wording");
+  const hasOutsideMsg =
+    source.includes("system temporary directory") ||
+    source.includes("system temp");
+  if (hasOutsideMsg) ok("source error mentions system temporary directory");
+  else failMsg("vision/index.ts rejection message missing system-temp wording");
+
+  const hasWinCase =
+    source.includes('sep === "\\\\"') || source.includes("toLowerCase()");
+  if (hasWinCase) ok("source isPathInside handles Windows case-insensitive containment");
+  else failMsg("vision/index.ts isPathInside missing Windows case handling");
+}
+
+// ── Test 6: pure path Windows / posix containment regression ─────
+// Exercises production isPathInside with path.win32 / path.posix so Windows
+// semantics are verified even when smoke runs on Linux.
+
+console.log("\n  isPathInside (Windows path.win32 semantics):");
+{
+  const win = path.win32;
+
+  if (prodIsPathInside("C:\\Temp\\img.png", "C:\\temp", win)) {
+    ok("win32: case-insensitive directory match");
+  } else {
+    failMsg("win32: rejected case-different path under temp");
+  }
+
+  if (prodIsPathInside("c:\\Temp\\img.png", "C:\\Temp", win)) {
+    ok("win32: case-insensitive drive letter");
+  } else {
+    failMsg("win32: rejected case-different drive letter");
+  }
+
+  if (!prodIsPathInside("C:\\Temp2\\img.png", "C:\\Temp", win)) {
+    ok("win32: C:\\Temp2 is not inside C:\\Temp");
+  } else {
+    failMsg("win32: incorrectly treated C:\\Temp2 as inside C:\\Temp");
+  }
+
+  if (!prodIsPathInside("D:\\Temp\\img.png", "C:\\Temp", win)) {
+    ok("win32: other drive rejected");
+  } else {
+    failMsg("win32: accepted path on other drive");
+  }
+
+  if (prodIsPathInside("C:\\Temp", "C:\\Temp", win)) {
+    ok("win32: exact root match");
+  } else {
+    failMsg("win32: exact root rejected");
+  }
+
+  if (prodIsPathInside("C:\\Temp\\a\\b.png", "C:\\Temp", win)) {
+    ok("win32: nested path inside");
+  } else {
+    failMsg("win32: nested path rejected");
+  }
+
+  if (!prodIsPathInside("C:\\Temp", "C:\\Temp\\sub", win)) {
+    ok("win32: parent is not inside child");
+  } else {
+    failMsg("win32: parent incorrectly inside child");
+  }
+}
+
+console.log("\n  isPathInside (posix regression — Linux must not loosen):");
+{
+  const posix = path.posix;
+
+  if (prodIsPathInside("/tmp/foo.png", "/tmp", posix)) {
+    ok("posix: /tmp/foo inside /tmp");
+  } else {
+    failMsg("posix: /tmp/foo rejected");
+  }
+
+  if (!prodIsPathInside("/tmp2/foo.png", "/tmp", posix)) {
+    ok("posix: /tmp2 not inside /tmp");
+  } else {
+    failMsg("posix: /tmp2 incorrectly inside /tmp");
+  }
+
+  if (!prodIsPathInside("/tmp/Foo", "/tmp/foo", posix)) {
+    ok("posix: case-sensitive (no false match on case alone)");
+  } else {
+    failMsg("posix: case-insensitive false match (Linux regression)");
+  }
+
+  if (!prodIsPathInside("/var/foo.png", "/tmp", posix)) {
+    ok("posix: other tree rejected");
+  } else {
+    failMsg("posix: /var incorrectly inside /tmp");
+  }
+
+  if (prodIsPathInside("/tmp", "/tmp", posix)) {
+    ok("posix: exact root match");
+  } else {
+    failMsg("posix: exact root rejected");
+  }
 }
 
 // ── Summary ─────────────────────────────────────────────────────

@@ -14,9 +14,9 @@
  * Security model (path-based image loads):
  *   1. Extension allowlist — only .png/.jpg/.jpeg/.webp/.gif accepted.
  *   2. Path containment — resolved path must stay under the project root
- *      or under /tmp (the only extra allowed root).
- *   3. Symlink defense — realpath resolution on both sides (and on /tmp)
- *      prevents symlink-based escape from those roots.
+ *      or under the system temporary directory (os.tmpdir(); /tmp on Unix).
+ *   3. Symlink defense — realpath resolution on both sides (and on the temp
+ *      root(s)) prevents symlink-based escape from those roots.
  * Together these prevent an LLM-supplied path from exfiltrating arbitrary
  * files (secrets, config, private keys) through a vision provider round-trip.
  */
@@ -127,10 +127,26 @@ type ResolvedImage = { base64: string; mimeType: string };
 
 // ── Path validation (security) ──────────────────────────────────
 
-/** Trailing-separator containment: `/a/bc` is not inside `/a/b`. */
-function isPathInside(abs: string, root: string): boolean {
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  return abs === root || abs.startsWith(rootWithSep);
+/**
+ * Trailing-separator containment: `/a/bc` is not inside `/a/b`.
+ * On Windows (pathApi.sep === "\\"), comparison is case-insensitive so
+ * drive-letter / directory casing differences do not false-reject.
+ * `pathApi` is injectable so smoke can exercise path.win32 on non-Windows hosts.
+ */
+function isPathInside(
+  abs: string,
+  root: string,
+  pathApi: { sep: string } = path,
+): boolean {
+  const sep = pathApi.sep;
+  let a = abs;
+  let r = root;
+  if (sep === "\\") {
+    a = a.toLowerCase();
+    r = r.toLowerCase();
+  }
+  const rootWithSep = r.endsWith(sep) ? r : r + sep;
+  return a === r || a.startsWith(rootWithSep);
 }
 
 /**
@@ -139,9 +155,10 @@ function isPathInside(abs: string, root: string): boolean {
  * Three layers of defense:
  *   1. Extension allowlist — only image extensions permitted.
  *   2. Path containment — resolved path must stay under the project root
- *      or under /tmp (extra allowed root for ephemeral screenshots/etc.).
- *   3. Symlink resolution — realpath on project root, /tmp, and the target
- *      so a /tmp symlink cannot escape into other sensitive directories.
+ *      or under the system temporary directory (os.tmpdir(); also /tmp on
+ *      Unix when distinct) for ephemeral screenshots/etc.
+ *   3. Symlink resolution — realpath on project root, temp root(s), and the
+ *      target so a temp-dir symlink cannot escape into other sensitive dirs.
  *
  * Returns the absolute path on success, or a VisionErr.
  */
@@ -161,25 +178,33 @@ function validateImagePath(
 
   const rootRaw = path.resolve(cwd ?? process.cwd());
   const absRaw = path.resolve(rootRaw, userPath);
-  const tmpRaw = path.resolve("/tmp");
+  // Platform temp tree (TEMP/TMP on Windows). On Unix also allow /tmp when
+  // it differs from os.tmpdir() (e.g. TMPDIR override). Never path.resolve
+  // a bare "/tmp" on Windows — that becomes a drive-relative wrong root.
+  const tmpRawList =
+    process.platform === "win32"
+      ? [path.resolve(os.tmpdir())]
+      : [...new Set([path.resolve(os.tmpdir()), path.resolve("/tmp")])];
 
   // Resolve symlinks on roots and the target. If a side doesn't exist yet,
   // fall back to the lexical path (a non-existent path can't be a
   // symlink-to-secret, so the lexical check is sufficient).
   let root: string;
   let abs: string;
-  let tmpRoot: string;
+  const tmpRoots: string[] = [];
   try { root = fsSync.realpathSync(rootRaw); } catch { root = rootRaw; }
   try { abs = fsSync.realpathSync(absRaw); } catch { abs = absRaw; }
-  try { tmpRoot = fsSync.realpathSync(tmpRaw); } catch { tmpRoot = tmpRaw; }
+  for (const tmpRaw of tmpRawList) {
+    try { tmpRoots.push(fsSync.realpathSync(tmpRaw)); } catch { tmpRoots.push(tmpRaw); }
+  }
 
-  // Allow project root or the real /tmp tree only. Containment is judged on
-  // post-realpath targets so /tmp/foo -> /etc/secret.png is rejected.
-  if (!isPathInside(abs, root) && !isPathInside(abs, tmpRoot)) {
+  // Allow project root or the real system-temp tree only. Containment is
+  // judged on post-realpath targets so tmp/foo -> /etc/secret.png is rejected.
+  if (!isPathInside(abs, root) && !tmpRoots.some((tmpRoot) => isPathInside(abs, tmpRoot))) {
     return {
       ok: false,
       error:
-        `Image path "${userPath}" resolves outside the project root and /tmp (after symlink resolution).`,
+        `Image path "${userPath}" resolves outside the project root and system temporary directory (/tmp on Unix) (after symlink resolution).`,
     };
   }
 
@@ -400,21 +425,22 @@ export default function (pi: ExtensionAPI) {
       "Use when your current model does not support image input. " +
       "Automatically selects the strongest " +
       "vision-capable model from available providers. Accepts base64-encoded " +
-      "images or file paths under the project directory or /tmp.",
+      "images or file paths under the project directory or the system temporary " +
+      "directory (/tmp on Unix).",
     promptSnippet: "vision(imageBase64?, path?, prompt, mimeType?) — analyze an image with the best vision model",
     promptGuidelines: [
       "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images; if the current model supports image input, pass the image directly instead.",
-      "Prefer imageBase64 for images already in context. Use path for local image files within the project or under /tmp.",
+      "Prefer imageBase64 for images already in context. Use path for local image files within the project or under the system temporary directory (/tmp on Unix).",
       "The tool auto-selects the best vision model per your `vision.modelPreferences` setting in pi-astack-settings.json (top-level, no piStack wrapper).",
       "Returns the text analysis from the vision model, along with model info and token usage.",
-      "For path-based loads: only .png/.jpg/.jpeg/.webp/.gif extensions are allowed, and resolved paths must stay under the project root or /tmp (symlink targets outside those roots are rejected).",
+      "For path-based loads: only .png/.jpg/.jpeg/.webp/.gif extensions are allowed, and resolved paths must stay under the project root or the system temporary directory (/tmp on Unix; symlink targets outside those roots are rejected).",
     ],
     parameters: Type.Object({
       imageBase64: Type.Optional(Type.String({
         description: "Base64-encoded image data (preferred for inline images)",
       })),
       path: Type.Optional(Type.String({
-        description: "Path to an image file under the project directory or /tmp (alternative to imageBase64)",
+        description: "Path to an image file under the project directory or system temporary directory (/tmp on Unix; alternative to imageBase64)",
       })),
       mimeType: Type.Optional(Type.String({
         description: "Image MIME type, e.g. image/png, image/jpeg. Auto-inferred from path extension.",
