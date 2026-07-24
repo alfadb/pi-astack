@@ -5,7 +5,8 @@
  * ZERO topology freedom (W7): it can only execute / retry / degrade / abort
  * stages that exist in the persisted declaration — there is no API on this
  * module that adds, removes, or rewires stages at runtime (W8: any such
- * entry point = H5 = ADR 0030).
+ * entry point needs new owner decision + new ADR + independent H5 per
+ * retired ADR 0042 current decision).
  *
  * Spec anchors:
  *  - W11 — on_fail routing consumes ONLY deterministic signals: the

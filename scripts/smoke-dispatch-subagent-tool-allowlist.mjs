@@ -9,7 +9,7 @@
  *     prompt(), including tools registered dynamically by an extension factory
  */
 
-import { readFileSync } from "node:fs";
+import fs, { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -79,8 +79,8 @@ if (!defaultMatch) {
 }
 
 check(
-  /excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, executionContext\?\.delegation\)/.test(src),
-  "createAgentSession applies the context-sensitive disabled set through excludeTools",
+  /excludeTools:\s*resolveSubAgentExcludeTools\(\s*\)/.test(src),
+  "createAgentSession applies the permanent disabled set through excludeTools",
 );
 check(
   !/\bpi\.getAllTools\s*\(/.test(src),
@@ -96,7 +96,7 @@ check(
 );
 const rejectionBlock = src.slice(registryIndex, promptIndex);
 check(
-  /await disposeSubAgentSession\(session, subAgentSm\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
+  /await disposeSubAgentSession\(session\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
   "registry rejection emits shutdown, disposes the target session, and returns tool_rejected",
 );
 check(
@@ -123,38 +123,113 @@ for (const name of ["dynamic_extension_tool", "lsp_diagnostics", "lsp_diagnostic
   const verdict = dispatch.validateTools(name);
   check(verdict.ok, `validateTools defers non-disabled name ${name} to target registry`);
 }
-const shadowDelegation = {
-  mode: "shadow",
-  maxDepth: 1,
-  maxDescendantRuns: 2,
-  maxConcurrentLeaves: 2,
-  maxAcceptedRuns: 2,
-  maxActiveExecutions: 2,
-  maxOpenSessions: 2,
-  maxRuntimeMs: 10_000,
-  allowedModels: ["openai/model-a"],
-  allowedTools: ["dispatch_agent", "read"],
-  allowedProfiles: ["read_only"],
-  allowsMutation: false,
-};
 check(
-  JSON.stringify(dispatch.resolveSubAgentExcludeTools(undefined)) === JSON.stringify(DISABLED),
-  "default SDK exclusion remains the exact five-tool deny set",
+  JSON.stringify(dispatch.resolveSubAgentExcludeTools()) === JSON.stringify(DISABLED),
+  "SDK exclusion remains the exact five-tool deny set",
+);
+// Permanent recursive-dispatch retirement: extra JS args cannot lift the five denials.
+const permanentDenyArgs = [
+  undefined,
+  null,
+  { mode: "shadow", allowedTools: ["dispatch_agent", "dispatch_parallel"] },
+  { maxDepth: 1, allowsMutation: true },
+  "read,dispatch_agent,dispatch_parallel",
+];
+for (const extra of permanentDenyArgs) {
+  for (const name of DISABLED) {
+    const verdict = dispatch.validateTools(
+      name === "dispatch_agent" ? `read,${name}` : name,
+      extra,
+    );
+    check(!verdict.ok, `validateTools permanently denies ${name} even with extra arg ${JSON.stringify(extra)}`);
+  }
+  const excluded = dispatch.resolveSubAgentExcludeTools(extra);
+  check(
+    JSON.stringify(excluded) === JSON.stringify(DISABLED) && excluded !== DISABLED,
+    `resolveSubAgentExcludeTools ignores extra arg and returns a fresh permanent five-tool set (extra=${JSON.stringify(extra)})`,
+  );
+}
+check(
+  dispatch.validateTools.length === 1,
+  "validateTools is single-argument (no delegation exception parameter)",
 );
 check(
-  JSON.stringify(dispatch.resolveSubAgentExcludeTools("read,dispatch_agent", shadowDelegation)) ===
-    JSON.stringify(["dispatch_parallel", "workflow_run", "prompt_user", "vault_release"]),
-  "legal shadow removes only the explicitly requested and capability-authorized dispatch tool",
+  dispatch.resolveSubAgentExcludeTools.length === 0,
+  "resolveSubAgentExcludeTools is zero-argument (no toolsStr / exception parameter)",
 );
 check(
-  !dispatch.validateTools("read", shadowDelegation).ok &&
-    !dispatch.validateTools(undefined, shadowDelegation).ok &&
-    dispatch.resolveSubAgentExcludeTools("read", shadowDelegation).includes("dispatch_agent"),
-  "shadow delegation without an explicitly requested authorized dispatch tool is rejected before binding",
+  dispatch.disposeSubAgentSession.length === 1,
+  "disposeSubAgentSession is single-argument (no sessionManager parameter)",
 );
 check(
-  JSON.stringify(dispatch.resolveSubAgentExcludeTools("read,dispatch_parallel", shadowDelegation)) === JSON.stringify(DISABLED),
-  "allowedTools mismatch keeps all five SDK exclusions",
+  !src.includes("delegation-shadow-bridge") &&
+    !src.includes("delegation-capability") &&
+    !src.includes("delegation-broker") &&
+    !src.includes("delegation-audit") &&
+    !src.includes("tree-governor") &&
+    !src.includes("process-provider-limiter") &&
+    !src.includes("shadowDelegationSchema"),
+  "production dispatch index has no active delegation scaffolding modules",
+);
+check(
+  src.includes("不得再次派发") &&
+    src.includes("dispatch_agent / dispatch_parallel / workflow_run"),
+  "role clarification still permanently forbids recursive dispatch",
+);
+
+const retiredRuntime = [
+  "extensions/dispatch/delegation-capability.ts",
+  "extensions/dispatch/delegation-broker.ts",
+  "extensions/dispatch/delegation-audit.ts",
+  "extensions/dispatch/delegation-shadow-bridge.ts",
+  "extensions/dispatch/tree-governor.ts",
+  "extensions/dispatch/process-provider-limiter.ts",
+  "scripts/smoke-dispatch-delegation.mjs",
+  "scripts/smoke-dispatch-delegation-core.mjs",
+  "scripts/smoke-dispatch-delegation-shadow.mjs",
+  "scripts/smoke-dispatch-delegation-production-replay.mjs",
+];
+for (const rel of retiredRuntime) {
+  const full = resolve(repoRoot, rel);
+  check(!existsSync(full), `retired path absent: ${rel}`);
+}
+
+const productionExtensionsRoot = resolve(repoRoot, "extensions");
+function walkTs(dir, out = []) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = resolve(dir, entry.name);
+    if (entry.isDirectory()) walkTs(full, out);
+    else if (entry.isFile() && entry.name.endsWith(".ts")) out.push(full);
+  }
+  return out;
+}
+const bannedImport = /delegation-shadow-bridge|delegation-capability|delegation-broker|delegation-audit|tree-governor|process-provider-limiter|shadowDelegationSchema/;
+const offenders = [];
+for (const file of walkTs(productionExtensionsRoot)) {
+  const body = readFileSync(file, "utf8");
+  if (bannedImport.test(body)) offenders.push(file.slice(repoRoot.length + 1));
+}
+check(
+  offenders.length === 0,
+  "no active delegation scaffolding tokens under extensions/",
+  `active delegation scaffolding tokens under extensions/: ${offenders.join(", ")}`,
+);
+
+const workflowSrc = readFileSync(resolve(repoRoot, "extensions/workflow/index.ts"), "utf8");
+check(
+  /validateTools\(req\.tools\)/.test(workflowSrc) &&
+    /enforceMutatingEnvGate/.test(workflowSrc),
+  "workflow keeps its independent deny/gate on top of dispatch validateTools",
+);
+
+const workflowDslPath = resolve(repoRoot, "extensions/workflow/dsl.ts");
+const workflowDsl = await jiti.import(workflowDslPath);
+const forbiddenTools = [...workflowDsl.FORBIDDEN_TOOLS].sort();
+const expectedForbidden = ["dispatch_agent", "dispatch_parallel", "dispatch_parallel_subagent"].sort();
+check(
+  JSON.stringify(forbiddenTools) === JSON.stringify(expectedForbidden),
+  "workflow/dsl.ts FORBIDDEN_TOOLS is exactly dispatch_agent, dispatch_parallel, dispatch_parallel_subagent",
+  `workflow/dsl.ts FORBIDDEN_TOOLS drifted: ${forbiddenTools.join(", ")}`,
 );
 
 console.log("\n  real target-session registry:");

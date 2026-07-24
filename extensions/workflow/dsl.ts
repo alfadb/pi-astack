@@ -14,7 +14,9 @@
  *     not referenceable by external needs (parallel = aggregate DAG node)
  *   - tools: whitelist-validated; dispatch-class tools UNCONDITIONALLY
  *     rejected (§6 H5 软肋闭合 — a stage with spawn tools is a de-facto
- *     hub regardless of fixed topology); unknown tools rejected
+ *     hub regardless of fixed topology); any lift / new dynamic-topology
+ *     entry needs new owner decision + new ADR + independent H5 (retired
+ *     ADR 0042 current decision); unknown tools rejected
  *   - mutating tools require BOTH stage `mutating: true` (per-stage
  *     explicit declaration, W9) AND workflow.readOnly=false; readOnly
  *     violations are dry-run FAILURES, never silent stripping
@@ -57,8 +59,9 @@ export const READONLY_TOOLS = new Set([
 export const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 
 /** §6 M1: spawn-class tools are FORBIDDEN in stage tools regardless of any
- *  flag — a stage that can dispatch is a de-facto hub (H5). Lifting this
- *  requires ADR 0030, not a settings change. */
+ *  flag — a stage that can dispatch is a de-facto hub (H5). Any lift / new
+ *  dynamic-topology entry needs new owner decision + new ADR + independent
+ *  H5 (retired ADR 0042 current decision), not a settings change. */
 export const FORBIDDEN_TOOLS = new Set([
   "dispatch_agent", "dispatch_parallel", "dispatch_parallel_subagent",
 ]);
@@ -207,8 +210,9 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
           // (fail-closed); this aligns message precision with dispatch.
           const t = rawTool.toLowerCase().trim();
           if (FORBIDDEN_TOOLS.has(t)) {
-            // H5 软肋闭合 (§6 M1): hard reject, NOT a warning. Lifting = ADR 0030.
-            err(`${where}: tool "${t}" is a spawn-class tool — FORBIDDEN in workflow stages (ADR 0032 §6: a stage that can dispatch is a de-facto hub; lifting this gate requires ADR 0030)`);
+            // H5 软肋闭合 (§6 M1): hard reject, NOT a warning. Lift/new entry =
+            // new owner decision + new ADR + independent H5 (retired ADR 0042).
+            err(`${where}: tool "${t}" is a spawn-class tool — FORBIDDEN in workflow stages (ADR 0032 §6: a stage that can dispatch is a de-facto hub; any lift / new dynamic-topology entry needs new owner decision + new ADR + independent H5 per retired ADR 0042)`);
           } else if (MUTATING_TOOLS.has(t)) {
             hasMutatingTool = true;
           } else if (!READONLY_TOOLS.has(t)) {

@@ -134,28 +134,6 @@ const tsmsOut = ts.transpileModule(fs.readFileSync(tsmsSrc, "utf8"), {
 fs.writeFileSync(path.join(tmpDir, "terminal-state.cjs"), tsmsOut.outputText);
 fs.copyFileSync(path.join(tmpDir, "terminal-state.cjs"), path.join(tmpDir, "terminal-state.js"));
 
-// Stub the non-delegating shadow bridge. Its production behavior has a dedicated
-// real-SDK smoke; this formatter harness only needs the import surface while it
-// exercises pure rendering helpers.
-fs.writeFileSync(
-  path.join(tmpDir, "delegation-shadow-bridge.js"),
-  `module.exports = {
-  activateShadowWorkerBinding: () => {},
-  createShadowWorkerBinding: () => ({}),
-  evaluateShadowDispatchIfBound: async () => undefined,
-  hasShadowWorkerBinding: () => false,
-  shadowDelegationSchema: {},
-  shadowDispatchDenyResult: (operation, reason_code) => ({
-    content: [{ type: "text", text: JSON.stringify({ operation, reason_code }) }],
-    details: { kind: "shadow_no_delegate", operation, decision: "would_deny", reason_code, tasks: [], remaining: {} },
-    isError: true,
-  }),
-  shadowDispatchToolsGranted: () => new Set(),
-  shutdownShadowWorkerBinding: async () => false,
-  validateShadowDelegation: () => ({ ok: false }),
-};\n`,
-);
-
 // Stub the per-worker reasoning writer. formatResult never starts a session,
 // but dispatch/index.ts resolves the module at load time.
 fs.writeFileSync(
@@ -229,6 +207,19 @@ fs.writeFileSync(
   `module.exports = { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR: "provider returned error: ended without visible assistant text after thinking" };\n`,
 );
 
+// input-compat canonicalizes legacy memory_get at load time.
+fs.writeFileSync(
+  path.join(sharedDir, "tool-name-compat.js"),
+  `module.exports = {
+  ABRAIN_GET_TOOL_NAME: "abrain_get",
+  LEGACY_MEMORY_GET_TOOL_NAME: "memory_get",
+  canonicalizeToolName: (name) => name === "memory_get" ? "abrain_get" : name,
+  canonicalizeToolNames: (names) => [...names],
+  canonicalizeToolCsv: (tools) => String(tools ?? ""),
+  isMemoryEntryReadToolName: (name) => name === "abrain_get" || name === "memory_get",
+};\n`,
+);
+
 // Stub `../_shared/pi-internals` — ADR 0027 PR-B added the
 // markSessionAsSubAgent import. formatResult doesn’t use it, but it’s
 // resolved at module load time. No-op stub keeps the loader happy.
@@ -237,6 +228,23 @@ fs.writeFileSync(
   `module.exports = {
   markSessionAsSubAgent: () => {},
   isSubAgentSession: () => false,
+  bindSubAgentBoundarySentinel: () => {},
+};\n`,
+);
+
+// parent contextFiles snapshot helpers are only needed at module load for this harness.
+fs.writeFileSync(
+  path.join(tmpDir, "parent-context-files.js"),
+  `module.exports = {
+  captureParentContextFilesSnapshot: () => [],
+  clearParentContextFilesSnapshotsForSession: () => {},
+  describeParentContextFilesSnapshot: () => "",
+  freezeParentContextFilesSnapshot: (v) => v,
+  isParentContextFilesSnapshot: (v) => Array.isArray(v),
+  normalizeParentContextFiles: (v) => v ?? [],
+  parentContextFilesAuditFields: () => ({}),
+  resolveParentContextFilesSnapshot: () => [],
+  _resetParentContextFilesForTests: () => {},
 };\n`,
 );
 

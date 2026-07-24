@@ -103,10 +103,14 @@ await check("parallel aggregate node: children agent-only, no needs/nesting, no 
   assert(errsOf(empty).includes("non-empty children"), "empty children rejected");
 });
 
-await check("H5 软肋闭合: dispatch-class tools HARD-rejected regardless of flags (ADR 0032 §6)", async () => {
+await check("H5 软肋闭合: dispatch-class tools HARD-rejected (ADR 0042 retirement)", async () => {
   for (const t of ["dispatch_agent", "dispatch_parallel", "dispatch_parallel_subagent"]) {
     const r = D.validateWorkflow(doc([agent("a", { tools: [t], mutating: true })]), RW);
-    assert(!r.ok && errsOf(r).includes("FORBIDDEN") && errsOf(r).includes("ADR 0030"), `${t}: ${errsOf(r)}`);
+    const e = errsOf(r);
+    assert(
+      !r.ok && e.includes("FORBIDDEN") && e.includes("new owner decision") && e.includes("new ADR") && e.includes("independent H5"),
+      `${t}: ${e}`,
+    );
   }
   assert(errsOf(D.validateWorkflow(doc([agent("a", { tools: ["frobnicate"] })]), RO)).includes("unknown tool"), "unknown tool rejected");
 });

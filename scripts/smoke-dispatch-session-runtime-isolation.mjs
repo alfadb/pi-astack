@@ -22,12 +22,10 @@ import { createJiti } from "jiti";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dispatchPath = path.join(repoRoot, "extensions/dispatch/index.ts");
 const piInternalsPath = path.join(repoRoot, "extensions/_shared/pi-internals.ts");
-const shadowBridgePath = path.join(repoRoot, "extensions/dispatch/delegation-shadow-bridge.ts");
 const dispatchSource = fs.readFileSync(dispatchPath, "utf8");
 const jiti = createJiti(import.meta.url);
 const dispatch = await jiti.import(dispatchPath);
 const piInternals = await jiti.import(piInternalsPath);
-const shadowBridge = await jiti.import(shadowBridgePath);
 
 let passed = 0;
 const failures = [];
@@ -86,7 +84,7 @@ await check("production resources and disposal are session-owned", () => {
   const runBlock = dispatchSource.match(/export async function runInProcess\([\s\S]*?\n}\n\n\/\/ ── Result formatting/);
   assert(runBlock, "could not locate runInProcess source block");
   assert(!/session(?:\?\.)?\.dispose\s*\(/.test(runBlock[0]), "runInProcess still directly disposes a session");
-  assert(/await disposeSubAgentSession\(session, (?:subAgentSm|shadowSessionManager)\)/.test(runBlock[0]), "runInProcess does not use production disposal helper");
+  assert(/await disposeSubAgentSession\(session(?:, subAgentSm)?\)/.test(runBlock[0]), "runInProcess does not use production disposal helper");
 });
 
 await check("legacy activation timing cannot bind the main runtime sentinel", async () => {
@@ -147,69 +145,6 @@ await check("disposal remains fail-safe when shutdown emission throws", async ()
 });
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-runtime-isolation-"));
-
-await check("shadow audit flush failure cannot reject cached disposal or replace worker result", async () => {
-  const manager = SessionManager.inMemory(tempRoot);
-  shadowBridge.createShadowWorkerBinding(manager, {
-    mode: "shadow",
-    maxDepth: 1,
-    maxDescendantRuns: 1,
-    maxConcurrentLeaves: 1,
-    maxAcceptedRuns: 1,
-    maxActiveExecutions: 1,
-    maxOpenSessions: 1,
-    maxRuntimeMs: 10_000,
-    allowedModels: ["openai/model-a"],
-    allowedTools: ["dispatch_agent", "read"],
-    allowedProfiles: ["read_only"],
-    allowsMutation: false,
-  }, {
-    projectRoot: tempRoot,
-    auditPath: path.join(tempRoot, "flush-failure", "audit.jsonl"),
-    rootRef: `shadowflush.${process.pid}`,
-  });
-
-  let shutdownStarts = 0;
-  let shutdownEmits = 0;
-  let disposeCalls = 0;
-  const observedFailures = [];
-  const session = {
-    extensionRunner: {
-      hasHandlers: (event) => event === "session_shutdown",
-      async emit() { shutdownEmits += 1; },
-    },
-    dispose() { disposeCalls += 1; },
-  };
-  shadowBridge._setShadowBridgeTestHooksForTests({
-    shutdownFlushFailure: Object.assign(new Error("SENSITIVE_SYNTHETIC_FLUSH_BODY"), {
-      code: "shadow_audit_flush_failed",
-    }),
-    onShutdownStart: () => { shutdownStarts += 1; },
-  });
-  dispatch._setShadowShutdownFailureObserverForTests((event) => { observedFailures.push(event); });
-  try {
-    const workerResult = { output: "worker-success" };
-    const result = await (async () => {
-      await Promise.all([
-        dispatch.disposeSubAgentSession(session, manager),
-        dispatch.disposeSubAgentSession(session, manager),
-      ]);
-      return workerResult;
-    })();
-    assert(result === workerResult, "cleanup replaced the successful worker result");
-    assert(shutdownStarts === 1, `shadow shutdown started ${shutdownStarts} times`);
-    assert(shutdownEmits === 1, `session_shutdown emitted ${shutdownEmits} times`);
-    assert(disposeCalls === 1, `session disposed ${disposeCalls} times`);
-    assert(!shadowBridge.hasShadowWorkerBinding(manager), "failed flush left binding active");
-    assert(observedFailures.length === 1, `observed ${observedFailures.length} shutdown failures`);
-    assert(observedFailures[0].phase === "dispose");
-    assert(observedFailures[0].reason_code === "shadow_audit_flush_failed");
-    assert(!JSON.stringify(observedFailures).includes("SENSITIVE_SYNTHETIC_FLUSH_BODY"));
-  } finally {
-    shadowBridge._setShadowBridgeTestHooksForTests();
-    dispatch._setShadowShutdownFailureObserverForTests();
-  }
-});
 
 const agentDir = path.join(tempRoot, "agent");
 fs.mkdirSync(agentDir);
