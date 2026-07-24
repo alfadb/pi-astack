@@ -1,0 +1,131 @@
+{
+  "schema": "sediment-extractor-budget-production-readonly/v1",
+  "generated_at": "2026-07-24T03:46:52.009Z",
+  "abrain_home_hash": "f49275876ecc881f4df8d797b509fd54c3844cabc56d213b527effeacf2e9a45",
+  "target_sessions": [
+    "019f8914-fded-7d80-bd88-93904f61c959",
+    "019f852d-2e1d-7ee2-87e9-8ba44ed1f3bf"
+  ],
+  "settings": {
+    "maxWindowChars": 350000,
+    "maxWindowEntries": 200,
+    "extractorModel": "0510680735d3c79aae6b82769dccc121b4581e1a5dfb9db5cd3082c06abb8372",
+    "extractor_prompt_bound_version": "bounded_window/v1",
+    "fixed_overhead_allowance": 80000
+  },
+  "live_budget": {
+    "enabled": true,
+    "maxPromptChars": 1000000,
+    "maxPromptEstimatedTokens": 300000,
+    "perOperationMaxCallsPerTurn": 12,
+    "perOperationMaxEstimatedTokensPerTurn": 600000
+  },
+  "pending_total": 11,
+  "recent_blocked_llm_extractor_budget_rows_scanned_tail": 19,
+  "recent_blocked_by_target_session": {
+    "019f8914-fded-7d80-bd88-93904f61c959": 19
+  },
+  "sessions": [
+    {
+      "session_id": "019f8914-fded-7d80-bd88-93904f61c959",
+      "session_file_hash": "e9de602bdaa5d592de037e50b1768438216ab61ab6ca3acb5d03f819ef6d251f",
+      "session_file_bytes": 3446611,
+      "pending_count": 7,
+      "pending_window_ids": [
+        "7c57af2839318806118c78c412031bb645b032f09e0353355ae8290f7698ed8f",
+        "4eef14e26a7248800be438cf32f2672cbd5d6183ce59ef0df8b077af99513a89",
+        "a990de2de9561b7e3e63e0dc2febdce26bb7c2e773f504d0a03c0f5df99ff009",
+        "c6c1b27904cf7766994d512cfdc9e3ae275e285944b5f5d3a7a65fb73d388de1",
+        "52984baebe2baa78b23d851b210927ec2fd4d8a8d75b26927c21746adbb30964",
+        "b937895fdbb22943481d6057c2c9e659d1d52a1bf48f9c9694b2c470559cdcd0",
+        "a000d9f2801e38bfec2d9896f5ee6d07babfe21e12c534bb5d866bdd4c5602cf"
+      ],
+      "restore_status": "ok",
+      "branch_entry_count": 408,
+      "branch_tip_id": "1ce1dd64",
+      "full_branch_chars": 1165113,
+      "full_branch_sha256": "76782030137479f994781bdbbfa72ee1d9b162987b17be8472f373f146ba3670",
+      "window": {
+        "chars": 347183,
+        "included_entries": 75,
+        "candidate_entries": 408,
+        "entry_ids_sha256": "36234a8488239f3298a2fc5c606550e0a75fa08030072da70f4c083ded7e57e9",
+        "entry_id_count": 75,
+        "text_sha256": "6289769aa84d0ad5906ea7fc79548fb0f28795236470130ec74dc1a5058b66d2",
+        "skip_reason": null,
+        "first_entry_id": "7ae6c5c4",
+        "last_entry_id": "1df7c41b"
+      },
+      "dry_run": {
+        "source": "bounded_window",
+        "before_full_branch_chars": 1165113,
+        "window_chars": 347183,
+        "after_serialized_prompt_chars": 357889,
+        "prompt_char_cap": 430000,
+        "system_context_chars": 2576,
+        "prompt_fingerprint": "65cd378fcd6bb3ffa97f9b621b279c71db0a80e3d46fbda240d368285dc3f518",
+        "live_budget": {
+          "enabled": true,
+          "maxPromptChars": 1000000,
+          "maxPromptEstimatedTokens": 300000
+        },
+        "wouldAllow_prompt_char_cap": true,
+        "wouldAllow_live_maxPromptChars": true,
+        "wouldAllow_live_estimated_tokens": true,
+        "wouldAllow": true,
+        "legacy_full_branch_would_exceed": true
+      }
+    },
+    {
+      "session_id": "019f852d-2e1d-7ee2-87e9-8ba44ed1f3bf",
+      "session_file_hash": "a3c7ba417aae683899f8e70b61734c7324ae0d85cc1e6bd4177c492df6d89db7",
+      "session_file_bytes": 3332195,
+      "pending_count": 2,
+      "pending_window_ids": [
+        "a304086cfea249126a23c5b39123ea24f5a9d78b9d1457bf205f1fd79be824a9",
+        "a77f48969ed7d5183911accef6b44a08e14334cb06f9fad393ffc19fb34bfc93"
+      ],
+      "restore_status": "ok",
+      "branch_entry_count": 589,
+      "branch_tip_id": "ef26584f",
+      "full_branch_chars": 1528796,
+      "full_branch_sha256": "7aec2712da60e79fb4c1c9d6b74d6ea6799aa0aff255413ac7e7d27be6fa2ed5",
+      "window": {
+        "chars": 330128,
+        "included_entries": 113,
+        "candidate_entries": 589,
+        "entry_ids_sha256": "b23358830f1e1bc807327b1150ce3055f888fe87b8d6c9f837b93e7f280e2beb",
+        "entry_id_count": 113,
+        "text_sha256": "bb899a805053acbcbca19873026a7b1a93b2f17eb47295e53e35f7d65daaf5af",
+        "skip_reason": null,
+        "first_entry_id": "d9695e76",
+        "last_entry_id": "38449a57"
+      },
+      "dry_run": {
+        "source": "bounded_window",
+        "before_full_branch_chars": 1528796,
+        "window_chars": 330128,
+        "after_serialized_prompt_chars": 340834,
+        "prompt_char_cap": 430000,
+        "system_context_chars": 2576,
+        "prompt_fingerprint": "1c12db4b71443f6ea6bed4214a39f5851887435c1dabcde76cc32fd9cacead18",
+        "live_budget": {
+          "enabled": true,
+          "maxPromptChars": 1000000,
+          "maxPromptEstimatedTokens": 300000
+        },
+        "wouldAllow_prompt_char_cap": true,
+        "wouldAllow_live_maxPromptChars": true,
+        "wouldAllow_live_estimated_tokens": true,
+        "wouldAllow": true,
+        "legacy_full_branch_would_exceed": true
+      }
+    }
+  ],
+  "assertions": {
+    "no_prompt_body": true,
+    "no_user_content": true,
+    "no_llm_call": true,
+    "no_pending_consumed": true
+  }
+}

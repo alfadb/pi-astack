@@ -65,6 +65,7 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
+import { BackgroundLlmBudgetExceededError } from "../_shared/llm-audit";
 import { buildProvisionalStagingEntry, buildProvisionalStagingSlug, runCorrectionPipeline, shouldEscalateToCurator, type RelatedEntryCard, type CorrectionSignal } from "./correction-pipeline";
 import { removeStagingEntriesBySlug, writeStagingEntry } from "./staging-loader";
 import type { RuleDraft } from "./rule-writer";
@@ -82,7 +83,7 @@ import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
 import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
 import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
-import { tryGetSessionMessages, verifyPiInternals, warnOnceIfUnavailable, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
+import { verifyPiInternals, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
@@ -124,10 +125,12 @@ import {
   buildSedimentIntakeRecord,
   listSedimentIntakePendingForSession,
   readSedimentIntakeRecord,
+  readSedimentIntakeStatus,
   resolveSedimentIntakeOwnerProjectRoot,
   restoreSedimentIntakeBranch,
   selectSedimentIntakePendingForOwnerRoot,
   tryClaimSedimentIntake,
+  writeSedimentIntakeEvalStatus,
   writeSedimentIntakeRecord,
   writeSedimentIntakeRecoveryStatus,
   type SedimentIntakeRecord,
@@ -2051,7 +2054,118 @@ function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
   // no-op (exact body-hash / slug dedup).
   if (auto.tier1 && !(isCapturedTier1Result(auto.tier1.result) || isTerminalTier1Reject(auto.tier1.result))) return false;
   if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
-  return auto.kind !== "llm_error";
+  // Hold durable pending: true provider llm_error may retry later; prompt
+  // budget exceeded also holds (no ack / no checkpoint advance) but is NOT a
+  // lifecycle tight-retry — same fingerprint is warned once per generation.
+  return auto.kind !== "llm_error" && auto.kind !== "prompt_budget_exceeded";
+}
+
+/** Process-local + intake-status fingerprint set: same window+prompt
+ *  fingerprint warns at most once per process/session generation. */
+const PROMPT_BUDGET_WARNED_KEY = Symbol.for("pi-astack/sediment/prompt-budget-warned/v1");
+
+function promptBudgetWarnedSet(): Set<string> {
+  const g = globalThis as Record<symbol, unknown>;
+  let set = g[PROMPT_BUDGET_WARNED_KEY] as Set<string> | undefined;
+  if (!set) {
+    set = new Set<string>();
+    g[PROMPT_BUDGET_WARNED_KEY] = set;
+  }
+  return set;
+}
+
+export function _resetPromptBudgetWarnedForTests(): void {
+  promptBudgetWarnedSet().clear();
+}
+
+function formatPromptBudgetFooterDetail(auto: {
+  budgetName?: string;
+  budgetCount?: number;
+  budgetLimit?: number;
+  promptChars?: number;
+  deduped?: boolean;
+}): string {
+  const name = auto.budgetName ?? "promptCharCap";
+  const count = auto.budgetCount ?? auto.promptChars;
+  const limit = auto.budgetLimit;
+  // Keep full budget name + numbers; do not slice mid-token ("maxPromp").
+  const core = typeof count === "number" && typeof limit === "number"
+    ? `prompt_budget_exceeded: ${name} ${count} > ${limit}`
+    : "prompt_budget_exceeded";
+  return auto.deduped ? `${core} (deduped)` : core;
+}
+
+/**
+ * Record fingerprint once per process/session generation. Returns true when
+ * this call is a duplicate (caller should suppress footer/audit flood).
+ * Durable intake status is updated on first sighting only; pending is never acked.
+ */
+async function notePromptBudgetExceededOnce(args: {
+  sessionId?: string;
+  intakeWindowId?: string;
+  abrainHome: string;
+  fingerprint: string;
+  window: RunWindow;
+  llmResult: LlmExtractorResult;
+}): Promise<boolean> {
+  const generation = currentForegroundEpoch();
+  const key = [
+    args.sessionId ?? "",
+    String(generation),
+    args.intakeWindowId ?? args.window.lastEntryId ?? "",
+    args.fingerprint,
+  ].join(":");
+  const warned = promptBudgetWarnedSet();
+  if (warned.has(key)) return true;
+
+  // Durable intake status may already hold the same fingerprint from a
+  // prior process — still only process-local set gates this generation's
+  // footer/audit once, but prefer not re-writing identical status.
+  let alreadyDurable = false;
+  if (args.intakeWindowId) {
+    try {
+      const existing = await readSedimentIntakeStatus(args.abrainHome, args.intakeWindowId);
+      if (
+        existing
+        && existing.status === "prompt_budget_exceeded"
+        && existing.prompt_fingerprint === args.fingerprint
+      ) {
+        alreadyDurable = true;
+      }
+    } catch {
+      // best-effort
+    }
+  }
+
+  warned.add(key);
+
+  if (!alreadyDurable && args.intakeWindowId) {
+    try {
+      await writeSedimentIntakeEvalStatus(
+        args.abrainHome,
+        {
+          windowId: args.intakeWindowId,
+          sessionId: args.sessionId ?? "",
+          sessionFile: "",
+        },
+        "prompt_budget_exceeded",
+        {
+          promptFingerprint: args.fingerprint,
+          windowChars: args.llmResult.windowChars ?? args.window.chars,
+          promptChars: args.llmResult.promptChars,
+          windowEntryCount: args.llmResult.windowEntryCount ?? args.window.includedEntries,
+          budgetName: args.llmResult.budgetName,
+          count: args.llmResult.budgetCount,
+          limit: args.llmResult.budgetLimit,
+          source: "bounded_window",
+        },
+      );
+    } catch {
+      // status is best-effort; pending retention does not depend on it
+    }
+  }
+
+  return alreadyDurable;
 }
 
 /** PR-A2 (F5): R3' covered-text extraction that sees BOTH outcome shapes —
@@ -2861,9 +2975,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const branch = snapshot.branchEntries.slice();
       const sessionId = snapshot.sessionId;
       const getBranch = ctx.sessionManager.getBranch;
-      // Continuation-call caching requires a live SessionManager. Detached
-      // passes deliberately omit it rather than retain a stale session object;
-      // branchEntries still provide the extractor's full transcript context.
+      // Extractor uses only buildRunWindow's bounded text. Detached passes
+      // omit SessionManager; full-session continuation is disabled so it
+      // cannot bypass the window/prompt cap.
       const sessMgr = undefined;
       const notify = (message: string, type?: string) => dynamicSedimentNotify(message, type, sessionId);
       const setStatus = (message?: string) => dynamicSedimentSetStatus(message, sessionId);
@@ -4384,16 +4498,26 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                           lane: "auto_write",
                           correlationId: corrId,
                         });
-                        // llm_error = the extraction LLM call broke; user
-                        // should see ⚠️, not ✅. Mirror the main bg lane
-                        // (auto.kind === "llm_error" -> failed). ineligible /
-                        // llm_skip remain healthy completions.
-                        applySedimentStatus(
-                          setStatus,
-                          sessionId,
-                          auto.kind === "llm_error" ? "failed" : "completed",
-                          auto.kind,
-                        );
+                        // llm_error = provider extraction broke; prompt_budget_exceeded
+                        // is a local cap, not provider error. Both show ⚠️.
+                        // ineligible / llm_skip remain healthy completions.
+                        if (auto.kind === "prompt_budget_exceeded") {
+                          if (auto.deduped !== true) {
+                            applySedimentStatus(
+                              setStatus,
+                              sessionId,
+                              "failed",
+                              formatPromptBudgetFooterDetail(auto),
+                            );
+                          }
+                        } else {
+                          applySedimentStatus(
+                            setStatus,
+                            sessionId,
+                            auto.kind === "llm_error" ? "failed" : "completed",
+                            auto.kind,
+                          );
+                        }
                       }
                     } catch (err: any) {
                       // R8 P1-A fix: was silent (just setStatus failed).
@@ -4541,13 +4665,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 // promoted. 'wrote' is NOT sufficient alone — the curator may have processed
                 // the window and skipped/rejected every result. The hold is bounded by the
                 // window scrolling past + (normally) the staging net.
+                // prompt_budget_exceeded also HOLDs (durable pending retained) but is not a
+                // provider transient — same fingerprint is not lifecycle tight-retried.
                 const transient = auto.kind === "llm_error";
+                const holdForPromptBudget = auto.kind === "prompt_budget_exceeded";
                 const captured = auto.kind === "tier1_direct"
                   ? isCapturedTier1Result(auto.result)
                   : auto.kind === "wrote" && hasPositiveWriteCapture(auto.results);
                 const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
-                const advance = !transient && (captured || terminalReject || safelyStaged);
+                const advance = !holdForPromptBudget && !transient && (captured || terminalReject || safelyStaged);
                 if (advance && effectiveWindow.lastEntryId) {
                   await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
                   await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
@@ -4942,63 +5069,91 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             }
 
             const pendingDeferred = deferredStopBySession.get(sessionId);
-            await appendAudit(cwd, {
-              operation: "skip",
-              lane: "auto_write",
-              reason:
-                auto.kind === "ineligible"
-                  ? (auto.eligibility.reason ?? "auto_write_ineligible")
-                  : auto.kind === "llm_skip"
-                    ? "llm_returned_skip"
-                    : auto.kind === "llm_error"
-                      ? "llm_extraction_error"
-                      : "no_explicit_memory_markers",
-              session_id: sessionId,
-              ...summary,
-              extractor:
-                // PR-A2 收敛 (opus NIT-A): tier1-prefixed ineligible 意味着
-                // “extractor follow-up 不可用”（如 model_registry_unavailable
-                // 随 follow-up 返回），标 explicit_marker 会误导取证。
-                auto.kind === "ineligible"
-                  ? (auto.tier1 ? "llm_extractor" : "explicit_marker")
-                  : "llm_extractor",
-              parser_version: PARSER_VERSION,
-              settings_snapshot: settingsSnapshot,
-              entry_breakdown: entryBreakdown,
-              correlation_id: autoCorrelationId,
-              eligibility:
-                auto.kind === "ineligible" ? auto.eligibility : undefined,
-              llm:
-                auto.kind === "llm_skip" || auto.kind === "llm_error" ? auto.llmAuditSummary : undefined,
-              raw_text:
-                auto.kind === "llm_error" || auto.kind === "llm_skip"
-                  ? auto.rawTextStored
-                  : undefined,
-              raw_text_truncated:
-                auto.kind === "llm_error" || auto.kind === "llm_skip"
-                  ? auto.rawTextTruncated
-                  : undefined,
-              raw_text_redacted:
-                auto.kind === "llm_error" || auto.kind === "llm_skip"
-                  ? auto.rawTextRedacted
-                  : undefined,
-              raw_text_redaction_reason:
-                auto.kind === "llm_error" || auto.kind === "llm_skip"
-                  ? auto.rawTextRedactionReason
-                  : undefined,
-              recovered_deferred: checkpointAdvanced && !!pendingDeferred,
-              ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
-              stage_ms: {
-                window_build: tWindowBuilt - tStart,
-                parse: tParseEnd - tParseStart,
-                llm_total: auto.kind === "llm_skip" || auto.kind === "llm_error" ? auto.llmDurationMs : 0,
-                write_total: 0,
-                total: Date.now() - tStart,
-                background: true,
-              },
-              checkpoint_advanced: checkpointAdvanced,
-              background_async: true,
-            });
+            const skipReason =
+              auto.kind === "ineligible"
+                ? (auto.eligibility.reason ?? "auto_write_ineligible")
+                : auto.kind === "llm_skip"
+                  ? "llm_returned_skip"
+                  : auto.kind === "llm_error"
+                    ? "llm_extraction_error"
+                    : auto.kind === "prompt_budget_exceeded"
+                      ? "prompt_budget_exceeded"
+                      : "no_explicit_memory_markers";
+            // Same window+fingerprint: one audit+footer warning per process/
+            // session generation. Pending is retained; no tight retry loop.
+            const suppressBudgetFlood =
+              auto.kind === "prompt_budget_exceeded" && auto.deduped === true;
+            if (!suppressBudgetFlood) {
+              await appendAudit(cwd, {
+                operation: "skip",
+                lane: "auto_write",
+                reason: skipReason,
+                session_id: sessionId,
+                ...summary,
+                extractor:
+                  // PR-A2 收敛 (opus NIT-A): tier1-prefixed ineligible 意味着
+                  // “extractor follow-up 不可用”（如 model_registry_unavailable
+                  // 随 follow-up 返回），标 explicit_marker 会误导取证。
+                  auto.kind === "ineligible"
+                    ? (auto.tier1 ? "llm_extractor" : "explicit_marker")
+                    : "llm_extractor",
+                parser_version: PARSER_VERSION,
+                settings_snapshot: settingsSnapshot,
+                entry_breakdown: entryBreakdown,
+                correlation_id: autoCorrelationId,
+                eligibility:
+                  auto.kind === "ineligible" ? auto.eligibility : undefined,
+                llm:
+                  auto.kind === "llm_skip" || auto.kind === "llm_error" || auto.kind === "prompt_budget_exceeded"
+                    ? auto.llmAuditSummary
+                    : undefined,
+                ...(auto.kind === "prompt_budget_exceeded" ? {
+                  prompt_budget: {
+                    reason: "prompt_budget_exceeded",
+                    window_chars: auto.windowChars,
+                    prompt_chars: auto.promptChars,
+                    source: auto.source ?? "bounded_window",
+                    window_entry_count: auto.windowEntryCount,
+                    prompt_fingerprint: auto.promptFingerprint,
+                    budget_name: auto.budgetName,
+                    count: auto.budgetCount,
+                    limit: auto.budgetLimit,
+                    deduped: auto.deduped === true,
+                  },
+                } : {}),
+                raw_text:
+                  auto.kind === "llm_error" || auto.kind === "llm_skip"
+                    ? auto.rawTextStored
+                    : undefined,
+                raw_text_truncated:
+                  auto.kind === "llm_error" || auto.kind === "llm_skip"
+                    ? auto.rawTextTruncated
+                    : undefined,
+                raw_text_redacted:
+                  auto.kind === "llm_error" || auto.kind === "llm_skip"
+                    ? auto.rawTextRedacted
+                    : undefined,
+                raw_text_redaction_reason:
+                  auto.kind === "llm_error" || auto.kind === "llm_skip"
+                    ? auto.rawTextRedactionReason
+                    : undefined,
+                recovered_deferred: checkpointAdvanced && !!pendingDeferred,
+                ...(checkpointAdvanced && pendingDeferred ? { previous_deferred_reason: pendingDeferred.reason } : {}),
+                stage_ms: {
+                  window_build: tWindowBuilt - tStart,
+                  parse: tParseEnd - tParseStart,
+                  llm_total:
+                    auto.kind === "llm_skip" || auto.kind === "llm_error" || auto.kind === "prompt_budget_exceeded"
+                      ? auto.llmDurationMs
+                      : 0,
+                  write_total: 0,
+                  total: Date.now() - tStart,
+                  background: true,
+                },
+                checkpoint_advanced: checkpointAdvanced,
+                background_async: true,
+              });
+            }
             await recordDeferredRecoveryIfNeeded({
               cwd,
               sessionId,
@@ -5008,8 +5163,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               correlationId: autoCorrelationId,
             });
             // ineligible / llm_skip = healthy completion;
-            // llm_error = failed (LLM call broke; user should know).
-            if (auto.kind === "llm_error") {
+            // llm_error = failed (LLM call broke; user should know);
+            // prompt_budget_exceeded = failed with explicit budget reason
+            // (not masqueraded as provider llm_error); warn once per fingerprint.
+            if (auto.kind === "prompt_budget_exceeded") {
+              if (!suppressBudgetFlood) {
+                applySedimentStatus(
+                  setStatus,
+                  sessionId,
+                  "failed",
+                  formatPromptBudgetFooterDetail(auto),
+                );
+              }
+            } else if (auto.kind === "llm_error") {
               applySedimentStatus(
                 setStatus,
                 sessionId,
@@ -5905,6 +6071,28 @@ type AutoWriteLaneOutcome =
       rawTextRedactionReason?: string;
     }
   | {
+      /** Local prompt/budget cap exceeded — NOT a provider llm_error. */
+      kind: "prompt_budget_exceeded";
+      tier1?: Tier1DirectInfo;
+      llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>;
+      llmDurationMs: number;
+      reason: "prompt_budget_exceeded";
+      windowChars?: number;
+      promptChars?: number;
+      source?: "bounded_window";
+      windowEntryCount?: number;
+      promptFingerprint?: string;
+      budgetName?: string;
+      budgetCount?: number;
+      budgetLimit?: number;
+      /** True when same window+fingerprint already warned this process/generation. */
+      deduped?: boolean;
+      rawTextStored?: string;
+      rawTextTruncated?: boolean;
+      rawTextRedacted?: boolean;
+      rawTextRedactionReason?: string;
+    }
+  | {
       kind: "wrote";
       tier1?: Tier1DirectInfo;
       drafts: ProjectEntryDraft[];
@@ -6080,12 +6268,9 @@ async function tryAutoWriteLane(args: {
   // writers directly, not via tryAutoWriteLane.
   abrainHome: string;
   projectId: string;
-  /** When provided, enables continuation-call: reuses the main session's
-   *  assembled messages as prompt prefix for KV cache reuse. */
+  /** Ignored: full-session continuation disabled (window cap). */
   sessionManager?: unknown;
-  /** When provided, the extractor uses the full branch for richer context
-   *  instead of the pruned RunWindow. The fixed system prefix (AGENTS.md)
-   *  + full transcript enables prompt caching across consecutive calls. */
+  /** Ignored: extractor semantic input is exclusively window.text. */
   branchEntries?: unknown[];
   /** PR-A2 (F5, ADR 0028 R1'): when true, a Tier-1 direct write re-enters the
    *  lane (correctionSignal:null) so the extractor still processes the same
@@ -6430,17 +6615,12 @@ async function tryAutoWriteLane(args: {
   //    model and parses the MEMORY/SKIP response. The curator/writer
   //    stages below decide and persist lifecycle operations.
   //
-  //    Continuation-call: if sessionManager is available, reuse the main
-  //    session's assembled messages as prompt prefix so the provider-side
-  //    KV cache from the main session call can be reused.
+  //    Semantic input is exclusively buildRunWindow's bounded window text.
+  //    Full-branch branchEntries override and full-session continuation
+  //    are disabled (they produced 1.1M–1.5M prompts against a 1M budget).
+  void sessionManager;
+  void branchEntries;
   const llmStart = Date.now();
-  let continuationMessages: unknown[] | undefined;
-  if (sessionManager) {
-    continuationMessages = tryGetSessionMessages(sessionManager);
-    if (!continuationMessages) {
-      warnOnceIfUnavailable("SessionManager.buildSessionContext");
-    }
-  }
   let llmResult: LlmExtractorResult;
   try {
     llmResult = await runLlmExtractor(window.text, {
@@ -6449,15 +6629,33 @@ async function tryAutoWriteLane(args: {
         typeof runLlmExtractor
       >[1]["modelRegistry"],
       signal: args.signal,
-      branchEntries,
-      continuationMessages,
+      windowEntryCount: window.includedEntries,
     });
   } catch (e: any) {
-    llmResult = {
-      ok: false,
-      model: settings.extractorModel,
-      error: sanitizeAuditText(e?.message ?? "extractor threw", 500),
-    };
+    if (e instanceof BackgroundLlmBudgetExceededError) {
+      llmResult = {
+        ok: false,
+        model: settings.extractorModel,
+        errorKind: "prompt_budget_exceeded",
+        error: `prompt_budget_exceeded: ${e.budgetName} ${e.count} > ${e.limit}`,
+        budgetName: e.budgetName,
+        budgetCount: e.count,
+        budgetLimit: e.limit,
+        source: "bounded_window",
+        windowChars: window.chars,
+        windowEntryCount: window.includedEntries,
+      };
+    } else {
+      llmResult = {
+        ok: false,
+        model: settings.extractorModel,
+        errorKind: "other",
+        error: sanitizeAuditText(e?.message ?? "extractor threw", 500),
+        source: "bounded_window",
+        windowChars: window.chars,
+        windowEntryCount: window.includedEntries,
+      };
+    }
   }
   const llmDurationMs = Date.now() - llmStart;
 
@@ -6474,6 +6672,44 @@ async function tryAutoWriteLane(args: {
   } = sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
 
   if (!llmResult.ok) {
+    if (llmResult.errorKind === "prompt_budget_exceeded") {
+      const fingerprint = llmResult.promptFingerprint
+        ?? createHash("sha256").update([
+          sessionId ?? "",
+          window.lastEntryId ?? "",
+          String(window.chars),
+          String(llmResult.promptChars ?? ""),
+          llmResult.budgetName ?? "",
+          String(llmResult.budgetLimit ?? ""),
+        ].join("|")).digest("hex");
+      const deduped = await notePromptBudgetExceededOnce({
+        sessionId,
+        intakeWindowId: args.intakeWindowId,
+        abrainHome,
+        fingerprint,
+        window,
+        llmResult,
+      });
+      return {
+        kind: "prompt_budget_exceeded",
+        reason: "prompt_budget_exceeded",
+        llmAuditSummary,
+        llmDurationMs,
+        windowChars: llmResult.windowChars ?? window.chars,
+        promptChars: llmResult.promptChars,
+        source: "bounded_window",
+        windowEntryCount: llmResult.windowEntryCount ?? window.includedEntries,
+        promptFingerprint: fingerprint,
+        budgetName: llmResult.budgetName,
+        budgetCount: llmResult.budgetCount,
+        budgetLimit: llmResult.budgetLimit,
+        deduped,
+        rawTextStored,
+        rawTextTruncated,
+        rawTextRedacted,
+        rawTextRedactionReason,
+      };
+    }
     return {
       kind: "llm_error",
       llmAuditSummary,

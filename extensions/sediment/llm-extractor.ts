@@ -7,7 +7,17 @@ import { sanitizeForMemory } from "./sanitizer";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { entryToText } from "./checkpoint";
 import { getCurrentAnchor, spreadAnchor } from "../_shared/causal-anchor";
-import { auditStreamSimple } from "../_shared/llm-audit";
+import {
+  auditStreamSimple,
+  BackgroundLlmBudgetExceededError,
+  resolveLlmAuditBudgetSettings,
+} from "../_shared/llm-audit";
+
+/** Template + system-context headroom for the standalone extractor prompt.
+ *  Window content is never truncated to fit — if the final serialized prompt
+ *  exceeds the cap we fail closed as prompt_budget_exceeded. */
+export const EXTRACTOR_PROMPT_FIXED_OVERHEAD_ALLOWANCE = 80_000;
+export const EXTRACTOR_PROMPT_BOUND_VERSION = "bounded_window/v1";
 
 // ── System context cache (loaded once, same across all extractor calls) ───
 let _cachedSystemContext: string | null = null;
@@ -85,11 +95,21 @@ export interface ModelRegistryLike {
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
 }
 
+export type LlmExtractorErrorKind =
+  | "provider"
+  | "prompt_budget_exceeded"
+  | "auth"
+  | "sanitize"
+  | "invalid_model"
+  | "other";
+
 export interface LlmExtractorResult {
   ok: boolean;
   model: string;
   stopReason?: string;
   error?: string;
+  /** Structured failure class. prompt_budget_exceeded is NOT a provider error. */
+  errorKind?: LlmExtractorErrorKind;
   rawText?: string;
   extraction?: ReturnType<typeof previewExtraction>;
   // Input-boundary sanitizer metadata. Current behavior redacts credentials
@@ -97,6 +117,19 @@ export interface LlmExtractorResult {
   // whole extraction window for a credential pattern.
   preSanitizeRedacted?: boolean;
   preSanitizeReplacements?: string[];
+  /** Observability: chars of the bounded window text used as semantic input. */
+  windowChars?: number;
+  /** Observability: final serialized prompt chars (no body stored). */
+  promptChars?: number;
+  /** Observability: always bounded_window after the 2026-07-24 fix. */
+  source?: "bounded_window";
+  /** Observability: number of buildRunWindow entries when caller supplies it. */
+  windowEntryCount?: number;
+  /** Hash of window+config for budget-exceeded dedup (never prompt body). */
+  promptFingerprint?: string;
+  budgetName?: string;
+  budgetCount?: number;
+  budgetLimit?: number;
 }
 
 export interface LlmExtractorQualityGate {
@@ -119,40 +152,6 @@ export interface LlmExtractorAuditSummary {
   error?: string;
   quality: LlmExtractorQualityGate;
   extraction?: ReturnType<typeof previewExtraction>;
-}
-
-/** Best-effort credential sanitization for continuation messages.
- *  Iterates each message's content blocks and replaces raw credentials
- *  with typed placeholders before sending to third-party extractor LLM.
- *
- *  Trade-off: sanitizing changes bytes → KV cache miss.
- *  If pi's own session sanitizer is confirmed adequate, this can be
- *  disabled via settings.skipContinuationSanitize. */
-function stripThenSanitizeText(text: string): string {
-  // Same strip logic as normal window path: only selected activation nonce.
-  const stripped = stripCurrentRuleInjection(text, getCurrentRuleInjectionNonce());
-  const result = sanitizeForMemory(stripped);
-  return result.ok ? (result.text ?? stripped) : stripped;
-}
-
-function sanitizeContinuationMessages(messages: any[]): any[] {
-  return messages.map((m) => {
-    const content = m?.content;
-    if (!content) return m;
-    if (typeof content === "string") {
-      return { ...m, content: stripThenSanitizeText(content) };
-    }
-    if (Array.isArray(content)) {
-      const sanitized = content.map((part: any) => {
-        if (part?.type === "text" && typeof part.text === "string") {
-          return { ...part, text: stripThenSanitizeText(part.text) };
-        }
-        return part;
-      });
-      return { ...m, content: sanitized };
-    }
-    return m;
-  });
 }
 
 /** Escape PI_SEDIMENT_WINDOW delimiters in transcript text to prevent
@@ -364,6 +363,90 @@ function hashRaw(raw: string): string {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
+/** Cap for the final serialized extractor prompt. Never truncates window
+ *  content to fit — callers must fail closed when the built prompt exceeds. */
+export function resolveExtractorPromptCharCap(settings: Pick<SedimentSettings, "maxWindowChars">): number {
+  const windowBased = Math.max(1, settings.maxWindowChars) + EXTRACTOR_PROMPT_FIXED_OVERHEAD_ALLOWANCE;
+  const budget = resolveLlmAuditBudgetSettings();
+  const caps: number[] = [windowBased];
+  if (budget.enabled && budget.maxPromptChars > 0) caps.push(budget.maxPromptChars);
+  // budget estimated-tokens uses chars/4 in llm-audit; invert for a char cap.
+  if (budget.enabled && budget.maxPromptEstimatedTokens > 0) {
+    caps.push(budget.maxPromptEstimatedTokens * 4);
+  }
+  return Math.min(...caps);
+}
+
+/** Hash of bounded window + extractor config. Never includes prompt body text. */
+export function buildExtractorPromptFingerprint(args: {
+  windowText: string;
+  model: string;
+  maxWindowChars: number;
+  promptCharCap: number;
+  systemContextChars: number;
+  windowEntryCount?: number;
+}): string {
+  return hashRaw([
+    EXTRACTOR_PROMPT_BOUND_VERSION,
+    args.model,
+    String(args.maxWindowChars),
+    String(args.promptCharCap),
+    String(args.systemContextChars),
+    String(args.windowEntryCount ?? ""),
+    hashRaw(args.windowText),
+  ].join("|"));
+}
+
+/** Dry-run the production prompt builder (no LLM call). */
+export function buildBoundedExtractorPromptPlan(
+  windowText: string,
+  opts: {
+    settings: Pick<SedimentSettings, "maxWindowChars" | "extractorModel">;
+    systemContext?: string;
+    windowEntryCount?: number;
+    /** Diagnostic only: full-branch transcript chars when caller still has them. */
+    fullBranchChars?: number;
+  },
+): {
+  source: "bounded_window";
+  windowChars: number;
+  promptChars: number;
+  promptCharCap: number;
+  systemContextChars: number;
+  windowEntryCount?: number;
+  fullBranchChars?: number;
+  wouldAllow: boolean;
+  promptFingerprint: string;
+  budget: ReturnType<typeof resolveLlmAuditBudgetSettings>;
+  prompt: string;
+} {
+  const systemContext = opts.systemContext ?? loadSystemContext();
+  const prompt = buildLlmExtractorPrompt(windowText, systemContext || undefined);
+  const promptCharCap = resolveExtractorPromptCharCap(opts.settings);
+  const budget = resolveLlmAuditBudgetSettings();
+  const promptFingerprint = buildExtractorPromptFingerprint({
+    windowText,
+    model: opts.settings.extractorModel,
+    maxWindowChars: opts.settings.maxWindowChars,
+    promptCharCap,
+    systemContextChars: systemContext.length,
+    windowEntryCount: opts.windowEntryCount,
+  });
+  return {
+    source: "bounded_window",
+    windowChars: windowText.length,
+    promptChars: prompt.length,
+    promptCharCap,
+    systemContextChars: systemContext.length,
+    windowEntryCount: opts.windowEntryCount,
+    fullBranchChars: opts.fullBranchChars,
+    wouldAllow: prompt.length <= promptCharCap,
+    promptFingerprint,
+    budget,
+    prompt,
+  };
+}
+
 function sanitizeResultText(text: string): string {
   const s = sanitizeForMemory(text);
   return s.ok ? (s.text ?? text) : `[redacted: ${s.error}]`;
@@ -429,37 +512,43 @@ export async function runLlmExtractor(
     settings: SedimentSettings;
     modelRegistry: ModelRegistryLike;
     signal?: AbortSignal;
-    /** Optional: full branch entries for rich-context extraction.
-     *  When provided, the extractor prompt includes system context
-     *  (AGENTS.md) as a cacheable fixed prefix + the full transcript. */
+    /**
+     * @deprecated Ignored. Semantic input is exclusively the bounded
+     * buildRunWindow text. Full-branch override was the root cause of
+     * prompt_budget_exceeded floods (1.1M–1.5M prompts from ~350k windows).
+     */
     branchEntries?: unknown[];
-    /** Optional: assembled session messages from buildSessionContext().
-     *  When provided, uses continuation-call: appends extractor instruction
-     *  as a new user message after the session messages, enabling provider-side
-     *  KV cache reuse from the main session call. */
+    /**
+     * @deprecated Ignored. Full-session continuation bypassed the window
+     * cap; extractor always runs standalone bounded_window prompts.
+     */
     continuationMessages?: unknown[];
+    /** Observability: number of entries selected by buildRunWindow. */
+    windowEntryCount?: number;
   },
 ): Promise<LlmExtractorResult> {
   const t0 = Date.now();
   const systemContext = loadSystemContext();
-  const rawWindowText = deps.branchEntries
-    ? buildBranchTranscript(deps.branchEntries)
-    : windowText;
+  // Sole semantic content boundary: the caller's bounded window text.
+  // Never replace with full branch / session messages.
+  const rawWindowText = windowText;
   // ADR 0023-R5 INV-R1 layer 1: if the main-session injected rules
   // section appears in transcript messages, strip ONLY the current
   // session nonce before any extractor/classifier LLM sees it. Older or
   // user-authored markers are preserved as ordinary evidence.
   const effectiveWindowText = stripCurrentRuleInjection(rawWindowText, getCurrentRuleInjectionNonce());
+  const windowChars = effectiveWindowText.length;
+  const windowEntryCount = deps.windowEntryCount;
+  const promptCharCap = resolveExtractorPromptCharCap(deps.settings);
+  const boundMeta = {
+    source: "bounded_window" as const,
+    windowChars,
+    windowEntryCount,
+  };
   // Estimate tokens for metrics (rough: chars/4 for English, chars/2 for
   // mixed CJK; conservative estimate at chars/3)
-  const estimatedTokens = deps.continuationMessages && Array.isArray(deps.continuationMessages)
-    ? (deps.continuationMessages as any[]).reduce((sum, m) => {
-        const content = (m as any).content;
-        if (typeof content === "string") return sum + Math.ceil(content.length / 3);
-        if (Array.isArray(content)) return sum + content.reduce((s: number, c: any) => s + Math.ceil((c?.text?.length ?? 0) / 3), 0);
-        return sum;
-      }, 0)
-    : Math.ceil(effectiveWindowText.length / 3) + (systemContext ? Math.ceil(systemContext.length / 3) : 0);
+  const estimatedTokens =
+    Math.ceil(effectiveWindowText.length / 3) + (systemContext ? Math.ceil(systemContext.length / 3) : 0);
   // Round 10 behavior: pre-sanitize is an INPUT REDACTION boundary, not
   // a whole-run abort. Raw credentials in the transcript are replaced with
   // typed placeholders before the third-party extractor LLM sees the
@@ -473,26 +562,81 @@ export async function runLlmExtractor(
     return {
       ok: false,
       model: deps.settings.extractorModel,
+      errorKind: "sanitize",
       error: sanitizeResultText(`pre-sanitize failed: ${windowSanitize.error ?? "unknown"}`),
       preSanitizeRedacted: true,
       ...(windowSanitize.replacements.length ? { preSanitizeReplacements: windowSanitize.replacements } : {}),
+      ...boundMeta,
     };
   }
   const sanitizedWindowText = windowSanitize.text ?? effectiveWindowText;
 
+  const prompt = buildLlmExtractorPrompt(sanitizedWindowText, systemContext || undefined);
+  const promptChars = prompt.length;
+  const promptFingerprint = buildExtractorPromptFingerprint({
+    windowText: sanitizedWindowText,
+    model: deps.settings.extractorModel,
+    maxWindowChars: deps.settings.maxWindowChars,
+    promptCharCap,
+    systemContextChars: systemContext.length,
+    windowEntryCount,
+  });
+  const observability = {
+    ...boundMeta,
+    promptChars,
+    promptFingerprint,
+  };
+
+  // Fail closed on oversized final prompt. Never silently drop selected
+  // window content — the window is already the exclusive content boundary.
+  if (promptChars > promptCharCap) {
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      errorKind: "prompt_budget_exceeded",
+      error: `prompt_budget_exceeded: promptChars ${promptChars} > promptCharCap ${promptCharCap}`,
+      budgetName: "promptCharCap",
+      budgetCount: promptChars,
+      budgetLimit: promptCharCap,
+      ...sanitizeMeta,
+      ...observability,
+    };
+  }
+
   const parsed = parseModelRef(deps.settings.extractorModel);
   if (!parsed) {
-    return { ok: false, model: deps.settings.extractorModel, error: "invalid extractorModel; expected provider/model", ...sanitizeMeta };
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      errorKind: "invalid_model",
+      error: "invalid extractorModel; expected provider/model",
+      ...sanitizeMeta,
+      ...observability,
+    };
   }
 
   const model = deps.modelRegistry.find(parsed.provider, parsed.id);
   if (!model) {
-    return { ok: false, model: deps.settings.extractorModel, error: "extractor model not found in registry", ...sanitizeMeta };
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      errorKind: "invalid_model",
+      error: "extractor model not found in registry",
+      ...sanitizeMeta,
+      ...observability,
+    };
   }
 
   const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
-    return { ok: false, model: deps.settings.extractorModel, error: sanitizeResultText(auth.error || "extractor model auth unavailable"), ...sanitizeMeta };
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      errorKind: "auth",
+      error: sanitizeResultText(auth.error || "extractor model auth unavailable"),
+      ...sanitizeMeta,
+      ...observability,
+    };
   }
 
   const piAi: {
@@ -503,66 +647,21 @@ export async function runLlmExtractor(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 
+  // Standalone bounded extractor only. Full-session continuation is disabled
+  // because it bypassed the window cap (see EXTRACTOR_PROMPT_BOUND_VERSION).
   let finalMsg: { stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> };
-  let promptChars = 0; // tracked for metrics; set in both paths
-  if (deps.continuationMessages && Array.isArray(deps.continuationMessages)) {
-    // Continuation-call: reuse main session messages + append extractor instruction.
-    // The main session's KV cache is still warm — prefix hits cache.
-    //
-    // Credential sanitization is controlled by skipContinuationSanitize.
-    // Default ON (secure); disable for air-gapped deployments.
-    // Even when credential sanitize is skipped, still strip selected activation
-    // rule fences from provider message text parts (same strip as normal window).
-    const messages = deps.settings.skipContinuationSanitize
-      ? (deps.continuationMessages as any[]).map((m) => {
-          const content = m?.content;
-          if (typeof content === "string") {
-            return { ...m, content: stripCurrentRuleInjection(content, getCurrentRuleInjectionNonce()) };
-          }
-          if (Array.isArray(content)) {
-            return {
-              ...m,
-              content: content.map((part: any) => {
-                if (part?.type === "text" && typeof part.text === "string") {
-                  return { ...part, text: stripCurrentRuleInjection(part.text, getCurrentRuleInjectionNonce()) };
-                }
-                return part;
-              }),
-            };
-          }
-          return m;
-        })
-      : sanitizeContinuationMessages(deps.continuationMessages as any[]);
-    const continuationPrompt = buildLlmExtractorContinuationInstruction();
-    promptChars = continuationPrompt.length; // approximate; messages chars tracked via estimatedTokens
+  try {
     finalMsg = await auditStreamSimple(
       process.cwd(),
-      { module: "sediment", operation: "llm_extractor_continuation", model_ref: deps.settings.extractorModel, prompt_chars: promptChars },
-      piAi,
-      model,
       {
-        messages: [
-          ...messages,
-          {
-            role: "user",
-            content: [{ type: "text", text: continuationPrompt }],
-          },
-        ],
+        module: "sediment",
+        operation: "llm_extractor",
+        model_ref: deps.settings.extractorModel,
+        prompt_chars: promptChars,
+        window_chars: windowChars,
+        source: "bounded_window",
+        ...(typeof windowEntryCount === "number" ? { window_entry_count: windowEntryCount } : {}),
       },
-      {
-        apiKey: auth.apiKey,
-        headers: auth.headers,
-        signal: deps.signal,
-        timeoutMs: deps.settings.extractorTimeoutMs,
-        maxRetries: deps.settings.extractorMaxRetries,
-      },
-    );
-  } else {
-    const prompt = buildLlmExtractorPrompt(sanitizedWindowText, systemContext || undefined);
-    promptChars = prompt.length;
-    finalMsg = await auditStreamSimple(
-      process.cwd(),
-      { module: "sediment", operation: "llm_extractor", model_ref: deps.settings.extractorModel, prompt_chars: promptChars },
       piAi,
       model,
       {
@@ -579,6 +678,29 @@ export async function runLlmExtractor(
         maxRetries: deps.settings.extractorMaxRetries,
       },
     );
+  } catch (err: unknown) {
+    if (err instanceof BackgroundLlmBudgetExceededError) {
+      return {
+        ok: false,
+        model: deps.settings.extractorModel,
+        errorKind: "prompt_budget_exceeded",
+        error: `prompt_budget_exceeded: ${err.budgetName} ${err.count} > ${err.limit}`,
+        budgetName: err.budgetName,
+        budgetCount: err.count,
+        budgetLimit: err.limit,
+        ...sanitizeMeta,
+        ...observability,
+      };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      errorKind: "other",
+      error: sanitizeResultText(message || "extractor threw"),
+      ...sanitizeMeta,
+      ...observability,
+    };
   }
 
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {
@@ -586,8 +708,10 @@ export async function runLlmExtractor(
       ok: false,
       model: deps.settings.extractorModel,
       stopReason: finalMsg.stopReason,
+      errorKind: "provider",
       error: sanitizeResultText(finalMsg.errorMessage || finalMsg.stopReason || "extractor failed"),
       ...sanitizeMeta,
+      ...observability,
     };
   }
 
@@ -598,7 +722,27 @@ export async function runLlmExtractor(
     .trim();
 
   if (!rawText || rawText === "SKIP") {
-    return { ok: true, model: deps.settings.extractorModel, stopReason: finalMsg.stopReason, rawText: rawText || "SKIP", extraction: previewExtraction([]), ...sanitizeMeta };
+    logExtractorMetrics({
+      ts: new Date().toISOString(),
+      model: deps.settings.extractorModel,
+      promptChars,
+      estimatedTokens,
+      systemContextChars: systemContext.length,
+      transcriptChars: effectiveWindowText.length,
+      ok: true,
+      stopReason: finalMsg.stopReason,
+      candidateCount: 0,
+      durationMs: Date.now() - t0,
+    });
+    return {
+      ok: true,
+      model: deps.settings.extractorModel,
+      stopReason: finalMsg.stopReason,
+      rawText: rawText || "SKIP",
+      extraction: previewExtraction([]),
+      ...sanitizeMeta,
+      ...observability,
+    };
   }
 
   const drafts = parseExplicitMemoryBlocks(rawText);
@@ -609,6 +753,7 @@ export async function runLlmExtractor(
     rawText,
     extraction: previewExtraction(drafts),
     ...sanitizeMeta,
+    ...observability,
   };
 
   // Log metrics for cache-hit-rate observability
@@ -617,8 +762,8 @@ export async function runLlmExtractor(
     model: deps.settings.extractorModel,
     promptChars,
     estimatedTokens,
-    systemContextChars: deps.continuationMessages ? 0 : systemContext.length,
-    transcriptChars: deps.continuationMessages ? 0 : effectiveWindowText.length,
+    systemContextChars: systemContext.length,
+    transcriptChars: effectiveWindowText.length,
     ok: result.ok,
     stopReason: result.stopReason,
     candidateCount: drafts.length,

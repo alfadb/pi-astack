@@ -11,6 +11,28 @@ status: active
 
 ---
 
+## 2026-07-24 — accepted — Sediment extractor bounded-window prompt boundary (budget flood fix)
+
+### 变更
+
+修复频繁的 `background LLM budget exceeded` / 伪 `llm_error`。根因：`runLlmExtractor` 在 `buildRunWindow` 已产出 ~350k bounded window 后，仍用 `deps.branchEntries` 重建整支 transcript（生产 session 约 1.14–1.54M），再叠加 system context 使最终 prompt 超过 live `maxPromptChars` 1M；budget pre-invocation 连刷，transient retry 不 ack pending，footer/audit 洪泛。
+
+Extractor 语义输入以 `buildRunWindow` 的 bounded window 为**唯一**内容边界，优先 `window.text`。禁用 full-session continuation / full-branch 覆盖（缓存优化不得绕过 cap）。最终 serialized prompt 强制不超过 `min(maxWindowChars + fixed overhead allowance, background maxPromptChars/estimated token limits)`；禁止静默丢弃 window 已选内容——超 cap 则 fail-closed。可观测字段：`window_chars`、`prompt_chars`、`source=bounded_window`、window entry count（不记 prompt 正文）。
+
+`BackgroundLlmBudgetExceededError` / `PI_ASTACK_BACKGROUND_LLM_BUDGET_EXCEEDED` 映射明确 kind/reason `prompt_budget_exceeded`，不再伪装 provider `llm_error`。同一 window+prompt fingerprint 在同一 process/session generation 只 footer/audit warning 一次；不 lifecycle tight retry。保留 durable intake，不 advance checkpoint / 不 ack。新 window 或 prompt/config 版本变化允许 retry。真 provider error 仍为 `llm_error`。Footer 显示短明确文本，不截断 `maxPromptChars` 名称。
+
+### 验收边界
+
+`smoke:sediment-extractor-budget`：>1.5M 真实形状 branch + 350k window，最终 prompt bounded 且完整使用 selected window；continuation/branchEntries 不可绕过；budget 注入分类/去重/pending 保留；provider error 仍非 budget；next fingerprint 可 retry。回归 `smoke:memory` / intake-publication / agent-end-queue / knowledge-mutations / llm-audit-budget。生产只读 dossier 对 session `019f8914...` 与 `019f852d...` dry-run（不调 LLM）：before full-branch chars ~1.16M/1.53M，window ~347k/330k，after prompt ~358k/341k，live budget wouldAllow=true；legacy full-branch 会超 cap。证据：[extractor budget production readonly](evidence/2026-07-24-sediment-extractor-budget-production-readonly.json)。
+
+### 状态
+
+`accepted`。当前 ready pending 可在修复后正常重跑；实现任务未消费 production pending、未调用 production LLM。
+
+### 关联
+
+[architecture/sediment.md](architecture/sediment.md)；[Smoke reference](reference/smoke-tests.md)；[llm-audit budget](../extensions/_shared/llm-audit.ts)。
+
 ## 2026-07-24 — accepted — Sediment intake owner-root isolation and foreground footer fencing (adee7c5 regression)
 
 ### 变更

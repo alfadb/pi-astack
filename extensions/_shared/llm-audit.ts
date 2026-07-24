@@ -257,7 +257,7 @@ export function resolveLlmAuditRotationSettings(rawSettings?: Record<string, unk
   return resolveJsonlRotationSettings(llmAudit.rotation, DEFAULT_LLM_AUDIT_ROTATION_SETTINGS);
 }
 
-function resolveLlmAuditBudgetSettings(): LlmAuditBudgetSettings {
+export function resolveLlmAuditBudgetSettings(): LlmAuditBudgetSettings {
   const raw = loadPiStackSettings();
   const llmAudit = (raw.llmAudit ?? {}) as Record<string, unknown>;
   const block = (llmAudit.backgroundBudget ?? {}) as Record<string, unknown>;

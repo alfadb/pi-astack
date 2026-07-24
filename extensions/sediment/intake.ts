@@ -511,6 +511,63 @@ export async function writeSedimentIntakeRecoveryStatus(
   return file;
 }
 
+/**
+ * Persist extractor eval status (e.g. prompt_budget_exceeded fingerprint)
+ * while leaving the pending trigger intact. No timer/backoff/attempt machine.
+ * Counts/hashes only — never stores prompt body or user content.
+ */
+export async function writeSedimentIntakeEvalStatus(
+  abrainHome: string,
+  record: Pick<SedimentIntakeRecord, "windowId" | "sessionId" | "sessionFile">,
+  status: "prompt_budget_exceeded",
+  meta: {
+    promptFingerprint: string;
+    windowChars?: number;
+    promptChars?: number;
+    windowEntryCount?: number;
+    budgetName?: string;
+    count?: number;
+    limit?: number;
+    source?: string;
+  },
+): Promise<string> {
+  const dir = sedimentIntakeStatusDir(abrainHome);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const file = path.join(dir, `${record.windowId}.json`);
+  await durableAtomicWriteFile(file, `${JSON.stringify({
+    schema: "sediment-intake-eval-status/v1",
+    windowId: record.windowId,
+    sessionId: record.sessionId,
+    sessionFile: record.sessionFile,
+    status,
+    prompt_fingerprint: meta.promptFingerprint,
+    ...(typeof meta.windowChars === "number" ? { window_chars: meta.windowChars } : {}),
+    ...(typeof meta.promptChars === "number" ? { prompt_chars: meta.promptChars } : {}),
+    ...(typeof meta.windowEntryCount === "number" ? { window_entry_count: meta.windowEntryCount } : {}),
+    ...(meta.budgetName ? { budget_name: meta.budgetName } : {}),
+    ...(typeof meta.count === "number" ? { count: meta.count } : {}),
+    ...(typeof meta.limit === "number" ? { limit: meta.limit } : {}),
+    ...(meta.source ? { source: meta.source } : {}),
+  })}\n`, { mode: 0o600 });
+  return file;
+}
+
+/** Read intake status for fingerprint dedup (recovery or eval). Best-effort. */
+export async function readSedimentIntakeStatus(
+  abrainHome: string,
+  windowId: string,
+): Promise<Record<string, unknown> | null> {
+  assertWindowId(windowId);
+  const file = path.join(sedimentIntakeStatusDir(abrainHome), `${windowId}.json`);
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, "utf-8")) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+}
+
 /** Nonblocking cross-process claim. Crash/SIGKILL releases the retained OFD. */
 export function tryClaimSedimentIntake(abrainHome: string, windowId: string, owner: string): SedimentIntakeClaim {
   assertWindowId(windowId);
