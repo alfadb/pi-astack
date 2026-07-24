@@ -95,6 +95,7 @@
     "smoke:dispatch-output-format": "node scripts/smoke-dispatch-output-format.mjs",
     "smoke:dispatch-subagent-tool-allowlist": "node scripts/smoke-dispatch-subagent-tool-allowlist.mjs",
     "smoke:dispatch-project-trust": "node scripts/smoke-dispatch-project-trust.mjs",
+    "smoke:dispatch-parent-context-files": "node scripts/smoke-dispatch-parent-context-files.mjs",
     "smoke:dispatch-session-runtime-isolation": "node scripts/smoke-dispatch-session-runtime-isolation.mjs",
     "smoke:dispatch-task-governor": "node scripts/smoke-dispatch-task-governor.mjs",
     "smoke:dispatch-delegation": "node scripts/smoke-dispatch-delegation.mjs",
@@ -341,10 +342,10 @@
     "openai": "6.26.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.81.1",
-    "@earendil-works/pi-ai": "0.81.1",
-    "@earendil-works/pi-coding-agent": "0.81.1",
-    "@earendil-works/pi-tui": "0.81.1",
+    "@earendil-works/pi-agent-core": "0.82.0",
+    "@earendil-works/pi-ai": "0.82.0",
+    "@earendil-works/pi-coding-agent": "0.82.0",
+    "@earendil-works/pi-tui": "0.82.0",
     "jiti": "2.7.0",
     "typescript": "6.0.3"
   },

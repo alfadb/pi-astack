@@ -101,6 +101,27 @@ import {
   validateShadowDelegation,
   type ShadowNestedTask,
 } from "./delegation-shadow-bridge";
+import {
+  captureParentContextFilesSnapshot,
+  clearParentContextFilesSnapshotsForSession,
+  isParentContextFilesSnapshot,
+  parentContextFilesAuditFields,
+  resolveParentContextFilesSnapshot,
+  type ParentContextFilesSnapshot,
+} from "./parent-context-files";
+
+export type { ParentContextFile, ParentContextFilesSnapshot } from "./parent-context-files";
+export {
+  captureParentContextFilesSnapshot,
+  clearParentContextFilesSnapshotsForSession,
+  describeParentContextFilesSnapshot,
+  freezeParentContextFilesSnapshot,
+  isParentContextFilesSnapshot,
+  normalizeParentContextFiles,
+  parentContextFilesAuditFields,
+  resolveParentContextFilesSnapshot,
+  _resetParentContextFilesForTests,
+} from "./parent-context-files";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -955,6 +976,7 @@ type FailureType =
   // pre-flight: failed before any LLM call
   | "model_not_found"   // model string couldn't be resolved in registry
   | "tool_rejected"     // structural validation or target registry rejected tools
+  | "context_files_snapshot_missing" // parent contextFiles snapshot required but absent
   | "auth"              // API key missing, expired, or permission denied (HTTP 401/403)
   // in-flight transient: pi-ai's auto_retry already burned attempts; surfaced after retries exhausted
   | "rate_limit"        // HTTP 429 / quota exceeded
@@ -1355,15 +1377,16 @@ export function resolveParentModelRuntime(modelRegistry: unknown): ModelRuntime 
     );
   }
   const runtime = (modelRegistry as { runtime?: unknown }).runtime;
-  if (
-    runtime == null
-    || typeof runtime !== "object"
-    || typeof (runtime as { getModel?: unknown }).getModel !== "function"
-    || typeof (runtime as { reloadConfig?: unknown }).reloadConfig !== "function"
-  ) {
+  const missingCapabilities = runtime == null || typeof runtime !== "object"
+    ? ["runtime"]
+    : (["getModel", "getAuth", "refresh"] as const).filter(
+        (name) => typeof (runtime as Record<string, unknown>)[name] !== "function",
+      );
+  if (missingCapabilities.length > 0) {
     throw new Error(
-      "dispatch: parent ModelRegistry.runtime is not a ModelRuntime; " +
-      "sub-agent sessions cannot inherit parent auth/model overlay (requires pi >= 0.80.10 ModelRegistry facade)",
+      "dispatch: parent ModelRegistry.runtime lacks required ModelRuntime capabilities " +
+      `(${missingCapabilities.join(", ")}); sub-agent sessions cannot inherit parent ` +
+      "auth/model overlay (requires pi >= 0.80.10 ModelRegistry facade)",
     );
   }
   return runtime as ModelRuntime;
@@ -1386,10 +1409,41 @@ export function installMaxOutputTokensOnSession(session: any, maxOutputTokens: n
   };
 }
 
+/** Fixed role clarification for sub-agent workers.
+ *  AGENTS.md remains extension-agnostic; this block clarifies that the
+ *  "main session dispatches deterministic work" clause describes the
+ *  *caller*, while the current worker must complete the received task
+ *  directly and must not re-dispatch. */
+const SUBAGENT_ROLE_CLARIFICATION_MARKER =
+  "<!-- pi-astack/dispatch: sub-agent role clarification -->";
+
+const SUBAGENT_ROLE_CLARIFICATION_BLOCK = `${SUBAGENT_ROLE_CLARIFICATION_MARKER}
+## 子代理角色澄清
+
+AGENTS.md 中「确定性任务全部派发给子代理执行」等主会话分工条款描述的是**调用方（主会话）**的职责边界，不是当前 worker 的职责。
+
+你当前是被派发的 worker：应直接完成收到的任务与验收标准，**不得再次派发**其他代理（不得调用 dispatch_agent / dispatch_parallel / workflow_run）。完成后把结果交还调用方审查。
+`;
+
+/** Bind the fixed sub-agent role clarification into systemPrompt.
+ *  Only registered on the sub-agent loader (via the boundary sentinel). */
+export function bindSubAgentRoleClarification(pi: ExtensionAPI): void {
+  pi.on("before_agent_start", (event: { systemPrompt?: string }) => {
+    const current = event.systemPrompt ?? "";
+    if (current.includes(SUBAGENT_ROLE_CLARIFICATION_MARKER)) return;
+    return {
+      systemPrompt: current.length > 0
+        ? `${current}\n\n${SUBAGENT_ROLE_CLARIFICATION_BLOCK}`
+        : SUBAGENT_ROLE_CLARIFICATION_BLOCK,
+    };
+  });
+}
+
 const subAgentBoundarySentinelExtension: InlineExtension = {
   name: "pi-astack-dispatch-subagent-boundary-sentinel",
   factory: function bindDispatchSubAgentBoundarySentinel(pi: ExtensionAPI): void {
     bindSubAgentBoundarySentinel(pi);
+    bindSubAgentRoleClarification(pi);
   },
 };
 
@@ -1397,6 +1451,13 @@ export type SubAgentSessionResourceOptions = {
   cwd?: string;
   agentDir?: string;
   extensionFactories?: InlineExtension[];
+  /**
+   * Required parent session contextFiles snapshot injected via agentsFilesOverride.
+   * Explicit empty array is legal (parent had no context files). Callers must
+   * pass a snapshot — there is no default "no snapshot" mode that could hide
+   * a missing capture. noContextFiles stays true; the override supplies files.
+   */
+  parentContextFiles: ParentContextFilesSnapshot;
 };
 
 /**
@@ -1410,8 +1471,20 @@ export type SubAgentSessionResourceOptions = {
  * The SDK may still cache immutable extension factory modules internally.
  */
 export async function createSubAgentSessionResources(
-  options: SubAgentSessionResourceOptions = {},
+  options: SubAgentSessionResourceOptions,
 ): Promise<{ settingsManager: any; resourceLoader: any }> {
+  // Runtime guard BEFORE SettingsManager/DefaultResourceLoader: JS/any callers
+  // may omit/malform parentContextFiles. Fail closed with a stable marker —
+  // never fall through with agentsFilesOverride=undefined (empty context).
+  const parentContextFiles = options?.parentContextFiles;
+  if (!isParentContextFilesSnapshot(parentContextFiles)) {
+    throw new Error(
+      "parent_context_files_snapshot_invalid: createSubAgentSessionResources " +
+        "requires a parent contextFiles snapshot array of {path,content} string " +
+        "entries (empty array is legal; missing/malformed is not)",
+    );
+  }
+
   const cwd = options.cwd ?? process.cwd();
   const agentDir = options.agentDir ?? getAgentDir();
   const settingsManager = (SettingsManager.create as (
@@ -1419,6 +1492,16 @@ export async function createSubAgentSessionResources(
     agentDir?: string,
     options?: { projectTrusted?: boolean },
   ) => any)(cwd, agentDir, { projectTrusted: false });
+  // Parent snapshot injection: noContextFiles:true prevents disk re-scan of
+  // AGENTS.md trees; agentsFilesOverride supplies the ordered parent snapshot
+  // (including the legal empty array). Do not share the parent loader.
+  const agentsFilesOverride = () => ({
+    agentsFiles: parentContextFiles.map((file) => ({
+      path: file.path,
+      content: file.content,
+    })),
+  });
+
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
@@ -1441,6 +1524,7 @@ export async function createSubAgentSessionResources(
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    ...(agentsFilesOverride ? { agentsFilesOverride } : {}),
     // This inline extension belongs only to this loader/runtime. It avoids
     // inferring sub-agent activation from process-wide reload timing while
     // preserving any caller-provided factories used by tests or embedders.
@@ -1558,6 +1642,40 @@ export async function disposeSubAgentSession(session: any, sessionManager?: unkn
  * This is acceptable because typical dispatch usage calls remote LLM APIs
  * for analysis; mutating workers are an explicit, caller-granted opt-in.
  */
+/**
+ * Strongly-typed execution context for in-process sub-agents.
+ * Shared by dispatch_agent, dispatch_parallel, and workflow → runInProcess.
+ *
+ * `parentContextFiles` is required for execution:
+ *   - missing/undefined → reject (failureType context_files_snapshot_missing)
+ *   - [] → legal empty injection via agentsFilesOverride
+ *   - non-empty → inject ordered parent snapshot (no disk re-scan)
+ */
+export type SubAgentExecutionContext = {
+  anchor?: CausalAnchor;
+  projectRoot?: string;
+  maxRuntimeMs?: number;
+  taskProfile?: string;
+  onProgress?: (progress: DispatchRunProgress) => void;
+  delegation?: unknown;
+  reasoningTrace?: {
+    dispatchToolCallId?: string;
+    taskIndex?: number;
+    taskCount?: number;
+    maxTraceBytes?: number;
+    /** @deprecated use maxTraceBytes. */
+    maxRawReasoningBytes?: number;
+    workflowRunId?: string;
+    workflowStageId?: string;
+  };
+  /**
+   * Parent session contextFiles snapshot. Required at the TS call layer;
+   * runtime still rejects when missing/malformed (JS/any). Empty array is legal.
+   * Callers must pass the turn-scoped immutable snapshot — never re-discover files.
+   */
+  parentContextFiles: ParentContextFilesSnapshot;
+};
+
 export async function runInProcess(
   modelStr: string,
   thinking: string,
@@ -1565,38 +1683,24 @@ export async function runInProcess(
   signal: AbortSignal,
   timeoutMs: number,
   modelRegistry: any,
-  toolAllowlist?: string,
-  /** ADR 0027 §C2' v1 Stage 1b: anchor + projectRoot needed for the
-   *  independent heartbeat liveness channel. When undefined the
-   *  heartbeat handle is a no-op (fail-open) and runInProcess works
-   *  identically to pre-Stage-1b for callers that don't pass anchor.
-   *  maxRuntimeMs is an internal safety cap for callers such as workflow
-   *  that must preserve a wall-clock budget while dispatch itself uses
-   *  timeoutMs as the no-progress idle timeout. */
-  heartbeatCtx?: {
-    anchor?: CausalAnchor;
-    projectRoot?: string;
-    maxRuntimeMs?: number;
-    taskProfile?: string;
-    onProgress?: (progress: DispatchRunProgress) => void;
-    delegation?: unknown;
-    reasoningTrace?: {
-      dispatchToolCallId?: string;
-      taskIndex?: number;
-      taskCount?: number;
-      maxTraceBytes?: number;
-      /** @deprecated use maxTraceBytes. */
-      maxRawReasoningBytes?: number;
-      workflowRunId?: string;
-      workflowStageId?: string;
-    };
-  },
+  toolAllowlist: string | undefined,
+  /** ADR 0027 §C2' v1 Stage 1b + parent contextFiles:
+   *  Required execution context at the TS call layer (anchor/projectRoot for
+   *  heartbeat; parentContextFiles for snapshot injection). Runtime still
+   *  guards missing parentContextFiles for JS/any callers. maxRuntimeMs is an
+   *  internal safety cap for callers such as workflow that must preserve a
+   *  wall-clock budget while dispatch itself uses timeoutMs as the no-progress
+   *  idle timeout. */
+  executionContext: SubAgentExecutionContext,
 ): Promise<AgentResult> {
   const start = Date.now();
   const idleTimeoutMs = Number.isFinite(timeoutMs) && timeoutMs > 0
     ? Math.floor(timeoutMs)
     : DEFAULT_TIMEOUT_MS;
-  const requestedMaxRuntimeMs = heartbeatCtx?.maxRuntimeMs;
+  // Single effective cwd for this run: parent snapshot scope must match the
+  // sub-agent tool/session cwd (loader, SessionManager, createAgentSession).
+  const effectiveCwd = executionContext?.projectRoot ?? process.cwd();
+  const requestedMaxRuntimeMs = executionContext?.maxRuntimeMs;
   const maxRuntimeMs = Number.isFinite(requestedMaxRuntimeMs) && requestedMaxRuntimeMs! > 0
     ? Math.max(idleTimeoutMs, Math.floor(requestedMaxRuntimeMs!))
     : idleTimeoutMs * DEFAULT_MAX_RUNTIME_MULTIPLIER;
@@ -1604,10 +1708,9 @@ export async function runInProcess(
   // ADR 0027 §C2' Stage 1b heartbeat. Start BEFORE createAgentSession
   // (so caller can detect a session-construction hang) and stop on
   // every terminal path (success / error / timeout / abort). The
-  // handle is a no-op when anchor / projectRoot is missing, so this
-  // is safe even on legacy call sites that don't pass heartbeatCtx.
-  const heartbeatProjectRoot = heartbeatCtx?.projectRoot ?? process.cwd();
-  const heartbeatAnchor = heartbeatCtx?.anchor;
+  // handle is a no-op when anchor is missing (fail-open).
+  const heartbeatProjectRoot = effectiveCwd;
+  const heartbeatAnchor = executionContext?.anchor;
   const heartbeat: HeartbeatHandle = startHeartbeat({
     anchor: heartbeatAnchor,
     projectRoot: heartbeatProjectRoot,
@@ -1627,19 +1730,19 @@ export async function runInProcess(
   // heartbeat.stop() is idempotent + best-effort, so wrapping is
   // mechanically safe.
   try {
-  if (heartbeatCtx?.reasoningTrace) {
+  if (executionContext?.reasoningTrace) {
     reasoningTrace = createDispatchReasoningTrace({
       projectRoot: heartbeatProjectRoot,
       anchor: heartbeatAnchor,
-      dispatchToolCallId: heartbeatCtx.reasoningTrace.dispatchToolCallId,
-      taskIndex: heartbeatCtx.reasoningTrace.taskIndex,
-      taskCount: heartbeatCtx.reasoningTrace.taskCount,
+      dispatchToolCallId: executionContext.reasoningTrace.dispatchToolCallId,
+      taskIndex: executionContext.reasoningTrace.taskIndex,
+      taskCount: executionContext.reasoningTrace.taskCount,
       model: modelStr,
       thinking,
-      maxTraceBytes: heartbeatCtx.reasoningTrace.maxTraceBytes,
-      maxRawReasoningBytes: heartbeatCtx.reasoningTrace.maxRawReasoningBytes,
-      workflowRunId: heartbeatCtx.reasoningTrace.workflowRunId,
-      workflowStageId: heartbeatCtx.reasoningTrace.workflowStageId,
+      maxTraceBytes: executionContext.reasoningTrace.maxTraceBytes,
+      maxRawReasoningBytes: executionContext.reasoningTrace.maxRawReasoningBytes,
+      workflowRunId: executionContext.reasoningTrace.workflowRunId,
+      workflowStageId: executionContext.reasoningTrace.workflowStageId,
     });
   }
   const finalizeReasoningTrace = async (
@@ -1687,7 +1790,25 @@ export async function runInProcess(
     };
   };
 
-  const directToolCheck = validateTools(toolAllowlist, heartbeatCtx?.delegation);
+  // Parent contextFiles snapshot is mandatory for execution. Empty array is
+  // legal (parent had no AGENTS.md / context files); missing rejects so we
+  // never silently re-scan disk or invent files inside the sub-agent loader.
+  // Runtime guard: TS requires parentContextFiles, but JS/any may omit it.
+  const parentContextFiles = executionContext?.parentContextFiles;
+  if (!isParentContextFilesSnapshot(parentContextFiles)) {
+    return finalizeReasoningTrace({
+      output: "",
+      error:
+        "parent_context_files_snapshot_missing: runInProcess requires the parent " +
+        "session contextFiles snapshot captured at before_agent_start; empty array " +
+        "is allowed, missing is not",
+      failureType: "context_files_snapshot_missing",
+      durationMs: Date.now() - start,
+      toolCallCount: 0,
+    });
+  }
+
+  const directToolCheck = validateTools(toolAllowlist, executionContext?.delegation);
   if (!directToolCheck.ok) {
     return finalizeReasoningTrace({
       output: "",
@@ -1743,7 +1864,7 @@ export async function runInProcess(
   // eligible when the target session actually registers and activates it.
   const tools = resolveSubAgentTools(toolAllowlist);
   const dispatchSettings = readDispatchSettings();
-  const governorProfile = inferTaskGovernorProfile(toolAllowlist, heartbeatCtx?.taskProfile);
+  const governorProfile = inferTaskGovernorProfile(toolAllowlist, executionContext?.taskProfile);
   const governorEmittedStages = new Set<DispatchTaskGovernorStage>();
   const visibleRepeatEnabled =
     dispatchSettings.workerRunGovernor.enabled && dispatchSettings.workerRunGovernor.visibleText.enabled;
@@ -1756,7 +1877,7 @@ export async function runInProcess(
   );
   const emitWorkerRunDecision = (decision: WorkerRunGovernorDecision | undefined): void => {
     if (!decision) return;
-    const trace = heartbeatCtx?.reasoningTrace;
+    const trace = executionContext?.reasoningTrace;
     void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, buildWorkerRunAuditEvent(decision, {
       ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
       ...(trace?.taskIndex !== undefined ? { taskIndex: trace.taskIndex } : {}),
@@ -1777,7 +1898,10 @@ export async function runInProcess(
     }));
   }
 
-  const { settingsManager, resourceLoader } = await createSubAgentSessionResources();
+  const { settingsManager, resourceLoader } = await createSubAgentSessionResources({
+    cwd: effectiveCwd,
+    parentContextFiles,
+  });
 
   // Local AbortController: merged from parent signal + timeout.
   // P1 fix: this closes the window where timeout fires before createAgentSession()
@@ -1940,7 +2064,7 @@ export async function runInProcess(
       lastProgressReason = reason;
       heartbeat.beat("alive", `progress:${reason}`);
       try {
-        heartbeatCtx?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath, toolCallCount });
+        executionContext?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath, toolCallCount });
       } catch { /* best-effort UI telemetry */ }
       armIdleTimeout();
     };
@@ -1963,11 +2087,11 @@ export async function runInProcess(
       // inside createAgentSession, the WeakSet channel covers that window and
       // backfills the id on first readable ctx. This is the sub-agent SM id,
       // never ADR 0027 C6's parent causal session_id.
-      const subAgentSm = SessionManager.inMemory(process.cwd());
+      const subAgentSm = SessionManager.inMemory(effectiveCwd);
       shadowSessionManager = subAgentSm;
       markSessionAsSubAgent(subAgentSm);
-      if (heartbeatCtx?.delegation !== undefined) {
-        createShadowWorkerBinding(subAgentSm, heartbeatCtx.delegation, {
+      if (executionContext?.delegation !== undefined) {
+        createShadowWorkerBinding(subAgentSm, executionContext.delegation, {
           projectRoot: heartbeatProjectRoot,
         });
       }
@@ -1975,12 +2099,15 @@ export async function runInProcess(
       // Create session. pi 0.80.10 createAgentSession takes modelRuntime (not
       // modelRegistry). Inherit the parent's ModelRuntime so memory overlays,
       // runtime API keys, and models.json composition stay shared.
+      // cwd matches effectiveCwd so tools/session see the same root as the
+      // parent contextFiles snapshot scope.
       const parentModelRuntime = resolveParentModelRuntime(refreshedModelRegistry);
       const result = await createAgentSession({
+        cwd: effectiveCwd,
         model,
         thinkingLevel: thinking as any, // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
         tools,
-        excludeTools: resolveSubAgentExcludeTools(toolAllowlist, heartbeatCtx?.delegation),
+        excludeTools: resolveSubAgentExcludeTools(toolAllowlist, executionContext?.delegation),
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoader,
@@ -2066,7 +2193,7 @@ export async function runInProcess(
                 : "audit_task_governor_stage_no_abort",
             }));
             try {
-              heartbeatCtx?.onProgress?.({
+              executionContext?.onProgress?.({
                 reason: `governor:${verdict.stage}`,
                 at: Date.now(),
                 heartbeatTracePath: heartbeat.tracePath,
@@ -2467,8 +2594,48 @@ export default function (pi: ExtensionAPI) {
   // anchors are derived via deriveSubAgentAnchor + runWithTriggerAnchor.
   // See causal-anchor.ts bindLifecycle doc.
   bindCausalAnchorLifecycle(pi);
+
+  // Capture the parent session's effective contextFiles once per turn from
+  // systemPromptOptions (already-loaded ordered {path,content}[]). Sub-agent
+  // handlers are excluded: they must not overwrite the parent turn snapshot.
+  // dispatch_agent / dispatch_parallel / workflow resolve the same immutable
+  // snapshot by (session_id, turn_id) and pass it into runInProcess.
+  //
+  // Fail closed on malformed lifecycle ctx: if ctx is missing, not an object,
+  // or has no sessionManager, do not capture. isSubAgentSession returns false
+  // for those shapes (safe default for other handlers), but treating them as
+  // the parent would risk capturing a sub-agent / SDK-exception path under the
+  // main (session, turn) key. Legal main ctx still captures; sub-agents skip.
+  pi.on("before_agent_start", (event: {
+    systemPromptOptions?: { contextFiles?: unknown };
+  }, ctx: unknown) => {
+    if (ctx == null || typeof ctx !== "object" || Array.isArray(ctx)) return;
+    const sessionManager = (ctx as { sessionManager?: unknown }).sessionManager;
+    if (sessionManager == null || typeof sessionManager !== "object") return;
+    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
+    captureParentContextFilesSnapshot(
+      getCurrentAnchor(),
+      event?.systemPromptOptions?.contextFiles,
+    );
+  });
+
   pi.on("session_shutdown", async (_event, ctx) => {
     await shutdownShadowWorkerBindingBestEffort(ctx?.sessionManager, "session_shutdown", "session_shutdown");
+    // Main-session only: free process-wide parent contextFiles snapshots for
+    // this session. Sub-agent shutdown must NOT clear the parent's turn store
+    // (siblings / later tools in the same parent turn still need it).
+    if (isSubAgentSession(ctx as { sessionManager?: unknown })) return;
+    try {
+      const sm = (ctx as {
+        sessionManager?: { getSessionId?(): string | null | undefined };
+      })?.sessionManager;
+      const sessionId = typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
+      if (typeof sessionId === "string" && sessionId.length > 0) {
+        clearParentContextFilesSnapshotsForSession(sessionId);
+      }
+    } catch {
+      // best-effort cleanup — never block session_shutdown
+    }
   });
 
   // Global repeated tool-call protection is registered by
@@ -2621,14 +2788,19 @@ export default function (pi: ExtensionAPI) {
       const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
 
       // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
-      // - parentAnchor may be undefined (e.g., dispatch_agent called before any
-      //   user turn — extremely rare but possible in test fixtures). In that
-      //   case subAnchor is also undefined; we still create the sub-agent session but
-      //   trace chain for this row is broken (audit log records anchor absent).
-      // - The anchor block is prepended to the prompt so the sub-agent LLM
-      //   knows its position in the trace tree (per C6 "L2 must know its anchor").
+      // - parentAnchor / parent contextFiles snapshot missing fail closed:
+      //   resolveParentContextFilesSnapshot returns undefined without a valid
+      //   parent (session, turn), and runInProcess rejects with
+      //   context_files_snapshot_missing — no usable sub-agent session is
+      //   created for that path (audit may still record the rejection).
+      // - When parentAnchor is present, the anchor block is prepended to the
+      //   prompt so the sub-agent LLM knows its position in the trace tree
+      //   (per C6 "L2 must know its anchor").
       const parentAnchor = getCurrentAnchor();
       const subAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_agent");
+      // Same immutable parent contextFiles snapshot for this (session, turn).
+      // Missing is rejected inside runInProcess; empty array is legal.
+      const parentContextFiles = resolveParentContextFilesSnapshot(parentAnchor);
       const prompt = subAnchor
         ? `${formatAnchorPromptBlock(subAnchor)}\n\n${params.prompt}`
         : params.prompt;
@@ -2656,10 +2828,13 @@ export default function (pi: ExtensionAPI) {
             // runInProcess can write the liveness channel. subAnchor is
             // the per-dispatch sub-agent anchor; ctx.cwd is the project
             // root. Both are also used by C6 audit so no new state.
+            // parentContextFiles: turn-scoped immutable snapshot (may be
+            // undefined → runInProcess rejects; [] is legal).
             {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
               taskProfile: params.taskProfile,
+              parentContextFiles,
               reasoningTrace: {
                 dispatchToolCallId: toolCallId,
                 taskIndex: 0,
@@ -2748,6 +2923,7 @@ export default function (pi: ExtensionAPI) {
           ...(typeof result.toolCallCount === "number" ? { tool_call_count: result.toolCallCount } : {}),
           ...dispatchGovernanceFields(result),
           ...dispatchReasoningTraceFields(result),
+          ...parentContextFilesAuditFields(parentContextFiles),
           output_chars: result.output?.length ?? 0,
           ...(result.usage
             ? {
@@ -2912,7 +3088,10 @@ export default function (pi: ExtensionAPI) {
       // all N tasks share the same parent. Each task derives its own
       // subturn inside the worker loop (deriveSubAgentAnchor maintains
       // per-(session_id, turn_id) counter, so subturns are 1..N in call order).
+      // Parent contextFiles snapshot is also resolved ONCE: every parallel
+      // task receives the same immutable reference (no per-task re-capture).
       const parentAnchor = getCurrentAnchor();
+      const parentContextFiles = resolveParentContextFilesSnapshot(parentAnchor);
       const projectRoot = ctx.cwd || process.cwd();
 
       const results: AgentResult[] = new Array(tasks.length);
@@ -3039,10 +3218,13 @@ export default function (pi: ExtensionAPI) {
                 // Stage 1b heartbeat ctx. Per-task subAnchor (subturn
                 // 1..N) gives each task its own heartbeat file under
                 // .pi-astack/dispatch/heartbeat/.
+                // parentContextFiles is the fan-out-shared immutable
+                // snapshot resolved once above the worker loop.
                 {
                   anchor: subAnchor,
                   projectRoot,
                   taskProfile: t.taskProfile,
+                  parentContextFiles,
                   reasoningTrace: {
                     dispatchToolCallId: toolCallId,
                     taskIndex: i,
@@ -3107,6 +3289,7 @@ export default function (pi: ExtensionAPI) {
             ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
             ...dispatchGovernanceFields(res),
             ...dispatchReasoningTraceFields(res),
+            ...parentContextFilesAuditFields(parentContextFiles),
             output_chars: res.output?.length ?? 0,
             ...(res.usage
               ? {

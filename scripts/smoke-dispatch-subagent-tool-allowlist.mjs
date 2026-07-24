@@ -79,7 +79,7 @@ if (!defaultMatch) {
 }
 
 check(
-  /excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, heartbeatCtx\?\.delegation\)/.test(src),
+  /excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, executionContext\?\.delegation\)/.test(src),
   "createAgentSession applies the context-sensitive disabled set through excludeTools",
 );
 check(

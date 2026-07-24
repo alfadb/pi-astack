@@ -541,7 +541,10 @@ await check("§8 API boundary: production runner uses dispatch's exported runInP
   assert(/export function validateSessionToolRegistry\(/.test(dispatchSrc), "dispatch exports target-session registry validation");
   assert(/export function enforceMutatingEnvGate\(/.test(dispatchSrc), "dispatch exports enforceMutatingEnvGate (W9 env gate, decoupled from validateTools 2026-06-16)");
   assert(/enforceMutatingEnvGate\(req\.tools\)/.test(src), "workflow production runner enforces the W9 mutating env gate locally (not inherited from validateTools)");
-  assert(/await createSubAgentSessionResources\(\)/.test(dispatchSrc), "runInProcess creates session-owned resources");
+  assert(/await createSubAgentSessionResources\(/.test(dispatchSrc), "runInProcess creates session-owned resources");
+  assert(/parentContextFiles/.test(dispatchSrc.match(/await createSubAgentSessionResources\([\s\S]{0,200}?\)/)?.[0] ?? ""), "runInProcess passes parentContextFiles into createSubAgentSessionResources");
+  assert(/resolveParentContextFilesSnapshot/.test(src), "workflow production runner resolves parent contextFiles snapshot");
+  assert(/parentContextFiles,/.test(src) || /parentContextFiles\s*:/.test(src), "workflow production runner threads parentContextFiles into runInProcess");
   assert(!/pi-astack\/dispatch\/shared-infra/.test(dispatchSrc), "dispatch does not retain the obsolete shared loader cache");
 });
 

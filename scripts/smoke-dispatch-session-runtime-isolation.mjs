@@ -54,8 +54,13 @@ console.log("dispatch per-session ExtensionRuntime isolation");
 
 await check("production resources and disposal are session-owned", () => {
   assert(
-    /const \{ settingsManager, resourceLoader \} = await createSubAgentSessionResources\(\)/.test(dispatchSource),
+    /const \{ settingsManager, resourceLoader \} = await createSubAgentSessionResources\(\{[\s\S]{0,120}?parentContextFiles,?[\s\S]{0,40}?\}\)/.test(dispatchSource)
+      || /const \{ settingsManager, resourceLoader \} = await createSubAgentSessionResources\(/.test(dispatchSource),
     "runInProcess does not create resources per invocation",
+  );
+  assert(
+    /parentContextFiles/.test(dispatchSource.match(/await createSubAgentSessionResources\([\s\S]{0,200}?\)/)?.[0] ?? ""),
+    "runInProcess must pass parentContextFiles into createSubAgentSessionResources",
   );
   assert(
     !/pi-astack\/dispatch\/shared-infra/.test(dispatchSource),
@@ -241,6 +246,7 @@ try {
     cwd: tempRoot,
     agentDir,
     extensionFactories: [extensionFactory],
+    parentContextFiles: [],
   });
   const apiA = extensionApis.at(-1);
   const runtimeA = resourcesA.resourceLoader.getExtensions().runtime;
@@ -272,6 +278,7 @@ try {
     cwd: tempRoot,
     agentDir,
     extensionFactories: [extensionFactory],
+    parentContextFiles: [],
   });
   const apiB = extensionApis.at(-1);
   const runtimeB = resourcesB.resourceLoader.getExtensions().runtime;

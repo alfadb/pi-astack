@@ -38,6 +38,18 @@ if (!resourcesMatch) {
     bad("per-session loader noExtensions:false missing - memory/web tools may not load");
   }
 
+  if (/noContextFiles:\s*true/.test(block)) {
+    ok("per-session loader keeps noContextFiles:true (parent snapshot via agentsFilesOverride)");
+  } else {
+    bad("per-session loader must keep noContextFiles:true and inject parent snapshot via override");
+  }
+
+  if (/agentsFilesOverride/.test(block)) {
+    ok("per-session loader supports agentsFilesOverride for parent contextFiles snapshot");
+  } else {
+    bad("per-session loader missing agentsFilesOverride injection for parent contextFiles");
+  }
+
   if (/resourceLoader\.reload\(\)/.test(block)) {
     ok("per-session loader reload preserves the explicit untrusted project state");
   } else {

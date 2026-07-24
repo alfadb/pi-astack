@@ -42,11 +42,16 @@ check("runInProcess imports startHeartbeat from _shared/heartbeat", () => {
   }
 });
 
-check("runInProcess signature accepts heartbeatCtx (anchor + projectRoot + maxRuntimeMs + onProgress)", () => {
-  if (!/heartbeatCtx\?:\s*\{[\s\S]{0,250}?anchor\?:\s*CausalAnchor;[\s\S]{0,250}?projectRoot\?:\s*string;[\s\S]{0,250}?maxRuntimeMs\?:\s*number;[\s\S]{0,250}?onProgress\?:/.test(dispatchSrc)) {
+check("runInProcess signature accepts required executionContext (anchor + projectRoot + maxRuntimeMs + onProgress)", () => {
+  // Typed as required SubAgentExecutionContext (exported); parentContextFiles is required too.
+  const namedType =
+    /executionContext:\s*SubAgentExecutionContext/.test(dispatchSrc) &&
+    /export type SubAgentExecutionContext\s*=\s*\{[\s\S]{0,400}?anchor\?:\s*CausalAnchor;[\s\S]{0,400}?projectRoot\?:\s*string;[\s\S]{0,400}?maxRuntimeMs\?:\s*number;[\s\S]{0,400}?onProgress\?:/.test(dispatchSrc) &&
+    /parentContextFiles:\s*ParentContextFilesSnapshot/.test(dispatchSrc);
+  if (!namedType) {
     throw new Error(
-      "runInProcess must accept optional heartbeatCtx parameter " +
-      "with { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number; onProgress?: ... } shape",
+      "runInProcess must accept required executionContext: SubAgentExecutionContext " +
+      "with { anchor?: CausalAnchor; projectRoot?: string; maxRuntimeMs?: number; onProgress?: ...; parentContextFiles: ... }",
     );
   }
 });
@@ -87,13 +92,13 @@ check("runInProcess calls heartbeat.stop() in a finally block (R8 P1 fix)", () =
   }
 });
 
-check("runInProcess forwards progress events to heartbeatCtx.onProgress", () => {
-  if (!/heartbeatCtx\?\.onProgress\?\.\(\{\s*reason,\s*at:\s*lastProgressAt,\s*heartbeatTracePath:\s*heartbeat\.tracePath,\s*toolCallCount\s*\}\)/.test(dispatchSrc)) {
-    throw new Error("recordProgress must call heartbeatCtx.onProgress with reason, timestamp, heartbeat trace path, and tool call count");
+check("runInProcess forwards progress events to executionContext.onProgress", () => {
+  if (!/executionContext\?\.onProgress\?\.\(\{\s*reason,\s*at:\s*lastProgressAt,\s*heartbeatTracePath:\s*heartbeat\.tracePath,\s*toolCallCount\s*\}\)/.test(dispatchSrc)) {
+    throw new Error("recordProgress must call executionContext.onProgress with reason, timestamp, heartbeat trace path, and tool call count");
   }
 });
 
-console.log("\nSection: caller-side heartbeatCtx threading");
+console.log("\nSection: caller-side executionContext threading");
 
 check("dispatch_agent.execute passes anchor + projectRoot to runInProcess", () => {
   // Find the dispatch_agent runInProcess call (anchored by
@@ -107,7 +112,7 @@ check("dispatch_agent.execute passes anchor + projectRoot to runInProcess", () =
   if (!/anchor:\s*subAnchor,[\s\S]{0,400}?projectRoot:\s*ctx\.cwd\s*\|\|\s*process\.cwd\(\)/.test(window)) {
     throw new Error(
       "dispatch_agent must pass { anchor: subAnchor, projectRoot: ctx.cwd || process.cwd() } " +
-      "as heartbeatCtx to runInProcess",
+      "as executionContext to runInProcess",
     );
   }
 });
@@ -124,7 +129,7 @@ check("dispatch_parallel.worker passes anchor + projectRoot to runInProcess", ()
   if (!/\{[\s\S]{0,200}?anchor:\s*subAnchor,[\s\S]{0,200}?projectRoot[\s\S]{0,400}?\}/.test(window)) {
     throw new Error(
       "dispatch_parallel must pass { anchor: subAnchor, projectRoot } " +
-      "as heartbeatCtx (projectRoot is the outer scope const captured by the worker)",
+      "as executionContext (projectRoot is the outer scope const captured by the worker)",
     );
   }
 });

@@ -41,6 +41,7 @@ import {
   validateTools,
   enforceMutatingEnvGate,
   dispatchReasoningTraceFields,
+  resolveParentContextFilesSnapshot,
   DEFAULT_TIMEOUT_MS,
   MAX_CONCURRENCY as DISPATCH_MAX_CONCURRENCY,
   type AgentResult,
@@ -248,7 +249,12 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
     if (!mutCheck.ok) {
       return { output: "", error: `tool_rejected: ${mutCheck.reason}`, failureType: "tool_rejected", durationMs: 0 };
     }
-    const anchor = deriveSubAgentAnchor(getCurrentAnchor(), req.anchorLabel);
+    // Resolve parent contextFiles from the main-session (session, turn) that
+    // launched workflow_run. Same snapshot contract as dispatch_agent: missing
+    // rejects inside runInProcess; empty array is legal; no disk re-scan.
+    const parentAnchor = getCurrentAnchor();
+    const parentContextFiles = resolveParentContextFilesSnapshot(parentAnchor);
+    const anchor = deriveSubAgentAnchor(parentAnchor, req.anchorLabel);
     const prompt = anchor ? `${formatAnchorPromptBlock(anchor)}\n\n${req.prompt}` : req.prompt;
     const result: AgentResult = await runWithTriggerAnchor(anchor, () =>
       runInProcess(
@@ -262,6 +268,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
           projectRoot,
           maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
           taskProfile: req.taskProfile,
+          parentContextFiles,
           reasoningTrace: {
             workflowRunId: req.workflowRunId,
             workflowStageId: req.stageId,

@@ -2,7 +2,7 @@
 /**
  * Smoke: current pi install target and backward-compatible peer contracts.
  *
- * Install target: 0.81.1. Peer floor: >=0.80.10 <1.0.0.
+ * Install target: 0.82.0. Peer floor: >=0.80.10 <1.0.0.
  *
  * Covers more than source-regex:
  *   1) package.json is the publish contract: pin four @earendil-works packages to
@@ -18,8 +18,8 @@
  * package-lock.json is gitignored and is NOT a release gate. When present locally it is
  * checked as a soft consistency signal; absence or drift never fails the smoke.
  *
- * Host path: PI_COMPAT_ROOT > legacy PI_08010_ROOT > resolvable package >
- * local node_modules > fixed Volta path last.
+ * Host path: PI_COMPAT_ROOT > legacy PI_08010_ROOT > active pi executable >
+ * resolvable package > local node_modules > fixed Volta path last.
  */
 
 import fs from "node:fs";
@@ -111,9 +111,33 @@ function packageRootFromResolved(resolvedUrlOrPath) {
   return null;
 }
 
+/** Resolve the package root behind the active `pi` executable on PATH. */
+function activePiPackageRoot() {
+  const pathEntries = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  const executableNames = process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
+  let repoLocal = null;
+  for (const entry of pathEntries) {
+    for (const name of executableNames) {
+      const candidate = path.join(entry, name);
+      try {
+        if (!fs.statSync(candidate).isFile()) continue;
+        const real = fs.realpathSync(candidate);
+        const root = packageRootFromResolved(real);
+        if (!root) continue;
+        const resolvedRoot = path.resolve(root);
+        const isRepoLocal = resolvedRoot === repoRoot || resolvedRoot.startsWith(`${repoRoot}${path.sep}`);
+        if (!isRepoLocal) return { root, executable: candidate, real };
+        repoLocal ??= { root, executable: candidate, real };
+      } catch { /* try the next PATH entry */ }
+    }
+  }
+  return repoLocal;
+}
+
 /**
- * Prefer PI_COMPAT_ROOT, retain PI_08010_ROOT as a legacy alias, then try an
- * import-resolvable package, local node_modules, and the fixed Volta image path.
+ * Prefer explicit compatibility roots, then the active pi executable. A local
+ * import is only a fallback because direct Node resolution can select this
+ * repository's stale node_modules instead of the process host.
  */
 function resolveHostCodingAgent() {
   const tried = [];
@@ -123,6 +147,14 @@ function resolveHostCodingAgent() {
     tried.push(`${envName}=${root}`);
     if (fs.existsSync(path.join(root, "package.json"))) return { root, source: envName, tried };
   }
+
+  const activePi = activePiPackageRoot();
+  tried.push(
+    activePi
+      ? `active-pi=${activePi.executable}→${activePi.real}→root=${activePi.root}`
+      : "active-pi=not found",
+  );
+  if (activePi) return { root: activePi.root, source: "active pi executable", tried };
 
   try {
     const resolved = import.meta.resolve("@earendil-works/pi-coding-agent");
@@ -171,7 +203,7 @@ function walkFiles(dir, pred, out = []) {
 }
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-const TARGET = "0.81.1";
+const TARGET = "0.82.0";
 const PEER_FLOOR = ">=0.80.10 <1.0.0";
 const EAR = [
   "@earendil-works/pi-agent-core",
@@ -288,7 +320,7 @@ if (fs.existsSync(lockPath)) {
   console.log("  skip  package-lock.json (gitignored; not a release contract)");
 }
 
-check("host resolver prefers PI_COMPAT_ROOT / legacy alias / resolvable package before fallback", () => {
+check("host resolver prefers explicit roots / external active pi before local fallback", () => {
   const resolved = resolveHostCodingAgent();
   if (!resolved.root) {
     throw new Error(`could not resolve host coding-agent; tried: ${resolved.tried.join(" | ")}`);
@@ -400,10 +432,18 @@ await checkAsync("resolveParentModelRuntime validates registry.runtime", async (
 
   const runtime = {
     getModel() { return undefined; },
-    reloadConfig() { return Promise.resolve(); },
+    getAuth() { return Promise.resolve(undefined); },
+    refresh() { return Promise.resolve(); },
   };
   const got = resolve({ runtime, find() {} });
   if (got !== runtime) throw new Error("should return the same runtime instance");
+
+  for (const capability of ["getModel", "getAuth", "refresh"]) {
+    const incomplete = { ...runtime, [capability]: undefined };
+    threw = false;
+    try { resolve({ runtime: incomplete, find() {} }); } catch { threw = true; }
+    if (!threw) throw new Error(`runtime without ${capability} should throw`);
+  }
 });
 
 await checkAsync("refreshModelRegistry singleflight: 16 concurrent → 1 refresh; failure retries", async () => {
@@ -491,7 +531,8 @@ await checkAsync("refresh awaits Promise before subsequent find (behavioral)", a
     },
     runtime: {
       getModel() { return undefined; },
-      reloadConfig() { return Promise.resolve(); },
+      getAuth() { return Promise.resolve(undefined); },
+      refresh() { return Promise.resolve(); },
     },
   };
   await mod.refreshModelRegistry(modelRegistry);

@@ -726,7 +726,7 @@ await check("dispatch terminal audit/details helper emits trace completeness fie
   assert.match(source, /timer = setTimeout\(finish, ABORT_TRACE_DRAIN_MS\)/);
   assert.match(source, /trackedRunPromise\.then\(finish, finish\)/);
   assert.match(source, /forceIncomplete: abortRace/);
-  assert.match(source, /if \(heartbeatCtx\?\.reasoningTrace\) \{[\s\S]{0,700}?createDispatchReasoningTrace/);
+  assert.match(source, /if \(executionContext\?\.reasoningTrace\) \{[\s\S]{0,700}?createDispatchReasoningTrace/);
   assert.doesNotMatch(source, /auditSessionEvent/);
   assert.match(workflowSource, /reasoningTrace:\s*\{[\s\S]{0,160}?workflowRunId: req\.workflowRunId,[\s\S]{0,80}?workflowStageId: req\.stageId/);
   assert.match(workflowSource, /\.\.\.dispatchReasoningTraceFields\(result\)/);

@@ -1040,7 +1040,7 @@ await check("production dispatch still enforces exactly five structural denies t
   const expected = ["dispatch_agent", "dispatch_parallel", "workflow_run", "prompt_user", "vault_release"];
   assert(JSON.stringify(actual) === JSON.stringify(expected), `deny set drift: ${actual}`);
   assert(/DISABLED_SUBAGENT_TOOL_NAMES\.has\(normalized\)/.test(source));
-  assert(/excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, heartbeatCtx\?\.delegation\)/.test(source));
+  assert(/excludeTools:\s*resolveSubAgentExcludeTools\(toolAllowlist, executionContext\?\.delegation\)/.test(source));
   assert(/return DISABLED_SUBAGENT_TOOLS\.filter\(\(name\) => !shadowGranted\.has\(name\)\)/.test(source));
 });
 

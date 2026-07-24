@@ -151,7 +151,14 @@ fs.writeFileSync(compiledPath, transpiled, "utf8");
 
 const { installTurnBoundaryCompactionPatch, _resetTurnBoundaryCompactionHooksForTests } = await import(compiledPath);
 const { AgentSession, CompactionSummaryMessageComponent, InteractiveMode } = await import("@earendil-works/pi-coding-agent");
-const { Agent, runAgentLoop } = await import("@earendil-works/pi-agent-core");
+const { Agent, runAgentLoop, setDefaultStreamFn } = await import("@earendil-works/pi-agent-core");
+
+// pi-agent-core 0.82.0 requires an explicit default for directly constructed
+// Agent instances. These tests never reach provider streaming; fail loudly if
+// that invariant changes instead of silently using a real provider.
+setDefaultStreamFn(() => {
+  throw new Error("turn-boundary smoke unexpectedly entered provider streaming");
+});
 
 // Deliberately not imported from pi-tui: runtime can contain a host copy and a
 // package-local copy, so the production patch must recognize this by shape.
