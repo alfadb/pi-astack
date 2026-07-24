@@ -13,9 +13,10 @@
  *
  * Security model (path-based image loads):
  *   1. Extension allowlist — only .png/.jpg/.jpeg/.webp/.gif accepted.
- *   2. Path containment — absolute paths and .. escapes are rejected.
- *   3. Symlink defense — realpath resolution on both sides prevents
- *      symlink-based TOCTOU bypass of path containment.
+ *   2. Path containment — resolved path must stay under the project root
+ *      or under /tmp (the only extra allowed root).
+ *   3. Symlink defense — realpath resolution on both sides (and on /tmp)
+ *      prevents symlink-based escape from those roots.
  * Together these prevent an LLM-supplied path from exfiltrating arbitrary
  * files (secrets, config, private keys) through a vision provider round-trip.
  */
@@ -126,13 +127,21 @@ type ResolvedImage = { base64: string; mimeType: string };
 
 // ── Path validation (security) ──────────────────────────────────
 
+/** Trailing-separator containment: `/a/bc` is not inside `/a/b`. */
+function isPathInside(abs: string, root: string): boolean {
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return abs === root || abs.startsWith(rootWithSep);
+}
+
 /**
  * Validate that a user-supplied image path is safe to read.
  *
  * Three layers of defense:
  *   1. Extension allowlist — only image extensions permitted.
- *   2. Lexical containment — resolved under cwd root.
- *   3. Symlink resolution — realpath on both sides prevents symlink escape.
+ *   2. Path containment — resolved path must stay under the project root
+ *      or under /tmp (extra allowed root for ephemeral screenshots/etc.).
+ *   3. Symlink resolution — realpath on project root, /tmp, and the target
+ *      so a /tmp symlink cannot escape into other sensitive directories.
  *
  * Returns the absolute path on success, or a VisionErr.
  */
@@ -152,22 +161,25 @@ function validateImagePath(
 
   const rootRaw = path.resolve(cwd ?? process.cwd());
   const absRaw = path.resolve(rootRaw, userPath);
+  const tmpRaw = path.resolve("/tmp");
 
-  // Resolve symlinks on both sides. If either side doesn't exist yet,
+  // Resolve symlinks on roots and the target. If a side doesn't exist yet,
   // fall back to the lexical path (a non-existent path can't be a
   // symlink-to-secret, so the lexical check is sufficient).
   let root: string;
   let abs: string;
+  let tmpRoot: string;
   try { root = fsSync.realpathSync(rootRaw); } catch { root = rootRaw; }
   try { abs = fsSync.realpathSync(absRaw); } catch { abs = absRaw; }
+  try { tmpRoot = fsSync.realpathSync(tmpRaw); } catch { tmpRoot = tmpRaw; }
 
-  // Trailing-separator guard: ensure /a/bc isn't treated as inside /a/b.
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  if (abs !== root && !abs.startsWith(rootWithSep)) {
+  // Allow project root or the real /tmp tree only. Containment is judged on
+  // post-realpath targets so /tmp/foo -> /etc/secret.png is rejected.
+  if (!isPathInside(abs, root) && !isPathInside(abs, tmpRoot)) {
     return {
       ok: false,
       error:
-        `Image path "${userPath}" resolves outside the project root (after symlink resolution).`,
+        `Image path "${userPath}" resolves outside the project root and /tmp (after symlink resolution).`,
     };
   }
 
@@ -388,21 +400,21 @@ export default function (pi: ExtensionAPI) {
       "Use when your current model does not support image input. " +
       "Automatically selects the strongest " +
       "vision-capable model from available providers. Accepts base64-encoded " +
-      "images or file paths confined to the project directory.",
+      "images or file paths under the project directory or /tmp.",
     promptSnippet: "vision(imageBase64?, path?, prompt, mimeType?) — analyze an image with the best vision model",
     promptGuidelines: [
       "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images; if the current model supports image input, pass the image directly instead.",
-      "Prefer imageBase64 for images already in context. Use path for local image files within the project.",
+      "Prefer imageBase64 for images already in context. Use path for local image files within the project or under /tmp.",
       "The tool auto-selects the best vision model per your `vision.modelPreferences` setting in pi-astack-settings.json (top-level, no piStack wrapper).",
       "Returns the text analysis from the vision model, along with model info and token usage.",
-      "For path-based loads: only .png/.jpg/.jpeg/.webp/.gif extensions are allowed, and paths are confined to the project root.",
+      "For path-based loads: only .png/.jpg/.jpeg/.webp/.gif extensions are allowed, and resolved paths must stay under the project root or /tmp (symlink targets outside those roots are rejected).",
     ],
     parameters: Type.Object({
       imageBase64: Type.Optional(Type.String({
         description: "Base64-encoded image data (preferred for inline images)",
       })),
       path: Type.Optional(Type.String({
-        description: "Path to an image file within the project directory (alternative to imageBase64)",
+        description: "Path to an image file under the project directory or /tmp (alternative to imageBase64)",
       })),
       mimeType: Type.Optional(Type.String({
         description: "Image MIME type, e.g. image/png, image/jpeg. Auto-inferred from path extension.",

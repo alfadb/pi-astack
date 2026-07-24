@@ -39,15 +39,35 @@ function transpile(srcPath) {
 }
 
 const visionSrc = path.join(repoRoot, "extensions", "vision", "index.ts");
+// Minimal real 1×1 PNG (binary fixture — not a string pretending to be PNG).
+const REAL_PNG_1X1 = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+if (REAL_PNG_1X1[0] !== 0x89 || REAL_PNG_1X1.subarray(1, 4).toString("ascii") !== "PNG") {
+  console.error("REAL_PNG_1X1 fixture is not a valid PNG");
+  process.exit(1);
+}
+
 let moduleExports;
+let prodValidateImagePath;
+let prodResolveImage;
 try {
-  const code = transpile(visionSrc);
+  // Append smoke-only exports so tests exercise production functions without
+  // widening the production API surface of vision/index.ts.
+  const code =
+    transpile(visionSrc) +
+    "\n// smoke-only exports (not part of production API)\n" +
+    "exports.__smokeValidateImagePath = validateImagePath;\n" +
+    "exports.__smokeResolveImage = resolveImage;\n";
   // Wrap to extract exports / top-level functions we want to test
   // We use a VM context to avoid polluting global scope
   const vm = require("node:vm");
+  const exportBag = {};
   const ctx = {
     require: (m) => {
-      if (m === "node:fs/promises") return { readFile: async () => { throw new Error("not stubbed"); } };
+      // Real fs/promises so production resolveImage actually reads file bytes.
+      if (m === "node:fs/promises") return fs.promises;
       if (m === "node:fs") return fs;
       if (m === "node:os") return os;
       if (m === "node:path") return path;
@@ -68,25 +88,27 @@ try {
     console,
     setTimeout,
     clearTimeout,
-    exports: {},
-    module: { exports: {} },
+    Buffer,
+    exports: exportBag,
+    module: { exports: exportBag },
     __dirname: path.dirname(visionSrc),
     __filename: visionSrc,
   };
   vm.createContext(ctx);
   vm.runInContext(code, ctx, { filename: visionSrc });
-  moduleExports = ctx.module.exports || ctx.exports;
+  moduleExports = ctx.module.exports;
+  prodValidateImagePath = moduleExports.__smokeValidateImagePath;
+  prodResolveImage = moduleExports.__smokeResolveImage;
+  if (typeof prodValidateImagePath !== "function" || typeof prodResolveImage !== "function") {
+    throw new Error(
+      "smoke-only production exports missing " +
+      `(validateImagePath=${typeof prodValidateImagePath}, resolveImage=${typeof prodResolveImage})`,
+    );
+  }
 } catch (err) {
   console.error(`Failed to transpile/load vision/index.ts: ${err.message}`);
   process.exit(1);
 }
-
-// ── Helper: invoke a function exported by the transpiled module ──
-
-// The transpiled module has top-level functions and a default export.
-// We need to extract validateImagePath + scoreByPrefs from the source.
-// Since they're local (not exported), we regex-extract the function bodies
-// and evaluate them in isolation.
 
 // ── Test 1: validateImagePath (security-critical) ────────────────
 
@@ -102,6 +124,11 @@ const EXT_MIME = {
   ".gif": "image/gif",
 };
 
+function isPathInside(abs, root) {
+  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
+  return abs === root || abs.startsWith(rootWithSep);
+}
+
 function validateImagePath(userPath, cwd) {
   const ext = path.extname(userPath).toLowerCase();
   if (!ALLOWED_IMAGE_EXTS.has(ext)) {
@@ -109,12 +136,13 @@ function validateImagePath(userPath, cwd) {
   }
   const rootRaw = path.resolve(cwd ?? process.cwd());
   const absRaw = path.resolve(rootRaw, userPath);
-  let root, abs;
+  const tmpRaw = path.resolve("/tmp");
+  let root, abs, tmpRoot;
   try { root = fs.realpathSync(rootRaw); } catch { root = rootRaw; }
   try { abs = fs.realpathSync(absRaw); } catch { abs = absRaw; }
-  const rootWithSep = root.endsWith(path.sep) ? root : root + path.sep;
-  if (abs !== root && !abs.startsWith(rootWithSep)) {
-    return { ok: false, error: `Image path resolves outside the project root.` };
+  try { tmpRoot = fs.realpathSync(tmpRaw); } catch { tmpRoot = tmpRaw; }
+  if (!isPathInside(abs, root) && !isPathInside(abs, tmpRoot)) {
+    return { ok: false, error: `Image path resolves outside the project root and /tmp.` };
   }
   return { ok: true, abs, ext };
 }
@@ -181,6 +209,56 @@ console.log("\n  validateImagePath (security):");
   else failMsg("accepted .svg");
 
   fs.rmSync(tmp, { recursive: true, force: true });
+}
+
+// Project root deliberately outside /tmp so /tmp allowance is not conflated
+// with ordinary project-root containment (mkdtemp under os.tmpdir often is /tmp).
+// These cases call the production validateImagePath from extensions/vision/index.ts
+// (smoke-only export on the transpiled module), not the local reimplementation above.
+console.log("\n  production validateImagePath (/tmp allowance + escape defense):");
+{
+  const project = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-proj-"));
+  const outsideHome = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-out-"));
+  const tmpImg = path.join("/tmp", `smoke-vision-allow-${process.pid}-${Date.now()}.png`);
+  const outsideImg = path.join(outsideHome, "secret.png");
+  const escapeLink = path.join("/tmp", `smoke-vision-escape-${process.pid}-${Date.now()}.png`);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { fs.rmSync(project, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.rmSync(outsideHome, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.unlinkSync(tmpImg); } catch { /* ignore */ }
+    try { fs.unlinkSync(escapeLink); } catch { /* ignore */ }
+  };
+
+  try {
+    fs.writeFileSync(tmpImg, REAL_PNG_1X1);
+    fs.writeFileSync(outsideImg, REAL_PNG_1X1);
+
+    // success: absolute image under real /tmp while cwd is a non-/tmp project
+    const rTmp = prodValidateImagePath(tmpImg, project);
+    if (rTmp.ok && rTmp.abs === fs.realpathSync(tmpImg)) ok("production accepts real image under /tmp");
+    else failMsg(`production rejected /tmp image: ${JSON.stringify(rTmp)}`);
+
+    // reject: path outside both project root and /tmp
+    const rOut = prodValidateImagePath(outsideImg, project);
+    if (!rOut.ok && rOut.error.includes("outside")) ok("production rejects path outside project and /tmp");
+    else failMsg(`production accepted outside path: ${JSON.stringify(rOut)}`);
+
+    // reject: /tmp symlink whose realpath target escapes allowed roots
+    fs.symlinkSync(outsideImg, escapeLink);
+    const rEsc = prodValidateImagePath(escapeLink, project);
+    if (!rEsc.ok && rEsc.error.includes("outside")) ok("production rejects /tmp symlink escape after realpath");
+    else failMsg(`production accepted /tmp symlink escape: ${JSON.stringify(rEsc)}`);
+
+    // prefix guard: /tmp-not-really is not under /tmp
+    const rPrefix = prodValidateImagePath("/tmp-not-really/evil.png", project);
+    if (!rPrefix.ok && rPrefix.error.includes("outside")) ok("production rejects /tmp prefix lookalike");
+    else failMsg(`production accepted /tmp prefix lookalike: ${JSON.stringify(rPrefix)}`);
+  } finally {
+    cleanup();
+  }
 }
 
 // ── Test 2: scoreByPrefs (model selection) ──────────────────────
@@ -298,6 +376,96 @@ async function resolveImage(input, cwd) {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
+// Production resolveImage (/tmp read path) — calls the transpiled vision module
+// with real fs/promises so file bytes are actually loaded from disk.
+console.log("\n  production resolveImage (/tmp real PNG read):");
+{
+  const project = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-resolve-"));
+  const outsideHome = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-resolve-out-"));
+  const tmpImg = path.join("/tmp", `smoke-vision-resolve-${process.pid}-${Date.now()}.png`);
+  const outsideImg = path.join(outsideHome, "secret.png");
+  const escapeLink = path.join("/tmp", `smoke-vision-resolve-escape-${process.pid}-${Date.now()}.png`);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { fs.rmSync(project, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.rmSync(outsideHome, { recursive: true, force: true }); } catch { /* ignore */ }
+    try { fs.unlinkSync(tmpImg); } catch { /* ignore */ }
+    try { fs.unlinkSync(escapeLink); } catch { /* ignore */ }
+  };
+
+  try {
+    // Runtime-created real PNG under /tmp; project cwd is deliberately not under /tmp.
+    fs.writeFileSync(tmpImg, REAL_PNG_1X1);
+    fs.writeFileSync(outsideImg, REAL_PNG_1X1);
+    const onDisk = await fs.promises.readFile(tmpImg);
+    if (!onDisk.equals(REAL_PNG_1X1)) {
+      failMsg("on-disk /tmp PNG bytes do not match fixture");
+    } else {
+      ok("wrote real PNG bytes under /tmp");
+    }
+
+    const expected = REAL_PNG_1X1.toString("base64");
+    const r7 = await prodResolveImage({ path: tmpImg, prompt: "test" }, project);
+    if (r7 && !("ok" in r7 && r7.ok === false) && r7.base64 === expected && r7.mimeType === "image/png") {
+      ok("production resolveImage reads real /tmp PNG from non-/tmp cwd");
+    } else {
+      failMsg(`production /tmp resolveImage: ${JSON.stringify(r7)}`);
+    }
+
+    // reject: outside both project and /tmp must not resolve through production path
+    const rOut = await prodResolveImage({ path: outsideImg, prompt: "test" }, project);
+    if (rOut && rOut.ok === false && String(rOut.error || "").includes("outside")) {
+      ok("production resolveImage rejects path outside project and /tmp");
+    } else {
+      failMsg(`production resolveImage accepted outside path: ${JSON.stringify(rOut)}`);
+    }
+
+    // reject: /tmp symlink escape must not load outside bytes
+    fs.symlinkSync(outsideImg, escapeLink);
+    const rEsc = await prodResolveImage({ path: escapeLink, prompt: "test" }, project);
+    if (rEsc && rEsc.ok === false && String(rEsc.error || "").includes("outside")) {
+      ok("production resolveImage rejects /tmp symlink escape");
+    } else {
+      failMsg(`production resolveImage accepted symlink escape: ${JSON.stringify(rEsc)}`);
+    }
+  } finally {
+    cleanup();
+  }
+}
+
+// Optional production acceptance: real screenshot under /tmp via VISION_SMOKE_REAL_IMAGE.
+// Unset → skip (ordinary smoke stays independent; no machine-local path hardcoded).
+console.log("\n  production resolveImage (VISION_SMOKE_REAL_IMAGE optional):");
+{
+  const realImagePath = process.env.VISION_SMOKE_REAL_IMAGE;
+  if (!realImagePath) {
+    ok("VISION_SMOKE_REAL_IMAGE unset — skip real-image acceptance");
+  } else {
+    const project = fs.mkdtempSync(path.join(os.homedir(), ".smoke-vision-real-"));
+    try {
+      if (!fs.existsSync(realImagePath)) {
+        failMsg(`VISION_SMOKE_REAL_IMAGE path missing: ${realImagePath}`);
+      } else {
+        const onDisk = await fs.promises.readFile(realImagePath);
+        const expectedB64 = onDisk.toString("base64");
+        const r = await prodResolveImage({ path: realImagePath, prompt: "smoke real image" }, project);
+        if (r && !("ok" in r && r.ok === false) && r.base64 === expectedB64 && r.mimeType === "image/png") {
+          ok("production resolveImage: real image base64 matches disk bytes, MIME image/png");
+        } else {
+          const b64Match = r && r.base64 === expectedB64;
+          failMsg(
+            `real image resolve mismatch: mime=${r && r.mimeType} b64Match=${b64Match} err=${JSON.stringify(r && r.error)}`,
+          );
+        }
+      }
+    } finally {
+      try { fs.rmSync(project, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  }
+}
+
 // ── Test 4: modelRegistry null-guard (P0 fix from audit round 6) ─
 
 console.log("\n  modelRegistry null-guard (P0 fix):");
@@ -313,6 +481,25 @@ console.log("\n  modelRegistry null-guard (P0 fix):");
   const hasMsg = source.includes("modelRegistry not available");
   if (hasMsg) ok("error message references modelRegistry");
   else failMsg("error message does not reference modelRegistry");
+}
+
+// ── Test 5: production source keeps /tmp realpath allowance ─────
+
+console.log("\n  production source (/tmp allowance contract):");
+{
+  const source = fs.readFileSync(visionSrc, "utf8");
+  const hasTmpResolve = source.includes('path.resolve("/tmp")') || source.includes("path.resolve('/tmp')");
+  if (hasTmpResolve) ok("source realpath-roots /tmp");
+  else failMsg("vision/index.ts missing path.resolve(\"/tmp\")");
+
+  const hasDualContainment =
+    source.includes("isPathInside(abs, root)") && source.includes("isPathInside(abs, tmpRoot)");
+  if (hasDualContainment) ok("source allows project root or real /tmp only");
+  else failMsg("vision/index.ts missing dual isPathInside containment");
+
+  const hasOutsideMsg = source.includes("outside the project root and /tmp");
+  if (hasOutsideMsg) ok("source error mentions project root and /tmp");
+  else failMsg("vision/index.ts rejection message missing /tmp wording");
 }
 
 // ── Summary ─────────────────────────────────────────────────────
