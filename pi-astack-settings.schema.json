@@ -347,7 +347,7 @@
         "classifierModel": {
           "type": "string",
           "default": "",
-          "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Needs low-latency reading comprehension and reliable structured output; deep reasoning is not required. Empty default means fail-closed unless configured in pi-astack-settings.json."
+          "description": "Model used by the active-correction classifier (conversation window → CorrectionSignal). Needs strong semantic judgment and reliable structured output (signal typing, is_directive, rule_scope project|global) — not a mini high-frequency flash/classify model. Empty default means fail-closed unless configured in pi-astack-settings.json."
         },
 
         "ruleContradictionConfirmModel": {
@@ -735,7 +735,7 @@
           "additionalProperties": false,
           "description": "ADR 0025 prompt/protocol version tags written into audit rows so classifier and multi-view quality can be grouped by prompt version.",
           "properties": {
-            "activeCorrectionClassifier": { "type": "string", "default": "v2" },
+            "activeCorrectionClassifier": { "type": "string", "default": "v3" },
             "reasoningNormalizationPreamble": { "type": "string", "default": "v1" },
             "multiViewPass1": { "type": "string", "default": "v1" },
             "multiViewPass2": { "type": "string", "default": "v1" },

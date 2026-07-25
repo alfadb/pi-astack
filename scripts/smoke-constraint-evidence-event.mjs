@@ -520,6 +520,7 @@ check("runtime integration body is deterministic for repeated agent_end signal",
       user_quote: "本项目内，Constraint Evidence Event writer 必须默认关闭。",
       correction_intent: "new preference",
       scope_description: "current project only",
+      rule_scope: "project",
       confidence: 9,
       provenance: "user-expressed",
     },
@@ -559,6 +560,7 @@ check("runtime integration records sanitizer redaction metadata", () => {
       user_quote: `所有项目中，禁止记录 ${rawToken}`,
       correction_intent: "new preference",
       scope_description: `all projects for owner@example.com via ${rawAws}`,
+      rule_scope: "global",
       confidence: 9,
       provenance: "user-expressed",
     },
@@ -588,12 +590,13 @@ check("runtime integration records sanitizer redaction metadata", () => {
   assert(body.privacy.redaction_level === "partial", "privacy redaction level must reflect sanitizer metadata");
 });
 
-check("runtime integration scope: project wording beats incidental global-config mention", () => {
+check("runtime integration scope: classifier rule_scope=project beats quote mentioning 全局配置", () => {
   const body = buildTier1ConstraintEvidenceEventBody({
     signal: {
       user_quote: "pi-astack直接推main，不要开PR，它是我的自有仓库，pi-astack是属于我个人的~/.pi全局配置的pi-global仓库的子模块，推送pi-astack后要把pi-global的子模块指针一起提交推送",
       correction_intent: "new preference",
       scope_description: "项目级规则，适用于 pi-astack（作为 pi-global 子模块）",
+      rule_scope: "project",
       confidence: 9,
       provenance: "user-expressed",
     },
@@ -611,16 +614,19 @@ check("runtime integration scope: project wording beats incidental global-config
     candidateId: "tier1-direct:scope",
     deviceId: "runtime-device",
   });
-  assert(body.scope.scope_hint.kind === "project", "incidental 全局配置 mention must not force global scope");
+  assert(body.scope.scope_hint.kind === "project", "classifier rule_scope=project must win over quote 全局配置 wording");
   assert(body.scope.scope_hint.project_id === "pi-global", "project scope must preserve active binding");
+  assert(body.scope.scope_hint.evidence === "classifier semantic rule_scope=project", "evidence must cite classifier semantic rule_scope");
 });
 
-check("runtime integration scope: explicit all-project wording stays global", () => {
+check("runtime integration scope: classifier rule_scope=global beats conflicting scope_description", () => {
   const body = buildTier1ConstraintEvidenceEventBody({
     signal: {
       user_quote: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
       correction_intent: "new preference",
-      scope_description: "all projects",
+      // Conflicting NL text must not override structured classifier scope.
+      scope_description: "current project only",
+      rule_scope: "global",
       confidence: 9,
       provenance: "user-expressed",
     },
@@ -638,7 +644,35 @@ check("runtime integration scope: explicit all-project wording stays global", ()
     candidateId: "tier1-direct:global-scope",
     deviceId: "runtime-device",
   });
-  assert(body.scope.scope_hint.kind === "global", "explicit all-project wording must remain global-scoped");
+  assert(body.scope.scope_hint.kind === "global", "classifier rule_scope=global must win over scope_description 'current project'");
+  assert(body.scope.scope_hint.evidence === "classifier semantic rule_scope=global", "evidence must cite classifier semantic rule_scope");
+});
+
+check("runtime integration scope: missing rule_scope is unknown (no default project)", () => {
+  const body = buildTier1ConstraintEvidenceEventBody({
+    signal: {
+      user_quote: "本项目内，缺少 rule_scope 不得默认 project。",
+      correction_intent: "new preference",
+      scope_description: "current project only",
+      confidence: 9,
+      provenance: "user-expressed",
+    },
+    draft: {
+      title: "Missing rule_scope unknown",
+      body: "本项目内，缺少 rule_scope 不得默认 project。",
+      entryConfidence: 9,
+    },
+    sessionId: "runtime-session",
+    turnId: "runtime-turn",
+    projectId: "pi-global",
+    cwd: repoRoot,
+    createdAtUtc: "2026-06-19T12:00:00.000Z",
+    correlationId: "runtime-session:auto-missing-scope",
+    candidateId: "tier1-direct:missing-scope",
+    deviceId: "runtime-device",
+  });
+  assert(body.scope.scope_hint.kind === "unknown", "missing rule_scope must be unknown, not default project");
+  assert(String(body.scope.scope_hint.reason || "").includes("missing"), "unknown reason must cite missing classifier rule_scope");
 });
 
 check("runtime integration appends L1 event and state audit idempotently", async () => {
@@ -649,6 +683,7 @@ check("runtime integration appends L1 event and state audit idempotently", async
       user_quote: "所有项目中，显式 runtime 开关必须保留在 JSON 配置里。",
       correction_intent: "new preference",
       scope_description: "all projects",
+      rule_scope: "global",
       confidence: 9,
       provenance: "user-expressed",
     },

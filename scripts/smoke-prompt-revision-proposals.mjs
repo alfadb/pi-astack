@@ -68,7 +68,7 @@ fs.mkdirSync(ledgerDir, { recursive: true });
 
 const settings = {
   promptVersion: {
-    activeCorrectionClassifier: "v2",
+    activeCorrectionClassifier: "v3",
     reasoningNormalizationPreamble: "v1",
     multiViewPass1: "v1",
     multiViewPass2: "v1",
@@ -133,7 +133,7 @@ function validRow(overrides = {}) {
     ts: "2026-07-08T10:00:00.000Z",
     project_root: projectRoot,
     target_prompt: "activeCorrectionClassifier",
-    current_version: "v2",
+    current_version: "v3",
     problem_pattern: "classifier over-accepts injected-without-self-report observations as retrieved-unused usage",
     evidence_quotes: [
       "path_a_signal=injected_no_self_report",
@@ -170,7 +170,7 @@ check("valid proposal without independent evidence autonomously defers", () => {
   if (row.requires_human_review !== false) throw new Error("requires_human_review must be forced false");
   if (row.status !== "deferred_until_new_evidence" || row.agent_disposition?.decision !== "defer_until_new_evidence") throw new Error(`proposal must autonomously defer: ${JSON.stringify(row)}`);
   if (row.applied_to_disk !== false) throw new Error("applied_to_disk must be forced false");
-  if (row.target_prompt !== "activeCorrectionClassifier" || row.current_version !== "v2") throw new Error(`target/version wrong: ${JSON.stringify(row)}`);
+  if (row.target_prompt !== "activeCorrectionClassifier" || row.current_version !== "v3") throw new Error(`target/version wrong: ${JSON.stringify(row)}`);
 });
 
 check("legacy/invalid status cannot recreate a review queue", () => {
@@ -241,7 +241,7 @@ check("packager emits proposal only for explicit reinforced classifier pattern s
   }, settings, new Date("2026-07-08T12:00:00.000Z"));
   if (proposals.length !== 1) throw new Error(`expected one packaged proposal, got ${proposals.length}`);
   const p = proposals[0];
-  if (p.target_prompt !== "activeCorrectionClassifier" || p.current_version !== "v2") throw new Error(`packaged target/version wrong: ${JSON.stringify(p)}`);
+  if (p.target_prompt !== "activeCorrectionClassifier" || p.current_version !== "v3") throw new Error(`packaged target/version wrong: ${JSON.stringify(p)}`);
   if (p.status !== "deferred_until_new_evidence" || p.requires_human_review !== false || p.applied_to_disk !== false) throw new Error(`packaged invariants wrong: ${JSON.stringify(p)}`);
 });
 

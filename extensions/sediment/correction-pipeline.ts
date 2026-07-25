@@ -54,11 +54,15 @@ function isRateLimitError(msg: string): boolean {
  *  structurally blocks the README/tool 'always use Yarn'
  *  content-in-transcript trap.
  *
- *  `is_directive` (recall-biased, classifier prompt v2) EXEMPTS the
+ *  `is_directive` (recall-biased, classifier prompt v3) EXEMPTS the
  *  confidence gate: a user-role imperative commits deterministically.
  *  Over-promotion is bounded (R3' tell surface + cheap user veto + R4'
  *  outcome edge); under-detection is SILENT loss — asymmetric cost,
  *  asymmetric threshold (R2').
+ *
+ *  `rule_scope` is a STRUCTURAL enum gate (project|global only) — not a
+ *  semantic re-judge. Missing/invalid rule_scope fails closed out of Tier-1
+ *  into staging / non-Tier1 so deterministic writers never invent scope.
  *
  *  SUNSET NOTE (impl plan §O5, F2 audit 2026-06-12): the `confidence >= 8`
  *  fallback for NON-directive durable signals is a transitional deviation
@@ -80,9 +84,12 @@ export function isTier1Directive(signal: CorrectionSignal | null | undefined): b
   // NON-directive durable signal with a target is typically a memory-
   // management correction ("你怎么记成 Y 了") whose correct destination is a
   // curator entry fix, not a new rule (附录A A.3.1).
+  // rule_scope enum check is structural fail-closed (not semantic scope guess):
+  // missing/invalid → non-Tier1 / staging, never invent project/global here.
   return !!signal?.signal_found
     && signal.typing === "durable"
     && signal.provenance === "user-expressed"
+    && (signal.rule_scope === "project" || signal.rule_scope === "global")
     && (signal.is_directive === true
       || ((signal.confidence ?? 0) >= 8 && !signal.target_entry_slug));
 }
@@ -129,8 +136,9 @@ export interface CorrectionSignal {
    *  Orthogonal to `typing` (mood vs time-scope). Exempts the confidence
    *  gate in isTier1Directive(); see the sunset note there. */
   is_directive?: boolean;
-  /** Classifier-owned Tier-1 rule blast radius. Missing/invalid values are
-   *  conservatively treated as project-scoped by downstream rule writers. */
+  /** Classifier-owned Tier-1 rule blast radius (structured semantic authority).
+   *  Missing/invalid values fail closed out of isTier1Directive — deterministic
+   *  writers must not invent project/global from natural language. */
   rule_scope?: "project" | "global";
   /** PR-3/P0.2 (ADR 0028 §6): deterministic quote-match diagnostics set by
    *  deriveProvenance — NOT from the LLM. multi_match=true when the quote
@@ -212,7 +220,7 @@ function loadClassifierPrompt(): string {
   // Both files are cached on first call; bumping either's version requires
   // a process restart for the cache to refresh.
   const preamblePath = path.join(__dirname, "prompts", "reasoning-normalization-preamble-v1.md");
-  const taskPath = path.join(__dirname, "prompts", "active-correction-classifier-v2.md");
+  const taskPath = path.join(__dirname, "prompts", "active-correction-classifier-v3.md");
   const preamble = fs.readFileSync(preamblePath, "utf-8");
   const taskPrompt = fs.readFileSync(taskPath, "utf-8");
   _classifierPromptCache = `${preamble}\n\n---\n\n${taskPrompt}`;
@@ -589,8 +597,8 @@ export async function runCorrectionPipeline(
     };
   }
 
-  // P1 uses dedicated classifierModel (v4-flash by default — classification
-  // is a reading-comprehension task, not reasoning).
+  // P1 uses dedicated classifierModel (strong semantic judgment model —
+  // active-correction needs reliable structured scope/intent, not mini flash).
   const parsed = parseModelRef(modelRef);
   if (!parsed) {
     return {

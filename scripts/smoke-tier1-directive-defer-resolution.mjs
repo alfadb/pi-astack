@@ -33,6 +33,7 @@ let total = 0;
 function assert(cond, msg) { total++; if (!cond) { failures.push(msg); console.log(`  FAIL  ${msg}`); } else console.log(`  ok    ${msg}`); }
 
 // The exact shape of the live staged gh directive's correction_signal.
+// rule_scope is a structural enum required for Tier-1 (fail-closed when missing).
 const ghDirective = {
   signal_found: true,
   typing: "durable",
@@ -40,6 +41,7 @@ const ghDirective = {
   confidence: 8,
   provenance: "user-expressed",
   quote_source: "user_message",
+  rule_scope: "global",
 };
 
 // 1. The live directive class commits deterministically (defer arm fires).
@@ -71,6 +73,12 @@ assert(shouldEscalateToCurator({ ...ghDirective, target_entry_slug: "some-entry"
 // 7. No signal / null tolerated.
 assert(shouldEscalateToCurator({ ...ghDirective, signal_found: false }) === false, "signal_found=false -> false");
 assert(shouldEscalateToCurator(null) === false, "null signal -> false (no throw)");
+
+// 8. Missing/invalid rule_scope is structural fail-closed (not a semantic re-judge).
+const { rule_scope: _omit, ...missingRuleScope } = ghDirective;
+assert(shouldEscalateToCurator(missingRuleScope) === false, "missing rule_scope -> non-Tier1 / staging");
+assert(shouldEscalateToCurator({ ...ghDirective, rule_scope: "world" }) === false, "invalid rule_scope -> non-Tier1 / staging");
+assert(shouldEscalateToCurator({ ...ghDirective, rule_scope: "project" }) === true, "rule_scope=project is valid Tier-1 enum");
 
 if (failures.length) { console.log(`\nFAIL — ${failures.length} of ${total} failed.`); process.exit(1); }
 console.log(`\nPASS — ${total} assertions (tier-1 directive defer-resolution gate).`);

@@ -67,7 +67,8 @@ export interface SedimentSettings {
   extractorTimeoutMs: number;
   extractorMaxRetries: number;
   /** ADR 0025 P1: model for the active correction classifier.
-   *  Classification task, not reasoning — v4-flash is sufficient. */
+   *  High-value semantic judgment — use a strong model; weak/high-frequency
+   *  mini routes are insufficient for durable-directive discrimination. */
   classifierModel: string;
   /** Model for confirming rule CONTRADICT candidates before contested demotion.
    *  Empty means fall back to classifierModel. */
@@ -446,7 +447,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     },
   },
   promptVersion: {
-    activeCorrectionClassifier: "v2",
+    activeCorrectionClassifier: "v3",
     reasoningNormalizationPreamble: "v1",
     multiViewPass1: "v1",
     multiViewPass2: "v1",
@@ -479,7 +480,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
  */
 export const PROMPT_VERSION_NOTES: Record<keyof SedimentSettings["promptVersion"], string> = {
   activeCorrectionClassifier:
-    "v2 (2026-06-10, PR-2/P0.1 of goal-workflow impl plan): adds is_directive output field per ADR 0028 R2' — imperative/prescriptive mood orthogonal to typing, RECALL-BIASED for user-role imperatives (asymmetric cost: missed directive = silent loss; over-flag = bounded by R3' tell + R4' outcome), with explicit abstain list (questions / memory-management corrections / restating known rules / quoted third-party imperatives / delegation). Pairs with isTier1Directive(): is_directive exempts the conf≥8 gate (transitional fallback retained for non-directive durable signals — sunset note in correction-pipeline.ts). v1 base unchanged: 7-step evidence-first reasoning (quote → cases → lean → disconfirmer → commit → self-critique → self-rating) + 10 bias cautions + staging_context anti-anchoring protocol. Prepended with reasoning-normalization-preamble v1.",
+    "v3 (2026-07-25): explicit future/default directives are first-class signals; conservative default only ambiguous cases. USER-direct future/default/cross-project assistant-behavior instructions count as active correction even without correcting prior memory or rebutting prior behavior. Semantic priority: explicit durable directive is ground-truth signal; 'Active correction is rare' must not override a direct user instruction; conservative null only for true ambiguity. Instruction-vs-correction: one-shot task commands are not; future/default/all-projects behavior covenants are durable active correction. Scope project/global judged by LLM semantics; exception clauses stay in verbatim user_quote. Retains quote/source abstain, four-reading method, and self-critique — no mechanical regex/marker write gate. v2 base retained: is_directive (ADR 0028 R2' recall bias + abstain list), 7-step evidence-first reasoning, bias cautions, staging anti-anchoring. Prepended with reasoning-normalization-preamble v1.",
   reasoningNormalizationPreamble:
     "v1: fixed 5-stage reasoning surface (quote → claim → alternative → uncertainty → resolving evidence) shared across classifier + multi-view pass-1/2 so cross-prompt comparison works.",
   multiViewPass1:

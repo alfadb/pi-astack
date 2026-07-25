@@ -19,6 +19,8 @@ export interface ConstraintEvidenceTier1SignalInput {
   user_quote?: string | null;
   correction_intent?: string | null;
   scope_description?: string | null;
+  /** Classifier structured scope (Tier-1 semantic authority). Deterministic layer only binds enum + projectId. */
+  rule_scope?: "project" | "global" | null;
   confidence?: number | null;
   provenance?: string | null;
   quote_source?: string | null;
@@ -106,7 +108,7 @@ export function buildTier1ConstraintEvidenceEventBody(
   const triggerPhraseResults = triggerPhrases(options.signal, options.draft).map((phrase) => sanitizeField(phrase));
   const appliesWhen = sanitizeField(options.signal.scope_description || "durable user directive observed in agent_end");
   const sanitizer = summarizeSanitizer([quote, title, body, appliesWhen, ...triggerPhraseResults]);
-  const scope = conservativeScopeContext(options);
+  const scope = classifierScopeContext(options);
   const quoteHash = sha256Hex(quote.text);
   return {
     event_schema_version: CONSTRAINT_EVIDENCE_EVENT_SCHEMA_VERSION,
@@ -243,52 +245,60 @@ function normalizedQuote(
   return draft.body.trim() || draft.title.trim() || "Tier-1 user directive observed in agent_end";
 }
 
-function hasExplicitProjectScope(text: string): boolean {
-  return /(项目级|本项目|当前项目|这个项目|此项目|项目内|current project|this project|project-level|project scoped|project-scoped)/i.test(text);
-}
-
-function hasExplicitGlobalScope(text: string): boolean {
-  return /(所有项目|任何项目|全部项目|跨项目|全局规则|全局约定|全局范围|global rule|global scope|global convention|all projects|any project|cross-project)/i.test(text);
-}
-
-function conservativeScopeContext(options: BuildTier1ConstraintEvidenceEventOptions): ConstraintEvidenceScopeContext {
-  const text = `${options.signal.scope_description ?? ""}\n${options.signal.correction_intent ?? ""}\n${options.signal.user_quote ?? ""}`;
-  if (hasExplicitProjectScope(text) && options.projectId) {
-    return {
-      active_project_binding: {
+/**
+ * Scope authority = classifier structured `rule_scope` only.
+ * No natural-language regex over quote/scope_description/correction_intent,
+ * and no default-to-project inference.
+ */
+function classifierScopeContext(options: BuildTier1ConstraintEvidenceEventOptions): ConstraintEvidenceScopeContext {
+  const binding = options.projectId
+    ? {
         project_id: options.projectId,
         binding_reason: "active project binding at agent_end",
         cwd_hash: sha256Hex(options.cwd),
-      },
-      scope_hint: { kind: "project", project_id: options.projectId, evidence: "explicit project wording in witnessed signal" },
-      scope_confidence: 0.75,
+      }
+    : { binding_reason: "no active project binding available at append time" };
+  const ruleScope = options.signal.rule_scope;
+  const overall = clampConfidence(options.signal.confidence ?? options.draft.entryConfidence);
+  // Scope confidence is conservative: clamp from overall confidence, never a second semantic judgment.
+  const scopeConfidence = overall === undefined ? 0.6 : Math.min(0.85, Math.max(0.4, overall));
+
+  if (ruleScope === "global") {
+    return {
+      active_project_binding: binding,
+      scope_hint: { kind: "global", evidence: "classifier semantic rule_scope=global" },
+      scope_confidence: scopeConfidence,
     };
   }
-  if (hasExplicitGlobalScope(text)) {
+  if (ruleScope === "project") {
+    if (options.projectId) {
+      return {
+        active_project_binding: binding,
+        scope_hint: {
+          kind: "project",
+          project_id: options.projectId,
+          evidence: "classifier semantic rule_scope=project",
+        },
+        scope_confidence: scopeConfidence,
+      };
+    }
     return {
-      active_project_binding: {
-        project_id: options.projectId,
-        binding_reason: "active project binding at agent_end",
-        cwd_hash: sha256Hex(options.cwd),
+      active_project_binding: binding,
+      scope_hint: {
+        kind: "unknown",
+        reason: "classifier semantic rule_scope=project but no project binding available",
       },
-      scope_hint: { kind: "global", evidence: "explicit global wording in witnessed signal" },
-      scope_confidence: 0.7,
-    };
-  }
-  if (options.projectId) {
-    return {
-      active_project_binding: {
-        project_id: options.projectId,
-        binding_reason: "active project binding at agent_end",
-        cwd_hash: sha256Hex(options.cwd),
-      },
-      scope_hint: { kind: "project", project_id: options.projectId, evidence: "no explicit global evidence at append time" },
-      scope_confidence: 0.65,
+      scope_confidence: 0.2,
     };
   }
   return {
-    active_project_binding: { binding_reason: "no active project binding available at append time" },
-    scope_hint: { kind: "unknown", reason: "no project binding available at append time" },
+    active_project_binding: binding,
+    scope_hint: {
+      kind: "unknown",
+      reason: ruleScope == null || ruleScope === undefined
+        ? "classifier semantic rule_scope missing"
+        : `classifier semantic rule_scope invalid (${String(ruleScope)})`,
+    },
     scope_confidence: 0.2,
   };
 }

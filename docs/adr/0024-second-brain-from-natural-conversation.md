@@ -180,7 +180,7 @@ R6 据此把上面这条原则升格为 ADR 显式方法论约束。R7 实证：
 
 **目标**：稳定识别用户在任务里冒出来的主动纠错，分清三种语义。这是整份设计的前置能力；其他五条能力都依赖它提供可靠的纠错信号。
 
-**关键 prompt 设计要点**（强制顺序 quote→三读→证伪→降级→commit→自批）——逐字 prompt 与机制见 ADR 0025 §4.1，规范源 `extensions/sediment/prompts/active-correction-classifier-v2.md`。
+**关键 prompt 设计要点**（强制顺序 quote→三读→证伪→降级→commit→自批）——逐字 prompt 与机制见 ADR 0025 §4.1，规范源 `extensions/sediment/prompts/active-correction-classifier-v3.md`。
 
 **为什么这样设计**：默认让 AI 解释推理过程时，它容易先下结论再倒回来编理由（事后找补），看起来推理很完整其实是事后找补。上面的顺序卡死让 LLM 必须先列证据再下结论。Step 6 anchored 到具体引用防止万能套话。
 

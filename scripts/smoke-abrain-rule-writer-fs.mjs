@@ -437,23 +437,28 @@ await check("#1 isTier1Directive: user-expressed durable CREATE escalates; is_di
   // ADR 0028 v1.1 R2' + O5-converged predicate (PR-2 2026-06-10): the
   // structural gate is DETERMINISTIC AX-PROVENANCE (turn.role), and
   // is_directive (recall-biased, prompt v2) exempts the conf≥8 fallback.
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "all git.alfadb.cn repos must use glab", provenance: "user-expressed" }) === true, "user-expressed create rule -> escalate");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 6, user_quote: "x", provenance: "user-expressed" }) === false, "low-conf NON-directive (陈述式) -> conf fallback holds -> stage, not escalate");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 6, is_directive: true, user_quote: "x", provenance: "user-expressed" }) === true, "祈使 directive exempts the confidence gate (R2' recall bias)");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 1, is_directive: true, user_quote: "x", provenance: "user-expressed" }) === true, "even conf=1 directive commits (low-confidence tell marker, not a gate)");
+  // rule_scope is a STRUCTURAL enum gate (project|global only); missing/invalid
+  // fails closed out of Tier-1 so deterministic writers never invent scope.
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "all git.alfadb.cn repos must use glab", provenance: "user-expressed", rule_scope: "global" }) === true, "user-expressed create rule -> escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 6, user_quote: "x", provenance: "user-expressed", rule_scope: "global" }) === false, "low-conf NON-directive (陈述式) -> conf fallback holds -> stage, not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 6, is_directive: true, user_quote: "x", provenance: "user-expressed", rule_scope: "global" }) === true, "祈使 directive exempts the confidence gate (R2' recall bias)");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 1, is_directive: true, user_quote: "x", provenance: "user-expressed", rule_scope: "project" }) === true, "even conf=1 directive commits (low-confidence tell marker, not a gate)");
   // PR-A3 (F6, 2026-06-12 计划附录A): targeted is_directive 不再被踢出 Tier-1 ——
   // 指令本体确定性提交为规则，被指向的知识条目由 curator 带 context 衰变。
   // （原断言把“复述已有规则”与 targeted directive 混为一谈：复述按 prompt v2
   // abstain 列表应是 is_directive=false，由下一条断言覆盖。）
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed", target_entry_slug: "existing" }) === true, "targeted 祈使 directive -> Tier-1 照常提交 (PR-A3)");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "x", provenance: "user-expressed", target_entry_slug: "existing" }) === false, "targeted 高置信非 directive (记忆管理纠错/复述) -> conf fallback 保留 !target -> 转发 curator");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "content-in-transcript" }) === false, "引述他人祈使 (README/tool) -> structural provenance gate wins over is_directive");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "x", provenance: "assistant-observed" }) === false, "assistant-observed -> not user-expressed -> not escalate");
-  assert(shouldEscalateToCurator({ signal_found: true, typing: "task-local", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed" }) === false, "task-local directive -> not durable -> not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed", target_entry_slug: "existing", rule_scope: "global" }) === true, "targeted 祈使 directive -> Tier-1 照常提交 (PR-A3)");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "x", provenance: "user-expressed", target_entry_slug: "existing", rule_scope: "global" }) === false, "targeted 高置信非 directive (记忆管理纠错/复述) -> conf fallback 保留 !target -> 转发 curator");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "content-in-transcript", rule_scope: "global" }) === false, "引述他人祈使 (README/tool) -> structural provenance gate wins over is_directive");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, user_quote: "x", provenance: "assistant-observed", rule_scope: "global" }) === false, "assistant-observed -> not user-expressed -> not escalate");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "task-local", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed", rule_scope: "global" }) === false, "task-local directive -> not durable -> not escalate");
   assert(shouldEscalateToCurator({ signal_found: false }) === false && shouldEscalateToCurator(null) === false, "no signal -> not escalate");
+  // Missing/invalid rule_scope is structural fail-closed (single-variable gates).
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed" }) === false, "missing rule_scope -> non-Tier1 / staging");
+  assert(shouldEscalateToCurator({ signal_found: true, typing: "durable", confidence: 9, is_directive: true, user_quote: "x", provenance: "user-expressed", rule_scope: "world" }) === false, "invalid rule_scope -> non-Tier1 / staging");
   // Alias contract: shouldEscalateToCurator delegates to isTier1Directive
   // (one canonical predicate definition).
-  const probe = { signal_found: true, typing: "durable", confidence: 6, is_directive: true, user_quote: "x", provenance: "user-expressed" };
+  const probe = { signal_found: true, typing: "durable", confidence: 6, is_directive: true, user_quote: "x", provenance: "user-expressed", rule_scope: "global" };
   assert(isTier1Directive(probe) === shouldEscalateToCurator(probe), "isTier1Directive is canonical; shouldEscalateToCurator is its alias");
 });
 

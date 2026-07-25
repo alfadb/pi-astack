@@ -6261,15 +6261,16 @@ function sanitizeAndTruncateRawForAudit(
   };
 }
 
-function tier1RuleScopeFromClassifier(signal: CorrectionSignal, projectId: string): { scope: RuleDraft["scope"]; source: "classifier" | "default" } {
+function tier1RuleScopeFromClassifier(signal: CorrectionSignal, projectId: string): { scope: RuleDraft["scope"]; source: "classifier" } {
+  // Classifier structured rule_scope is the sole Tier-1 scope authority.
+  // isTier1Directive already requires project|global, so missing/invalid here
+  // is unreachable on the direct path — throw rather than invent a default.
   if (signal.rule_scope === "global") return { scope: "global", source: "classifier" };
   if (signal.rule_scope === "project") return { scope: { projectId }, source: "classifier" };
-  // Missing/invalid classifier output falls back to project: mis-projecting
-  // only narrows injection, while mis-globalizing pollutes every project.
-  return { scope: { projectId }, source: "default" };
+  throw new Error(`tier1RuleScopeFromClassifier: expected classifier rule_scope project|global, got ${String(signal.rule_scope)}`);
 }
 
-function buildTier1RuleDraft(signal: CorrectionSignal, sessionId: string, projectId: string): { draft: RuleDraft; ruleScopeSource: "classifier" | "default" } {
+function buildTier1RuleDraft(signal: CorrectionSignal, sessionId: string, projectId: string): { draft: RuleDraft; ruleScopeSource: "classifier" } {
   const quote = (typeof signal.user_quote === "string" ? signal.user_quote : "").trim();
   const scopeDescription = (typeof signal.scope_description === "string" ? signal.scope_description : "").trim();
   const body = quote.length >= 10 ? quote : [quote, scopeDescription].filter(Boolean).join("\n\n");

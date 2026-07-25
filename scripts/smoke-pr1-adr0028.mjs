@@ -1361,7 +1361,7 @@ await check("S35: rule CONTRADICT confirm unavailable does not burn retry key", 
   assert(ledger.length === 2 && ledger.some((r) => r.status_mutation === "status_to_contested" && r.outcome_event_id === "footnote:retry-confirm"), `retry must append canonical terminal row: ${JSON.stringify(ledger)}`);
 });
 
-await check("S36: Tier-1 rule_scope comes from classifier/default, not keyword regex", async () => {
+await check("S36: classifier rule_scope is sole Tier-1 authority; missing fails closed", async () => {
   _resetAutoWriteStateForTests();
   const fx = freshFixture("pr1-s36");
   await bindAbrainProject({ abrainHome: fx.abrainHome, cwd: fx.root, projectId: fx.projectId });
@@ -1371,19 +1371,19 @@ await check("S36: Tier-1 rule_scope comes from classifier/default, not keyword r
     correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: globalQuoteWithProjectWord, scope_description: "contains 本项目 but classifier says global", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message", rule_scope: "global" },
   });
   assert(outcome.kind === "tier1_direct" && outcome.result.ruleScope === "global", `classifier global must win over 本项目 text: ${JSON.stringify(outcome)}`);
-  let direct = readJsonl(sedimentAuditPath(fx.root)).find((r) => r.operation === "tier1_direct_write" && r.session_id === "scope-global");
+  const direct = readJsonl(sedimentAuditPath(fx.root)).find((r) => r.operation === "tier1_direct_write" && r.session_id === "scope-global");
   assert(direct?.rule_scope_source === "classifier" && direct?.correction_signal?.rule_scope === "global", `scope source audit wrong: ${JSON.stringify(direct)}`);
 
   _resetAutoWriteStateForTests();
   const fx2 = freshFixture("pr1-s36b");
   await bindAbrainProject({ abrainHome: fx2.abrainHome, cwd: fx2.root, projectId: fx2.projectId });
   outcome = await _tryAutoWriteLaneForTests({
-    cwd: fx2.root, sessionId: "scope-default", settings: baseSettings, window: makeRunWindow("--- ENTRY 1 u1 message/user ---\n所有仓库必须使用 gh 工具管理。"), modelRegistry: null, correlationId: "scope-default:auto", abrainHome: fx2.abrainHome, projectId: fx2.projectId,
+    cwd: fx2.root, sessionId: "scope-missing", settings: baseSettings, window: makeRunWindow("--- ENTRY 1 u1 message/user ---\n所有仓库必须使用 gh 工具管理。"), modelRegistry: null, correlationId: "scope-missing:auto", abrainHome: fx2.abrainHome, projectId: fx2.projectId,
     correctionSignal: { signal_found: true, typing: "durable", confidence: 9, user_quote: "所有仓库必须使用 gh 工具管理。", scope_description: "missing rule_scope", target_entry_slug: null, provenance: "user-expressed", quote_source: "user_message" },
   });
-  assert(outcome.kind === "tier1_direct" && outcome.result.ruleScope === "project", `missing rule_scope must default project: ${JSON.stringify(outcome)}`);
-  direct = readJsonl(sedimentAuditPath(fx2.root)).find((r) => r.operation === "tier1_direct_write" && r.session_id === "scope-default");
-  assert(direct?.rule_scope_source === "default", `default scope source audit wrong: ${JSON.stringify(direct)}`);
+  assert(outcome.kind !== "tier1_direct", `missing rule_scope must fail closed out of Tier-1, got ${JSON.stringify(outcome)}`);
+  const missingDirect = readJsonl(sedimentAuditPath(fx2.root)).find((r) => r.operation === "tier1_direct_write" && r.session_id === "scope-missing");
+  assert(!missingDirect, `missing rule_scope must not emit tier1_direct_write audit: ${JSON.stringify(missingDirect)}`);
 });
 
 await check("S37: staging proposer respects classifier rule_scope and defaults legacy to project", async () => {

@@ -3,9 +3,11 @@
  * ADR 0025 P1 live dossier — classifier prompt prototype validation.
  *
  * Calls the configured DeepSeek provider from agent/models.json
- * (OpenAI-compatible) with the active-correction-classifier-v2 prompt against conversation fixtures
- * (20 original + 5 directive-detection fixtures added in PR-2/P0.1 for
- * the is_directive field, ADR 0028 R2' recall bias + abstain list).
+ * (OpenAI-compatible) with the active-correction-classifier-v3.md prompt
+ * (explicit future/default directives are first-class signals) against
+ * conversation fixtures (20 original + 5 directive-detection fixtures added
+ * in PR-2/P0.1 for the is_directive field, ADR 0028 R2' recall bias + abstain
+ * list). Not a production historical-quote replay gate.
  *
  * Usage: node scripts/dossier-classifier-prompt.mjs
  */
@@ -73,7 +75,7 @@ if (!API_KEY) {
 // ── Helpers ────────────────────────────────────────────────────────────
 
 function loadPrompt() {
-  const promptPath = path.join(repoRoot, "extensions", "sediment", "prompts", "active-correction-classifier-v2.md");
+  const promptPath = path.join(repoRoot, "extensions", "sediment", "prompts", "active-correction-classifier-v3.md");
   if (!fs.existsSync(promptPath)) {
     console.error(`❌ Prompt file not found: ${promptPath}`);
     process.exit(1);
