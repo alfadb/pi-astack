@@ -73,10 +73,11 @@ check(
 );
 
 check(
-  "isTerminalTier1Reject: constraint append faults are default-terminal except :write_failed",
+  "isTerminalTier1Reject: constraint append faults use isTransientConstraintEvidenceAppendFailure",
   indexSrc.includes('result.reason.startsWith("constraint_evidence_append_failed:")')
-    && indexSrc.includes('result.reason !== "constraint_evidence_append_failed:write_failed"'),
-  "the default-terminal-except-write_failed inversion is missing (GAP-1 infinite-HOLD fix)",
+    && indexSrc.includes("isTransientConstraintEvidenceAppendFailure(result.reason)")
+    && indexSrc.includes("RECOVERY_QUARANTINED"),
+  "transient constraint failure taxonomy (write_failed + RECOVERY_QUARANTINED + barrier) missing",
 );
 
 check(

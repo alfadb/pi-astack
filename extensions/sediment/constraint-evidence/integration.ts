@@ -66,9 +66,42 @@ export interface AppendTier1ConstraintEvidenceEventResult {
   statusPath?: string;
 }
 
+/** Test-only: force the next N appendTier1 calls to throw (quarantine/barrier simulation). */
+let appendTier1ForceThrowRemaining = 0;
+let appendTier1ForceThrowFactory: (() => Error) | null = null;
+
+export function _setAppendTier1ForceThrowForTests(args: {
+  remaining: number;
+  errorFactory?: () => Error;
+} | null): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_setAppendTier1ForceThrowForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  if (!args) {
+    appendTier1ForceThrowRemaining = 0;
+    appendTier1ForceThrowFactory = null;
+    return;
+  }
+  appendTier1ForceThrowRemaining = Math.max(0, Math.floor(args.remaining));
+  appendTier1ForceThrowFactory = args.errorFactory
+    ?? (() => Object.assign(new Error("RECOVERY_QUARANTINED: forced transient for tests"), {
+      name: "CanonicalGitRuntimeError",
+      code: "RECOVERY_QUARANTINED",
+    }));
+}
+
 export async function appendTier1ConstraintEvidenceEvent(
   options: AppendTier1ConstraintEvidenceEventOptions,
 ): Promise<AppendTier1ConstraintEvidenceEventResult> {
+  if (appendTier1ForceThrowRemaining > 0) {
+    appendTier1ForceThrowRemaining -= 1;
+    const factory = appendTier1ForceThrowFactory
+      ?? (() => Object.assign(new Error("RECOVERY_QUARANTINED: forced transient for tests"), {
+        name: "CanonicalGitRuntimeError",
+        code: "RECOVERY_QUARANTINED",
+      }));
+    throw factory();
+  }
   const appendAndRecord = async (): Promise<AppendTier1ConstraintEvidenceEventResult> => {
     const body = buildTier1ConstraintEvidenceEventBody(options);
     const append = await appendConstraintEvidenceEvent({ abrainHome: options.abrainHome, body });

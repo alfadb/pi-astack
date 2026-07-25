@@ -81,7 +81,22 @@ import { runForgettingAgentEndPass } from "./forgetting-agent-end";
 import { runStagingResolverIfDue, STAGING_RESOLVER_PROMPT_VERSION } from "./staging-resolver";
 import { runStagingAgeOutIfDue, STAGING_AGEOUT_PROMPT_VERSION } from "./staging-ageout";
 import { runStagingPromotionIfDue, STAGING_PROMOTION_PROMPT_VERSION } from "./staging-promotion";
-import { appendTier1ConstraintEvidenceEvent } from "./constraint-evidence/integration";
+import {
+  appendTier1ConstraintEvidenceEvent,
+  _setAppendTier1ForceThrowForTests as setAppendTier1ForceThrowForTests,
+} from "./constraint-evidence/integration";
+import {
+  ackTier1HeldDecision,
+  buildTier1HeldAuthorizedDecision,
+  computeTier1HeldDecisionId,
+  heldSignalAsCorrectionSignal,
+  holdTier1AuthorizedDecision,
+  isTransientConstraintEvidenceAppendFailure,
+  listTier1HeldDecisionsForSession,
+  normalizeConstraintEvidenceAppendError,
+  peekOldestTier1HeldDecision,
+  type Tier1HeldAuthorizedDecision,
+} from "./tier1-held-decision";
 import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
 import { verifyPiInternals, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
@@ -1415,20 +1430,20 @@ function isTerminalTier1Reject(result: WriteRuleResult): boolean {
   // (deterministic rejects reproduce identically on every retry). Transient
   // reasons (git_commit_failed / lock timeouts) stay non-terminal → HOLD+retry.
   //
-  // ADR0039 P4-a (2026-06-20, 4×T0 unanimous): constraint Evidence Event append
-  // failures. ALL deterministic append faults (invalid / path_violation /
-  // collision / blocked, and any unknown-throw reason produced by the catch at
-  // the append call site) are TERMINAL — they reproduce identically on retry,
-  // so a non-terminal HOLD would burn one classifier+append every turn until
-  // the window scrolls (the exact GAP this fixes). The SOLE transient exception
-  // is ":write_failed" (IO): it stays non-terminal so the checkpoint HOLDs and
-  // the content-addressed event idempotently re-appends next agent_end (no new
-  // persistence layer — durable retry deferred to the L3 SQLite jobs table).
+  // ADR0039 P4-a + held-decision (2026-07-25): constraint Evidence Event append
+  // failures. Deterministic append faults (invalid / path_violation /
+  // collision / blocked) are TERMINAL — they reproduce identically on retry.
+  // Transient faults (write_failed IO + canonical RECOVERY_QUARANTINED /
+  // startup barrier / mutation busy / drain transient) HOLD the checkpoint
+  // AND persist the exact already-authorized classifier decision via
+  // tier1-held-decision so the next lifecycle retries original provenance/
+  // rule_scope without re-guessing from a later transcript (assistant echo
+  // multi-match demote was the production silent-loss class).
   // ":blocked" is deterministic: constraint-evidence/integration.ts now
   // propagates sanitizeForMemory ok:false into sanitizer.status="blocked",
   // and append.ts rejects it with CE_SANITIZER_BLOCKED.
   if (result.reason.startsWith("constraint_evidence_append_failed:")) {
-    return result.reason !== "constraint_evidence_append_failed:write_failed";
+    return !isTransientConstraintEvidenceAppendFailure(result.reason);
   }
   // ADR0040 Tier-1 → policy proposition bridge: only the exact
   // proposition_tier1_policy_write_failed:write_failed reason is transient
@@ -1449,6 +1464,141 @@ function isTerminalTier1Reject(result: WriteRuleResult): boolean {
     || result.reason === "entry_not_found"
     || result.reason === "status_precondition_failed"
     || result.reason.startsWith("credential pattern detected");
+}
+
+/**
+ * After a Tier-1 direct attempt: durable-hold the exact authorized classifier
+ * decision on transient non-capture, or ack/drop the held record on capture
+ * success / terminal reject. Never re-classifies; never invents rule_scope.
+ */
+async function settleTier1AuthorizedDecision(args: {
+  abrainHome: string;
+  sessionId: string;
+  projectId: string;
+  cwd: string;
+  window: RunWindow;
+  signal: CorrectionSignal;
+  result: WriteRuleResult;
+  evidenceCandidateId: string;
+  held?: Tier1HeldAuthorizedDecision | null;
+}): Promise<{ held_status?: string; decision_id?: string; acked?: boolean }> {
+  if (!shouldEscalateToCurator(args.signal)) return {};
+  // Held freezes original authorization identity. Re-hold / CE lineage must not
+  // adopt the current window turn/time (cross-window exactly-once).
+  const sourceSessionId = args.held?.sessionId ?? args.sessionId;
+  const sourceProjectId = args.held?.projectId ?? args.projectId;
+  const sourceProjectRoot = args.held?.projectRoot ?? args.cwd;
+  const sourceTurnId = args.held?.sourceTurnId ?? stableRunWindowTurnId(args.window);
+  const sourceAuthorizedAtUtc = args.held?.authorizedAtUtc ?? stableRunWindowTimestamp(args.window);
+  try {
+    const identity = buildTier1HeldAuthorizedDecision({
+      sessionId: sourceSessionId,
+      projectId: sourceProjectId,
+      projectRoot: sourceProjectRoot,
+      sourceTurnId,
+      authorizedAtUtc: sourceAuthorizedAtUtc,
+      holdReason: args.result.reason ?? "tier1_non_capture",
+      candidateId: args.evidenceCandidateId,
+      signal: args.signal,
+    });
+    if (isCapturedTier1Result(args.result) || isTerminalTier1Reject(args.result)) {
+      const ack = await ackTier1HeldDecision(args.abrainHome, identity.decisionId);
+      // Also ack the FIFO held peek when identity differs (legacy/partial).
+      // Any ack failure is audited + rethrown by the outer catch (no silent swallow).
+      if (args.held && args.held.decisionId !== identity.decisionId) {
+        await ackTier1HeldDecision(args.abrainHome, args.held.decisionId);
+      }
+      return { acked: ack.status === "acked", decision_id: identity.decisionId };
+    }
+    // Transient non-capture: persist exact authorized lineage for restart-safe retry.
+    // Re-hold keeps held sourceTurnId/authorizedAtUtc (never current window).
+    const held = await holdTier1AuthorizedDecision(args.abrainHome, {
+      sessionId: sourceSessionId,
+      projectId: sourceProjectId,
+      projectRoot: sourceProjectRoot,
+      sourceTurnId,
+      authorizedAtUtc: sourceAuthorizedAtUtc,
+      holdReason: args.result.reason ?? "tier1_transient_non_capture",
+      candidateId: args.evidenceCandidateId,
+      signal: args.signal,
+    });
+    return { held_status: held.status, decision_id: held.decision.decisionId };
+  } catch (error) {
+    // Fail-closed: never treat hold/ack write failure as settle success.
+    // Low-sensitivity audit, then rethrow so intake/checkpoint is not acked.
+    await appendAudit(args.cwd, {
+      operation: "tier1_held_decision_settle_failed",
+      lane: "auto_write",
+      // Execution session for ops correlation.
+      session_id: args.sessionId,
+      // Source lineage (held frozen when present).
+      held_source_session_id: sourceSessionId,
+      held_source_project_id: sourceProjectId,
+      held_source_turn_id: sourceTurnId,
+      held_authorized_at_utc: sourceAuthorizedAtUtc,
+      held_decision_id: args.held?.decisionId ?? null,
+      result_status: args.result.status,
+      result_reason: args.result.reason ?? null,
+      error: sanitizeAuditText(error instanceof Error ? error.message : String(error), 200),
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function finishTier1DirectOutcome(args: {
+  abrainHome: string;
+  sessionId: string;
+  projectId: string;
+  cwd: string;
+  window: RunWindow;
+  signal: CorrectionSignal;
+  draft: RuleDraft;
+  result: WriteRuleResult;
+  writeStart: number;
+  evidenceCandidateId: string;
+  held?: Tier1HeldAuthorizedDecision | null;
+}): Promise<Extract<AutoWriteLaneOutcome, { kind: "tier1_direct" }>> {
+  const settle = await settleTier1AuthorizedDecision({
+    abrainHome: args.abrainHome,
+    sessionId: args.sessionId,
+    projectId: args.projectId,
+    cwd: args.cwd,
+    window: args.window,
+    signal: args.signal,
+    result: args.result,
+    evidenceCandidateId: args.evidenceCandidateId,
+    held: args.held,
+  });
+  if (settle.held_status || settle.acked) {
+    await appendAudit(args.cwd, {
+      operation: "tier1_held_decision_settle",
+      lane: "auto_write",
+      // Execution session (current lifecycle) for ops correlation.
+      session_id: args.sessionId,
+      decision_id: settle.decision_id ?? null,
+      held_status: settle.held_status ?? null,
+      acked: settle.acked === true,
+      result_status: args.result.status,
+      result_reason: args.result.reason ?? null,
+      signal_provenance: args.signal.provenance ?? null,
+      signal_rule_scope: args.signal.rule_scope ?? null,
+      // Source lineage of the authorized decision (frozen held when present).
+      held_source_session_id: args.held?.sessionId ?? null,
+      held_source_project_id: args.held?.projectId ?? null,
+      held_source_turn_id: args.held?.sourceTurnId ?? null,
+      held_authorized_at_utc: args.held?.authorizedAtUtc ?? null,
+      from_held_decision: Boolean(args.held),
+      // Low-sensitivity only: no full quote body.
+      quote_prefix: sanitizeAuditText(args.signal.user_quote ?? "", 80),
+    }).catch(() => {});
+  }
+  return {
+    kind: "tier1_direct",
+    draft: args.draft,
+    result: args.result,
+    writeStart: args.writeStart,
+    signal: args.signal,
+  };
 }
 
 interface DirectiveRecallCandidate {
@@ -6406,12 +6556,78 @@ async function tryAutoWriteLane(args: {
     };
   }
 
-  const tier1Signal = args.correctionSignal;
+  // Prefer durable held authorized decision over re-classification this turn.
+  // Held freezes original user-expressed provenance + classifier rule_scope so
+  // a later assistant-echo multi-match demote cannot degrade the retry.
+  let heldAuthorized: Tier1HeldAuthorizedDecision | null = null;
+  if (!args.tier1AlreadyCommitted) {
+    // Fail-closed: list/peek already treat pending-dir ENOENT as empty.
+    // Corruption/IO errors must not silently degrade to "no held".
+    heldAuthorized = await peekOldestTier1HeldDecision(abrainHome, sessionId);
+  }
+  const heldSignal = heldAuthorized ? heldSignalAsCorrectionSignal(heldAuthorized) : null;
+  const preferHeld = Boolean(heldSignal && shouldEscalateToCurator(heldSignal));
+  const tier1Signal = preferHeld ? heldSignal : args.correctionSignal;
+  // If a newer Tier-1 authorization arrived while an older held is still
+  // pending, park it durably too so FIFO held retry does not drop it.
+  // Compare full decision identity (not only user_quote).
+  if (
+    preferHeld
+    && heldAuthorized
+    && args.correctionSignal
+    && shouldEscalateToCurator(args.correctionSignal)
+  ) {
+    const incomingDecisionId = computeTier1HeldDecisionId({
+      sessionId,
+      projectId,
+      candidateId: "tier1-direct:c0",
+      signal: {
+        user_quote: args.correctionSignal.user_quote,
+        scope_description: args.correctionSignal.scope_description,
+        correction_intent: args.correctionSignal.correction_intent,
+        rule_scope: args.correctionSignal.rule_scope as "project" | "global",
+      },
+    });
+    if (incomingDecisionId !== heldAuthorized.decisionId) {
+      // Not best-effort: persistence failure must surface (no silent drop).
+      await holdTier1AuthorizedDecision(abrainHome, {
+        sessionId,
+        projectId,
+        projectRoot: cwd,
+        sourceTurnId: stableRunWindowTurnId(window),
+        authorizedAtUtc: stableRunWindowTimestamp(window),
+        holdReason: "queued_behind_prior_held_authorized_decision",
+        candidateId: "tier1-direct:c0",
+        signal: args.correctionSignal,
+      });
+    }
+  }
   if (tier1Signal && !args.tier1AlreadyCommitted && shouldEscalateToCurator(tier1Signal)) {
     const writeStart = Date.now();
-    const { draft, ruleScopeSource } = buildTier1RuleDraft(tier1Signal, sessionId, projectId);
+    // Held freezes CE/proposition identity fields so multi-window retries are
+    // content-addressed exactly-once (session/turn/time/project from held).
+    // projectRoot only for original source cwd_hash semantics when present.
+    const tier1SourceSessionId = heldAuthorized?.sessionId ?? sessionId;
+    const tier1SourceProjectId = heldAuthorized?.projectId ?? projectId;
+    const tier1SourceTurnId = heldAuthorized?.sourceTurnId ?? stableRunWindowTurnId(window);
+    const tier1SourceCreatedAtUtc = heldAuthorized?.authorizedAtUtc ?? stableRunWindowTimestamp(window);
+    const tier1SourceCwd = heldAuthorized?.projectRoot ?? cwd;
+    const { draft, ruleScopeSource } = buildTier1RuleDraft(tier1Signal, tier1SourceSessionId, tier1SourceProjectId);
     const tier1CandidateId = candidateIdFor(correlationId, -1);
-    const tier1EvidenceCandidateId = "tier1-direct:c0";
+    const tier1EvidenceCandidateId = heldAuthorized?.candidateId ?? "tier1-direct:c0";
+    const finishTier1 = (result: WriteRuleResult) => finishTier1DirectOutcome({
+      abrainHome,
+      sessionId,
+      projectId,
+      cwd,
+      window,
+      signal: tier1Signal,
+      draft,
+      result,
+      writeStart,
+      evidenceCandidateId: tier1EvidenceCandidateId,
+      held: heldAuthorized,
+    });
     const tier1AuditContext: WriterAuditContext = {
       lane: "auto_write",
       sessionId,
@@ -6429,11 +6645,11 @@ async function tryAutoWriteLane(args: {
           abrainHome,
           signal: tier1Signal,
           draft,
-          sessionId,
-          turnId: stableRunWindowTurnId(window),
-          projectId,
-          cwd,
-          createdAtUtc: stableRunWindowTimestamp(window),
+          sessionId: tier1SourceSessionId,
+          turnId: tier1SourceTurnId,
+          projectId: tier1SourceProjectId,
+          cwd: tier1SourceCwd,
+          createdAtUtc: tier1SourceCreatedAtUtc,
           correlationId,
           candidateId: tier1EvidenceCandidateId,
           deviceId: getDeviceId(),
@@ -6460,7 +6676,10 @@ async function tryAutoWriteLane(args: {
           constraintEvidenceAppendError = constraintEvidenceEvent.append.status;
         }
       } catch (e: unknown) {
-        constraintEvidenceAppendError = sanitizeAuditText(e instanceof Error ? e.message : String(e), 500) || "unknown";
+        // Normalize quarantine/barrier/busy throws to stable HOLD codes so
+        // isTerminalTier1Reject does not treat them as terminal (and so the
+        // held-decision layer can durable-retry original provenance).
+        constraintEvidenceAppendError = normalizeConstraintEvidenceAppendError(e);
         await appendAudit(cwd, {
           operation: "constraint_evidence_append_failed",
           lane: "auto_write",
@@ -6469,6 +6688,10 @@ async function tryAutoWriteLane(args: {
           candidate_id: tier1EvidenceCandidateId,
           error: constraintEvidenceAppendError,
           checkpoint_advanced: false,
+          signal_consumed: false,
+          held_retry_eligible: isTransientConstraintEvidenceAppendFailure(
+            `constraint_evidence_append_failed:${constraintEvidenceAppendError}`,
+          ),
         }).catch(() => {});
       }
       if (
@@ -6511,9 +6734,13 @@ async function tryAutoWriteLane(args: {
           event_first_blocked_legacy_write: true,
           signal_consumed: false,
           checkpoint_advanced: false,
+          held_retry_eligible: isTransientConstraintEvidenceAppendFailure(result.reason ?? ""),
+          signal_provenance: tier1Signal.provenance ?? null,
+          signal_rule_scope: tier1Signal.rule_scope ?? null,
+          from_held_decision: Boolean(heldAuthorized),
           durationMs: Date.now() - writeStart,
         }).catch(() => {});
-        return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+        return finishTier1(result);
       }
       if (
         settings.constraintEvidenceEventWriter.mode === "event_first"
@@ -6568,8 +6795,9 @@ async function tryAutoWriteLane(args: {
             constraintBody: constraintEvidenceEvent.body,
             signal: tier1Signal,
             draft,
-            sessionId,
-            turnId: stableRunWindowTurnId(window),
+            // Must match constraint body session/turn (held-frozen when retrying).
+            sessionId: tier1SourceSessionId,
+            turnId: tier1SourceTurnId,
           });
           if (!prop.ok) {
             const failCode = prop.code ?? prop.status;
@@ -6636,9 +6864,10 @@ async function tryAutoWriteLane(args: {
               ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
               signal_consumed: false,
               checkpoint_advanced: false,
+              from_held_decision: Boolean(heldAuthorized),
               durationMs: Date.now() - writeStart,
             }).catch(() => {});
-            return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+            return finishTier1(result);
           }
 
           // Local durable append succeeded (created|identical). Capture is only
@@ -6734,9 +6963,10 @@ async function tryAutoWriteLane(args: {
               ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
               signal_consumed: false,
               checkpoint_advanced: false,
+              from_held_decision: Boolean(heldAuthorized),
               durationMs: Date.now() - writeStart,
             }).catch(() => {});
-            return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+            return finishTier1(result);
           }
 
           let forceRepublishScheduled = false;
@@ -6872,9 +7102,10 @@ async function tryAutoWriteLane(args: {
             // Durable constraint + proposition + pending marker; republish is async.
             signal_consumed: true,
             checkpoint_advanced: false,
+            from_held_decision: Boolean(heldAuthorized),
             durationMs: Date.now() - writeStart,
           }).catch(() => {});
-          return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+          return finishTier1(result);
         }
 
         // Setting false (or missing envelope): keep historical constraint-only
@@ -6921,9 +7152,10 @@ async function tryAutoWriteLane(args: {
           ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
           signal_consumed: publicationDurable,
           checkpoint_advanced: false,
+          from_held_decision: Boolean(heldAuthorized),
           durationMs: Date.now() - writeStart,
         }).catch(() => {});
-        return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+        return finishTier1(result);
       }
     }
     // ADR0039 P4-a (2026-06-20, 4×T0 unanimous R2): the Tier-1 write-time
@@ -7001,8 +7233,12 @@ async function tryAutoWriteLane(args: {
       // existing rule (PR-4).
       signal_consumed: result.status === "created" || result.status === "deduped" || result.status === "dry_run" || result.status === "updated",
       checkpoint_advanced: false,
+      from_held_decision: Boolean(heldAuthorized),
       durationMs: Date.now() - writeStart,
     });
+    // Settle held before optional extractor follow-up so capture/ack is not
+    // deferred behind a second lane entry.
+    const tier1Outcome = await finishTier1(result);
     // PR-A2 (F5, ADR 0028 R1'): a Tier-1 hit must NOT preempt the window.
     // R1' is disjoint authority — the extractor still owns inferred Tier-2
     // candidates in this same window. Re-enter the lane with
@@ -7017,10 +7253,10 @@ async function tryAutoWriteLane(args: {
       // body-hash dedup is the backup if this gate ever regresses.
       const followUp = await tryAutoWriteLane({ ...args, tier1ExtractorFollowUp: false, tier1AlreadyCommitted: true });
       if (followUp.kind !== "tier1_direct") {
-        return { ...followUp, tier1: { draft, result, writeStart, signal: tier1Signal } };
+        return { ...followUp, tier1: tier1Outcome };
       }
     }
-    return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+    return tier1Outcome;
   }
 
   if (
@@ -7363,6 +7599,17 @@ export const _detachedAgentEndQueueStatsForTests = detachedAgentEndQueueStats;
  * model registry to lock the closure-arg threading invariant.
  */
 export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
+/** Same-module test hook (avoid jiti dual-instance miss). */
+export const _setAppendTier1ForceThrowForTests = setAppendTier1ForceThrowForTests;
+export const _isTerminalTier1RejectForTests = isTerminalTier1Reject;
+export const _isTransientConstraintEvidenceAppendFailureForTests = isTransientConstraintEvidenceAppendFailure;
+export const _normalizeConstraintEvidenceAppendErrorForTests = normalizeConstraintEvidenceAppendError;
+export const _holdTier1AuthorizedDecisionForTests = holdTier1AuthorizedDecision;
+export const _listTier1HeldDecisionsForSessionForTests = listTier1HeldDecisionsForSession;
+export const _peekOldestTier1HeldDecisionForTests = peekOldestTier1HeldDecision;
+export const _ackTier1HeldDecisionForTests = ackTier1HeldDecision;
+export const _computeTier1HeldDecisionIdForTests = computeTier1HeldDecisionId;
+export { isTransientConstraintEvidenceAppendFailure, normalizeConstraintEvidenceAppendError };
 export const _detectDirectiveRecallCandidatesForTests = detectDirectiveRecallCandidates;
 export const _shouldAdvanceAfterAutoOutcomeForTests = shouldAdvanceAfterAutoOutcome;
 export const _shouldAdvanceAfterResultsForTests = shouldAdvanceAfterResults;

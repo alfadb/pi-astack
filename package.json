@@ -77,6 +77,7 @@
     "smoke:adr-decomposer": "node scripts/smoke-adr-decomposer.mjs",
     "smoke:rule-footer-realtime": "node scripts/smoke-rule-footer-realtime.mjs",
     "smoke:tier1-directive-defer": "node scripts/smoke-tier1-directive-defer-resolution.mjs",
+    "smoke:tier1-held-authorized-retry": "node scripts/smoke-tier1-held-authorized-retry.mjs",
     "smoke:tell-not-ask": "node scripts/smoke-tell-not-ask-no-confirm.mjs",
     "smoke:pr1-adr0028": "node scripts/smoke-pr1-adr0028.mjs",
     "smoke:pr-c-hygiene": "node scripts/smoke-pr-c-hygiene.mjs",
