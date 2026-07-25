@@ -54,6 +54,20 @@ function resolveExecutionOwner(raw: unknown, fallback: "foreground" | "daemon"):
   return fallback;
 }
 
+/**
+ * Daemon continuous edge-shadow producer flag.
+ * Production is settings-JSON only. Env override is strictly gated by
+ * PI_ASTACK_ENABLE_TEST_HOOKS=1 (smoke/harness); never a production on-switch.
+ */
+function resolveDaemonWorkerEdgeShadowCaptureEnabled(raw: unknown, fallback: boolean): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1") {
+    const env = process.env.PI_ASTACK_DAEMON_WORKER_EDGE_SHADOW_CAPTURE?.trim().toLowerCase();
+    if (env === "1" || env === "true" || env === "on" || env === "yes") return true;
+    if (env === "0" || env === "false" || env === "off" || env === "no") return false;
+  }
+  return asBoolean(raw, fallback);
+}
+
 function piStackSettingsPath(): string {
   return process.env.PI_ASTACK_SETTINGS_PATH?.trim()
     || path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
@@ -287,6 +301,23 @@ export interface SedimentSettings {
    */
   executionOwner: "foreground" | "daemon";
 
+  /**
+   * ADR 0045 continuous production producer (default-off).
+   * Triple gate (all required):
+   *   executionOwner=daemon
+   *   edgeProtocolShadow.enabled=true
+   *   daemonWorker.edgeShadowCaptureEnabled=true
+   * Ordinary foreground Pi then writes each healthy terminal assistant turn
+   * into the flat edge-protocol-shadow journal (candidate + terminal_witness
+   * continuous producer_seq + exact messages sidecar) for the daemon A0.2b
+   * scanner. Capture receipt is NOT ConsumerAck / authority / retention.
+   * Worker mode never producer-captures. Production is settings-JSON only;
+   * env override requires PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   */
+  daemonWorker: {
+    edgeShadowCaptureEnabled: boolean;
+  };
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -463,6 +494,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     },
   },
   executionOwner: "foreground",
+  daemonWorker: {
+    edgeShadowCaptureEnabled: false,
+  },
   promptVersion: {
     activeCorrectionClassifier: "v3",
     reasoningNormalizationPreamble: "v1",
@@ -682,6 +716,12 @@ export function resolveSedimentSettings(): SedimentSettings {
       },
     },
     executionOwner: resolveExecutionOwner(cfg.executionOwner, DEFAULT_SEDIMENT_SETTINGS.executionOwner),
+    daemonWorker: {
+      edgeShadowCaptureEnabled: resolveDaemonWorkerEdgeShadowCaptureEnabled(
+        (cfg.daemonWorker as Record<string, unknown> | undefined)?.edgeShadowCaptureEnabled,
+        DEFAULT_SEDIMENT_SETTINGS.daemonWorker.edgeShadowCaptureEnabled,
+      ),
+    },
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

@@ -36,7 +36,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
@@ -121,7 +121,12 @@ import {
 } from "./tier1-held-decision";
 import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
 import { verifyPiInternals, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
-import { getCurrentAnchor, getDeviceId, runWithTriggerAnchor } from "../_shared/causal-anchor";
+import {
+  bindLifecycle as bindCausalAnchorLifecycle,
+  getCurrentAnchor,
+  getDeviceId,
+  runWithTriggerAnchor,
+} from "../_shared/causal-anchor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { loadEntries } from "../memory/parser";
 import { reconcileEmbeddings, resolveEmbeddingProviderConfig, vectorIndexPath } from "../memory/embedding";
@@ -188,6 +193,14 @@ import {
   isSedimentWorkerMode,
   registerSedimentWorkerCommand,
 } from "./worker-rpc";
+import {
+  captureEdgeProtocolTerminalPair,
+  initializeEdgeProtocolShadowSession,
+  recoverEdgeProtocolMissingWitnessesForOwner,
+  type EdgeC6Identity,
+  type EdgeLeafTip,
+  type EdgeTerminalPairCaptureResult,
+} from "./edge-protocol-shadow";
 
 /** Per-turn window budget for frozen-snapshot backlog inside one queue claim. */
 const AGENT_END_BACKLOG_WINDOWS_PER_TURN = 8;
@@ -840,6 +853,285 @@ function resolveCaptureSourceProjectRoot(cwd: string, abrainHome: string): strin
     if (first) sourceProjectRootByCwd.delete(first);
   }
   return sourceProjectRoot;
+}
+
+/**
+ * Canonical physical owner root for edge-protocol-shadow / worker owner_key.
+ * physical git/bind root → realpath. Single helper used by capture + session_start
+ * recovery so owner_key never splits across symlink forms.
+ * Fail closed: both realpath forms failing throws — never returns raw (dual-key risk).
+ */
+function resolveDaemonEdgeOwnerRoot(cwd: string, abrainHome: string): string {
+  const binding = resolveActiveProject(cwd, { abrainHome });
+  const walked = findGitRootByWalk(cwd);
+  const raw = path.resolve(
+    binding.activeProject?.projectRoot
+      ?? walked
+      ?? normalizeProjectRoot(cwd, { abrainHome }).projectRoot,
+  );
+  try {
+    return realpathSync.native(raw);
+  } catch {
+    try {
+      return realpathSync(raw);
+    } catch {
+      // Fail closed: never fall back to non-realpath raw (owner_key would split).
+      throw new Error("daemon_edge_owner_root_realpath_failed");
+    }
+  }
+}
+
+/** Accepted healthy terminal stop reasons for continuous edge producer. */
+const EDGE_ACCEPTED_TERMINAL_STOP_REASONS = new Set(["stop", "length"]);
+
+/**
+ * Triple gate: executionOwner=daemon && edgeProtocolShadow.enabled &&
+ * daemonWorker.edgeShadowCaptureEnabled. Worker mode never producer-captures.
+ */
+function isDaemonEdgeShadowCaptureEnabled(settings?: SedimentSettings): boolean {
+  const s = settings ?? resolveSedimentSettings();
+  return s.executionOwner === "daemon"
+    && s.edgeProtocolShadow.enabled === true
+    && s.daemonWorker.edgeShadowCaptureEnabled === true
+    && !isSedimentWorkerMode();
+}
+
+/** Last real assistant message with accepted terminal stopReason, or skip code. */
+function resolveHealthyTerminalAssistant(
+  messages: ReadonlyArray<AgentEndMessageSnapshot> | undefined,
+): { ok: true; message: AgentEndMessageSnapshot; stopReason: string } | { ok: false; skipCode: string } {
+  if (!messages || messages.length === 0) return { ok: false, skipCode: "empty_messages" };
+  let last: AgentEndMessageSnapshot | undefined;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "assistant") {
+      last = messages[i];
+      break;
+    }
+  }
+  if (!last) return { ok: false, skipCode: "no_assistant" };
+  const stop = typeof last.stopReason === "string" ? last.stopReason : "";
+  if (!stop) return { ok: false, skipCode: "no_stop_reason" };
+  if (stop === "error") return { ok: false, skipCode: "agent_error" };
+  if (stop === "aborted") return { ok: false, skipCode: "agent_aborted" };
+  if (stop === "toolUse") return { ok: false, skipCode: "tool_use_intermediate" };
+  if (!EDGE_ACCEPTED_TERMINAL_STOP_REASONS.has(stop)) {
+    return { ok: false, skipCode: "unaccepted_stop_reason" };
+  }
+  return { ok: true, message: last, stopReason: stop };
+}
+
+/** Aggregate-only edge capture audit — no path/session/content/digest/token. */
+function auditDaemonEdgeShadowCapture(args: {
+  cwd: string;
+  result: string;
+  skipCode?: string;
+  pairStatus?: string;
+  candidateReused?: boolean;
+  witnessReused?: boolean;
+}): void {
+  void appendAudit(args.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "edge_shadow_capture",
+    edge_shadow_result: args.result,
+    ...(args.skipCode ? { edge_shadow_skip_code: args.skipCode } : {}),
+    ...(args.pairStatus ? { edge_shadow_pair_status: args.pairStatus } : {}),
+    ...(args.candidateReused !== undefined ? { edge_shadow_candidate_reused: args.candidateReused } : {}),
+    ...(args.witnessReused !== undefined ? { edge_shadow_witness_reused: args.witnessReused } : {}),
+    checkpoint_advanced: false,
+    background_async: false,
+  }).catch(() => {});
+}
+
+/**
+ * ADR 0045 continuous production producer: healthy terminal assistant →
+ * edge-protocol-shadow candidate + terminal_witness (default-off).
+ * Local fsync only; never awaits LLM. Uses live event/context snapshot fields
+ * (no synthetic leaf/C6). Pair API owns idempotent reuse + conflict fail-closed.
+ */
+async function maybeCaptureDaemonEdgeProtocolShadow(args: {
+  event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> };
+  /** Capture coordinates from live SessionManager + anchor (not intake persistence). */
+  record: SedimentIntakeRecord;
+}): Promise<void> {
+  const settings = resolveSedimentSettings();
+  if (!isDaemonEdgeShadowCaptureEnabled(settings)) return;
+
+  const { record, event } = args;
+  const cwd = record.cwd;
+
+  if (record.captureBoundary.boundaryUntrusted) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "boundary_untrusted" });
+    return;
+  }
+
+  const terminal = resolveHealthyTerminalAssistant(event.messages);
+  if (!terminal.ok) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: terminal.skipCode });
+    return;
+  }
+
+  if (!record.sessionId) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "no_session" });
+    return;
+  }
+
+  const abrainHome = resolveAbrainHomeForSediment();
+  let ownerProjectRoot: string;
+  try {
+    ownerProjectRoot = resolveDaemonEdgeOwnerRoot(record.cwd, abrainHome);
+  } catch {
+    emitEdgeShadowAggregateOnce("edge_shadow_owner_unconfirmed");
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "owner_unconfirmed" });
+    return;
+  }
+  // Seed cache so later capture paths share the same unique owner key.
+  sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${path.resolve(record.cwd)}`, ownerProjectRoot);
+
+  const anchor = getCurrentAnchor();
+  if (!anchor || !anchor.session_id || anchor.turn_id === undefined || anchor.turn_id < 0) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "no_c6" });
+    return;
+  }
+  // Session id authority is the live SessionManager id.
+  // C6 must match; never rewrite types or invent epoch turn ids.
+  if (anchor.session_id !== record.sessionId) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "session_c6_mismatch" });
+    return;
+  }
+
+  const tip = record.branchTip;
+  if (!tip?.id || !tip.type || !tip.timestampUtc) {
+    auditDaemonEdgeShadowCapture({ cwd, result: "skipped", skipCode: "no_leaf_tip" });
+    return;
+  }
+  const leafTip: EdgeLeafTip = {
+    id: tip.id,
+    parentId: tip.parentId,
+    type: tip.type,
+    timestampUtc: tip.timestampUtc,
+  };
+
+  const c6: EdgeC6Identity = {
+    session_id: record.sessionId,
+    turn_id: anchor.turn_id,
+    ...(anchor.subturn !== undefined ? { subturn: anchor.subturn } : {}),
+    ...(anchor.sub_agent_label ? { sub_agent_label: anchor.sub_agent_label } : {}),
+  };
+
+  try {
+    const pair: EdgeTerminalPairCaptureResult = await captureEdgeProtocolTerminalPair({
+      abrainHome,
+      ownerProjectRoot,
+      sessionId: record.sessionId,
+      messages: event.messages ?? [],
+      c6,
+      leafTip,
+    });
+    if (pair.status === "complete") {
+      auditDaemonEdgeShadowCapture({
+        cwd,
+        result: "complete",
+        pairStatus: pair.status,
+        candidateReused: pair.candidate_reused === true,
+        witnessReused: pair.witness_reused === true,
+      });
+      return;
+    }
+    if (pair.status === "candidate_only") {
+      // Candidate kept; session_start recovery / next retry fills witness.
+      emitEdgeShadowAggregateOnce("edge_shadow_candidate_only");
+      auditDaemonEdgeShadowCapture({
+        cwd,
+        result: "candidate_only",
+        pairStatus: pair.status,
+        candidateReused: pair.candidate_reused === true,
+      });
+      return;
+    }
+    if (pair.status === "conflict") {
+      emitEdgeShadowAggregateOnce("edge_shadow_c6_content_conflict");
+      auditDaemonEdgeShadowCapture({
+        cwd,
+        result: "failed",
+        pairStatus: pair.status,
+        skipCode: pair.error_code ?? "c6_content_conflict",
+      });
+      return;
+    }
+    emitEdgeShadowAggregateOnce(`edge_shadow_${pair.status}`);
+    auditDaemonEdgeShadowCapture({
+      cwd,
+      result: "failed",
+      pairStatus: pair.status,
+      skipCode: pair.error_code,
+    });
+  } catch (err) {
+    emitEdgeShadowAggregateOnce("edge_shadow_capture_threw");
+    auditDaemonEdgeShadowCapture({
+      cwd,
+      result: "failed",
+      skipCode: "capture_threw",
+    });
+    void err;
+  }
+}
+
+const edgeShadowDiagOnce = new Set<string>();
+function emitEdgeShadowAggregateOnce(code: string): void {
+  if (edgeShadowDiagOnce.has(code)) return;
+  edgeShadowDiagOnce.add(code);
+  console.error(`[sediment/edge-protocol-shadow] ${code}`);
+}
+
+async function maybeInitAndRecoverDaemonEdgeShadow(args: {
+  sessionId: string | undefined;
+  cwd: string;
+}): Promise<void> {
+  if (!isDaemonEdgeShadowCaptureEnabled()) return;
+  const abrainHome = resolveAbrainHomeForSediment();
+  let ownerProjectRoot: string;
+  try {
+    ownerProjectRoot = resolveDaemonEdgeOwnerRoot(args.cwd, abrainHome);
+  } catch {
+    emitEdgeShadowAggregateOnce("edge_shadow_owner_unconfirmed");
+    return;
+  }
+  sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${path.resolve(args.cwd)}`, ownerProjectRoot);
+  try {
+    if (args.sessionId) {
+      const init = await initializeEdgeProtocolShadowSession({
+        abrainHome,
+        ownerProjectRoot,
+        sessionId: args.sessionId,
+      });
+      if (init.status !== "ready") {
+        emitEdgeShadowAggregateOnce(`edge_shadow_init_${init.error_code ?? "failed"}`);
+      }
+    }
+    // Owner-wide candidate-only recovery (bounded). Not only current session.
+    const recovery = await recoverEdgeProtocolMissingWitnessesForOwner({
+      abrainHome,
+      ownerProjectRoot,
+    });
+    if (recovery.recovered > 0 || recovery.failed > 0 || (recovery.sessions_scanned ?? 0) > 0) {
+      void appendAudit(args.cwd, {
+        operation: "skip",
+        lane: "system",
+        reason: "edge_shadow_witness_recovery",
+        edge_shadow_recovered: recovery.recovered,
+        edge_shadow_failed: recovery.failed,
+        edge_shadow_scanned: recovery.scanned,
+        edge_shadow_already_complete: recovery.already_complete,
+        edge_shadow_sessions_scanned: recovery.sessions_scanned ?? 0,
+        edge_shadow_sessions_skipped: recovery.sessions_skipped ?? 0,
+        checkpoint_advanced: false,
+        background_async: false,
+      }).catch(() => {});
+    }
+  } catch {
+    emitEdgeShadowAggregateOnce("edge_shadow_init_or_recovery_threw");
+  }
 }
 
 function captureSedimentAgentEndIntake(
@@ -2847,6 +3139,10 @@ export default function (pi: ExtensionAPI) {
   // but log a warning so operators know after a pi upgrade.
   verifyPiInternals({ pi });
 
+  // ADR 0027 C6: ensure session/turn anchor is available for intake + edge
+  // producer even when only sediment is loaded (multi-binder safe).
+  bindCausalAnchorLifecycle(pi);
+
   registerSedimentCommand(pi);
   // /about-me slash retired 2026-06-15 (unused brain-management surface,
   // INV-TELL-NOT-ASK). The natural path stays: the LLM emits MEMORY-ABOUT-ME
@@ -2963,11 +3259,30 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const binding = resolveActiveProject(cwd, { abrainHome });
       // Physical checkout root owns evaluation. Prefer strict bind root when
       // available; otherwise the git root (or cwd) of this boot instance.
-      const ownerProjectRoot = path.resolve(
+      // Daemon edge producer uses the same resolveDaemonEdgeOwnerRoot helper
+      // (realpath) so owner_key never splits. realpath double-fail is fail-closed
+      // (throw) — never seed cache with raw non-realpath.
+      let ownerProjectRoot = path.resolve(
         binding.activeProject?.projectRoot ?? rootInfo.projectRoot,
       );
-      // Seed capture cache so the first agent_end does not pay git cold cost.
-      sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${cwd}`, ownerProjectRoot);
+      if (isDaemonEdgeShadowCaptureEnabled(settings)) {
+        try {
+          ownerProjectRoot = resolveDaemonEdgeOwnerRoot(cwd, abrainHome);
+          // Seed capture cache so the first agent_end does not pay git cold cost.
+          sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${cwd}`, ownerProjectRoot);
+        } catch {
+          emitEdgeShadowAggregateOnce("edge_shadow_owner_unconfirmed");
+        }
+      } else {
+        sourceProjectRootByCwd.set(`${path.resolve(abrainHome)}::${cwd}`, ownerProjectRoot);
+      }
+
+      // ADR 0045 continuous producer: init layout + owner-wide candidate-only
+      // witness recovery (bounded; default-off).
+      void maybeInitAndRecoverDaemonEdgeShadow({
+        sessionId: sessionId ?? undefined,
+        cwd,
+      });
 
       // Bump foreground generation and rebind reporters before any recovery so
       // stale /new|/resume|/reload callbacks cannot paint this UI.
@@ -6119,6 +6434,30 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       cycle.ended += 1;
       sessionAgentCycle.set(record.sessionId, cycle);
 
+      // ADR 0045: daemon execution owner never writes ordinary intake pending
+      // (nobody consumes it — worker is sole pass executor and only drains edge
+      // shadow when the continuous producer triple gate is fully open). Incomplete
+      // dual flags → aggregate diagnostic + return (no foreground pipeline).
+      // Full gate → edge capture (fsync pair before return). Foreground keeps
+      // intake → queue. Capture failure is NOT knowledge ack.
+      const agentEndSettings = resolveSedimentSettings();
+      if (agentEndSettings.executionOwner === "daemon") {
+        if (isDaemonEdgeShadowCaptureEnabled(agentEndSettings)) {
+          await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
+          return;
+        }
+        emitEdgeShadowAggregateOnce("daemon_capture_disabled");
+        void appendAudit(record.cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "daemon_capture_disabled",
+          session_id: record.sessionId,
+          checkpoint_advanced: false,
+          background_async: false,
+        }).catch(() => {});
+        return;
+      }
+
       const started = performance.now();
       try {
         const written = await writeSedimentIntakeRecord(resolveAbrainHomeForSediment(), record);
@@ -7650,6 +7989,32 @@ export function _setSedimentAgentEndTestHooksForTests(hooks: SedimentAgentEndTes
     throw new Error("sediment agent_end test hooks require PI_ASTACK_ENABLE_TEST_HOOKS=1");
   }
   sedimentAgentEndTestHooks = hooks;
+}
+
+/** Test-only: drive the same daemon edge-shadow producer path as agent_end. */
+export async function _maybeCaptureDaemonEdgeProtocolShadowForTests(args: {
+  event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> };
+  record: SedimentIntakeRecord;
+}): Promise<void> {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_maybeCaptureDaemonEdgeProtocolShadowForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  await maybeCaptureDaemonEdgeProtocolShadow(args);
+}
+
+export function _isDaemonEdgeShadowCaptureEnabledForTests(): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_isDaemonEdgeShadowCaptureEnabledForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return isDaemonEdgeShadowCaptureEnabled();
+}
+
+/** Test-only: fail-closed realpath owner root resolver. */
+export function _resolveDaemonEdgeOwnerRootForTests(cwd: string, abrainHome: string): string {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_resolveDaemonEdgeOwnerRootForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return resolveDaemonEdgeOwnerRoot(cwd, abrainHome);
 }
 
 export function _resetDetachedAgentEndQueueForTests(): void {

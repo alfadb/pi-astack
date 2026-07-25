@@ -811,6 +811,19 @@
           "enum": ["foreground", "daemon"],
           "default": "foreground",
           "description": "ADR 0045 Stage0 single-executor ownership. foreground (default): ordinary Pi extension owns enqueue + recovery + normal sediment pass/timer; worker mode refuses. daemon: ordinary extension keeps agent_end/settled capture (intake + edge shadow) but does not enqueue, schedule recovery, or run the normal sediment pass; headless worker (PI_ASTACK_SEDIMENT_WORKER_MODE=1) is the sole pass executor. Prevents dual-executor races. Not a formal ACK/authority switch."
+        },
+
+        "daemonWorker": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0045 continuous production producer for daemon-owned execution. Default-off. Triple gate: executionOwner=daemon AND edgeProtocolShadow.enabled=true AND edgeShadowCaptureEnabled=true. Ordinary foreground Pi then writes each healthy terminal assistant turn into the flat edge-protocol-shadow authoritative source (candidate + terminal_witness continuous producer_seq + exact messages raw sidecar ≤8MiB) for the daemon A0.2b scanner. Capture receipt is NOT ConsumerAck / formal authority / retention / delete / knowledge ack. Daemon+edge path does not write ordinary intake (no pending orphans). Worker mode never producer-captures. Foreground executionOwner leaves this inert (zero default behavior change). Production is settings-JSON only; env PI_ASTACK_DAEMON_WORKER_EDGE_SHADOW_CAPTURE requires PI_ASTACK_ENABLE_TEST_HOOKS=1.",
+          "properties": {
+            "edgeShadowCaptureEnabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable continuous edge-protocol-shadow capture on healthy terminal assistant turns. Requires sediment.executionOwner=daemon and sediment.edgeProtocolShadow.enabled=true. Does not run the sediment pass, does not ACK, does not delete sources, does not invent ConsumerAck."
+            }
+          }
         }
       }
     },

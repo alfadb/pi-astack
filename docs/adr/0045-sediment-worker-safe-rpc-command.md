@@ -21,7 +21,24 @@ Central sediment edge authority migrates semantic evaluation off the interactive
 
 Default **`foreground`** — ordinary Pi extension owns enqueue + recovery + normal sediment pass/timer. **Zero behavior change** for existing installs.
 
-**`daemon`**: ordinary Pi extension still performs `agent_end` / settled **capture** (durable intake + edge-protocol-shadow when enabled) but **does not** enqueue, schedule recovery, or run the normal sediment pass/timer. Headless worker (`PI_ASTACK_SEDIMENT_WORKER_MODE=1`) is the sole pass executor. Worker start **requires** `executionOwner=daemon` else returns `execution_owner_not_daemon` (prevents dual-executor races).
+**`daemon`**: ordinary Pi extension **does not** write ordinary intake pending (nobody consumes it under daemon ownership), does **not** enqueue / schedule recovery / run the normal sediment pass/timer. When the continuous edge-protocol-shadow producer triple gate is fully open, `agent_end` captures healthy terminals into edge shadow; when dual producer flags are incomplete, `agent_end` emits aggregate audit/config diagnostic `daemon_capture_disabled` and returns (no foreground pipeline, no pending leak). Headless worker (`PI_ASTACK_SEDIMENT_WORKER_MODE=1`) is the sole pass executor. Worker start **requires** `executionOwner=daemon` else returns `execution_owner_not_daemon` (prevents dual-executor races).
+
+### 2.1b Continuous edge-protocol-shadow producer (`sediment.daemonWorker.edgeShadowCaptureEnabled`)
+
+Default **`false`**. Triple gate — all required: `executionOwner=daemon` **and** `edgeProtocolShadow.enabled=true` **and** `daemonWorker.edgeShadowCaptureEnabled=true`. Ordinary foreground Pi then writes each **healthy** terminal assistant turn into the existing flat `edge-protocol-shadow` authoritative source:
+
+- Pair API `captureEdgeProtocolTerminalPair` (source + candidate + terminal_witness under one journal OFD lock). Public `writeEdgeTerminalWitness` default append semantics unchanged; pair/recovery use explicit pin + idempotent opts
+- Hard size contract: exact raw sidecar bytes and journal record JSON each ≤ **8 MiB** (`EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES` = pi-router `MAX_READ_BYTES`). Oversize → stable skip/fail code, **no** candidate left
+- Atomic publish temps live under per-session `staging/` (same FS, scanner does **not** enumerate). Never leave `.tmp` under `journal/records/` (daemon whole-round fail)
+- Owner root = `resolveDaemonEdgeOwnerRoot(cwd, abrain)` physical bind/git root → realpath (unique `owner_key`). Never worktree extension path. Realpath double-fail is **fail closed** (throw / skip capture+recovery aggregate) — never return non-realpath raw
+- Session id is SessionManager authority; C6 keeps real number/string types; leaf tip from real `getLeafEntry` (never synthesized)
+- Healthy terminal: real last assistant with `stopReason` in accepted set (`stop`/`length`). Empty / no assistant / `toolUse` / error / aborted / untrusted → skip
+- Concurrent same (session,C6,content) under OFD lock → one candidate + one witness. Same C6 different content → fail closed `c6_content_conflict`
+- Sidecar always create/verify content-addressed; missing restored; corrupt collision fail closed; never witness → missing sidecar
+- Candidate-only partial failure: owner-wide bounded `session_start` recovery fills witnesses only
+- Daemon owner **never** writes ordinary intake (no unbounded `pending/` orphans) regardless of producer source / flag completeness. Full triple gate → edge capture; incomplete flags → `daemon_capture_disabled` skip. Foreground keeps intake→queue. Capture receipt is **not** ConsumerAck / knowledge ack / formal authority / retention / delete
+- `agent_end` awaits local fsync only (no LLM). Worker mode never producer-captures
+- Production is settings-JSON only. Env `PI_ASTACK_DAEMON_WORKER_EDGE_SHADOW_CAPTURE` requires `PI_ASTACK_ENABLE_TEST_HOOKS=1`
 
 ### 2.2 Worker mode env
 
@@ -142,6 +159,7 @@ All flags are real Pi CLI flags（`pi --help`）. Settings must set `sediment.ex
 - Memory decision/write counter telemetry completeness（reported 0 until pipeline surfaces counts）
 - Receipt/claim GC
 - Non-Linux OFD claim portability
+- Edge-protocol-shadow delete / retention watermark advance from capture receipt
 
 ## 4. Consequences
 

@@ -25,6 +25,14 @@ export const EDGE_JOURNAL_SCHEMA = "pi-astack/edge-journal/v1" as const;
 export const EDGE_SOURCE_SCHEMA = "pi-astack/edge-source/v1" as const;
 export const EDGE_JOURNAL_SCHEMA_VERSION = 1 as const;
 
+/**
+ * Hard size contract shared with pi-router daemon scanner / copy-store.
+ * `pi_router_daemon::memory_shadow_copy::MAX_READ_BYTES` and
+ * `MemoryCopyStore` default max file bytes are both 8 MiB. Producer must not
+ * write any source sidecar or journal record larger than this bound.
+ */
+export const EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES = 8 * 1024 * 1024;
+
 export type EdgeJournalRecordType = "candidate_capture" | "terminal_witness";
 
 export interface EdgeC6Identity {
@@ -161,6 +169,56 @@ export interface EdgeWitnessArgs {
   c6: EdgeC6Identity;
   leafTip?: EdgeLeafTip;
   createdAt?: string;
+  /**
+   * Explicit pin: witness this candidate_capture record_id (must match C6).
+   * Without this, latest candidate for C6 is used (agent_settled path).
+   * Opt-in only — does not change default latest-C6 behavior when omitted.
+   */
+  candidateRecordId?: string;
+  /**
+   * Explicit opt-in for pair/recovery: if a terminal_witness already references
+   * the chosen candidate, return it without appending. Default false preserves
+   * historical writeEdgeTerminalWitness multi-call append semantics.
+   */
+  idempotentReuse?: boolean;
+}
+
+export type EdgeTerminalPairStatus =
+  | "complete"
+  | "candidate_only"
+  | "source_failed"
+  | "journal_failed"
+  | "conflict"
+  | "disabled";
+
+/** Idempotent healthy-terminal candidate+witness pair result (daemon continuous producer). */
+export interface EdgeTerminalPairCaptureResult {
+  status: EdgeTerminalPairStatus;
+  duration_ms: number;
+  candidate?: EdgeCandidateCaptureResult;
+  witness?: EdgeTerminalWitnessResult;
+  /** True when an existing candidate for (session,C6,content) was reused. */
+  candidate_reused?: boolean;
+  /** True when an existing terminal_witness for that candidate was reused. */
+  witness_reused?: boolean;
+  error_code?: string;
+  error_detail?: string;
+}
+
+export interface EdgeMissingWitnessRecoveryResult {
+  status: "ready" | "failed";
+  duration_ms: number;
+  /** Candidate_capture records considered across scanned sessions. */
+  scanned: number;
+  recovered: number;
+  failed: number;
+  already_complete: number;
+  /** Bounded owner-wide walk: number of session dirs visited. */
+  sessions_scanned?: number;
+  /** Sessions skipped due to caps / fail-closed layout. */
+  sessions_skipped?: number;
+  error_code?: string;
+  error_detail?: string;
 }
 
 export interface EdgeSessionInitArgs {
@@ -184,6 +242,9 @@ const DIR_MODE = 0o700;
 const LOCK_BUSY_RETRIES = 200;
 const LOCK_BUSY_SLEEP_MS = 10;
 const RECORD_FILENAME_RE = /^(\d{20})__([0-9a-f]{64})\.json$/;
+/** Owner-wide recovery bounds (cost-controlled on session_start). */
+const RECOVERY_MAX_SESSIONS = 64;
+const RECOVERY_MAX_CANDIDATES_PER_SESSION = 256;
 
 /** Unique + stable for this Node process lifetime. Journal writer identity only. */
 const PROCESS_JOURNAL_WRITER_EPOCH: string = `${Date.now().toString(36)}-pid${process.pid}-${crypto.randomUUID()}`;
@@ -231,6 +292,16 @@ export function edgeJournalLockDir(sessionRoot: string): string {
   return path.join(edgeJournalDir(sessionRoot), "lock");
 }
 
+/**
+ * Per-session private staging for atomic publish temps.
+ * Same filesystem as records/sources (link(2) requires it) but NOT under
+ * `journal/records/` — daemon scanner treats any unexpected name there as
+ * whole-round fail (`source_unexpected_entry`). Crash residue here is ignored.
+ */
+export function edgeStagingDir(sessionRoot: string): string {
+  return path.join(sessionRoot, "staging");
+}
+
 export function edgeSourcePath(sessionRoot: string, contentId: string): string {
   assertContentId(contentId);
   return path.join(edgeSourcesDir(sessionRoot), `${contentId}.json`);
@@ -240,6 +311,13 @@ export function edgeRecordPath(sessionRoot: string, producerSeq: number, recordI
   assertContentId(recordId);
   if (!Number.isInteger(producerSeq) || producerSeq < 1) throw new Error(`invalid producer_seq: ${producerSeq}`);
   return path.join(edgeJournalRecordsDir(sessionRoot), `${String(producerSeq).padStart(20, "0")}__${recordId}.json`);
+}
+
+function edgeStagingTmpPath(sessionRoot: string, kind: "source" | "record"): string {
+  return path.join(
+    edgeStagingDir(sessionRoot),
+    `.${kind}.${process.pid}.${Date.now()}.${crypto.randomBytes(8).toString("hex")}.tmp`,
+  );
 }
 
 /** JSON-safe deep clone. Single walk. Strips functions/symbols; BigInt → string; Error → {name,message}.
@@ -656,30 +734,25 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
       messageCount,
       messagesJson,
     });
+    const sourceByteLength = Buffer.byteLength(sourceBody, "utf-8");
+    // Hard size contract BEFORE any candidate/journal write — no partial product.
+    if (sourceByteLength > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+      return failCandidate(started, "source_too_large", `source exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`);
+    }
     const sourcePath = edgeSourcePath(sessionRoot, payloadDigest);
     let sourceStatus: EdgeWriteStatus;
     try {
-      // Fail closed BEFORE durable source create — never write candidate without source.
-      maybeThrowSourceCreateFaultForTests();
-      // verifyCreated=false: link(temp,target) shares already-fsynced temp inode.
-      sourceStatus = await durableAtomicCreateFile(sourcePath, sourceBody, {
-        mode: SOURCE_MODE,
-        verifyCreated: false,
-      });
-      if (sourceStatus === "collision") {
-        // Same content_id with different bytes is a hard integrity failure.
-        return failCandidate(started, "source_collision", "content-addressed source collision");
-      }
-      await assertMode(sourcePath, SOURCE_MODE);
+      sourceStatus = await createOrVerifyEdgeSidecar(sessionRoot, sourcePath, sourceBody);
     } catch (err) {
-      return failCandidate(started, "source_write_failed", errMessage(err));
+      const code = errMessage(err) === "source_collision" ? "source_collision" : "source_write_failed";
+      return failCandidate(started, code, errMessage(err));
     }
 
     const sourceRef: EdgeSourceRef = {
       kind: "raw_sidecar",
       content_id: payloadDigest,
       relative_path: path.posix.join("sources", `${payloadDigest}.json`),
-      byte_length: Buffer.byteLength(sourceBody, "utf-8"),
+      byte_length: sourceByteLength,
     };
 
     try {
@@ -715,9 +788,13 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
         };
         const recordPath = edgeRecordPath(sessionRoot, producerSeq, recordId);
         const body = `${JSON.stringify(record)}\n`;
+        if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+          throw new Error("record_too_large");
+        }
         const status = await durableAtomicCreateFile(recordPath, body, {
           mode: SOURCE_MODE,
           verifyCreated: false,
+          tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
         });
         if (status === "collision") throw new Error("journal record collision");
         await assertMode(recordPath, SOURCE_MODE);
@@ -736,12 +813,18 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
         record_path: written.recordPath,
       };
     } catch (err) {
-      return failCandidate(started, "journal_write_failed", errMessage(err), {
-        content_id: payloadDigest,
-        path: sourcePath,
-        status: sourceStatus,
-        byte_length: sourceRef.byte_length,
-      });
+      const detail = errMessage(err);
+      return failCandidate(
+        started,
+        detail === "record_too_large" ? "record_too_large" : "journal_write_failed",
+        detail,
+        {
+          content_id: payloadDigest,
+          path: sourcePath,
+          status: sourceStatus,
+          byte_length: sourceRef.byte_length,
+        },
+      );
     }
   } catch (err) {
     return failCandidate(started, "capture_failed", errMessage(err));
@@ -751,6 +834,11 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
 /**
  * agent_settled: local durable TerminalWitness only.
  * References latest candidate for this session/C6. Never terminal_seal / TurnSettled.
+ *
+ * Default semantics are unchanged from pre-continuous-producer: each call may
+ * append a new witness for the latest/pinned candidate. Idempotent reuse and
+ * pair capture live in `captureEdgeProtocolTerminalPair` or require explicit
+ * `idempotentReuse: true` / `candidateRecordId` opts.
  */
 export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<EdgeTerminalWitnessResult> {
   const started = performance.now();
@@ -786,54 +874,52 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
   const sessionRoot = edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, sessionId);
   try {
     await ensureSessionLayout(sessionRoot, args.abrainHome);
-    // findLatest + allocateSeq + durable witness create must share one OFD lock
+    // findLatest/pin + allocateSeq + durable witness create must share one OFD lock
     // critical section so concurrent candidate writers cannot race the ref.
     const written = await withJournalWriter(sessionRoot, args.abrainHome, async (writer) => {
-      const latest = await findLatestCandidateForC6(sessionRoot, c6);
-      if (!latest) return null;
-      const createdAt = args.createdAt ?? new Date().toISOString();
-      const candidateRef: EdgeCandidateRef = {
-        record_id: latest.record.record_id,
-        producer_seq: latest.record.producer_seq,
-        payload_digest: latest.record.payload_digest,
-        run_generation: latest.record.run_generation,
-      };
-      const producerSeq = writer.allocateSeq();
-      const partial = {
-        schema: EDGE_JOURNAL_SCHEMA,
-        schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
-        session_id: sessionId,
-        session_writer_epoch: writer.session_writer_epoch,
-        record_type: "terminal_witness" as const,
-        created_at: createdAt,
-        payload_digest: latest.record.payload_digest,
+      const index = await loadJournalIndex(sessionRoot);
+      writer.seedSeq(index.maxSeq + 1);
+      let latest: { record: EdgeJournalRecord; path: string } | null = null;
+      if (args.candidateRecordId) {
+        const hit = index.byRecordId.get(args.candidateRecordId);
+        if (hit && hit.record.record_type === "candidate_capture") {
+          latest = { record: hit.record, path: hit.path };
+        }
+        if (!latest) return { kind: "no_candidate" as const };
+        if (c6Key(latest.record.c6) !== c6Key(c6)) {
+          throw new Error("candidate c6 mismatch for pinned candidateRecordId");
+        }
+      } else {
+        latest = indexFindLatestCandidateForC6(index, c6);
+        if (!latest) return { kind: "no_candidate" as const };
+      }
+      // Opt-in only: default public API may still append multiple witnesses.
+      if (args.idempotentReuse === true) {
+        const existingWit = index.witnessByCandidateId.get(latest.record.record_id);
+        if (existingWit) {
+          return { kind: "reused" as const, record: existingWit.record, recordPath: existingWit.path };
+        }
+      }
+      // Never point a witness at a missing sidecar.
+      if (latest.record.source_ref?.content_id) {
+        const sidePath = edgeSourcePath(sessionRoot, latest.record.source_ref.content_id);
+        try {
+          await fs.stat(sidePath);
+        } catch {
+          throw new Error("witness_source_missing");
+        }
+      }
+      return writeWitnessRecordUnderLock({
+        writer,
+        sessionRoot,
+        sessionId,
         c6,
-        // Witness does not invent a new execution generation; it seals nothing.
-        run_generation: latest.record.run_generation,
-        candidate_ref: candidateRef,
-        source_ref: latest.record.source_ref,
-        capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
-        settlement_status: "unsupported_core_capability" as const,
-        ...(args.leafTip ? { leaf_tip: args.leafTip } : {}),
-        deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
-      };
-      const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
-      const record: EdgeJournalRecord = {
-        ...partial,
-        record_id: recordId,
-        producer_seq: producerSeq,
-        deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
-      };
-      const recordPath = edgeRecordPath(sessionRoot, producerSeq, recordId);
-      const status = await durableAtomicCreateFile(recordPath, `${JSON.stringify(record)}\n`, {
-        mode: SOURCE_MODE,
-        verifyCreated: false,
+        candidate: latest.record,
+        leafTip: args.leafTip,
+        createdAt: args.createdAt,
       });
-      if (status === "collision") throw new Error("journal witness collision");
-      await assertMode(recordPath, SOURCE_MODE);
-      return { record, recordPath };
     });
-    if (!written) {
+    if (written.kind === "no_candidate") {
       return { status: "no_candidate", duration_ms: performance.now() - started };
     }
     return {
@@ -847,6 +933,482 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
       status: "journal_failed",
       duration_ms: performance.now() - started,
       error_code: "witness_write_failed",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+}
+
+/**
+ * Production producer naming alias for writeEdgeTerminalWitness.
+ * Same durable TerminalWitness semantics; never terminal_seal / ConsumerAck.
+ */
+export async function captureEdgeProtocolTerminalWitness(
+  args: EdgeWitnessArgs,
+): Promise<EdgeTerminalWitnessResult> {
+  return writeEdgeTerminalWitness(args);
+}
+
+/**
+ * Idempotent healthy-terminal pair: durable source + candidate, then TerminalWitness.
+ *
+ * Critical section under the journal OFD lock:
+ *  - one journal index load (candidate/witness lookup + seq)
+ *  - same (session,C6,content) reuses candidate
+ *  - same C6 different content → fail closed `c6_content_conflict` (no append)
+ *  - witness dedupe under the same lock
+ *
+ * Sidecar is always create/verify content-addressed before any witness is written.
+ * Partial witness failure leaves the candidate for recovery.
+ */
+export async function captureEdgeProtocolTerminalPair(
+  args: EdgeCaptureArgs,
+): Promise<EdgeTerminalPairCaptureResult> {
+  const started = performance.now();
+  const sessionId = args.sessionId;
+  if (!sessionId) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      error_code: "missing_session_id",
+      error_detail: sanitizeDiagnostic("sessionId required"),
+    };
+  }
+  let c6: EdgeC6Identity;
+  try {
+    c6 = normalizeC6(args.c6);
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      error_code: "invalid_c6",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+  if (sessionId !== c6.session_id) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      error_code: "session_c6_mismatch",
+      error_detail: sanitizeDiagnostic("sessionId does not match c6.session_id"),
+    };
+  }
+
+  const sessionRoot = edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, sessionId);
+  try {
+    await ensureSessionLayout(sessionRoot, args.abrainHome);
+    const messagesSafe = toJsonSafe(args.messages);
+    const messagesJson = JSON.stringify(messagesSafe);
+    const payloadDigest = computePayloadDigest(messagesJson);
+    const messageCount = Array.isArray(messagesSafe) ? messagesSafe.length : 0;
+    const sourceBody = buildEdgeSourceEnvelopeBody({
+      contentId: payloadDigest,
+      sessionId,
+      messageCount,
+      messagesJson,
+    });
+    const sourceByteLength = Buffer.byteLength(sourceBody, "utf-8");
+    if (sourceByteLength > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+      return {
+        status: "source_failed",
+        duration_ms: performance.now() - started,
+        error_code: "source_too_large",
+        error_detail: sanitizeDiagnostic(`source exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
+      };
+    }
+    const sourcePath = edgeSourcePath(sessionRoot, payloadDigest);
+    let sourceStatus: EdgeWriteStatus;
+    try {
+      // Always create/verify exact content-addressed sidecar (missing → restore;
+      // corrupt/collision → fail closed). Never write witness for missing source.
+      sourceStatus = await createOrVerifyEdgeSidecar(sessionRoot, sourcePath, sourceBody);
+    } catch (err) {
+      const detail = errMessage(err);
+      return {
+        status: "source_failed",
+        duration_ms: performance.now() - started,
+        error_code: detail === "source_collision" ? "source_collision" : "source_write_failed",
+        error_detail: sanitizeDiagnostic(detail),
+      };
+    }
+
+    const sourceRef: EdgeSourceRef = {
+      kind: "raw_sidecar",
+      content_id: payloadDigest,
+      relative_path: path.posix.join("sources", `${payloadDigest}.json`),
+      byte_length: sourceByteLength,
+    };
+
+    type PairLockResult =
+      | {
+          kind: "complete";
+          candidate: EdgeJournalRecord;
+          candidatePath: string;
+          candidateReused: boolean;
+          witness: EdgeJournalRecord;
+          witnessPath: string;
+          witnessReused: boolean;
+        }
+      | {
+          kind: "candidate_only";
+          candidate: EdgeJournalRecord;
+          candidatePath: string;
+          candidateReused: boolean;
+          error_code: string;
+          error_detail?: string;
+        }
+      | { kind: "conflict"; error_code: string; error_detail: string }
+      | { kind: "failed"; error_code: string; error_detail: string };
+
+    const locked = await withJournalWriter(sessionRoot, args.abrainHome, async (writer): Promise<PairLockResult> => {
+      // One index load under the OFD lock: candidate/witness lookup + seq.
+      const index = await loadJournalIndex(sessionRoot);
+      writer.seedSeq(index.maxSeq + 1);
+      const wantC6 = c6Key(c6);
+
+      // Same C6 different content → fail closed (do not guess / do not append).
+      const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
+      const matching = sameC6.find((c) => c.record.payload_digest === payloadDigest) ?? null;
+      if (!matching && sameC6.length > 0) {
+        const otherDigest = sameC6[sameC6.length - 1]?.record.payload_digest;
+        if (otherDigest && otherDigest !== payloadDigest) {
+          return {
+            kind: "conflict",
+            error_code: "c6_content_conflict",
+            error_detail: sanitizeDiagnostic("same C6 already has a different content digest"),
+          };
+        }
+      }
+
+      let candidateReused = false;
+      let candidateRecord: EdgeJournalRecord;
+      let candidatePath: string;
+
+      if (matching) {
+        candidateReused = true;
+        candidateRecord = matching.record;
+        candidatePath = matching.path;
+      } else {
+        const producerSeq = writer.allocateSeq();
+        const runGeneration = producerSeq;
+        const createdAtRecord = args.createdAt ?? new Date().toISOString();
+        const partial = {
+          schema: EDGE_JOURNAL_SCHEMA,
+          schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
+          session_id: sessionId,
+          session_writer_epoch: writer.session_writer_epoch,
+          record_type: "candidate_capture" as const,
+          created_at: createdAtRecord,
+          payload_digest: payloadDigest,
+          c6,
+          run_generation: runGeneration,
+          source_ref: sourceRef,
+          capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
+          ...(args.leafTip ? { leaf_tip: args.leafTip } : {}),
+          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
+        };
+        const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
+        candidateRecord = {
+          ...partial,
+          record_id: recordId,
+          producer_seq: producerSeq,
+          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
+        };
+        candidatePath = edgeRecordPath(sessionRoot, producerSeq, recordId);
+        const body = `${JSON.stringify(candidateRecord)}\n`;
+        if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+          return {
+            kind: "failed",
+            error_code: "record_too_large",
+            error_detail: sanitizeDiagnostic(`record exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
+          };
+        }
+        const status = await durableAtomicCreateFile(candidatePath, body, {
+          mode: SOURCE_MODE,
+          verifyCreated: false,
+          tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
+        });
+        if (status === "collision") {
+          return {
+            kind: "failed",
+            error_code: "journal_record_collision",
+            error_detail: sanitizeDiagnostic("journal record collision"),
+          };
+        }
+        await assertMode(candidatePath, SOURCE_MODE);
+      }
+
+      const existingWit = index.witnessByCandidateId.get(candidateRecord.record_id);
+      if (existingWit) {
+        return {
+          kind: "complete",
+          candidate: candidateRecord,
+          candidatePath,
+          candidateReused,
+          witness: existingWit.record,
+          witnessPath: existingWit.path,
+          witnessReused: true,
+        };
+      }
+
+      try {
+        const wit = await writeWitnessRecordUnderLock({
+          writer,
+          sessionRoot,
+          sessionId,
+          c6,
+          candidate: candidateRecord,
+          leafTip: args.leafTip ?? candidateRecord.leaf_tip,
+          createdAt: args.createdAt,
+        });
+        return {
+          kind: "complete",
+          candidate: candidateRecord,
+          candidatePath,
+          candidateReused,
+          witness: wit.record,
+          witnessPath: wit.recordPath,
+          witnessReused: false,
+        };
+      } catch (err) {
+        return {
+          kind: "candidate_only",
+          candidate: candidateRecord,
+          candidatePath,
+          candidateReused,
+          error_code: "witness_write_failed",
+          error_detail: sanitizeDiagnostic(errMessage(err)),
+        };
+      }
+    });
+
+    if (locked.kind === "conflict") {
+      return {
+        status: "conflict",
+        duration_ms: performance.now() - started,
+        error_code: locked.error_code,
+        error_detail: locked.error_detail,
+      };
+    }
+    if (locked.kind === "failed") {
+      return {
+        status: locked.error_code === "record_too_large" ? "journal_failed" : "journal_failed",
+        duration_ms: performance.now() - started,
+        error_code: locked.error_code,
+        error_detail: locked.error_detail,
+      };
+    }
+
+    const candidateResult: EdgeCandidateCaptureResult = {
+      status: "captured",
+      duration_ms: 0,
+      source: {
+        content_id: payloadDigest,
+        path: sourcePath,
+        status: sourceStatus,
+        byte_length: sourceByteLength,
+      },
+      record: locked.candidate,
+      record_path: locked.candidatePath,
+    };
+
+    if (locked.kind === "candidate_only") {
+      return {
+        status: "candidate_only",
+        duration_ms: performance.now() - started,
+        candidate: candidateResult,
+        candidate_reused: locked.candidateReused,
+        error_code: locked.error_code,
+        error_detail: locked.error_detail,
+      };
+    }
+
+    return {
+      status: "complete",
+      duration_ms: performance.now() - started,
+      candidate: candidateResult,
+      witness: {
+        status: "written",
+        duration_ms: 0,
+        record: locked.witness,
+        record_path: locked.witnessPath,
+      },
+      candidate_reused: locked.candidateReused,
+      witness_reused: locked.witnessReused,
+    };
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      error_code: "pair_capture_failed",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+}
+
+/**
+ * Complete candidate-only pairs for ONE session (bounded).
+ * Prefer {@link recoverEdgeProtocolMissingWitnessesForOwner} on session_start.
+ */
+export async function recoverEdgeProtocolMissingWitnesses(
+  args: EdgeSessionInitArgs,
+): Promise<EdgeMissingWitnessRecoveryResult> {
+  const started = performance.now();
+  if (!args.sessionId) {
+    return {
+      status: "failed",
+      duration_ms: performance.now() - started,
+      scanned: 0,
+      recovered: 0,
+      failed: 0,
+      already_complete: 0,
+      sessions_scanned: 0,
+      error_code: "missing_session_id",
+      error_detail: sanitizeDiagnostic("sessionId required"),
+    };
+  }
+  try {
+    const one = await recoverMissingWitnessesForSession({
+      abrainHome: args.abrainHome,
+      ownerProjectRoot: args.ownerProjectRoot,
+      sessionId: args.sessionId,
+    });
+    return {
+      status: "ready",
+      duration_ms: performance.now() - started,
+      scanned: one.scanned,
+      recovered: one.recovered,
+      failed: one.failed,
+      already_complete: one.already_complete,
+      sessions_scanned: 1,
+      sessions_skipped: 0,
+    };
+  } catch (err) {
+    return {
+      status: "failed",
+      duration_ms: performance.now() - started,
+      scanned: 0,
+      recovered: 0,
+      failed: 0,
+      already_complete: 0,
+      sessions_scanned: 0,
+      error_code: "witness_recovery_failed",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+}
+
+/**
+ * Owner-wide candidate-only recovery: walk all bounded sessions under the
+ * owner key. Safe lstat walk + caps; symlink / unexpected entry fail closed
+ * for that session (counted, not guessed). Same-C6 conflict does not invent.
+ */
+export async function recoverEdgeProtocolMissingWitnessesForOwner(args: {
+  abrainHome: string;
+  ownerProjectRoot: string;
+  maxSessions?: number;
+}): Promise<EdgeMissingWitnessRecoveryResult> {
+  const started = performance.now();
+  const maxSessions = args.maxSessions ?? RECOVERY_MAX_SESSIONS;
+  let scanned = 0;
+  let recovered = 0;
+  let failed = 0;
+  let already = 0;
+  let sessionsScanned = 0;
+  let sessionsSkipped = 0;
+  try {
+    const ownerKey = edgeOwnerKey(args.ownerProjectRoot);
+    const sessionsDir = path.join(
+      edgeProtocolShadowRoot(args.abrainHome),
+      "by-owner",
+      ownerKey,
+      "sessions",
+    );
+    let names: string[];
+    try {
+      const st = await fs.lstat(sessionsDir);
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        return {
+          status: "failed",
+          duration_ms: performance.now() - started,
+          scanned: 0,
+          recovered: 0,
+          failed: 0,
+          already_complete: 0,
+          sessions_scanned: 0,
+          sessions_skipped: 0,
+          error_code: "sessions_dir_invalid",
+          error_detail: sanitizeDiagnostic("sessions dir symlink or not directory"),
+        };
+      }
+      names = await fs.readdir(sessionsDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        return {
+          status: "ready",
+          duration_ms: performance.now() - started,
+          scanned: 0,
+          recovered: 0,
+          failed: 0,
+          already_complete: 0,
+          sessions_scanned: 0,
+          sessions_skipped: 0,
+        };
+      }
+      throw err;
+    }
+    names.sort();
+    for (const name of names) {
+      if (sessionsScanned >= maxSessions) {
+        sessionsSkipped += 1;
+        continue;
+      }
+      const sessionPath = path.join(sessionsDir, name);
+      try {
+        const st = await fs.lstat(sessionPath);
+        if (st.isSymbolicLink() || !st.isDirectory()) {
+          sessionsSkipped += 1;
+          continue;
+        }
+      } catch {
+        sessionsSkipped += 1;
+        continue;
+      }
+      sessionsScanned += 1;
+      try {
+        const one = await recoverMissingWitnessesForSession({
+          abrainHome: args.abrainHome,
+          ownerProjectRoot: args.ownerProjectRoot,
+          sessionId: name,
+        });
+        scanned += one.scanned;
+        recovered += one.recovered;
+        failed += one.failed;
+        already += one.already_complete;
+      } catch {
+        sessionsSkipped += 1;
+      }
+    }
+    return {
+      status: "ready",
+      duration_ms: performance.now() - started,
+      scanned,
+      recovered,
+      failed,
+      already_complete: already,
+      sessions_scanned: sessionsScanned,
+      sessions_skipped: sessionsSkipped,
+    };
+  } catch (err) {
+    return {
+      status: "failed",
+      duration_ms: performance.now() - started,
+      scanned,
+      recovered,
+      failed,
+      already_complete: already,
+      sessions_scanned: sessionsScanned,
+      sessions_skipped: sessionsSkipped,
+      error_code: "owner_witness_recovery_failed",
       error_detail: sanitizeDiagnostic(errMessage(err)),
     };
   }
@@ -911,17 +1473,138 @@ export async function findLatestCandidateForC6(
   return null;
 }
 
+/** Candidate by exact record_id (for pinned witness recovery). */
+export async function findCandidateByRecordId(
+  sessionRoot: string,
+  recordId: string,
+): Promise<{ record: EdgeJournalRecord; path: string } | null> {
+  if (!/^[0-9a-f]{64}$/.test(recordId)) return null;
+  const dir = edgeJournalRecordsDir(sessionRoot);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  for (const name of names) {
+    const parsedName = parseEdgeRecordFilename(name);
+    if (!parsedName || parsedName.recordId !== recordId) continue;
+    const full = path.join(dir, name);
+    let parsed: EdgeJournalRecord;
+    try {
+      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
+    } catch {
+      continue;
+    }
+    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
+    if (parsed.record_id !== recordId) continue;
+    return { record: parsed, path: full };
+  }
+  return null;
+}
+
+/**
+ * Idempotent pair key: existing candidate for same C6 + payload_digest.
+ * Newest-first so concurrent retries latch onto the durable head for that content.
+ */
+export async function findCandidateForC6AndDigest(
+  sessionRoot: string,
+  c6: EdgeC6Identity,
+  payloadDigest: string,
+): Promise<{ record: EdgeJournalRecord; path: string } | null> {
+  if (!/^[0-9a-f]{64}$/.test(payloadDigest)) return null;
+  const want = c6Key(c6);
+  const dir = edgeJournalRecordsDir(sessionRoot);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  const newestFirst = names
+    .filter((name) => RECORD_FILENAME_RE.test(name))
+    .sort()
+    .reverse();
+  for (const name of newestFirst) {
+    const full = path.join(dir, name);
+    let parsed: EdgeJournalRecord;
+    try {
+      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
+    } catch {
+      continue;
+    }
+    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
+    if (parsed.payload_digest !== payloadDigest) continue;
+    if (c6Key(parsed.c6) !== want) continue;
+    return { record: parsed, path: full };
+  }
+  return null;
+}
+
+/** Existing terminal_witness for a candidate record_id (idempotent witness gate). */
+export async function findTerminalWitnessForCandidate(
+  sessionRoot: string,
+  candidateRecordId: string,
+): Promise<{ record: EdgeJournalRecord; path: string } | null> {
+  if (!/^[0-9a-f]{64}$/.test(candidateRecordId)) return null;
+  const dir = edgeJournalRecordsDir(sessionRoot);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  // Newest-first: a late duplicate would still be found; callers treat any hit as complete.
+  const newestFirst = names
+    .filter((name) => RECORD_FILENAME_RE.test(name))
+    .sort()
+    .reverse();
+  for (const name of newestFirst) {
+    const full = path.join(dir, name);
+    let parsed: EdgeJournalRecord;
+    try {
+      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
+    } catch {
+      continue;
+    }
+    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "terminal_witness") continue;
+    if (parsed.candidate_ref?.record_id !== candidateRecordId) continue;
+    return { record: parsed, path: full };
+  }
+  return null;
+}
+
 // ── internals ──────────────────────────────────────────────────────────
 
 interface JournalWriter {
   /** This process's journal writer identity (not SessionManager / launch fence). */
   session_writer_epoch: string;
   allocateSeq(): number;
+  /** When caller already loaded a journal index under the lock, seed next seq. */
+  seedSeq(next: number): void;
+}
+
+interface JournalIndexEntry {
+  record: EdgeJournalRecord;
+  path: string;
+  name: string;
+}
+
+interface JournalIndex {
+  maxSeq: number;
+  byRecordId: Map<string, JournalIndexEntry>;
+  candidatesByC6: Map<string, Array<{ record: EdgeJournalRecord; path: string }>>;
+  witnessByCandidateId: Map<string, { record: EdgeJournalRecord; path: string }>;
 }
 
 /**
  * OFD lock + allocate next producer_seq from record filenames only.
  * No secondary writer-state head: crash recovery re-scans filenames under the lock.
+ * Callers that load a full journal index under the lock should `seedSeq` from that
+ * index so seq allocation does not re-scan filenames a second time.
  */
 async function withJournalWriter<T>(
   sessionRoot: string,
@@ -936,7 +1619,7 @@ async function withJournalWriter<T>(
   let lastBusy = false;
   for (let attempt = 0; attempt < LOCK_BUSY_RETRIES; attempt += 1) {
     const locked = await withRetainedDirectoryOfdLock(realLock, async () => {
-      // producer_seq unique truth: max(record filename seq)+1 under OFD lock, then durable create.
+      // Default: max(record filename seq)+1 under OFD lock. Pair path seeds from index.
       let nextSeq = (await scanMaxProducerSeq(sessionRoot)) + 1;
       const writer: JournalWriter = {
         session_writer_epoch: PROCESS_JOURNAL_WRITER_EPOCH,
@@ -944,6 +1627,9 @@ async function withJournalWriter<T>(
           const seq = nextSeq;
           nextSeq += 1;
           return seq;
+        },
+        seedSeq(next: number) {
+          if (Number.isInteger(next) && next >= 1) nextSeq = next;
         },
       };
       return fn(writer);
@@ -974,6 +1660,211 @@ async function scanMaxProducerSeq(sessionRoot: string): Promise<number> {
   return max;
 }
 
+/** One full parse of journal/records under the caller's OFD lock. */
+async function loadJournalIndex(sessionRoot: string): Promise<JournalIndex> {
+  const dir = edgeJournalRecordsDir(sessionRoot);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        maxSeq: 0,
+        byRecordId: new Map(),
+        candidatesByC6: new Map(),
+        witnessByCandidateId: new Map(),
+      };
+    }
+    throw err;
+  }
+  const byRecordId = new Map<string, JournalIndexEntry>();
+  const candidatesByC6 = new Map<string, Array<{ record: EdgeJournalRecord; path: string }>>();
+  const witnessByCandidateId = new Map<string, { record: EdgeJournalRecord; path: string }>();
+  let maxSeq = 0;
+  const sorted = names.filter((n) => RECORD_FILENAME_RE.test(n)).sort();
+  for (const name of sorted) {
+    const parsedName = parseEdgeRecordFilename(name);
+    if (!parsedName) continue;
+    if (parsedName.producerSeq > maxSeq) maxSeq = parsedName.producerSeq;
+    const full = path.join(dir, name);
+    let record: EdgeJournalRecord;
+    try {
+      record = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
+    } catch {
+      continue;
+    }
+    if (record.schema !== EDGE_JOURNAL_SCHEMA) continue;
+    const entry: JournalIndexEntry = { record, path: full, name };
+    byRecordId.set(record.record_id, entry);
+    if (record.record_type === "candidate_capture") {
+      const key = c6Key(record.c6);
+      const list = candidatesByC6.get(key) ?? [];
+      list.push({ record, path: full });
+      candidatesByC6.set(key, list);
+    } else if (record.record_type === "terminal_witness" && record.candidate_ref?.record_id) {
+      // Keep newest for the candidate (sorted ascending → last wins).
+      witnessByCandidateId.set(record.candidate_ref.record_id, { record, path: full });
+    }
+  }
+  return { maxSeq, byRecordId, candidatesByC6, witnessByCandidateId };
+}
+
+function indexFindLatestCandidateForC6(
+  index: JournalIndex,
+  c6: EdgeC6Identity,
+): { record: EdgeJournalRecord; path: string } | null {
+  const list = index.candidatesByC6.get(c6Key(c6));
+  if (!list || list.length === 0) return null;
+  return list[list.length - 1] ?? null;
+}
+
+/**
+ * Content-addressed sidecar create/verify. Always attempts durable create;
+ * identical = reuse; collision = fail closed. Test fault gated.
+ */
+async function createOrVerifyEdgeSidecar(
+  sessionRoot: string,
+  sourcePath: string,
+  sourceBody: string,
+): Promise<EdgeWriteStatus> {
+  maybeThrowSourceCreateFaultForTests();
+  const status = await durableAtomicCreateFile(sourcePath, sourceBody, {
+    mode: SOURCE_MODE,
+    verifyCreated: false,
+    tmpPath: edgeStagingTmpPath(sessionRoot, "source"),
+  });
+  if (status === "collision") {
+    throw new Error("source_collision");
+  }
+  await assertMode(sourcePath, SOURCE_MODE);
+  return status;
+}
+
+async function writeWitnessRecordUnderLock(args: {
+  writer: JournalWriter;
+  sessionRoot: string;
+  sessionId: string;
+  c6: EdgeC6Identity;
+  candidate: EdgeJournalRecord;
+  leafTip?: EdgeLeafTip;
+  createdAt?: string;
+}): Promise<{ kind: "written"; record: EdgeJournalRecord; recordPath: string }> {
+  const createdAt = args.createdAt ?? new Date().toISOString();
+  const candidateRef: EdgeCandidateRef = {
+    record_id: args.candidate.record_id,
+    producer_seq: args.candidate.producer_seq,
+    payload_digest: args.candidate.payload_digest,
+    run_generation: args.candidate.run_generation,
+  };
+  const producerSeq = args.writer.allocateSeq();
+  const partial = {
+    schema: EDGE_JOURNAL_SCHEMA,
+    schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
+    session_id: args.sessionId,
+    session_writer_epoch: args.writer.session_writer_epoch,
+    record_type: "terminal_witness" as const,
+    created_at: createdAt,
+    payload_digest: args.candidate.payload_digest,
+    c6: args.c6,
+    run_generation: args.candidate.run_generation,
+    candidate_ref: candidateRef,
+    source_ref: args.candidate.source_ref,
+    capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
+    settlement_status: "unsupported_core_capability" as const,
+    ...(args.leafTip ? { leaf_tip: args.leafTip } : {}),
+    deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
+  };
+  const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
+  const record: EdgeJournalRecord = {
+    ...partial,
+    record_id: recordId,
+    producer_seq: producerSeq,
+    deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
+  };
+  const recordPath = edgeRecordPath(args.sessionRoot, producerSeq, recordId);
+  const body = `${JSON.stringify(record)}\n`;
+  if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+    throw new Error("record_too_large");
+  }
+  const status = await durableAtomicCreateFile(recordPath, body, {
+    mode: SOURCE_MODE,
+    verifyCreated: false,
+    tmpPath: edgeStagingTmpPath(args.sessionRoot, "record"),
+  });
+  if (status === "collision") throw new Error("journal witness collision");
+  await assertMode(recordPath, SOURCE_MODE);
+  return { kind: "written" as const, record, recordPath };
+}
+
+async function recoverMissingWitnessesForSession(args: {
+  abrainHome: string;
+  ownerProjectRoot: string;
+  sessionId: string;
+}): Promise<{ scanned: number; recovered: number; failed: number; already_complete: number }> {
+  const sessionRoot = edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, args.sessionId);
+  // Do not create layout for sessions that never had producer product.
+  try {
+    await fs.lstat(edgeJournalRecordsDir(sessionRoot));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { scanned: 0, recovered: 0, failed: 0, already_complete: 0 };
+    }
+    throw err;
+  }
+  await ensureSessionLayout(sessionRoot, args.abrainHome);
+  const index = await loadJournalIndex(sessionRoot);
+  const candidates: Array<{ record: EdgeJournalRecord; path: string }> = [];
+  for (const list of index.candidatesByC6.values()) {
+    for (const c of list) candidates.push(c);
+  }
+  candidates.sort((a, b) => a.record.producer_seq - b.record.producer_seq);
+  const bounded = candidates.slice(0, RECOVERY_MAX_CANDIDATES_PER_SESSION);
+  let recovered = 0;
+  let failed = 0;
+  let already = 0;
+  for (const cand of bounded) {
+    if (index.witnessByCandidateId.has(cand.record.record_id)) {
+      already += 1;
+      continue;
+    }
+    // Sidecar must exist; never invent witness for missing source.
+    if (cand.record.source_ref?.content_id) {
+      try {
+        await fs.stat(edgeSourcePath(sessionRoot, cand.record.source_ref.content_id));
+      } catch {
+        failed += 1;
+        continue;
+      }
+    }
+    const wit = await writeEdgeTerminalWitness({
+      abrainHome: args.abrainHome,
+      ownerProjectRoot: args.ownerProjectRoot,
+      sessionId: args.sessionId,
+      c6: cand.record.c6,
+      leafTip: cand.record.leaf_tip,
+      candidateRecordId: cand.record.record_id,
+      idempotentReuse: true,
+    });
+    if (wit.status === "written") {
+      recovered += 1;
+      if (wit.record) {
+        index.witnessByCandidateId.set(cand.record.record_id, {
+          record: wit.record,
+          path: wit.record_path ?? "",
+        });
+      }
+    } else {
+      failed += 1;
+    }
+  }
+  return {
+    scanned: bounded.length,
+    recovered,
+    failed,
+    already_complete: already,
+  };
+}
+
 /**
  * Durable layered mkdir under abrainHome ownership root.
  * Walks ownershipRoot → target component-by-component with lstat (no intermediate
@@ -985,6 +1876,7 @@ async function scanMaxProducerSeq(sessionRoot: string): Promise<number> {
 async function ensureSessionLayout(sessionRoot: string, abrainHome: string): Promise<void> {
   await ensureDirOwned(sessionRoot, abrainHome);
   await ensureDirOwned(edgeSourcesDir(sessionRoot), abrainHome);
+  await ensureDirOwned(edgeStagingDir(sessionRoot), abrainHome);
   await ensureDirOwned(edgeJournalDir(sessionRoot), abrainHome);
   await ensureDirOwned(edgeJournalRecordsDir(sessionRoot), abrainHome);
   await ensureDirOwned(edgeJournalLockDir(sessionRoot), abrainHome);
@@ -1123,8 +2015,15 @@ function failCandidate(
   detail: string,
   source?: EdgeCandidateCaptureResult["source"],
 ): EdgeCandidateCaptureResult {
+  const journalish =
+    code === "journal_write_failed"
+    || code === "record_too_large"
+    || code === "capture_failed"
+    || code === "missing_session_id"
+    || code === "invalid_c6"
+    || code === "session_c6_mismatch";
   return {
-    status: code.startsWith("source_") ? "source_failed" : code === "journal_write_failed" ? "journal_failed" : "source_failed",
+    status: journalish ? "journal_failed" : "source_failed",
     duration_ms: performance.now() - started,
     source,
     error_code: code,

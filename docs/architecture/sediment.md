@@ -53,7 +53,8 @@ Status: **implemented in-tree（Stage0）**; not formal ACK / authority / retent
 
 Daemon-hosted headless worker surface for terminal-witness evaluation without foreground agent lifecycle:
 
-- **Single executor**: `sediment.executionOwner` default `foreground` (unchanged). When `daemon`, ordinary Pi extension keeps agent_end/settled **capture** (intake + edge shadow) but does **not** enqueue / schedule recovery / run normal pass; worker is the sole pass executor. Worker requires `executionOwner=daemon` else `execution_owner_not_daemon`.
+- **Single executor**: `sediment.executionOwner` default `foreground` (unchanged). When `daemon`, ordinary Pi extension **never** writes ordinary intake pending and does **not** enqueue / schedule recovery / run normal pass; worker is the sole pass executor. Worker requires `executionOwner=daemon` else `execution_owner_not_daemon`. Incomplete continuous-producer flags → aggregate `daemon_capture_disabled` skip (no pending leak).
+- **Continuous edge producer (default-off)**: triple gate `executionOwner=daemon` **and** `edgeProtocolShadow.enabled` **and** `daemonWorker.edgeShadowCaptureEnabled` (all default off/false except when explicitly set). When fully open, ordinary Pi writes each healthy terminal assistant turn into flat `edge-protocol-shadow` (candidate + terminal_witness continuous `producer_seq` + exact messages sidecar ≤8MiB) for the daemon A0.2b scanner. Capture receipt is **not** ConsumerAck / authority / retention / delete / knowledge ack. Owner root realpath double-fail is fail closed (skip, never raw). Worker mode never producer-captures. Pair API is lock-internal idempotent; public `writeEdgeTerminalWitness` defaults unchanged. Owner-wide bounded recovery on `session_start` for candidate-only pairs. Foreground keeps intake→queue.
 - Env `PI_ASTACK_SEDIMENT_WORKER_MODE=1` → sediment extension registers **only** `/sediment-worker-run` and installs the shared `runSedimentAgentEndPass` body. No ordinary lifecycle hooks / queue / recovery / timer / footer; no recursive edge-protocol-shadow from the worker session.
 - Required worker env: `PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT` (canonical) + `PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS` (JSON realpath allowlist). Sidecar path shape `<root>/records/<terminal_record_id>/sidecar.bin`; open+fstat with `O_NOFOLLOW`.
 - Manifest schema `pi-astack/sediment-worker-task/v1`（JSON or base64url, ≤64KiB）; strict unknown-field reject; `content_id` + `owner_key` required; Stage0 admits **only** `task_kind=terminal_witness`.
@@ -74,7 +75,7 @@ ABRAIN_ROOT=<path> \
   --extension <repo>/extensions/sediment/index.ts
 ```
 
-Authority: [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md). Code: `extensions/sediment/worker-rpc.ts`, worker branch in `extensions/sediment/index.ts`, `sediment.executionOwner` in settings/schema. Smoke: `npm run smoke:sediment-worker-rpc`.
+Authority: [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md). Code: `extensions/sediment/worker-rpc.ts`, worker branch + daemon edge producer in `extensions/sediment/index.ts`, `sediment.executionOwner` / `sediment.daemonWorker.edgeShadowCaptureEnabled` in settings/schema, `extensions/sediment/edge-protocol-shadow.ts`. Smoke: `npm run smoke:sediment-worker-rpc`, `npm run smoke:sediment-daemon-edge-capture`.
 
 ## 3. Curator operation set
 
