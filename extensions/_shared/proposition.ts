@@ -12,6 +12,8 @@ export const PROPOSITION_SCHEMA_CONTRACT_PRODUCER = "pi-astack.proposition-schem
 export const PROPOSITION_PRODUCTION_GENESIS_PRODUCER = "pi-astack.proposition-production-genesis-writer" as const;
 export const PROPOSITION_PRODUCTION_GENESIS_PRODUCER_VERSION = "adr0040-production-genesis-writer/v1" as const;
 export const PROPOSITION_PRODUCTION_GENESIS_EPOCH_ID = "adr0040-production-genesis-v1" as const;
+/** Production genesis L1 event id for the ADR0040 no-migration epoch (P0b2). */
+export const PROPOSITION_PRODUCTION_GENESIS_EVENT_ID = "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3" as const;
 export const PROPOSITION_SCHEMA_CONTRACT_SCHEMA = "proposition-schema-contract/v1" as const;
 export const PROPOSITION_GENESIS_BINDING_SCHEMA = "proposition-genesis-binding/v1" as const;
 export const PROPOSITION_GENESIS_BINDING_MANIFEST_SCHEMA = "proposition-genesis-binding-manifest/v1" as const;

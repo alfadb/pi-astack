@@ -96,7 +96,8 @@
       ],
       "producers": [
         "pi-astack.proposition-schema-contract",
-        "pi-astack.proposition-production-evidence-writer"
+        "pi-astack.proposition-production-evidence-writer",
+        "pi-astack.proposition-tier1-policy-writer"
       ]
     },
     {

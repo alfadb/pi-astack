@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import {
   PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES,
@@ -7,6 +8,7 @@ import {
 import { stableViewCanonicalizeJcs } from "./proposition-policy-stable-view";
 import { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
 import { acquireRetainedDirectoryOfdLock } from "./retained-directory-ofd-lock";
+import { durableAtomicCreateFile, type DurableCreateStatus } from "./durable-write";
 import {
   readPropositionPolicyStableViewForRuntime,
   type PropositionPolicyStableViewRuntimeReadResult,
@@ -26,6 +28,7 @@ export const PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_CHILD_MAX_STDOUT_BYTES = 16
 export const PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_CHILD_MAX_STDERR_BYTES = 16 * 1024;
 
 const RECOVERY_STATE_KEY = Symbol.for("pi-astack/proposition-policy-stable-view-recovery/v1");
+const SOURCE_CHANGE_STATE_KEY = Symbol.for("pi-astack/proposition-policy-stable-view-source-change-republish/v1");
 const CHILD_SCHEMA = "proposition-policy-stable-view-recovery-child-result/v1";
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const ERROR_CODE_PATTERN = /^[A-Z0-9_]{1,128}$/;
@@ -37,6 +40,7 @@ const VALIDATION_SESSION_MANAGER = Object.freeze({
   getSessionId: () => VALIDATION_SESSION_ID,
   getSessionFile: () => "/nonexistent/proposition-policy-stable-view-recovery-validator.jsonl",
 });
+const STABLE_VIEW_PUBLICATION_ROOT_RELATIVE = ".state/sediment/proposition-policy-stable-view/v1";
 
 export type PropositionPolicyStableViewRecoveryStatus =
   | "already_valid"
@@ -464,12 +468,38 @@ function assertBoundedChildLaunch(executable: string, args: readonly string[], e
   if (envBytes > MAX_CHILD_ENV_BYTES) throw recoveryFailure("RECOVERY_CHILD_ENV_INVALID", "publication child env exceeds its hard limit");
 }
 
+/** Hard-contract recovery reader (missing/invalid stable-view recovery path). */
 function strictRead(abrainHome: string): PropositionPolicyStableViewRuntimeReadResult {
+  return strictReadWithBudget(abrainHome, PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES);
+}
+
+/** Source-change final/ack reader — uses the production runtime budget. */
+function strictReadWithBudget(
+  abrainHome: string,
+  maxReadBytes: number,
+): PropositionPolicyStableViewRuntimeReadResult {
   return readPropositionPolicyStableViewForRuntime({
     abrainHome,
-    settings: { maxReadBytes: PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES },
+    settings: { maxReadBytes },
     sessionManager: VALIDATION_SESSION_MANAGER,
   });
+}
+
+function resolveSourceChangeRuntimeMaxReadBytes(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw recoveryFailure(
+      "SOURCE_CHANGE_RUNTIME_BUDGET_INVALID",
+      "runtimeMaxReadBytes must be a finite number matching production injection budget",
+    );
+  }
+  const n = Math.floor(value);
+  if (n < 1) {
+    throw recoveryFailure(
+      "SOURCE_CHANGE_RUNTIME_BUDGET_INVALID",
+      "runtimeMaxReadBytes must be >= 1",
+    );
+  }
+  return Math.min(PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES, n);
 }
 
 function finalizeResult(input: {
@@ -694,3 +724,758 @@ export const __TEST = Object.freeze({
     recoveryTestControls = {};
   },
 });
+
+// ---------------------------------------------------------------------------
+// Source-change force republish (Tier-1 → proposition append path)
+// Skips the recovery already_valid short-circuit; always spawns the production
+// publisher child so a newly durable proposition enters the stable-view source
+// closure. Process-global singleflight + pending coalesce per abrainHome.
+// Durable pending markers (event id only) survive process death; they are
+// derived publish todos, never a second semantic authority.
+// ---------------------------------------------------------------------------
+
+export const PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_SCHEMA =
+  "proposition-policy-stable-view-source-change-pending/v1" as const;
+/** Outside the stable-view publication root (which only allows bundles/latest). */
+export const PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_RELATIVE =
+  ".state/sediment/proposition-policy-stable-view-source-change/v1/pending" as const;
+
+export type PropositionPolicyStableViewSourceChangeStatus =
+  | "republished"
+  | "contended_converged"
+  | "failed";
+
+export interface PropositionPolicyStableViewSourceChangeResult {
+  schema_version: "proposition-policy-stable-view-source-change-result/v1";
+  status: PropositionPolicyStableViewSourceChangeStatus;
+  reason: string;
+  abrain_home: string;
+  started_at: string;
+  finished_at: string;
+  required_event_ids: readonly string[];
+  final_read_reason: string;
+  contention_observed: boolean;
+  bundle_hash?: string;
+  publication_status?: "created" | "identical";
+  error_code?: string;
+  error_message?: string;
+  /** Distinct from recovery already_valid — force path never reports that. */
+  already_valid_short_circuit: false;
+}
+
+export interface PropositionPolicyStableViewSourceChangeOptions {
+  abrainHome: string;
+  repoRoot: string;
+  requiredEventIds: readonly string[];
+  /**
+   * Production runtime reader budget — must equal the live
+   * `ruleInjector.propositionPolicyStableViewInjection.maxReadBytes`.
+   * Source-change final strictRead / ack use this budget (not the hard 262144
+   * recovery envelope) so capture/ack cannot clear markers the production
+   * reader would reject as oversize. Required for every production and test call.
+   */
+  runtimeMaxReadBytes: number;
+  contentionWaitMs?: number;
+  contentionPollMs?: number;
+  sourceRaceMaxRetries?: number;
+  sourceRaceBackoffMs?: number;
+  childTimeoutMs?: number;
+}
+
+export interface PropositionPolicyStableViewSourceChangePendingMarker {
+  schema: typeof PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_SCHEMA;
+  event_id: string;
+}
+
+interface SourceChangeProcessState {
+  scheduled: Map<string, Promise<PropositionPolicyStableViewSourceChangeResult>>;
+  inFlight: Map<string, Promise<PropositionPolicyStableViewSourceChangeResult>>;
+  pendingIds: Map<string, Set<string>>;
+  latest: Map<string, PropositionPolicyStableViewSourceChangeResult>;
+  tail: PropositionPolicyStableViewSourceChangeResult[];
+  /** Last non-id options used to re-arm after a lost-wakeup race. */
+  lastOptions: Map<string, PropositionPolicyStableViewSourceChangeOptions>;
+}
+
+function sourceChangeState(): SourceChangeProcessState {
+  const global = globalThis as Record<symbol, unknown>;
+  const existing = global[SOURCE_CHANGE_STATE_KEY] as SourceChangeProcessState | undefined;
+  if (existing) return existing;
+  const created: SourceChangeProcessState = {
+    scheduled: new Map(),
+    inFlight: new Map(),
+    pendingIds: new Map(),
+    latest: new Map(),
+    tail: [],
+    lastOptions: new Map(),
+  };
+  global[SOURCE_CHANGE_STATE_KEY] = created;
+  return created;
+}
+
+export function propositionPolicyStableViewSourceChangePendingDir(abrainHome: string): string {
+  return path.join(
+    path.resolve(abrainHome),
+    ...PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_RELATIVE.split("/"),
+  );
+}
+
+export function propositionPolicyStableViewSourceChangePendingPath(
+  abrainHome: string,
+  eventId: string,
+): string {
+  if (!SHA256_PATTERN.test(eventId)) {
+    throw recoveryFailure("SOURCE_CHANGE_PENDING_ID_INVALID", "pending marker event_id must be sha256 hex");
+  }
+  return path.join(propositionPolicyStableViewSourceChangePendingDir(abrainHome), `${eventId}.json`);
+}
+
+const PENDING_MARKER_NAME_PATTERN = /^[0-9a-f]{64}\.json$/;
+
+/**
+ * Walk abrainHome → pending dir with lstat only. Fail closed on symlink/non-dir.
+ * Missing intermediate or target → "missing" (list empty / delete missing).
+ */
+async function inspectSourceChangePendingDirChain(
+  abrainHome: string,
+): Promise<"ready" | "missing"> {
+  const root = path.resolve(abrainHome);
+  const targetDir = propositionPolicyStableViewSourceChangePendingDir(root);
+  const relative = path.relative(root, targetDir);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw recoveryFailure("SOURCE_CHANGE_PENDING_PATH_ESCAPE", "pending marker directory escapes abrain home");
+  }
+  let current = root;
+  try {
+    const rootStat = await fsp.lstat(current);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      throw recoveryFailure("SOURCE_CHANGE_PENDING_PATH_UNSAFE", "abrain home must be a non-symlink directory");
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw err;
+  }
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, part);
+    try {
+      const st = await fsp.lstat(current);
+      if (st.isSymbolicLink() || !st.isDirectory()) {
+        throw recoveryFailure(
+          "SOURCE_CHANGE_PENDING_PATH_UNSAFE",
+          "pending marker directory chain is unsafe",
+        );
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+      throw err;
+    }
+  }
+  return "ready";
+}
+
+/**
+ * Create pending dir one level at a time from an existing non-symlink abrain root.
+ * After each mkdir, fsync the parent. Never uses recursive mkdir (symlink-safe).
+ */
+async function ensureSourceChangePendingDirReady(abrainHome: string): Promise<string> {
+  const root = path.resolve(abrainHome);
+  const targetDir = propositionPolicyStableViewSourceChangePendingDir(root);
+  const relative = path.relative(root, targetDir);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw recoveryFailure("SOURCE_CHANGE_PENDING_PATH_ESCAPE", "pending marker directory escapes abrain home");
+  }
+  let current = root;
+  const rootStat = await fsp.lstat(current);
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    throw recoveryFailure("SOURCE_CHANGE_PENDING_PATH_UNSAFE", "abrain home must be a non-symlink directory");
+  }
+  for (const part of relative.split(path.sep).filter(Boolean)) {
+    const parent = current;
+    current = path.join(current, part);
+    let st: fs.Stats | null = null;
+    try {
+      st = await fsp.lstat(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    if (!st) {
+      try {
+        await fsp.mkdir(current, { mode: 0o700 });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+      fsyncDirectory(parent);
+      st = await fsp.lstat(current);
+    }
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_PATH_UNSAFE",
+        "pending marker directory chain is unsafe",
+      );
+    }
+  }
+  return targetDir;
+}
+
+/**
+ * Durable enqueue of a low-sensitivity publish todo (event id only).
+ * Create-only + parent fsync; identical on retry. Not semantic authority.
+ */
+export async function enqueuePropositionPolicyStableViewSourceChangePendingMarker(
+  abrainHome: string,
+  eventId: string,
+): Promise<{ status: DurableCreateStatus; eventId: string; filePath: string }> {
+  if (!SHA256_PATTERN.test(eventId)) {
+    throw recoveryFailure("SOURCE_CHANGE_PENDING_ID_INVALID", "pending marker event_id must be sha256 hex");
+  }
+  const root = path.resolve(abrainHome);
+  await ensureSourceChangePendingDirReady(root);
+  const filePath = propositionPolicyStableViewSourceChangePendingPath(root, eventId);
+  const marker: PropositionPolicyStableViewSourceChangePendingMarker = Object.freeze({
+    schema: PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_SCHEMA,
+    event_id: eventId,
+  });
+  const raw = `${JSON.stringify(marker)}\n`;
+  const status = await durableAtomicCreateFile(filePath, raw, { mode: 0o600 });
+  if (status === "collision") {
+    // Existing file must be the same low-sens marker; otherwise hard-fail closed.
+    try {
+      const existing = JSON.parse(await fsp.readFile(filePath, "utf8")) as PropositionPolicyStableViewSourceChangePendingMarker;
+      if (
+        existing?.schema === PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_SCHEMA
+        && existing.event_id === eventId
+      ) {
+        return { status: "identical", eventId, filePath };
+      }
+    } catch {
+      // fall through
+    }
+    throw recoveryFailure(
+      "SOURCE_CHANGE_PENDING_COLLISION",
+      `source-change pending marker collides with different bytes: ${eventId}`,
+    );
+  }
+  return { status, eventId, filePath };
+}
+
+export async function listPropositionPolicyStableViewSourceChangePendingMarkers(
+  abrainHome: string,
+): Promise<readonly string[]> {
+  const chain = await inspectSourceChangePendingDirChain(abrainHome);
+  if (chain === "missing") return Object.freeze([]);
+  const dir = propositionPolicyStableViewSourceChangePendingDir(abrainHome);
+  const names = await fsp.readdir(dir);
+  const ids: string[] = [];
+  for (const name of names) {
+    if (!PENDING_MARKER_NAME_PATTERN.test(name)) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_FOREIGN",
+        `foreign entry in pending marker directory: ${name}`,
+      );
+    }
+    const filePath = path.join(dir, name);
+    let st: fs.Stats;
+    try {
+      st = await fsp.lstat(filePath);
+    } catch (err) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_CORRUPT",
+        `pending marker unreadable: ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_FOREIGN",
+        `pending marker is not a regular file: ${name}`,
+      );
+    }
+    let raw: string;
+    try {
+      raw = await fsp.readFile(filePath, "utf8");
+    } catch (err) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_CORRUPT",
+        `pending marker unreadable: ${name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    let marker: PropositionPolicyStableViewSourceChangePendingMarker;
+    try {
+      marker = JSON.parse(raw) as PropositionPolicyStableViewSourceChangePendingMarker;
+    } catch {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_CORRUPT",
+        `pending marker JSON corrupt: ${name}`,
+      );
+    }
+    if (
+      marker?.schema !== PROPOSITION_POLICY_STABLE_VIEW_SOURCE_CHANGE_PENDING_SCHEMA
+      || typeof marker.event_id !== "string"
+      || !SHA256_PATTERN.test(marker.event_id)
+      || marker.event_id !== name.slice(0, 64)
+    ) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_PENDING_CORRUPT",
+        `pending marker content invalid: ${name}`,
+      );
+    }
+    ids.push(marker.event_id);
+  }
+  ids.sort();
+  return Object.freeze(ids);
+}
+
+export async function deletePropositionPolicyStableViewSourceChangePendingMarker(
+  abrainHome: string,
+  eventId: string,
+): Promise<"deleted" | "missing"> {
+  if (!SHA256_PATTERN.test(eventId)) return "missing";
+  const chain = await inspectSourceChangePendingDirChain(abrainHome);
+  if (chain === "missing") return "missing";
+  const filePath = propositionPolicyStableViewSourceChangePendingPath(abrainHome, eventId);
+  const dir = path.dirname(filePath);
+  try {
+    await fsp.unlink(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    throw err;
+  }
+  // Durable ack requires parent fsync. Failure must propagate so callers do not
+  // claim a durable ack; marker may already be unlinked (at-least-once retry).
+  fsyncDirectory(dir);
+  return "deleted";
+}
+
+/** After a covering stable-view, drop markers for those event ids (fsync). */
+export async function ackPropositionPolicyStableViewSourceChangePendingMarkers(
+  abrainHome: string,
+  coveredEventIds: readonly string[],
+): Promise<readonly string[]> {
+  const acked: string[] = [];
+  for (const id of coveredEventIds) {
+    if (!SHA256_PATTERN.test(id)) continue;
+    const status = await deletePropositionPolicyStableViewSourceChangePendingMarker(abrainHome, id);
+    if (status === "deleted") acked.push(id);
+  }
+  return Object.freeze(acked);
+}
+
+/**
+ * session_start / external recovery: scan durable markers and force-republish
+ * even when the old stable-view is already strict-valid. Empty → no-op null.
+ * Resolves to the source-change Result (or null), not a nested Promise — JS
+ * promise assimilation would otherwise make `.then(scheduled => scheduled.then)`
+ * TypeError at session_start. Does not tight-loop on failure; next session_start
+ * or new source event retries.
+ */
+export async function schedulePropositionPolicyStableViewSourceChangeFromPendingMarkers(
+  options: Omit<PropositionPolicyStableViewSourceChangeOptions, "requiredEventIds"> & {
+    requiredEventIds?: readonly string[];
+  },
+): Promise<PropositionPolicyStableViewSourceChangeResult | null> {
+  const listed = await listPropositionPolicyStableViewSourceChangePendingMarkers(options.abrainHome);
+  const extra = (options.requiredEventIds ?? []).filter((id) => typeof id === "string" && SHA256_PATTERN.test(id));
+  const ids = Object.freeze([...new Set([...listed, ...extra])].sort());
+  if (ids.length === 0) return null;
+  return schedulePropositionPolicyStableViewSourceChangeRepublish({
+    ...options,
+    requiredEventIds: ids,
+  });
+}
+
+/**
+ * Schedule a force republish after a new durable policy proposition append.
+ * setImmediate start; does not block the caller on full publish.
+ * Coalesces required event IDs while a run is already scheduled/in-flight.
+ * In-flight new ids become a subsequent wave of the same loop. A failed wave
+ * does not retry the same ids in-process (durable markers + next external
+ * trigger own retries) but still drains waves that already arrived.
+ */
+export function schedulePropositionPolicyStableViewSourceChangeRepublish(
+  options: PropositionPolicyStableViewSourceChangeOptions,
+): Promise<PropositionPolicyStableViewSourceChangeResult> {
+  const key = path.resolve(options.abrainHome);
+  const state = sourceChangeState();
+  const pending = state.pendingIds.get(key) ?? new Set<string>();
+  for (const id of options.requiredEventIds) {
+    if (typeof id === "string" && SHA256_PATTERN.test(id)) pending.add(id);
+  }
+  state.pendingIds.set(key, pending);
+  const resolvedOptions: PropositionPolicyStableViewSourceChangeOptions = {
+    ...options,
+    abrainHome: key,
+    repoRoot: path.resolve(options.repoRoot),
+  };
+  state.lastOptions.set(key, resolvedOptions);
+
+  const existing = state.scheduled.get(key);
+  if (existing) return existing;
+
+  let created!: Promise<PropositionPolicyStableViewSourceChangeResult>;
+  created = new Promise<PropositionPolicyStableViewSourceChangeResult>((resolve, reject) => {
+    setImmediate(() => {
+      void runSourceChangeLoop(resolvedOptions).then(resolve, reject);
+    });
+  }).finally(() => {
+    if (state.scheduled.get(key) === created) state.scheduled.delete(key);
+    // Lost-wakeup guard: a concurrent schedule may have filled pending after
+    // the loop observed empty and before we dropped `scheduled`.
+    const remaining = state.pendingIds.get(key);
+    if (remaining && remaining.size > 0 && !state.scheduled.has(key)) {
+      const last = state.lastOptions.get(key) ?? resolvedOptions;
+      schedulePropositionPolicyStableViewSourceChangeRepublish({
+        ...last,
+        abrainHome: key,
+        requiredEventIds: [],
+      });
+    }
+  });
+  // Prevent unhandled rejection if the caller only fire-and-forgets.
+  created.catch(() => undefined);
+  state.scheduled.set(key, created);
+  return created;
+}
+
+async function runSourceChangeLoop(
+  options: PropositionPolicyStableViewSourceChangeOptions,
+): Promise<PropositionPolicyStableViewSourceChangeResult> {
+  const key = path.resolve(options.abrainHome);
+  const state = sourceChangeState();
+  let last: PropositionPolicyStableViewSourceChangeResult | undefined;
+  // Drain pending waves so coalesce callers' ids are covered. Failed waves do
+  // not requeue their own ids (durable marker + next external trigger), but
+  // the loop continues for any next wave already enqueued in memory.
+  for (;;) {
+    const pending = state.pendingIds.get(key);
+    if (!pending || pending.size === 0) break;
+    const required = Object.freeze([...pending].sort());
+    pending.clear();
+    const inFlight = forceRepublishPropositionPolicyStableView({
+      ...options,
+      abrainHome: key,
+      requiredEventIds: required,
+    });
+    state.inFlight.set(key, inFlight);
+    try {
+      last = await inFlight;
+    } finally {
+      if (state.inFlight.get(key) === inFlight) state.inFlight.delete(key);
+    }
+    state.latest.set(key, last);
+    state.tail.push(last);
+    if (state.tail.length > PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_MAX_PROCESS_ROWS) {
+      state.tail.splice(0, state.tail.length - PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_MAX_PROCESS_ROWS);
+    }
+    // Do not break on failed: still process a subsequent wave that arrived
+    // while this wave ran. Failed ids stay on durable markers only.
+  }
+  if (!last) {
+    last = Object.freeze({
+      schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+      status: "failed" as const,
+      reason: "source-change republish scheduled with empty required event set",
+      abrain_home: key,
+      started_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+      required_event_ids: Object.freeze([] as string[]),
+      final_read_reason: "not_run",
+      contention_observed: false,
+      already_valid_short_circuit: false as const,
+      error_code: "SOURCE_CHANGE_EMPTY",
+      error_message: "no required event ids",
+    });
+  }
+  return last;
+}
+
+/**
+ * Force-spawn the production publisher child. Never returns already_valid from
+ * a pre-publish strictRead of the old bundle. On success covering required
+ * event ids, deletes the corresponding durable pending markers + fsync.
+ * Intentionally no extra singleflight: only the scheduler / tests call this.
+ */
+export async function forceRepublishPropositionPolicyStableView(
+  options: PropositionPolicyStableViewSourceChangeOptions,
+): Promise<PropositionPolicyStableViewSourceChangeResult> {
+  const startedAt = new Date().toISOString();
+  const abrainHome = path.resolve(options.abrainHome);
+  const requiredEventIds = Object.freeze(
+    [...new Set(options.requiredEventIds.filter((id) => typeof id === "string" && SHA256_PATTERN.test(id)))].sort(),
+  );
+  let finalReason = "not_read";
+  let contentionObserved = false;
+
+  let configuredRoot: string | undefined;
+  let rootError: unknown;
+  try { configuredRoot = resolvePropositionPolicyStableViewCurrentAbrainHome(); }
+  catch (error) { rootError = error; }
+
+  if (rootError || !configuredRoot || abrainHome !== configuredRoot) {
+    const controlled = controlledError(rootError ?? recoveryFailure(
+      "SOURCE_CHANGE_ROOT_MISMATCH",
+      "source-change republish root must equal the caller's current ABRAIN_ROOT or HOME/.abrain",
+    ));
+    return Object.freeze({
+      schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+      status: "failed" as const,
+      reason: "source-change republish rejected an unauthorized root",
+      abrain_home: abrainHome,
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      required_event_ids: requiredEventIds,
+      final_read_reason: finalReason,
+      contention_observed: false,
+      already_valid_short_circuit: false as const,
+      error_code: controlled.code,
+      error_message: controlled.message,
+    });
+  }
+
+  try {
+    // Production runtime budget: final selected_valid + marker ack must pass the
+    // same envelope the session injector uses (not only the hard recovery max).
+    const runtimeMaxReadBytes = resolveSourceChangeRuntimeMaxReadBytes(options.runtimeMaxReadBytes);
+
+    // Intentionally skip any pre-publish already_valid short-circuit.
+    const attempted = await publishWithContention({
+      abrainHome,
+      repoRoot: path.resolve(options.repoRoot),
+      contentionWaitMs: options.contentionWaitMs,
+      contentionPollMs: options.contentionPollMs,
+      sourceRaceMaxRetries: options.sourceRaceMaxRetries,
+      sourceRaceBackoffMs: options.sourceRaceBackoffMs,
+      childTimeoutMs: options.childTimeoutMs,
+    });
+    contentionObserved = attempted.contentionObserved;
+
+    if (attempted.contendedConverged) {
+      // publishWithContention only hard-reads; re-strictRead with the runtime
+      // budget before ack so oversize production views do not clear markers.
+      const runtimeRead = strictReadWithBudget(abrainHome, runtimeMaxReadBytes);
+      finalReason = runtimeRead.reason;
+      if (!runtimeRead.ok) {
+        throw recoveryFailure(
+          "SOURCE_CHANGE_POST_PUBLICATION_VALIDATION_FAILED",
+          `runtime-budget validation rejected the contended artifact: ${runtimeRead.reason}`,
+        );
+      }
+      if (runtimeRead.bundleHash !== attempted.contendedConverged.bundleHash) {
+        throw recoveryFailure(
+          "SOURCE_CHANGE_POST_PUBLICATION_IDENTITY_MISMATCH",
+          "runtime-budget read bundle hash diverged from contended hard-read identity",
+        );
+      }
+      const missing = missingRequiredEventIds(abrainHome, runtimeRead.bundleHash, requiredEventIds);
+      if (missing.length) {
+        return Object.freeze({
+          schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+          status: "failed" as const,
+          reason: "contended stable view is selected_valid but missing required proposition event ids",
+          abrain_home: abrainHome,
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+          required_event_ids: requiredEventIds,
+          final_read_reason: finalReason,
+          contention_observed: true,
+          bundle_hash: runtimeRead.bundleHash,
+          already_valid_short_circuit: false as const,
+          error_code: "SOURCE_CHANGE_MISSING_EVENT",
+          error_message: `missing event ids: ${missing.join(",")}`,
+        });
+      }
+      const covered = requiredEventIds.filter((id) => !missing.includes(id));
+      await ackCoveredMarkersBestEffort(abrainHome, runtimeRead.bundleHash, covered);
+      return Object.freeze({
+        schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+        status: "contended_converged" as const,
+        reason: "another publisher produced a strict-valid stable view covering required events",
+        abrain_home: abrainHome,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        required_event_ids: requiredEventIds,
+        final_read_reason: finalReason,
+        contention_observed: true,
+        bundle_hash: runtimeRead.bundleHash,
+        already_valid_short_circuit: false as const,
+      });
+    }
+
+    await recoveryTestControls.afterChildPublication?.();
+    // Ack only after selected_valid under the production runtime budget.
+    const finalRead = strictReadWithBudget(abrainHome, runtimeMaxReadBytes);
+    finalReason = finalRead.reason;
+    if (!finalRead.ok) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_POST_PUBLICATION_VALIDATION_FAILED",
+        `strict runtime validation rejected the published artifact: ${finalRead.reason}`,
+      );
+    }
+    if (!attempted.publication) {
+      throw recoveryFailure("SOURCE_CHANGE_POST_PUBLICATION_IDENTITY_MISMATCH", "publisher returned no publication identity");
+    }
+    if (finalRead.bundleHash !== attempted.publication.bundle_hash) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_POST_PUBLICATION_IDENTITY_MISMATCH",
+        "runtime-budget read bundle hash diverged from publisher identity",
+      );
+    }
+    const missing = missingRequiredEventIds(abrainHome, finalRead.bundleHash, requiredEventIds);
+    if (missing.length) {
+      throw recoveryFailure(
+        "SOURCE_CHANGE_MISSING_EVENT",
+        `published selected_valid bundle is missing required proposition event ids: ${missing.join(",")}`,
+      );
+    }
+    await ackCoveredMarkersBestEffort(abrainHome, finalRead.bundleHash, requiredEventIds);
+    return Object.freeze({
+      schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+      status: "republished" as const,
+      reason: "forced child compile, publication, latest switch, and parent strict read covered required events",
+      abrain_home: abrainHome,
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      required_event_ids: requiredEventIds,
+      final_read_reason: finalReason,
+      contention_observed: contentionObserved,
+      bundle_hash: finalRead.bundleHash,
+      publication_status: attempted.publication.publication_status,
+      already_valid_short_circuit: false as const,
+    });
+  } catch (error) {
+    const controlled = controlledError(error);
+    return Object.freeze({
+      schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+      status: "failed" as const,
+      reason: "source-change force republish failed closed",
+      abrain_home: abrainHome,
+      started_at: startedAt,
+      finished_at: new Date().toISOString(),
+      required_event_ids: requiredEventIds,
+      final_read_reason: finalReason,
+      contention_observed: contentionObserved,
+      already_valid_short_circuit: false as const,
+      error_code: controlled.code,
+      error_message: controlled.message,
+    });
+  }
+}
+
+async function ackCoveredMarkersBestEffort(
+  abrainHome: string,
+  bundleHash: string,
+  requiredEventIds: readonly string[],
+): Promise<void> {
+  // Ack required ids that are present, plus any other durable markers already
+  // covered by this whole-L1 republish (derived todo cleanup only).
+  // Delete/list/fsync failures must propagate: stable-view may already cover the
+  // events, but durable ack is incomplete — force reports failed and markers
+  // remain for a later cleanup/retry. Never swallow into a false success.
+  const published = new Set(readPublishedInputEventIds(abrainHome, bundleHash));
+  const fromRequired = requiredEventIds.filter((id) => published.has(id));
+  const listed = await listPropositionPolicyStableViewSourceChangePendingMarkers(abrainHome);
+  const extras = listed.filter((id) => published.has(id) && !fromRequired.includes(id));
+  await ackPropositionPolicyStableViewSourceChangePendingMarkers(
+    abrainHome,
+    [...fromRequired, ...extras],
+  );
+}
+
+function missingRequiredEventIds(
+  abrainHome: string,
+  bundleHash: string,
+  requiredEventIds: readonly string[],
+): string[] {
+  if (requiredEventIds.length === 0) return [];
+  const inputIds = readPublishedInputEventIds(abrainHome, bundleHash);
+  const present = new Set(inputIds);
+  return requiredEventIds.filter((id) => !present.has(id));
+}
+
+function readPublishedInputEventIds(abrainHome: string, bundleHash: string): string[] {
+  if (!SHA256_PATTERN.test(bundleHash)) return [];
+  const manifestPath = path.join(
+    abrainHome,
+    ...STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"),
+    "bundles",
+    bundleHash,
+    "manifest.json",
+  );
+  try {
+    const raw = fs.readFileSync(manifestPath, "utf8");
+    const manifest = JSON.parse(raw) as {
+      canonical_source?: { input_event_ids?: unknown };
+    };
+    const ids = manifest.canonical_source?.input_event_ids;
+    if (!Array.isArray(ids)) return [];
+    return ids.filter((id): id is string => typeof id === "string" && SHA256_PATTERN.test(id));
+  } catch {
+    // Fail-closed for coverage checks: empty means every required id is missing
+    // when the required set is non-empty. Do not treat parse/IO errors as
+    // "no requirements".
+    return [];
+  }
+}
+
+export function getPropositionPolicyStableViewSourceChangeDiagnostics(abrainHome?: string): Readonly<{
+  in_flight: boolean;
+  scheduled: boolean;
+  pending_event_ids: readonly string[];
+  latest?: PropositionPolicyStableViewSourceChangeResult;
+  tail: readonly PropositionPolicyStableViewSourceChangeResult[];
+}> {
+  const state = sourceChangeState();
+  const key = path.resolve(abrainHome ?? resolvePropositionPolicyStableViewCurrentAbrainHome());
+  const pending = state.pendingIds.get(key);
+  return Object.freeze({
+    in_flight: state.inFlight.has(key),
+    scheduled: state.scheduled.has(key),
+    pending_event_ids: Object.freeze(pending ? [...pending].sort() : []),
+    ...(state.latest.get(key) ? { latest: state.latest.get(key)! } : {}),
+    tail: Object.freeze(state.tail.slice()),
+  });
+}
+
+/** Test-only: wait until no scheduled/in-flight source-change work remains. */
+export async function waitForPropositionPolicyStableViewSourceChangeRepublishIdle(
+  abrainHome?: string,
+  timeoutMs = 120_000,
+): Promise<void> {
+  assertTestHooksEnabled("waitForPropositionPolicyStableViewSourceChangeRepublishIdle");
+  const deadline = Date.now() + timeoutMs;
+  const key = abrainHome ? path.resolve(abrainHome) : undefined;
+  for (;;) {
+    const state = sourceChangeState();
+    const scheduledBusy = key ? state.scheduled.has(key) : state.scheduled.size > 0;
+    const inFlightBusy = key ? state.inFlight.has(key) : state.inFlight.size > 0;
+    const pendingBusy = key
+      ? (state.pendingIds.get(key)?.size ?? 0) > 0
+      : [...state.pendingIds.values()].some((set) => set.size > 0);
+    if (!scheduledBusy && !inFlightBusy && !pendingBusy) return;
+    if (Date.now() >= deadline) {
+      throw new Error("waitForPropositionPolicyStableViewSourceChangeRepublishIdle timed out");
+    }
+    const inflight = key ? state.inFlight.get(key) ?? state.scheduled.get(key) : undefined;
+    if (inflight) {
+      await inflight.catch(() => undefined);
+      continue;
+    }
+    await delay(10);
+  }
+}
+
+/** Test-only: clear process-global source-change republish state (not durable markers). */
+export function resetPropositionPolicyStableViewSourceChangeRepublishForTests(): void {
+  assertTestHooksEnabled("resetPropositionPolicyStableViewSourceChangeRepublishForTests");
+  const state = sourceChangeState();
+  state.scheduled.clear();
+  state.inFlight.clear();
+  state.pendingIds.clear();
+  state.latest.clear();
+  state.tail.length = 0;
+  state.lastOptions.clear();
+}
+
+function assertTestHooksEnabled(name: string): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error(`${name} requires PI_ASTACK_ENABLE_TEST_HOOKS=1`);
+  }
+}

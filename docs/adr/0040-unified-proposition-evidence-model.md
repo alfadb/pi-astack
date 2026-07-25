@@ -9,7 +9,7 @@ status: accepted
 - **Date**: 2026-07-12。
 - **Relates-to**: [ADR 0023](./0023-session-start-rule-injection.md), [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0028](./0028-sediment-ground-truth-tiered-rearchitecture.md), [ADR 0031](./0031-autonomous-self-calibrating-forgetting.md), [ADR 0039](./0039-constraint-pipeline-reset.md)。
 - **Supersedes-direction**: 本 ADR 继承 ADR 0039 的统一 Evidence、L1/L2/L3 存储分层、append-only L1 SOT 与确定性 L2 renderer 原则；本 ADR 取代“Knowledge 与 Rule/Constraint 可继续保有域级 canonical 本体、独立 canonical store、重复生命周期并通过迁移层延续权威”的口径，选择统一 proposition/lifecycle SOT 与 no-migration cutover。
-- **Implementation status**: 2026-07-20 production full flip 已完成；2026-07-21 用户进一步授权 deterministic derived publication 的完全自动恢复，包括 strict compile 成功后自动发布并切换 `latest`、无需每设备人工 grant。runtime reader 仍 fail-closed/no fallback。当前事实以 [Current State](../current-state.md) 为准。
+- **Implementation status**: 2026-07-20 production full flip 已完成；2026-07-21 用户进一步授权 deterministic derived publication 的完全自动恢复，包括 strict compile 成功后自动发布并切换 `latest`、无需每设备人工 grant。runtime reader 仍 fail-closed/no fallback。2026-07-25：**Tier-1 自然纠正 → constraint evidence → dynamic policy proposition → durable source-change pending marker（仅 event id）→ 异步 stable-view force republish 的最小闭环实现已落地，生产开关 `sediment.propositionTier1PolicyWriter.enabled` 已 armed**；marker 是派生发布待办而非第二套 semantic authority；session_start canonical-ready 扫描 marker 并 force republish（即使旧 stable-view 仍 strict-valid）；不迁移历史 constraint、不恢复 legacy/compiled/D3 fallback；**真实自然纠正 → fresh persisted session 验收必须在重启后用新事件完成，fixture smoke 不得单独宣称闭环已通过；未完成前不删 D3-v2**。当前事实以 [Current State](../current-state.md) 为准。
 
 ## 1. 背景与事故根因
 

@@ -543,6 +543,19 @@
           }
         },
 
+        "propositionTier1PolicyWriter": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0040 dedicated bridge: after a successful Tier-1 constraint evidence durable append, append a normative policy proposition (dedicated producer allowlist) and schedule force stable-view source-change republish. Default false. Does not change proposition-evidence-envelope phase/write_enabled/fold, and does not re-enable legacy rules or constraint auto-refresh.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "When true, tryAutoWriteLane awaits the local durable proposition append after constraint success and schedules async force republish. When false, constraint-only success is audited as deferred and is not treated as a closed policy rule loop."
+            }
+          }
+        },
+
         "tier2RulesLegacyWriteGate": {
           "type": "object",
           "additionalProperties": false,

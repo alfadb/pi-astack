@@ -138,16 +138,24 @@ export function resolvePropositionLifecycleEffectiveState(
   const references = new Map<string, readonly string[]>();
   for (const node of nodes) {
     const refs = nodeReferences(node);
+    const topologyRefs: string[] = [];
     for (const ref of refs) {
       const parent = byId.get(ref);
       if (!parent) {
+        // Evidence may cite non-proposition L1 (e.g. constraint-evidence event)
+        // via causal_parents / derives_from / counterevidence as witnessed
+        // provenance anchors. Those are not proposition-topology edges.
+        // supersedes and lifecycle targets remain hard-known.
+        if (node.kind === "evidence" && isExternalWitnessRef(node, ref)) continue;
         fail("PROPOSITION_LIFECYCLE_UNKNOWN_PARENT", "proposition topology references an unknown parent", { eventId: node.eventId, parentEventId: ref });
-      }
-      if (parent.kind !== "genesis" && parent.epochId !== node.epochId) {
-        fail("PROPOSITION_LIFECYCLE_CROSS_EPOCH", "proposition topology crosses epochs", { eventId: node.eventId, parentEventId: ref });
+      } else {
+        if (parent.kind !== "genesis" && parent.epochId !== node.epochId) {
+          fail("PROPOSITION_LIFECYCLE_CROSS_EPOCH", "proposition topology crosses epochs", { eventId: node.eventId, parentEventId: ref });
+        }
+        topologyRefs.push(ref);
       }
     }
-    references.set(node.eventId, refs);
+    references.set(node.eventId, Object.freeze(topologyRefs.sort(compareCodeUnits)));
   }
   assertAcyclic(nodes, references);
 
@@ -368,6 +376,17 @@ function nodeReferences(node: ResolverNode): readonly string[] {
     for (const eventId of (body as PropositionLifecycleBodyV1).lifecycle.target_event_ids) refs.add(eventId);
   }
   return Object.freeze([...refs].sort(compareCodeUnits));
+}
+
+/** External witness refs may point outside the proposition event set. */
+function isExternalWitnessRef(node: ResolverNode, ref: string): boolean {
+  if (node.kind !== "evidence") return false;
+  const body = node.body as PropositionEvidenceBodyV1;
+  if (body.facets.lineage.supersedes.includes(ref)) return false;
+  return body.facets.lineage.causal_parents.includes(ref)
+    || body.facets.lineage.derives_from.includes(ref)
+    || body.facets.contestability.counterevidence_event_ids.includes(ref)
+    || body.facets.provenance_authority.source_event_id === ref;
 }
 
 function uniqueNodeMap(nodes: readonly ResolverNode[]): Map<string, ResolverNode> {

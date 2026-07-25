@@ -111,6 +111,15 @@ export interface SedimentSettings {
     legacyFallbackOnEventFailure: boolean;
     legacyRuleWriteOnSuccessfulEvent: boolean;
   };
+  /**
+   * ADR 0040: after a successful Tier-1 constraint evidence durable append,
+   * also append a normative policy proposition (dedicated producer) and
+   * schedule force stable-view republish. Default false; production arms
+   * explicitly. Does not re-enable legacy rules or constraint auto-refresh.
+   */
+  propositionTier1PolicyWriter: {
+    enabled: boolean;
+  };
   /** Tier-2 rules-zone legacy writer gate. Default observe keeps current behavior while auditing caller/scope/slug. */
   tier2RulesLegacyWriteGate: {
     mode: "off" | "observe" | "block";
@@ -328,6 +337,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
     mode: "parallel_legacy",
     legacyFallbackOnEventFailure: true,
     legacyRuleWriteOnSuccessfulEvent: true,
+  },
+  propositionTier1PolicyWriter: {
+    enabled: false,
   },
   tier2RulesLegacyWriteGate: {
     mode: "observe",
@@ -556,6 +568,9 @@ export function resolveSedimentSettings(): SedimentSettings {
       mode: resolveMode((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.mode),
       legacyFallbackOnEventFailure: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyFallbackOnEventFailure, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyFallbackOnEventFailure),
       legacyRuleWriteOnSuccessfulEvent: asBoolean((cfg.constraintEvidenceEventWriter as Record<string, unknown> | undefined)?.legacyRuleWriteOnSuccessfulEvent, DEFAULT_SEDIMENT_SETTINGS.constraintEvidenceEventWriter.legacyRuleWriteOnSuccessfulEvent),
+    },
+    propositionTier1PolicyWriter: {
+      enabled: asBoolean((cfg.propositionTier1PolicyWriter as Record<string, unknown> | undefined)?.enabled, DEFAULT_SEDIMENT_SETTINGS.propositionTier1PolicyWriter.enabled),
     },
     tier2RulesLegacyWriteGate: {
       mode: resolveTier2RulesLegacyWriteGateMode((cfg.tier2RulesLegacyWriteGate as Record<string, unknown> | undefined)?.mode, DEFAULT_SEDIMENT_SETTINGS.tier2RulesLegacyWriteGate.mode),

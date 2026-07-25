@@ -112,8 +112,18 @@ import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { loadAndValidateTransitionRegister } from "../_shared/transition-register";
 import { canonicalGitRuntimeEnabled } from "../_shared/canonical-git-runtime";
 import { abrainProjectDir, abrainSedimentStagingPath, listAbrainProjects, normalizeProjectRoot, resolveActiveProject } from "../_shared/runtime";
-import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, scanRules } from "../abrain/rule-injector";
-import { schedulePropositionPolicyStableViewRecovery } from "../_shared/proposition-policy-stable-view-recovery";
+import { getCurrentInjectedRuleEntries, getCurrentRuleInjectionNonce, refreshRuleCacheForTests, resolveRuleInjectorSettings, scanRules } from "../abrain/rule-injector";
+import {
+  enqueuePropositionPolicyStableViewSourceChangePendingMarker,
+  schedulePropositionPolicyStableViewRecovery,
+  schedulePropositionPolicyStableViewSourceChangeFromPendingMarkers,
+  schedulePropositionPolicyStableViewSourceChangeRepublish,
+} from "../_shared/proposition-policy-stable-view-recovery";
+import {
+  appendTier1PolicyProposition,
+  buildPropositionTier1PolicyWriteFailedCheckpointReason,
+  isTerminalPropositionTier1PolicyWriteReason,
+} from "../_shared/proposition-tier1-policy-writer";
 import {
   detachedAgentEndQueueStats,
   enqueueDetachedAgentEnd,
@@ -1419,6 +1429,17 @@ function isTerminalTier1Reject(result: WriteRuleResult): boolean {
   // and append.ts rejects it with CE_SANITIZER_BLOCKED.
   if (result.reason.startsWith("constraint_evidence_append_failed:")) {
     return result.reason !== "constraint_evidence_append_failed:write_failed";
+  }
+  // ADR0040 Tier-1 → policy proposition bridge: only the exact
+  // proposition_tier1_policy_write_failed:write_failed reason is transient
+  // (raw storage I/O / unknown). Deterministic refuses (scope_unknown,
+  // sanitizer, collision, registry drift, body mismatch) are terminal so the
+  // window does not burn one classifier+append every turn. Writer maps raw
+  // Node I/O to status write_failed; index always builds the HOLD reason via
+  // buildPropositionTier1PolicyWriteFailedCheckpointReason (never suffixes
+  // EACCES/ENOSPC into the checkpoint reason).
+  if (result.reason.startsWith("proposition_tier1_policy_write_failed:")) {
+    return isTerminalPropositionTier1PolicyWriteReason(result.reason);
   }
   return result.reason.startsWith("validation_error")
     || result.reason.startsWith("kind_invalid")
@@ -2819,15 +2840,57 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // Only canonical-ready may own the one-shot derived Policy
           // publication. The recovery promise retains only roots and never
           // captures ctx or UI.
+          const repoRoot = path.resolve(__dirname, "..", "..");
           void schedulePropositionPolicyStableViewRecovery({
             abrainHome,
-            repoRoot: path.resolve(__dirname, "..", ".."),
+            repoRoot,
           }).then((result) => {
             if (result.status === "failed") {
               console.error(`[sediment] proposition policy stable-view recovery failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`);
             }
           }).catch((error) => {
             console.error(`[sediment] proposition policy stable-view recovery scheduling failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
+          // Cross-process publish recovery: durable source-change markers are
+          // derived publish todos. Even when the old stable-view is still
+          // strict-valid, force republish so newly durable propositions enter
+          // the source closure. Helper resolves to Result|null (not nested
+          // Promise). No tight loop — next session_start/new event.
+          const runtimeMaxReadBytes = resolveRuleInjectorSettings()
+            .propositionPolicyStableViewInjection.maxReadBytes;
+          void schedulePropositionPolicyStableViewSourceChangeFromPendingMarkers({
+            abrainHome,
+            repoRoot,
+            runtimeMaxReadBytes,
+          }).then((result) => {
+            if (!result) return;
+            if (result.status === "failed") {
+              console.error(
+                `[sediment] proposition policy source-change pending-marker republish failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`,
+              );
+              void appendAudit(cwd, {
+                operation: "proposition_tier1_policy_source_change_failed",
+                lane: "session_start",
+                session_id: sessionId,
+                event_ids: result.required_event_ids,
+                status: result.status,
+                error_code: result.error_code ?? null,
+                reason: result.reason,
+                // Low-sensitivity only: event ids / status / code; no statement/body.
+              }).catch(() => {});
+            }
+          }).catch((error) => {
+            console.error(
+              `[sediment] proposition policy source-change pending-marker scheduling failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            void appendAudit(cwd, {
+              operation: "proposition_tier1_policy_source_change_schedule_failed",
+              lane: "session_start",
+              session_id: sessionId,
+              status: "schedule_failed",
+              error_code: "SOURCE_CHANGE_SCHEDULE_FAILED",
+              error_message: error instanceof Error ? error.message : String(error),
+            }).catch(() => {});
           });
         }
         const livenessTrigger = {
@@ -6457,6 +6520,365 @@ async function tryAutoWriteLane(args: {
         && constraintEvidenceEvent?.append.ok === true
       ) {
         const publicationDurable = constraintPublicationDurability?.durable === true;
+        const constraintOkStatuses = new Set(["appended", "idempotent_duplicate"]);
+        const constraintAppendOk = constraintOkStatuses.has(constraintEvidenceEvent.append.status);
+
+        // ADR0040: constraint evidence is correction evidence only. Closing the
+        // policy rule loop requires a dedicated proposition append + force
+        // stable-view republish. Setting default-off audits as deferred so a
+        // constraint-only success is never treated as a silent closed loop.
+        let propositionBridge:
+          | {
+            enabled: false;
+            deferred: true;
+            reason: "proposition_tier1_policy_writer_disabled";
+          }
+          | {
+            enabled: true;
+            ok: boolean;
+            status: string;
+            code?: string;
+            event_id?: string | null;
+            pending_marker_durable?: boolean;
+            force_republish_scheduled?: boolean;
+          }
+          | undefined;
+
+        if (settings.propositionTier1PolicyWriter.enabled !== true) {
+          propositionBridge = {
+            enabled: false,
+            deferred: true,
+            reason: "proposition_tier1_policy_writer_disabled",
+          };
+          await appendAudit(cwd, {
+            operation: "proposition_tier1_policy_deferred",
+            lane: "auto_write",
+            session_id: sessionId,
+            correlation_id: correlationId,
+            candidate_id: tier1EvidenceCandidateId,
+            constraint_event_id: constraintEvidenceEvent.append.eventId ?? null,
+            reason: "proposition_tier1_policy_writer_disabled",
+            closed_policy_loop: false,
+          }).catch(() => {});
+        } else if (constraintAppendOk && constraintEvidenceEvent.append.envelope && constraintEvidenceEvent.body) {
+          const prop = await appendTier1PolicyProposition({
+            abrainHome,
+            constraintEnvelope: constraintEvidenceEvent.append.envelope,
+            constraintBody: constraintEvidenceEvent.body,
+            signal: tier1Signal,
+            draft,
+            sessionId,
+            turnId: stableRunWindowTurnId(window),
+          });
+          if (!prop.ok) {
+            const failCode = prop.code ?? prop.status;
+            // HOLD reason is exact write_failed for raw I/O; audit keeps original code.
+            const checkpointReason = buildPropositionTier1PolicyWriteFailedCheckpointReason(prop);
+            propositionBridge = {
+              enabled: true,
+              ok: false,
+              status: prop.status,
+              code: failCode,
+              event_id: null,
+              force_republish_scheduled: false,
+            };
+            await appendAudit(cwd, {
+              operation: "proposition_tier1_policy_write_failed",
+              lane: "auto_write",
+              session_id: sessionId,
+              correlation_id: correlationId,
+              candidate_id: tier1EvidenceCandidateId,
+              constraint_event_id: constraintEvidenceEvent.append.eventId ?? null,
+              code: failCode,
+              status: prop.status,
+              // Low-sensitivity only: no statement/body text.
+              closed_policy_loop: false,
+              legacy_fallback: false,
+              signal_consumed: false,
+              checkpoint_advanced: false,
+            }).catch(() => {});
+            const result: WriteRuleResult = {
+              slug: draft.title,
+              path: "",
+              status: "rejected",
+              reason: checkpointReason,
+              lane: "auto_write",
+              sessionId,
+              correlationId,
+              candidateId: tier1CandidateId,
+            };
+            await appendAudit(cwd, {
+              operation: "tier1_direct_write",
+              lane: "auto_write",
+              session_id: sessionId,
+              ...checkpointSummary(window),
+              correlation_id: correlationId,
+              candidate_id: tier1CandidateId,
+              candidate_title: sanitizeAuditText(draft.title, 500),
+              candidate_kind: draft.kind,
+              candidate_confidence: draft.entryConfidence,
+              candidate_body_chars: draft.body.length,
+              rule_scope_source: ruleScopeSource,
+              result: resultSummary(result),
+              deterministic_direct_path: true,
+              constraint_evidence_event: {
+                ok: true,
+                status: constraintEvidenceEvent.append.status,
+                event_id: constraintEvidenceEvent.append.eventId,
+                audit_path: constraintEvidenceEvent.auditPath ?? null,
+                status_path: constraintEvidenceEvent.statusPath ?? null,
+                diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+              },
+              proposition_tier1_policy: propositionBridge,
+              event_first_skipped_legacy_rule_write: true,
+              constraint_publication: constraintPublicationDurability ?? null,
+              ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
+              signal_consumed: false,
+              checkpoint_advanced: false,
+              durationMs: Date.now() - writeStart,
+            }).catch(() => {});
+            return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+          }
+
+          // Local durable append succeeded (created|identical). Capture is only
+          // allowed after a durable low-sens pending marker (event id only) is
+          // enqueued; the marker is a derived publish todo, not semantic SOT.
+          // Force republish is async and must not roll back capture when the
+          // marker is already durable (session_start will retry).
+          let pendingMarkerDurable = false;
+          let markerStatus: string | undefined;
+          if (prop.eventId) {
+            try {
+              const marker = await enqueuePropositionPolicyStableViewSourceChangePendingMarker(
+                abrainHome,
+                prop.eventId,
+              );
+              pendingMarkerDurable = marker.status === "created" || marker.status === "identical";
+              markerStatus = marker.status;
+            } catch (error) {
+              markerStatus = error instanceof Error && "code" in error
+                ? String((error as { code?: unknown }).code ?? "SOURCE_CHANGE_PENDING_FAILED")
+                : "SOURCE_CHANGE_PENDING_FAILED";
+              console.error(
+                `[sediment] proposition policy source-change pending marker failed: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+
+          if (!pendingMarkerDurable || !prop.eventId) {
+            // Marker durability is part of the capture boundary. Treat as
+            // transient write_failed so the checkpoint holds and the next
+            // agent_end retries (proposition is create-only idempotent).
+            const detailCode = markerStatus ?? "SOURCE_CHANGE_PENDING_FAILED";
+            propositionBridge = {
+              enabled: true,
+              ok: false,
+              status: "write_failed",
+              code: detailCode,
+              event_id: prop.eventId ?? null,
+              pending_marker_durable: false,
+              force_republish_scheduled: false,
+            };
+            await appendAudit(cwd, {
+              operation: "proposition_tier1_policy_write_failed",
+              lane: "auto_write",
+              session_id: sessionId,
+              correlation_id: correlationId,
+              candidate_id: tier1EvidenceCandidateId,
+              constraint_event_id: constraintEvidenceEvent.append.eventId ?? null,
+              event_id: prop.eventId ?? null,
+              code: detailCode,
+              status: "pending_marker_failed",
+              closed_policy_loop: false,
+              legacy_fallback: false,
+              signal_consumed: false,
+              checkpoint_advanced: false,
+              // Low-sensitivity only: no statement/body text.
+            }).catch(() => {});
+            const result: WriteRuleResult = {
+              slug: draft.title,
+              path: "",
+              status: "rejected",
+              reason: "proposition_tier1_policy_write_failed:write_failed",
+              lane: "auto_write",
+              sessionId,
+              correlationId,
+              candidateId: tier1CandidateId,
+            };
+            await appendAudit(cwd, {
+              operation: "tier1_direct_write",
+              lane: "auto_write",
+              session_id: sessionId,
+              ...checkpointSummary(window),
+              correlation_id: correlationId,
+              candidate_id: tier1CandidateId,
+              candidate_title: sanitizeAuditText(draft.title, 500),
+              candidate_kind: draft.kind,
+              candidate_confidence: draft.entryConfidence,
+              candidate_body_chars: draft.body.length,
+              rule_scope_source: ruleScopeSource,
+              result: resultSummary(result),
+              deterministic_direct_path: true,
+              constraint_evidence_event: {
+                ok: true,
+                status: constraintEvidenceEvent.append.status,
+                event_id: constraintEvidenceEvent.append.eventId,
+                audit_path: constraintEvidenceEvent.auditPath ?? null,
+                status_path: constraintEvidenceEvent.statusPath ?? null,
+                diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+              },
+              proposition_tier1_policy: propositionBridge,
+              event_first_skipped_legacy_rule_write: true,
+              constraint_publication: constraintPublicationDurability ?? null,
+              ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
+              signal_consumed: false,
+              checkpoint_advanced: false,
+              durationMs: Date.now() - writeStart,
+            }).catch(() => {});
+            return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+          }
+
+          let forceRepublishScheduled = false;
+          try {
+            const runtimeMaxReadBytes = resolveRuleInjectorSettings()
+              .propositionPolicyStableViewInjection.maxReadBytes;
+            const scheduled = schedulePropositionPolicyStableViewSourceChangeRepublish({
+              abrainHome,
+              repoRoot: path.resolve(__dirname, "..", ".."),
+              requiredEventIds: [prop.eventId],
+              runtimeMaxReadBytes,
+            });
+            forceRepublishScheduled = true;
+            // status=failed is a resolved value, not a rejection — must audit both.
+            void scheduled.then((result) => {
+              if (result.status !== "failed") return;
+              console.error(
+                `[sediment] proposition policy source-change republish failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`,
+              );
+              void appendAudit(cwd, {
+                operation: "proposition_tier1_policy_source_change_failed",
+                lane: "auto_write",
+                session_id: sessionId,
+                correlation_id: correlationId,
+                candidate_id: tier1EvidenceCandidateId,
+                event_ids: result.required_event_ids,
+                event_id: prop.eventId ?? null,
+                status: result.status,
+                error_code: result.error_code ?? null,
+                reason: result.reason,
+                // Marker remains for session_start; capture not rolled back.
+                pending_marker_retained: true,
+                // Low-sensitivity only: no statement/body text.
+              }).catch(() => {});
+            }).catch((error) => {
+              console.error(
+                `[sediment] proposition policy source-change republish rejected: ${error instanceof Error ? error.message : String(error)}`,
+              );
+              void appendAudit(cwd, {
+                operation: "proposition_tier1_policy_source_change_failed",
+                lane: "auto_write",
+                session_id: sessionId,
+                correlation_id: correlationId,
+                candidate_id: tier1EvidenceCandidateId,
+                event_ids: prop.eventId ? [prop.eventId] : [],
+                event_id: prop.eventId ?? null,
+                status: "rejected",
+                error_code: "SOURCE_CHANGE_PROMISE_REJECTED",
+                error_message: error instanceof Error ? error.message : String(error),
+                pending_marker_retained: true,
+              }).catch(() => {});
+            });
+          } catch (error) {
+            // Sync schedule failure: capture stays (marker durable); session_start retries.
+            console.error(
+              `[sediment] proposition policy source-change republish scheduling failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            void appendAudit(cwd, {
+              operation: "proposition_tier1_policy_source_change_schedule_failed",
+              lane: "auto_write",
+              session_id: sessionId,
+              correlation_id: correlationId,
+              candidate_id: tier1EvidenceCandidateId,
+              event_ids: prop.eventId ? [prop.eventId] : [],
+              event_id: prop.eventId ?? null,
+              status: "schedule_failed",
+              error_code: "SOURCE_CHANGE_SCHEDULE_FAILED",
+              error_message: error instanceof Error ? error.message : String(error),
+              pending_marker_retained: true,
+              // Low-sensitivity only: no statement/body text.
+            }).catch(() => {});
+          }
+
+          propositionBridge = {
+            enabled: true,
+            ok: true,
+            status: prop.status,
+            event_id: prop.eventId ?? null,
+            pending_marker_durable: true,
+            force_republish_scheduled: forceRepublishScheduled,
+          };
+          await appendAudit(cwd, {
+            operation: "proposition_tier1_policy_write",
+            lane: "auto_write",
+            session_id: sessionId,
+            correlation_id: correlationId,
+            candidate_id: tier1EvidenceCandidateId,
+            constraint_event_id: constraintEvidenceEvent.append.eventId ?? null,
+            event_id: prop.eventId ?? null,
+            status: prop.status,
+            pending_marker_durable: true,
+            force_republish_scheduled: forceRepublishScheduled,
+            // Low-sensitivity only: no statement/body text.
+          }).catch(() => {});
+
+          const result: WriteRuleResult = {
+            slug: draft.title,
+            path: "",
+            status: "deduped",
+            reason: `proposition_tier1_policy_appended:${prop.eventId}`,
+            dedupedAgainst: prop.eventId,
+            lane: "auto_write",
+            sessionId,
+            correlationId,
+            candidateId: tier1CandidateId,
+          };
+          await appendAudit(cwd, {
+            operation: "tier1_direct_write",
+            lane: "auto_write",
+            session_id: sessionId,
+            ...checkpointSummary(window),
+            correlation_id: correlationId,
+            candidate_id: tier1CandidateId,
+            candidate_title: sanitizeAuditText(draft.title, 500),
+            candidate_kind: draft.kind,
+            candidate_confidence: draft.entryConfidence,
+            candidate_body_chars: draft.body.length,
+            rule_scope_source: ruleScopeSource,
+            result: resultSummary(result),
+            deterministic_direct_path: true,
+            constraint_evidence_event: {
+              ok: true,
+              status: constraintEvidenceEvent.append.status,
+              event_id: constraintEvidenceEvent.append.eventId,
+              audit_path: constraintEvidenceEvent.auditPath ?? null,
+              status_path: constraintEvidenceEvent.statusPath ?? null,
+              diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
+            },
+            proposition_tier1_policy: propositionBridge,
+            event_first_skipped_legacy_rule_write: true,
+            constraint_publication: constraintPublicationDurability ?? null,
+            ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
+            // Durable constraint + proposition + pending marker; republish is async.
+            signal_consumed: true,
+            checkpoint_advanced: false,
+            durationMs: Date.now() - writeStart,
+          }).catch(() => {});
+          return { kind: "tier1_direct", draft, result, writeStart, signal: tier1Signal };
+        }
+
+        // Setting false (or missing envelope): keep historical constraint-only
+        // pending/durable reason. Explicit deferred audit above prevents silent
+        // "success as closed policy loop".
         const result: WriteRuleResult = {
           slug: draft.title,
           path: "",
@@ -6492,6 +6914,7 @@ async function tryAutoWriteLane(args: {
             status_path: constraintEvidenceEvent.statusPath ?? null,
             diagnostics: constraintEvidenceEvent.append.diagnostics.map((diagnostic) => diagnostic.code),
           },
+          ...(propositionBridge ? { proposition_tier1_policy: propositionBridge } : {}),
           event_first_skipped_legacy_rule_write: true,
           constraint_publication: constraintPublicationDurability ?? null,
           ...(constraintAutoRefreshSchedule ? { constraint_shadow_auto_refresh: constraintAutoRefreshSchedule } : {}),
