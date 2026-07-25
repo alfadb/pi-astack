@@ -121,6 +121,17 @@ function isCanonicalContentOwner(owner: ProducedArtifactOwner): boolean {
   return CANONICAL_CONTENT_OWNERS.has(owner);
 }
 
+/** Canonical backlog / drain / metadata-checkpoint ownership only covers l1/l2.
+ *  Non-canonical dirty (e.g. tracked `.gitignore` ` M`, untracked writer files)
+ *  stays outside the transaction: no receipt, no block, no mutation. */
+function isCanonicalTreePath(rel: string): boolean {
+  return rel.startsWith("l1/") || rel.startsWith("l2/");
+}
+
+function statusTouchesCanonicalTree(row: Pick<GitPorcelainV1Record, "paths">): boolean {
+  return row.paths.some((item) => isCanonicalTreePath(item));
+}
+
 type DrainGenerationPolicy = "steady_writer" | "startup_content_backlog";
 type ValidatedArtifact = { receipt: ProducedArtifact; content?: Buffer };
 type RecoveryMetadataRecord = WholeL1ScanResult["all"][number];
@@ -1552,6 +1563,8 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const records = new Map(scan.all.map((record) => [record.relativePath, record]));
     const artifacts: ValidatedArtifact[] = [];
     for (const row of status.rows) {
+      // Non-canonical dirty is outside the metadata checkpoint transaction.
+      if (!statusTouchesCanonicalTree(row)) continue;
       if (row.sourcePath || row.paths.length !== 1 || row.status !== "??") {
         throw new CanonicalGitRuntimeError(
           "DEVICE_JOIN_METADATA_DIRTY_UNKNOWN",
@@ -1651,7 +1664,8 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const allowed = new Set(paths);
     const status = await statusSnapshot(this.repo);
     for (const row of status.rows) {
-      if (row.paths.some((rel) => !allowed.has(rel))) {
+      // Non-canonical dirty remains outside recovery; only unknown canonical dirty blocks.
+      if (row.paths.some((rel) => !allowed.has(rel) && isCanonicalTreePath(rel))) {
         throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_RECOVERY_DIRTY_UNKNOWN", "unknown dirty path blocks metadata checkpoint index recovery", { path: row.path, status: row.status });
       }
     }
@@ -1669,7 +1683,9 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     await preflightSharedIndexLock(this.repo);
     await convergeExactCohortIndex({ repo: this.repo, refName: this.options.refName, cohortPaths: paths, frozenIndexSnapshot: new Map() });
     const after = await statusSnapshot(this.repo);
-    if (after.rows.length) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_RECOVERY_INCOMPLETE", "metadata checkpoint index recovery did not restore a clean repository");
+    if (after.rows.some((row) => statusTouchesCanonicalTree(row))) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_RECOVERY_INCOMPLETE", "metadata checkpoint index recovery did not clear residual canonical dirty");
+    }
     this.record({ operation: "metadata_checkpoint", status: "index_recovered", commit: head, cohortSize: paths.length });
   }
 
@@ -1730,7 +1746,9 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_VERIFY_FAILED", "metadata checkpoint changed HEAD or recovery event inventory unexpectedly");
     }
     const finalStatus = await statusSnapshot(this.repo);
-    if (finalStatus.rows.length) throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_VERIFY_DIRTY", "metadata checkpoint did not leave a clean repository");
+    if (finalStatus.rows.some((row) => statusTouchesCanonicalTree(row))) {
+      throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_VERIFY_DIRTY", "metadata checkpoint left residual canonical dirty");
+    }
     this.record({ operation: "metadata_checkpoint", status: "index_converged", commit: prepared.candidate, cohortSize: prepared.entries.length });
     return prepared.candidate;
   }
@@ -1750,10 +1768,13 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const ownership: Record<string, string[]> = { knowledge: [], constraint: [], canonical_path: [] };
     try {
       for (const row of first.rows) {
-        const canonicalPath = row.paths.some((item) => item.startsWith("l1/") || item.startsWith("l2/"));
+        // Only l1/l2 enter ownership inference. Staged/unstaged/untracked/deleted
+        // non-canonical dirty (production: tracked `.gitignore` ` M`) stays outside
+        // the transaction: no receipt, no ARTIFACT_UNOWNED block, no mutation.
+        // Staged non-canonical exact-cohort preservation is unchanged.
+        if (!statusTouchesCanonicalTree(row)) continue;
         if (row.x !== " " && row.x !== "?") {
-          if (canonicalPath) throw new CanonicalGitRuntimeError("STAGED_DIRTY_BLOCKED", "staged canonical path cannot be inferred by startup ownership", { path: row.path, status: row.status });
-          continue;
+          throw new CanonicalGitRuntimeError("STAGED_DIRTY_BLOCKED", "staged canonical path cannot be inferred by startup ownership", { path: row.path, status: row.status });
         }
         if (row.sourcePath) throw new CanonicalGitRuntimeError("STATUS_RENAME_COPY_BLOCKED", "startup backlog does not infer ownership across rename/copy records", { path: row.path, sourcePath: row.sourcePath });
         if (row.status !== "??" && row.status !== " M" && row.status !== " D") {
@@ -1867,13 +1888,19 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     for (const row of tailSecond.rows) {
       if (seen.has(row.path)) continue;
       if (row.x !== " " && row.x !== "?") {
-        if (row.path.startsWith("l1/") || row.path.startsWith("l2/")) {
+        // Rename/copy porcelain lists destination first; judge every path so a
+        // canonical source renamed/copied to a non-canonical target still blocks.
+        if (statusTouchesCanonicalTree(row)) {
           throw new CanonicalGitRuntimeError("STAGED_DIRTY_BLOCKED", "staged canonical path outside the receipt cohort blocks drain", { path: row.path });
         }
         // Exact-cohort convergence preserves unrelated staged entries byte-for-
         // byte; they are intentionally outside this transaction.
         continue;
       }
+      // Unstaged/untracked/deleted non-canonical dirty stays outside drain too
+      // (same isolation as staged non-canonical; production `.gitignore` ` M`).
+      // Rename/copy is judged by every porcelain path (source + destination).
+      if (!statusTouchesCanonicalTree(row)) continue;
       if (!row.path.startsWith("l1/events/sha256/")) throw new CanonicalGitRuntimeError("ARTIFACT_UNOWNED", "dirty path outside the explicit transaction blocks canonical drain", { path: row.path });
       if (await isLegacyReadOnlyL1(this.repo, row.path)) continue;
       const tailReceipt = await createProducedArtifactReceipt({ abrainHome: this.repo, filePath: path.join(this.repo, row.path) });

@@ -338,7 +338,7 @@ await check("pre-join checkpoints validated recovery metadata and fresh startup 
   assert(JSON.stringify(recoveredIds) === JSON.stringify(idsBefore), "checkpoint recovery changed the L1 inventory");
 });
 
-await check("pre-join rejects unknown dirty beside validated metadata without mutation", async () => {
+await check("pre-join ignores non-canonical dirty beside validated metadata without consuming it", async () => {
   const repo = initRepo("prejoin-metadata-unknown-dirty");
   const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
   assert((await runtime.awaitStartup()).startup === "ready", "unknown-dirty fixture startup failed");
@@ -348,14 +348,121 @@ await check("pre-join rejects unknown dirty beside validated metadata without mu
   assert(drained.status === "index_converged" && drained.episodeId, `unknown-dirty fixture did not drain: ${JSON.stringify(drained)}`);
   const tail = (await activeRecoveryRecords(repo)).filter((record) => record.body.episode_id === drained.episodeId);
   assert(tail.length === 4, `unknown-dirty fixture tail is not exact: ${tail.length}`);
-  fs.writeFileSync(path.join(repo, "unknown-dirty.txt"), "must remain dirty\n");
+  const unknownPath = path.join(repo, "unknown-dirty.txt");
+  fs.writeFileSync(unknownPath, "must remain dirty\n");
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  const unknownBefore = fs.readFileSync(unknownPath);
+  await runtime.settleForDeviceJoin();
+  const headAfter = git(repo, "rev-parse", "HEAD");
+  assert(headAfter !== headBefore, "pre-join did not publish the metadata checkpoint beside non-canonical dirty");
+  assert(Buffer.compare(fs.readFileSync(unknownPath), unknownBefore) === 0, "unknown dirty path bytes were mutated");
+  assert(fs.readFileSync(unknownPath, "utf8") === "must remain dirty\n", "unknown dirty path was consumed or deleted");
+  assert(git(repo, "status", "--porcelain=v1", "-uall", "--", "unknown-dirty.txt") === "?? unknown-dirty.txt", "unknown dirty status was not preserved as untracked");
+  assert(git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(tail[0].relativePath), "metadata checkpoint did not land recovery paths");
+  assert(!git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes("unknown-dirty.txt"), "unknown dirty path was swallowed into HEAD");
+});
+
+await check("tracked .gitignore unstaged dirty + Knowledge L1: preflight only L1, settle preserves non-canonical", async () => {
+  const repo = initRepo("gitignore-unstaged-with-l1");
+  // Preserve porcelain leading spaces (` M`); the shared git() helper trims.
+  const porcelain = (...args) => execFileSync("git", ["-C", repo, "status", "--porcelain=v1", "-uall", ...args], { encoding: "utf8", env: { ...process.env, LANG: "C", LC_ALL: "C" } });
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "gitignore+L1 fixture startup failed");
+
+  // Production shape: tracked `.gitignore` with unstaged ` M`, plus valid untracked Knowledge L1,
+  // plus an unrelated non-canonical untracked file that must never be swallowed.
+  const gitignorePath = path.join(repo, ".gitignore");
+  const gitignoreBefore = fs.readFileSync(gitignorePath);
+  fs.appendFileSync(gitignorePath, "# local scratch\n.scratch/\n");
+  const gitignoreDirty = fs.readFileSync(gitignorePath);
+  assert(Buffer.compare(gitignoreBefore, gitignoreDirty) !== 0, "gitignore fixture did not create an unstaged modification");
+  assert(porcelain("--", ".gitignore") === " M .gitignore\n", `gitignore status is not unstaged tracked modify: ${JSON.stringify(porcelain("--", ".gitignore"))}`);
+
+  const knowledge = writeKnowledge(repo, 71);
+  const strangerPath = path.join(repo, "local-scratch.note");
+  fs.writeFileSync(strangerPath, "must not be swallowed\n");
+  const strangerBefore = fs.readFileSync(strangerPath);
+
+  const preflight = await runtime.requestBacklogPreflight();
+  assert(preflight.status === "ready", `preflight not ready: ${JSON.stringify(preflight)}`);
+  assert(preflight.receipts.length === 1 && preflight.receipts[0].path === knowledge.relativePath, `preflight ready set must be exactly the Knowledge L1: ${JSON.stringify(preflight.receipts.map((r) => r.path))}`);
+  assert(preflight.ownership.knowledge?.length === 1 && preflight.ownership.knowledge[0] === knowledge.relativePath, `preflight ownership must only list Knowledge L1: ${JSON.stringify(preflight.ownership)}`);
+  assert(!preflight.receipts.some((receipt) => receipt.path === ".gitignore" || receipt.path === "local-scratch.note"), "preflight formed a non-canonical receipt");
+
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  await runtime.settleForDeviceJoin();
+  const headAfter = git(repo, "rev-parse", "HEAD");
+  assert(headAfter !== headBefore, "settle did not advance HEAD for the Knowledge L1 drain/checkpoint");
+  assert(git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(knowledge.relativePath), "settle did not commit Knowledge L1");
+  assert(!git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes("local-scratch.note"), "non-canonical untracked file was swallowed into HEAD");
+  assert(!git(repo, "show", `${headAfter}:.gitignore`).includes(".scratch/"), "unstaged .gitignore dirty bytes were committed");
+
+  assert(Buffer.compare(fs.readFileSync(gitignorePath), gitignoreDirty) === 0, ".gitignore worktree bytes changed during settle");
+  assert(porcelain("--", ".gitignore") === " M .gitignore\n", `.gitignore porcelain status was not preserved: ${JSON.stringify(porcelain("--", ".gitignore"))}`);
+  assert(Buffer.compare(fs.readFileSync(strangerPath), strangerBefore) === 0, "non-canonical untracked file bytes were mutated");
+  assert(porcelain("--", "local-scratch.note") === "?? local-scratch.note\n", "non-canonical untracked file was staged or deleted");
+  assert(porcelain("--", knowledge.relativePath) === "", "Knowledge L1 remained dirty after settle");
+});
+
+await check("staged canonical L1 still preflight blocked STAGED_DIRTY_BLOCKED", async () => {
+  const repo = initRepo("staged-canonical-l1-preflight");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "staged L1 fixture startup failed");
+  const knowledge = writeKnowledge(repo, 72);
+  git(repo, "add", "--", knowledge.relativePath);
+  assert(git(repo, "status", "--porcelain=v1", "--", knowledge.relativePath).startsWith("A  "), `staged L1 fixture is not staged: ${git(repo, "status", "--porcelain=v1", "--", knowledge.relativePath)}`);
   const before = repositoryFingerprint(repo);
-  let error;
-  try { await runtime.settleForDeviceJoin(); } catch (caught) { error = caught; }
-  assert(/DEVICE_JOIN_BACKLOG_BLOCKED.*ARTIFACT_UNOWNED/.test(String(error)), `unknown dirty path passed pre-join settlement: ${error}`);
-  assert(repositoryFingerprint(repo) === before, "unknown dirty rejection changed HEAD/index/status/L1 bytes");
-  assert(fs.readFileSync(path.join(repo, "unknown-dirty.txt"), "utf8") === "must remain dirty\n", "unknown dirty path was consumed or deleted");
-  assert(tail.every((record) => fs.existsSync(path.join(repo, ...record.relativePath.split("/")))), "validated metadata event was deleted on rejection");
+  const preflight = await runtime.requestBacklogPreflight();
+  assert(preflight.status === "blocked" && /STAGED_DIRTY_BLOCKED/.test(preflight.reason ?? ""), `staged canonical L1 was not STAGED_DIRTY_BLOCKED: ${JSON.stringify(preflight)}`);
+  assert(repositoryFingerprint(repo) === before, "staged L1 preflight rejection mutated HEAD/index/status/L1 bytes");
+  assert(git(repo, "status", "--porcelain=v1", "--", knowledge.relativePath).startsWith("A  "), "staged L1 was unstaged or consumed by preflight");
+});
+
+await check("canonical rename-out source L1 blocks preflight and drain tail without mutation", async () => {
+  const repo = initRepo("canonical-rename-out-l1");
+  const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+  assert((await runtime.awaitStartup()).startup === "ready", "rename-out fixture startup failed");
+  const knowledge = writeKnowledge(repo, 73);
+  const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+  const drained = await runtime.requestDrain([receipt], "seed rename-out L1");
+  assert(drained.status === "index_converged" && drained.commit, `rename-out seed drain failed: ${JSON.stringify(drained)}`);
+  assert(git(repo, "ls-files", "--error-unmatch", knowledge.relativePath) === knowledge.relativePath, "rename-out seed did not index-converge");
+
+  const destRel = "outside-rename/renamed-l1.json";
+  fs.mkdirSync(path.join(repo, "outside-rename"), { recursive: true });
+  git(repo, "mv", "--", knowledge.relativePath, destRel);
+  const porcelain = git(repo, "status", "--porcelain=v1", "-uall");
+  assert(/R\s+outside-rename\/renamed-l1\.json/.test(porcelain) || porcelain.includes(`${knowledge.relativePath} -> ${destRel}`), `rename-out fixture is not a staged rename: ${JSON.stringify(porcelain)}`);
+
+  const before = repositoryFingerprint(repo);
+  const contentBefore = fs.readFileSync(path.join(repo, destRel));
+  const headBefore = git(repo, "rev-parse", "HEAD");
+  const indexBefore = git(repo, "ls-files", "--stage");
+
+  const preflight = await runtime.requestBacklogPreflight();
+  assert(preflight.status === "blocked" && /STAGED_DIRTY_BLOCKED|STATUS_RENAME_COPY_BLOCKED/.test(preflight.reason ?? ""), `rename-out preflight was not blocked: ${JSON.stringify(preflight)}`);
+  assert(repositoryFingerprint(repo) === before, "rename-out preflight rejection mutated HEAD/index/status/L1 bytes");
+  assert(git(repo, "rev-parse", "HEAD") === headBefore, "rename-out preflight advanced HEAD");
+  assert(git(repo, "ls-files", "--stage") === indexBefore, "rename-out preflight mutated the index");
+  assert(Buffer.compare(fs.readFileSync(path.join(repo, destRel)), contentBefore) === 0, "rename-out preflight mutated worktree bytes");
+
+  // Direct drain tail must also refuse: destination is non-canonical, but source is L1.
+  const stranger = path.join(repo, "writer-beside-rename.txt");
+  fs.writeFileSync(stranger, "must not open a drain past rename-out\n");
+  const strangerReceipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: stranger, sourceIds: ["fixture:rename-out"] });
+  let drainCode = null;
+  try {
+    await runtime.requestDrain([strangerReceipt], "drain beside canonical rename-out");
+  } catch (error) {
+    drainCode = error.code ?? error.message;
+  }
+  assert(drainCode === "STAGED_DIRTY_BLOCKED", `rename-out drain tail was not STAGED_DIRTY_BLOCKED: ${drainCode}`);
+  assert(git(repo, "rev-parse", "HEAD") === headBefore, "rename-out drain advanced HEAD");
+  assert(git(repo, "ls-files", "--stage") === indexBefore, "rename-out drain mutated the index");
+  assert(Buffer.compare(fs.readFileSync(path.join(repo, destRel)), contentBefore) === 0, "rename-out drain mutated renamed worktree bytes");
+  assert(fs.existsSync(stranger), "rename-out drain consumed the unrelated writer path");
+  assert(!git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(destRel), "rename-out destination was swallowed into HEAD");
+  assert(git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(knowledge.relativePath), "rename-out source disappeared from HEAD without a durable transition");
 });
 
 await check("steady writer_transaction commits exactly, then Knowledge opens the next generation and absorbs its metadata tail", async () => {
@@ -443,18 +550,22 @@ await check("canonical bind helper treats repeated metadata-deferred drains as c
   assert(repositoryFingerprint(repo) === stableFingerprint, "repeated bind helper changed L1/status/HEAD/index");
 });
 
-await check("startup orphan writer_transaction fails closed without HEAD/index/recovery mutation", async () => {
+await check("startup leaves non-canonical orphan writer dirty outside the transaction", async () => {
   const repo = initRepo("startup-orphan-writer");
-  fs.writeFileSync(path.join(repo, "orphan-writer.txt"), "orphan writer transaction\n");
+  const orphanPath = path.join(repo, "orphan-writer.txt");
+  fs.writeFileSync(orphanPath, "orphan writer transaction\n");
+  const orphanBefore = fs.readFileSync(orphanPath);
   const before = repositoryFingerprint(repo);
   const indexBefore = git(repo, "ls-files", "--stage");
   const recoveryBefore = (await activeRecoveryRecords(repo)).map((record) => record.eventId).sort();
   const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
   const startup = await runtime.awaitStartup();
-  assert(startup.startup === "blocked" && /ARTIFACT_UNOWNED/.test(startup.blockedReason ?? ""), `orphan writer did not fail closed: ${startup.blockedReason}`);
+  assert(startup.startup === "ready", `orphan writer blocked startup: ${startup.blockedReason}`);
   assert(repositoryFingerprint(repo) === before, "orphan writer startup changed HEAD/status/recovery bytes");
   assert(git(repo, "ls-files", "--stage") === indexBefore, "orphan writer startup changed the index");
   assert(JSON.stringify((await activeRecoveryRecords(repo)).map((record) => record.eventId).sort()) === JSON.stringify(recoveryBefore), "orphan writer startup created recovery metadata");
+  assert(Buffer.compare(fs.readFileSync(orphanPath), orphanBefore) === 0, "orphan writer bytes were mutated");
+  assert(git(repo, "status", "--porcelain=v1", "-uall", "--", "orphan-writer.txt") === "?? orphan-writer.txt", "orphan writer was consumed or staged");
 });
 
 await check("public workflow and about-me writers publish canonical writer_transaction commits", async () => {
