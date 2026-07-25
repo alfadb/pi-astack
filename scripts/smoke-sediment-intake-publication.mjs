@@ -922,6 +922,94 @@ await check("canonicalGitRuntime.enabled=true publisher uses held-OFD exact-coho
     const finalBStatus = git(canonAbrain, ["status", "--porcelain", "--", knowledge.knowledgeEvidenceEventRelativePath(untrackedB.eventId)]).trim();
     assert(finalBStatus.startsWith("??"), `repair/publisher consumed disk-only B: ${finalBStatus}`);
 
+    // Focused exact-output repair-only: missing + stale + extra markdown + manifest.
+    // Pure projector over frozen HEAD L1 must rediscover every drift class, publish
+    // one exact cohort, and leave unrelated disk-only L1 untouched.
+    const trackedARel = "l2/views/knowledge/latest/projects/canon-project/tracked-a.md";
+    const trackedCRel = "l2/views/knowledge/latest/projects/canon-project/canonical-publisher-fact.md";
+    const extraRel = "l2/views/knowledge/latest/projects/canon-project/orphan-extra.md";
+    const expectedTrackedA = git(canonAbrain, ["show", `HEAD:${trackedARel}`]);
+    const expectedTrackedC = git(canonAbrain, ["show", `HEAD:${trackedCRel}`]);
+    const expectedManifest = git(canonAbrain, ["show", "HEAD:l2/views/knowledge/latest/manifest.json"]);
+    const l1CountBeforeExact = git(canonAbrain, ["ls-tree", "-r", "--name-only", "HEAD", "--", "l1/events/sha256"]).trim().split("\n").filter(Boolean).length;
+
+    // missing: drop tracked-a L2 from HEAD while its L1 remains.
+    git(canonAbrain, ["rm", "-q", "--", trackedARel]);
+    // stale: keep event ids but corrupt body bytes of tracked C.
+    const staleC = expectedTrackedC.replace(
+      /Published via exact-cohort under held OFD\./,
+      "STALE exact-output fixture body that must be repaired.",
+    );
+    assert(staleC !== expectedTrackedC, "stale fixture did not change tracked C body");
+    fs.writeFileSync(path.join(canonAbrain, trackedCRel), staleC);
+    // extra: orphan L2 identity with no matching frozen HEAD L1.
+    fs.mkdirSync(path.dirname(path.join(canonAbrain, extraRel)), { recursive: true });
+    fs.writeFileSync(path.join(canonAbrain, extraRel), [
+      "---",
+      "title: Orphan Extra",
+      "slug: orphan-extra",
+      `sediment_event_id: ${"e".repeat(64)}`,
+      `sediment_watermark_event_id: ${"e".repeat(64)}`,
+      "---",
+      "",
+      "# Orphan Extra",
+      "",
+      "This L2 must be deleted by exact-output repair-only.\n",
+    ].join("\n"));
+    // manifest bytes drift independent of entry content.
+    const exactPollutedManifest = readJson(manifestPath);
+    exactPollutedManifest.latestEventId = "c".repeat(64);
+    exactPollutedManifest.latestOutputPath = "latest/projects/canon-project/orphan-extra.md";
+    fs.writeFileSync(manifestPath, `${JSON.stringify(exactPollutedManifest, null, 2)}\n`);
+    git(canonAbrain, ["add", "-A", "--", "l2/views/knowledge/latest"]);
+    git(canonAbrain, ["commit", "-q", "-m", "polluted exact-output drift fixture"]);
+
+    assert((await outbox.listPublicationOutboxPending(canonAbrain)).length === 0, "exact repair-only precondition has pending items");
+    const beforeExact = await writer.inspectKnowledgeHeadClosure(canonAbrain);
+    assert(beforeExact.violations.some((v) => v.reason === "exact_output_missing" && v.path.endsWith("tracked-a.md")),
+      `missing exact output not detected: ${JSON.stringify(beforeExact)}`);
+    assert(beforeExact.violations.some((v) => v.reason === "exact_output_stale" && v.path.endsWith("canonical-publisher-fact.md")),
+      `stale exact output not detected: ${JSON.stringify(beforeExact)}`);
+    assert(beforeExact.violations.some((v) => v.reason === "exact_output_extra" && v.path.endsWith("orphan-extra.md")),
+      `extra exact output not detected: ${JSON.stringify(beforeExact)}`);
+    assert(beforeExact.violations.some((v) => v.reason === "manifest_closure_mismatch" && v.path.endsWith("manifest.json")),
+      `manifest exact drift not detected: ${JSON.stringify(beforeExact)}`);
+
+    const pollutedExactHead = git(canonAbrain, ["rev-parse", "HEAD"]).trim();
+    await writer.scheduleKnowledgePublicationOutboxDrain(canonAbrain, sedimentSettings);
+    const repairedExactHead = git(canonAbrain, ["rev-parse", "HEAD"]).trim();
+    const afterExact = await writer.inspectKnowledgeHeadClosure(canonAbrain);
+    assert(repairedExactHead !== pollutedExactHead, "exact repair-only one-shot did not publish a cohort");
+    assert(afterExact.violations.length === 0, `exact repair-only left closure violations: ${JSON.stringify(afterExact)}`);
+
+    assert(headHas(trackedARel), "exact repair-only did not restore missing tracked-a L2");
+    assert(!headHas(extraRel), "exact repair-only left extra orphan L2 in HEAD");
+    assert(git(canonAbrain, ["show", `HEAD:${trackedARel}`]) === expectedTrackedA, "exact repair-only restored tracked-a bytes incorrectly");
+    assert(git(canonAbrain, ["show", `HEAD:${trackedCRel}`]) === expectedTrackedC, "exact repair-only restored tracked-c bytes incorrectly");
+    assert(git(canonAbrain, ["show", `HEAD:l2/views/knowledge/latest/manifest.json`]) === expectedManifest, "exact repair-only restored manifest bytes incorrectly");
+
+    const exactRepairStatus = git(canonAbrain, ["show", "--name-status", "--pretty=format:", "HEAD"]);
+    assert(/\bA\s+l2\/views\/knowledge\/latest\/projects\/canon-project\/tracked-a\.md\b/.test(exactRepairStatus)
+      || /\bM\s+l2\/views\/knowledge\/latest\/projects\/canon-project\/tracked-a\.md\b/.test(exactRepairStatus),
+      `exact repair cohort missing tracked-a restore: ${exactRepairStatus}`);
+    assert(/\bM\s+l2\/views\/knowledge\/latest\/projects\/canon-project\/canonical-publisher-fact\.md\b/.test(exactRepairStatus),
+      `exact repair cohort missing stale C rewrite: ${exactRepairStatus}`);
+    assert(/\bD\s+l2\/views\/knowledge\/latest\/projects\/canon-project\/orphan-extra\.md\b/.test(exactRepairStatus),
+      `exact repair cohort missing extra delete: ${exactRepairStatus}`);
+    assert(/\bM\s+l2\/views\/knowledge\/latest\/manifest\.json\b/.test(exactRepairStatus),
+      `exact repair cohort missing manifest rewrite: ${exactRepairStatus}`);
+    assert(!/^D\s+l1\/events\//m.test(exactRepairStatus), `exact repair-only deleted L1: ${exactRepairStatus}`);
+    assert(!/^A\s+l1\/events\//m.test(exactRepairStatus), `exact repair-only added L1: ${exactRepairStatus}`);
+
+    const l1CountAfterExact = git(canonAbrain, ["ls-tree", "-r", "--name-only", "HEAD", "--", "l1/events/sha256"]).trim().split("\n").filter(Boolean).length;
+    assert(l1CountAfterExact === l1CountBeforeExact, "exact repair-only changed Knowledge L1 cardinality");
+    const exactBStatus = git(canonAbrain, ["status", "--porcelain", "--", knowledge.knowledgeEvidenceEventRelativePath(untrackedB.eventId)]).trim();
+    assert(exactBStatus.startsWith("??"), `exact repair-only consumed disk-only B: ${exactBStatus}`);
+    assert(!headHas("l2/views/knowledge/latest/projects/canon-project/untracked-b.md"), "exact repair-only leaked disk-only B into HEAD L2");
+    // Repair must leave Knowledge L2 worktree clean; unrelated disk-only L1 may stay untracked.
+    const exactL2Status = git(canonAbrain, ["status", "--porcelain", "--", "l2/views/knowledge"]).trim();
+    assert(exactL2Status === "", `exact repair-only left dirty Knowledge L2 worktree: ${exactL2Status}`);
+
     runtimeMod.getCanonicalStartupPromise = originalStartup;
   } finally {
     process.env.HOME = prevHome;

@@ -737,7 +737,13 @@ interface FrozenKnowledgeHeadSnapshot {
 
 export interface KnowledgeHeadClosureViolation {
   path: string;
-  reason: "watermark_missing_from_head_l1" | "event_id_missing_from_head_l1" | "manifest_closure_mismatch";
+  reason:
+    | "watermark_missing_from_head_l1"
+    | "event_id_missing_from_head_l1"
+    | "manifest_closure_mismatch"
+    | "exact_output_missing"
+    | "exact_output_stale"
+    | "exact_output_extra";
   eventId?: string;
   identity?: string;
 }
@@ -817,9 +823,44 @@ function knowledgeIdentityFromL2Path(relativePath: string): KnowledgeIdentityDes
   return undefined;
 }
 
-function expectedManifestBytes(plan: KnowledgeProjectionPlan): Buffer | undefined {
-  const manifest = plan.entries.find((entry) => entry.relativePath === "latest/manifest.json");
-  return manifest?.op === "put" ? Buffer.from(manifest.content!, "utf-8") : undefined;
+function knowledgeProjectionBlobPath(relativePath: string): string {
+  return `${KNOWLEDGE_L2_ROOT}/${relativePath}`;
+}
+
+function collectKnowledgeIdentityDescriptors(
+  nodes: readonly KnowledgeEventNode[],
+): Map<string, KnowledgeIdentityDescriptor> {
+  const identities = new Map<string, KnowledgeIdentityDescriptor>();
+  for (const node of nodes) {
+    const identity = knowledgeIdentityDescriptor(node.body);
+    identities.set(identity.key, identity);
+  }
+  return identities;
+}
+
+function collectHeadKnowledgeL2Identities(
+  snapshot: FrozenKnowledgeHeadSnapshot,
+): Map<string, KnowledgeIdentityDescriptor> {
+  const identities = new Map<string, KnowledgeIdentityDescriptor>();
+  for (const relativePath of snapshot.blobs.keys()) {
+    if (!relativePath.startsWith(`${KNOWLEDGE_L2_LATEST}/`) || !relativePath.endsWith(".md")) continue;
+    const identity = knowledgeIdentityFromL2Path(relativePath);
+    if (!identity) throw new Error(`unsupported tracked Knowledge L2 path: ${relativePath}`);
+    identities.set(identity.key, identity);
+  }
+  return identities;
+}
+
+/** Full exact-cohort identity set: every foldable L1 identity plus every tracked L2 markdown identity. */
+function fullKnowledgeClosureAffectedIdentities(
+  snapshot: FrozenKnowledgeHeadSnapshot,
+  closureNodes: readonly KnowledgeEventNode[],
+): KnowledgeIdentityDescriptor[] {
+  const identities = collectKnowledgeIdentityDescriptors(closureNodes);
+  for (const [key, identity] of collectHeadKnowledgeL2Identities(snapshot)) {
+    identities.set(key, identity);
+  }
+  return [...identities.values()];
 }
 
 function inspectFrozenKnowledgeL2References(snapshot: FrozenKnowledgeHeadSnapshot): KnowledgeHeadClosureViolation[] {
@@ -850,28 +891,55 @@ function inspectFrozenKnowledgeL2References(snapshot: FrozenKnowledgeHeadSnapsho
   return violations;
 }
 
-function inspectFrozenKnowledgeManifest(
+/** Compare pure projector exact outputs against frozen HEAD blobs (missing/stale/extra + manifest). */
+function inspectFrozenKnowledgeExactOutputs(
   snapshot: FrozenKnowledgeHeadSnapshot,
   plan: KnowledgeProjectionPlan,
-): KnowledgeHeadClosureViolation | undefined {
-  const expectedManifest = expectedManifestBytes(plan);
-  const actualManifest = snapshot.blobs.get(KNOWLEDGE_MANIFEST_PATH)?.content;
-  if (
-    (!expectedManifest || (actualManifest && actualManifest.equals(expectedManifest)))
-    && (expectedManifest || !actualManifest)
-  ) return undefined;
-  let eventId: string | undefined;
-  if (actualManifest) {
-    try {
-      const parsed = JSON.parse(actualManifest.toString("utf-8")) as { latestEventId?: unknown };
-      if (typeof parsed.latestEventId === "string") eventId = parsed.latestEventId;
-    } catch { /* mismatch is already explicit */ }
+): KnowledgeHeadClosureViolation[] {
+  const violations: KnowledgeHeadClosureViolation[] = [];
+  for (const entry of plan.entries) {
+    const blobPath = knowledgeProjectionBlobPath(entry.relativePath);
+    const actual = snapshot.blobs.get(blobPath);
+    const isManifest = blobPath === KNOWLEDGE_MANIFEST_PATH;
+    if (entry.op === "delete") {
+      if (!actual) continue;
+      violations.push({
+        path: blobPath,
+        reason: isManifest ? "manifest_closure_mismatch" : "exact_output_extra",
+        ...(entry.identity ? { identity: entry.identity } : {}),
+      });
+      continue;
+    }
+    const expected = Buffer.from(entry.content!, "utf-8");
+    if (!actual) {
+      violations.push({
+        path: blobPath,
+        reason: isManifest ? "manifest_closure_mismatch" : "exact_output_missing",
+        ...(entry.identity ? { identity: entry.identity } : {}),
+      });
+      continue;
+    }
+    if (actual.content.equals(expected)) continue;
+    if (isManifest) {
+      let eventId: string | undefined;
+      try {
+        const parsed = JSON.parse(actual.content.toString("utf-8")) as { latestEventId?: unknown };
+        if (typeof parsed.latestEventId === "string") eventId = parsed.latestEventId;
+      } catch { /* mismatch is already explicit */ }
+      violations.push({
+        path: blobPath,
+        reason: "manifest_closure_mismatch",
+        ...(eventId ? { eventId } : {}),
+      });
+      continue;
+    }
+    violations.push({
+      path: blobPath,
+      reason: "exact_output_stale",
+      ...(entry.identity ? { identity: entry.identity } : {}),
+    });
   }
-  return {
-    path: KNOWLEDGE_MANIFEST_PATH,
-    reason: "manifest_closure_mismatch",
-    ...(eventId ? { eventId } : {}),
-  };
+  return violations;
 }
 
 function sortKnowledgeClosureViolations(
@@ -881,11 +949,13 @@ function sortKnowledgeClosureViolations(
 }
 
 function inspectFrozenKnowledgeClosureSnapshot(snapshot: FrozenKnowledgeHeadSnapshot): KnowledgeHeadClosureViolation[] {
-  const plan = planKnowledgeProjectionFromValidatedSet({ nodes: snapshot.knowledgeNodes, affectedIdentities: [] });
-  const manifestViolation = inspectFrozenKnowledgeManifest(snapshot, plan);
+  const plan = planKnowledgeProjectionFromValidatedSet({
+    nodes: snapshot.knowledgeNodes,
+    affectedIdentities: fullKnowledgeClosureAffectedIdentities(snapshot, snapshot.knowledgeNodes),
+  });
   return sortKnowledgeClosureViolations([
     ...inspectFrozenKnowledgeL2References(snapshot),
-    ...(manifestViolation ? [manifestViolation] : []),
+    ...inspectFrozenKnowledgeExactOutputs(snapshot, plan),
   ]);
 }
 
@@ -979,27 +1049,28 @@ function buildKnowledgeBatchProjectionPlan(args: {
   if (!args.settings.knowledgeProjector.enabled || args.settings.knowledgeProjector.l2OutputRoot !== "repo") {
     return { violations: [] };
   }
-  const referenceViolations = inspectFrozenKnowledgeL2References(args.snapshot);
+  // Drift discovery is frozen-HEAD-only: exact L2/manifest must be checked against
+  // snapshot.knowledgeNodes ↔ snapshot.blobs. Using HEAD+batch closureNodes would
+  // mark every ordinary new-batch identity as exact_output_missing/stale.
+  // Publication plan still folds the full closureNodes; affected merges batch
+  // identities with frozen-HEAD drift identities so the cohort stays minimal.
+  const violations = inspectFrozenKnowledgeClosureSnapshot(args.snapshot);
   const affected = new Map<string, KnowledgeIdentityDescriptor>();
   for (const node of args.batchNodes) {
     const identity = knowledgeIdentityDescriptor(node.body);
     affected.set(identity.key, identity);
   }
-  for (const violation of referenceViolations) {
-    if (!violation.identity) continue;
+  for (const violation of violations) {
     const identity = knowledgeIdentityFromL2Path(violation.path);
     if (identity) affected.set(identity.key, identity);
   }
+  if (args.batchNodes.length === 0 && violations.length === 0) return { violations };
+  // Manifest is always rendered from the full closure; affected only selects
+  // entry put/delete paths so the exact cohort stays minimal.
   const plan = planKnowledgeProjectionFromValidatedSet({
     nodes: args.closureNodes,
     affectedIdentities: [...affected.values()],
   });
-  const manifestViolation = inspectFrozenKnowledgeManifest(args.snapshot, plan);
-  const violations = sortKnowledgeClosureViolations([
-    ...referenceViolations,
-    ...(manifestViolation ? [manifestViolation] : []),
-  ]);
-  if (args.batchNodes.length === 0 && violations.length === 0) return { violations };
   return { plan, violations };
 }
 
