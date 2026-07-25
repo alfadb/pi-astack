@@ -51,6 +51,7 @@ const fixtureSettings = {
     },
     imageGen: { "alpha/image": "fixture image generation" },
     tiers: {
+      frontier: { label: "T0+ — scarce frontier capability", models: ["beta/reviewer"] },
       flagship: { label: "T0", models: ["alpha/executor", "beta/reviewer", "gamma/candidate"] },
       flagship_candidate: { label: "T0 candidate", models: ["gamma/candidate"] },
       standard: { label: "T1", models: ["alpha/executor"] },
@@ -144,10 +145,13 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
   } else {
     check("block contains '### Tier roster'", block.includes("### Tier roster"));
     check("block contains '**flagship**' roster entry", block.includes("**flagship**"));
+    check("block contains '**frontier**' roster entry when configured", !tiers.frontier || block.includes("**frontier**"));
     check("block contains '**flagship_candidate**' roster entry when configured", !tiers.flagship_candidate || block.includes("**flagship_candidate**"));
     check("block contains '**standard**' roster entry", block.includes("**standard**"));
     check("block contains '**fast**' roster entry", block.includes("**fast**"));
     check("block contains at least one flagship model id", (tiers.flagship?.models ?? []).some((m) => block.includes(m)));
+    check("block contains frontier caveat when configured",
+      !tiers.frontier || block.includes("scarce capability ABOVE ordinary T0/flagship"));
     check("block contains candidate caveat when configured",
       !tiers.flagship_candidate || block.includes("do NOT count these as primary T0 voters"));
     check("block contains the cross-vendor selection guidance",
@@ -157,6 +161,8 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
     );
     check("roster is rendered BEFORE the per-provider table",
       block.indexOf("### Tier roster") < firstProviderTable);
+    check("frontier renders before flagship when present",
+      !tiers.frontier || (block.indexOf("**frontier**") < block.indexOf("**flagship**")));
     check("flagship_candidate renders between flagship and standard when present",
       !tiers.flagship_candidate || (block.indexOf("**flagship**") < block.indexOf("**flagship_candidate**") && block.indexOf("**flagship_candidate**") < block.indexOf("**standard**")));
     check("hints still render (regression: per-model table)",
@@ -192,6 +198,7 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
 console.log("\n[4] live responsibility hints recommend Grok execution and keep other non-GPT models judgment-only");
 {
   const liveHints = liveSettings.modelCurator?.hints ?? {};
+  const liveTiers = liveSettings.modelCurator?.tiers ?? {};
   const grokHint = liveHints["xai/grok-4.5"];
   check("live Grok hint explicitly recommends deterministic task execution",
     typeof grokHint === "string" && grokHint.includes("Recommended deterministic task execution model."));
@@ -213,6 +220,31 @@ console.log("\n[4] live responsibility hints recommend Grok execution and keep o
         hint.includes("Use only for judgment-oriented tasks") &&
         hint.includes("do not use for coding, log review, or concrete implementation")
     ));
+
+  const opusHint = liveHints["anthropic/claude-opus-5"];
+  const fableHint = liveHints["anthropic/claude-fable-5"];
+  const frontierModels = liveTiers.frontier?.models ?? [];
+  const flagshipModels = liveTiers.flagship?.models ?? [];
+  const rollbackModels = liveTiers.rollback?.models ?? [];
+  check("live Opus 5 hint is Primary Anthropic T0 route",
+    typeof opusHint === "string" && opusHint.includes("Primary Anthropic T0 route"));
+  check("live Fable hint is scarce frontier, not routine T0",
+    typeof fableHint === "string" &&
+      fableHint.includes("Scarce frontier (T0+)") &&
+      fableHint.includes("NOT a routine T0 route") &&
+      fableHint.includes("independent weekly usage cap equal to half of the overall weekly quota") &&
+      fableHint.includes("does not mean Opus, Sonnet, or Haiku are unavailable"));
+  check("live frontier tier ranks above flagship by object order",
+    Object.keys(liveTiers).indexOf("frontier") >= 0 &&
+      Object.keys(liveTiers).indexOf("frontier") < Object.keys(liveTiers).indexOf("flagship"));
+  check("live frontier contains Fable and not Opus 5",
+    frontierModels.includes("anthropic/claude-fable-5") &&
+      !frontierModels.includes("anthropic/claude-opus-5"));
+  check("live flagship contains Opus 5 and not Fable",
+    flagshipModels.includes("anthropic/claude-opus-5") &&
+      !flagshipModels.includes("anthropic/claude-fable-5"));
+  check("live rollback no longer lists Opus 5",
+    !rollbackModels.includes("anthropic/claude-opus-5"));
 }
 
 console.log("");

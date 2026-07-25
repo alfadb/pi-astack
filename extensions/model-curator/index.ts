@@ -267,6 +267,15 @@ function buildAvailableModelsBlock(
     for (const [tierName, tier] of Object.entries(tiers)) {
       const label = tier.label?.trim() || tierName;
       lines.push(`- **${tierName}** (${label}) — ${tier.models.map((m) => `\`${m}\``).join(", ")}`);
+      if (tierName === "frontier") {
+        lines.push(
+          "  - Frontier caveat: scarce capability ABOVE ordinary T0/flagship. " +
+            "NOT a candidate tier and NOT a routine T0 voter. Invoke only when " +
+            "the problem is extremely complex and regular T0 routes are " +
+            "insufficient; never for daily use, ordinary T0 reviews, automatic " +
+            "fallback, background hot paths, or coding/execution.",
+        );
+      }
       if (tierName === "flagship_candidate") {
         lines.push(
           "  - Candidate caveat: do NOT count these as primary T0 voters in " +
@@ -280,7 +289,8 @@ function buildAvailableModelsBlock(
       lines.push(
         "When dispatching flagship-tier models for blind review or " +
           "architecture critique, prefer cross-vendor + cross-architecture " +
-          "picks when available; two models from the same vendor (e.g. fable-5 + opus-4-8) " +
+          "picks when available; two models from the same vendor (e.g. two " +
+          "OpenAI routes, or frontier fable-5 + T0 opus-5) " +
           "do NOT count as fully independent voters unless availability forces " +
           "a cross-model/same-model isolated downgrade. Always check the per-model " +
           "hints below before dispatching — the tier roster is a rough guide.",
