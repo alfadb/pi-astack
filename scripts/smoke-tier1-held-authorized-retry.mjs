@@ -223,6 +223,62 @@ await check("normalize + transient taxonomy: RECOVERY_QUARANTINED HOLDs", () => 
   );
 });
 
+await check("normalize + transient taxonomy: RUNTIME_PROVENANCE_SPLIT HOLDs (restart-only)", () => {
+  // CanonicalGitRuntimeError message shape: `${code}: ${message}`.
+  const codeFromField = index._normalizeConstraintEvidenceAppendErrorForTests(
+    Object.assign(
+      new Error("RUNTIME_PROVENANCE_SPLIT: jiti/module copies loaded different implementation provenance"),
+      { code: "RUNTIME_PROVENANCE_SPLIT", name: "CanonicalGitRuntimeError" },
+    ),
+  );
+  assert(codeFromField === "RUNTIME_PROVENANCE_SPLIT", `expected RUNTIME_PROVENANCE_SPLIT from .code, got ${codeFromField}`);
+  // Message-only / mid-flight un-normalized production shape (PID1533336 class).
+  const codeFromMsg = index._normalizeConstraintEvidenceAppendErrorForTests(
+    new Error("RUNTIME_PROVENANCE_SPLIT: jiti/module copies loaded different implementation provenance"),
+  );
+  assert(codeFromMsg === "RUNTIME_PROVENANCE_SPLIT", `expected RUNTIME_PROVENANCE_SPLIT from message, got ${codeFromMsg}`);
+  const reason = `constraint_evidence_append_failed:${codeFromField}`;
+  assert(index._isTransientConstraintEvidenceAppendFailureForTests(reason) === true, "provenance split must be transient HOLD");
+  assert(
+    index._isTerminalTier1RejectForTests({ status: "rejected", reason }) === false,
+    "provenance split must not terminal-advance checkpoint",
+  );
+  // Legacy un-normalized reason already written to held/audit must still HOLD.
+  assert(
+    index._isTransientConstraintEvidenceAppendFailureForTests(
+      "constraint_evidence_append_failed:RUNTIME_PROVENANCE_SPLIT: jiti/module copies loaded different implementation provenance",
+    ) === true,
+    "legacy full message reason must stay HOLD",
+  );
+  // Sibling process-level provenance codes (restart-only).
+  for (const sibling of ["PROVENANCE_DRIFT", "RUNTIME_RECONFIGURE_BLOCKED"]) {
+    const normalized = index._normalizeConstraintEvidenceAppendErrorForTests(
+      Object.assign(new Error(`${sibling}: process provenance frozen`), {
+        code: sibling,
+        name: "CanonicalGitRuntimeError",
+      }),
+    );
+    assert(normalized === sibling, `expected ${sibling}, got ${normalized}`);
+    assert(
+      index._isTransientConstraintEvidenceAppendFailureForTests(`constraint_evidence_append_failed:${sibling}`) === true,
+      `${sibling} must be transient HOLD`,
+    );
+  }
+  // True terminals must NOT be reclassified by provenance matching.
+  assert(
+    index._isTransientConstraintEvidenceAppendFailureForTests(
+      "constraint_evidence_append_failed:blocked",
+    ) === false,
+    "blocked remains terminal",
+  );
+  assert(
+    index._isTransientConstraintEvidenceAppendFailureForTests(
+      "constraint_evidence_append_failed:invalid",
+    ) === false,
+    "invalid remains terminal",
+  );
+});
+
 const SOURCE_TURN = "turn1";
 const SOURCE_TS = "2026-07-25T08:00:00.000Z";
 let frozenHeldSource = null;
@@ -372,6 +428,119 @@ await check("idempotent third pass on turn3 does not double-consume CE", async (
   assert(ce.body?.turn_id === SOURCE_TURN, `third pass CE turn_id still held source, got ${ce.body?.turn_id}`);
   assert(ce.body?.created_at_utc === SOURCE_TS, `third pass CE created_at still held source, got ${ce.body?.created_at_utc}`);
   assert(ce.body?.turn_id !== "turn3", "CE must not adopt turn3");
+});
+
+// --- RUNTIME_PROVENANCE_SPLIT restart-only HOLD (PID1533336 class) ---
+// Separate session so quarantine CE exactly-once above stays isolated.
+const PROV_SESSION = "held-retry-prov-split";
+const PROV_TURN = "turn1";
+const PROV_TS = "2026-07-25T08:00:00.000Z";
+let provFrozenHeld = null;
+let provCeEventId = null;
+const ceBeforeProv = countCeEvents();
+
+await check("RUNTIME_PROVENANCE_SPLIT forced throw → rejected non-terminal, held pending, no checkpoint advance", async () => {
+  index._resetAutoWriteStateForTests();
+  index._setAppendTier1ForceThrowForTests({
+    remaining: 1,
+    errorFactory: () => Object.assign(
+      new Error("RUNTIME_PROVENANCE_SPLIT: jiti/module copies loaded different implementation provenance"),
+      { name: "CanonicalGitRuntimeError", code: "RUNTIME_PROVENANCE_SPLIT" },
+    ),
+  });
+
+  const outcome = await index._tryAutoWriteLaneForTests(
+    laneArgs(PROV_SESSION, authorizedSignal, `${PROV_SESSION}:auto-1`, {
+      turnId: PROV_TURN,
+      timestamp: PROV_TS,
+    }),
+  );
+  assert(outcome.kind === "tier1_direct", `expected tier1_direct, got ${outcome.kind}`);
+  assert(outcome.result.status === "rejected", `expected rejected, got ${outcome.result.status}`);
+  assert(
+    (outcome.result.reason ?? "") === "constraint_evidence_append_failed:RUNTIME_PROVENANCE_SPLIT"
+      || (outcome.result.reason ?? "").startsWith("constraint_evidence_append_failed:RUNTIME_PROVENANCE_SPLIT"),
+    `expected RUNTIME_PROVENANCE_SPLIT reason, got ${outcome.result.reason}`,
+  );
+  assert(
+    index._isTerminalTier1RejectForTests(outcome.result) === false,
+    "RUNTIME_PROVENANCE_SPLIT reject must not be terminal",
+  );
+  assert(index._shouldAdvanceAfterAutoOutcomeForTests(outcome) === false, "must not advance checkpoint");
+  assert(countCeEvents() === ceBeforeProv, "CE must not exist after provenance-split throw");
+
+  const held = await index._listTier1HeldDecisionsForSessionForTests(abrainHome, PROV_SESSION);
+  assert(held.length === 1, `expected 1 held decision, got ${held.length}`);
+  assert(held[0].signal.provenance === "user-expressed", "held provenance must stay user-expressed");
+  assert(held[0].signal.rule_scope === "project", "held rule_scope must stay project");
+  assert(held[0].holdReason.includes("RUNTIME_PROVENANCE_SPLIT"), `holdReason=${held[0].holdReason}`);
+  assert(held[0].sourceTurnId === PROV_TURN, `held sourceTurnId must be ${PROV_TURN}, got ${held[0].sourceTurnId}`);
+  assert(held[0].authorizedAtUtc === PROV_TS, `held authorizedAtUtc must be ${PROV_TS}, got ${held[0].authorizedAtUtc}`);
+  provFrozenHeld = {
+    sessionId: held[0].sessionId,
+    projectId: held[0].projectId,
+    sourceTurnId: held[0].sourceTurnId,
+    authorizedAtUtc: held[0].authorizedAtUtc,
+    decisionId: held[0].decisionId,
+  };
+  index._setAppendTier1ForceThrowForTests(null);
+});
+
+await check("restart after RUNTIME_PROVENANCE_SPLIT: held survives, same lineage captures, held can ack", async () => {
+  // Simulate process restart: clear in-memory state; disk held remains. Force-throw cleared
+  // (restart heals process-level provenance fingerprint).
+  index._resetAutoWriteStateForTests();
+  index._setAppendTier1ForceThrowForTests(null);
+
+  const peeked = await index._peekOldestTier1HeldDecisionForTests(abrainHome, PROV_SESSION);
+  assert(peeked, "held must survive process state reset after provenance split");
+  assert(peeked.signal.provenance === "user-expressed", "restart held provenance");
+  assert(peeked.sourceTurnId === PROV_TURN, "restart held sourceTurnId frozen");
+  assert(peeked.authorizedAtUtc === PROV_TS, "restart held authorizedAtUtc frozen");
+  assert(peeked.decisionId === provFrozenHeld.decisionId, "restart held decisionId stable");
+
+  const outcome = await index._tryAutoWriteLaneForTests(
+    laneArgs(PROV_SESSION, demotedSignal, `${PROV_SESSION}:auto-2`, {
+      turnId: "turn2",
+      timestamp: "2026-07-25T09:00:00.000Z",
+    }),
+  );
+  assert(outcome.kind === "tier1_direct", `retry must stay tier1_direct, got ${outcome.kind}`);
+  assert(outcome.signal.provenance === "user-expressed", `retry must use original provenance, got ${outcome.signal.provenance}`);
+  assert(outcome.signal.rule_scope === "project", `retry must use original rule_scope, got ${outcome.signal.rule_scope}`);
+  assert(
+    outcome.result.status === "deduped" || outcome.result.status === "created",
+    `expected capture status after restart, got ${JSON.stringify(outcome.result)}`,
+  );
+  const reason = outcome.result.reason ?? "";
+  assert(
+    reason.startsWith("constraint_compiler_publication_pending:")
+      || reason.startsWith("constraint_compiler_publication_durable:"),
+    `unexpected success reason: ${reason}`,
+  );
+  assert(countCeEvents() === ceBeforeProv + 1, `exactly-once CE for provenance session, got ${countCeEvents()}`);
+
+  // Find the CE belonging to this session (quarantine session may already have one).
+  const ceFiles = listCeEventFiles();
+  const matching = ceFiles
+    .map((f) => JSON.parse(fs.readFileSync(f, "utf8")))
+    .filter((env) => env?.body?.session_id === PROV_SESSION);
+  assert(matching.length === 1, `expected 1 CE for ${PROV_SESSION}, got ${matching.length}`);
+  const ce = matching[0];
+  provCeEventId = ce.event_id ?? ce.body_hash;
+  assert(typeof provCeEventId === "string" && /^[0-9a-f]{64}$/.test(provCeEventId), `CE event_id invalid: ${provCeEventId}`);
+  assert(ce.body?.turn_id === provFrozenHeld.sourceTurnId, `CE turn_id must be held source, got ${ce.body?.turn_id}`);
+  assert(ce.body?.created_at_utc === provFrozenHeld.authorizedAtUtc, `CE created_at_utc must be held source, got ${ce.body?.created_at_utc}`);
+  assert(ce.body?.turn_id !== "turn2", "CE must not use current retry window turnId");
+
+  const heldAfter = await index._listTier1HeldDecisionsForSessionForTests(abrainHome, PROV_SESSION);
+  if (reason.startsWith("constraint_compiler_publication_pending:")) {
+    assert(heldAfter.length === 1, `pending publication should keep held for retry, got ${heldAfter.length}`);
+    assert(heldAfter[0].sourceTurnId === PROV_TURN, "re-hold keeps sourceTurnId");
+    assert(index._shouldAdvanceAfterAutoOutcomeForTests(outcome) === false, "pending publication HOLDs checkpoint");
+  } else {
+    assert(heldAfter.length === 0, `captured path should ack held, still pending=${heldAfter.length}`);
+  }
 });
 
 await check("held decision identity is content-addressed (no wall clock)", () => {
