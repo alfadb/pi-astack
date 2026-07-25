@@ -13,6 +13,7 @@ sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得
 - 明确 `MEMORY-ABOUT-ME: ... END_MEMORY` block（Lane G compatibility/diagnostic 通道；`/about-me` slash 已退役；非正常产品路径）。
 - 自然对话经 `agent_end` 背景抽取是唯一正常产品路径，和 ADR 0024 / REQ-001 的隐形自治要求一致。
 - `agent_end` 背景 LLM auto-write（Lane C，需配置启用）。
+- Stage0 daemon worker RPC（`PI_ASTACK_SEDIMENT_WORKER_MODE=1` + `/sediment-worker-run`）复用同一 pass 处理 terminal witness sidecar；不是用户产品路径，也不是 formal ACK（见 §2.2）。
 - human slash commands 触发的 maintenance/migration（当前用户面保留 `/sediment` 等维护入口，不保留 `/about-me` 主动声明入口）。
 - vault Lane V（由 abrain/vault 子系统同步处理，不是 ordinary memory）。
 
@@ -45,6 +46,35 @@ Implemented path (code is source of truth):
 **ABOUT-ME Phase-3 blocker**: no append-only identity/about-me L1 domain or authorized schema exists in this repository. A durable intent outbox would have to duplicate the complete sanitized identity draft, which is privacy-sensitive and would still not be semantic truth. Phase 2 therefore keeps `writeAbrainAboutMeUnlocked` on its synchronous legacy-domain path and does not claim `durable_pending`/L1 acceptance for Lane G. Its scheduling remains keyed per session, so one Lane G session does not serialize unrelated session keys. Phase 3 requires an explicitly authorized identity L1 schema or a privacy-preserving intent contract; this change does not invent one.
 
 Remaining non-goals: constraint/outcome full mutation outbox and ABOUT-ME semantic migration. Shared canonical runtime remains for other owners, but sediment index is no longer a startup consumer.
+
+## 2.2 Stage0 daemon worker-safe RPC (2026-07-25)
+
+Status: **implemented in-tree（Stage0）**; not formal ACK / authority / retention.
+
+Daemon-hosted headless worker surface for terminal-witness evaluation without foreground agent lifecycle:
+
+- **Single executor**: `sediment.executionOwner` default `foreground` (unchanged). When `daemon`, ordinary Pi extension keeps agent_end/settled **capture** (intake + edge shadow) but does **not** enqueue / schedule recovery / run normal pass; worker is the sole pass executor. Worker requires `executionOwner=daemon` else `execution_owner_not_daemon`.
+- Env `PI_ASTACK_SEDIMENT_WORKER_MODE=1` → sediment extension registers **only** `/sediment-worker-run` and installs the shared `runSedimentAgentEndPass` body. No ordinary lifecycle hooks / queue / recovery / timer / footer; no recursive edge-protocol-shadow from the worker session.
+- Required worker env: `PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT` (canonical) + `PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS` (JSON realpath allowlist). Sidecar path shape `<root>/records/<terminal_record_id>/sidecar.bin`; open+fstat with `O_NOFOLLOW`.
+- Manifest schema `pi-astack/sediment-worker-task/v1`（JSON or base64url, ≤64KiB）; strict unknown-field reject; `content_id` + `owner_key` required; Stage0 admits **only** `task_kind=terminal_witness`.
+- Independent checkpoint slot `daemon-worker:<sha256(source session)>` (does not share foreground watermark). Synthetic entry IDs content-stable across cumulative sidecars.
+- Success receipt **only** after real checkpoint advance **and** `more=false` (in-worker more loop, budget 16). Soft skip / no progress / void ⇒ not processed, no receipt. Receipt = processed settled success only; no durable failed receipts. Corrupt receipt fail closed. Process-wide pass serial + per-id Linux OFD claim (Stage0 Linux-only; receipts/claims no GC).
+- On success, worker drains knowledge publication outbox one-shot (cannot wait foreground `session_start`).
+- Business result via `ctx.ui.notify` aggregate JSON (`sediment-worker-result:` + `pi-astack/sediment-worker-result/v1`); notify must be available before execution; RPC prompt response is only command acceptance.
+
+Suggested argv（all real Pi flags）:
+
+```bash
+PI_ASTACK_SEDIMENT_WORKER_MODE=1 \
+PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT=<copy-store> \
+PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS='["/abs/owner"]' \
+ABRAIN_ROOT=<path> \
+  pi --mode rpc --no-session \
+  --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files \
+  --extension <repo>/extensions/sediment/index.ts
+```
+
+Authority: [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md). Code: `extensions/sediment/worker-rpc.ts`, worker branch in `extensions/sediment/index.ts`, `sediment.executionOwner` in settings/schema. Smoke: `npm run smoke:sediment-worker-rpc`.
 
 ## 3. Curator operation set
 

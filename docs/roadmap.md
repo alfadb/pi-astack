@@ -85,6 +85,7 @@ GIC 在这里是 externalized system 的坐标系，不是重构规范。真实 
 
 | Roadmap ID | Item | Intent |
 |---|---|---|
+| `RM-SEDIMENT-WORKER-001` | **Stage0 sediment worker-safe RPC**（ADR 0045） | daemon 可 spawn `pi --mode rpc` + `PI_ASTACK_SEDIMENT_WORKER_MODE=1` 只加载 sediment extension，用 `/sediment-worker-run` 处理 terminal_witness sidecar；`sediment.executionOwner=daemon` 单执行器；独立 checkpoint slot；success receipt 仅真实 CP 推进+more=false；copy-store path 门禁；复用 `runSedimentAgentEndPass`；**不是** formal ConsumerAck/authority/retention；daemon 负责 lifecycle。后续：pi-router supervisor 接线、真实模型 production bridge、decision/write 计数回传、receipt/claim GC。 |
 | `RM-ARCH-001` | Stage0 follow-up | 解耦 reconcile 写入、异步 cold-start rebuild、统一截断语义，并保留中文 sparse 防复发 guard / dedup oracle；只按真实 query 回归与瓶颈推进，不恢复全库 fallback。 |
 | `RM-ARCH-002` | Schema evolution | 为 frontmatter/audit/binding schema 建立多版本兼容与 migration path，不在 docs 镜像当前字段清单。 |
 | `RM-ARCH-003` | Runtime path docs/tests | 防止 `.pensieve` / `.pi-astack` / `.abrain/.state` 路径语义漂移。 |

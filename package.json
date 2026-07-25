@@ -193,6 +193,7 @@
     "smoke:canonical-mutation-barrier": "node scripts/smoke-canonical-mutation-barrier.mjs",
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
+    "smoke:sediment-worker-rpc": "node scripts/smoke-sediment-worker-rpc.mjs",
     "smoke:edge-shadow-frozen-contract-adapter": "node scripts/smoke-edge-shadow-frozen-contract-adapter.mjs",
     "dossier:edge-shadow-frozen-contract-production": "node scripts/dossier-edge-shadow-frozen-contract-production.mjs",
     "smoke:sediment-intake-publication": "node scripts/smoke-sediment-intake-publication.mjs",

@@ -50,11 +50,33 @@ import {
   checkpointSummary,
   entryToText,
   lineagePatchForBranch,
-  loadSessionCheckpoint,
-  saveSessionCheckpoint,
+  loadSessionCheckpoint as loadSessionCheckpointRaw,
+  saveSessionCheckpoint as saveSessionCheckpointRaw,
   type RunWindow,
   type SedimentCheckpoint,
 } from "./checkpoint";
+
+/**
+ * Daemon worker may pin an independent checkpoint session slot via snapshot
+ * `checkpointSessionId` without rewriting every call site. Ordinary paths leave
+ * the override unset so load/save use the provenance sessionId unchanged.
+ */
+let _checkpointSessionIdOverride: string | undefined;
+
+async function loadSessionCheckpoint(
+  projectRoot: string,
+  sessionId: string | undefined,
+): Promise<SedimentCheckpoint> {
+  return loadSessionCheckpointRaw(projectRoot, _checkpointSessionIdOverride ?? sessionId);
+}
+
+async function saveSessionCheckpoint(
+  projectRoot: string,
+  sessionId: string | undefined,
+  patch: SedimentCheckpoint,
+): Promise<void> {
+  return saveSessionCheckpointRaw(projectRoot, _checkpointSessionIdOverride ?? sessionId, patch);
+}
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import type { EntryStatus } from "./validation";
 import { executeCuratorDecisionToBrain } from "./curator-decision-writer";
@@ -162,6 +184,10 @@ import {
 } from "./intake";
 import { listPublicationOutboxPending } from "./publication-outbox";
 import { scheduleKnowledgePublicationOutboxDrain } from "./writer";
+import {
+  isSedimentWorkerMode,
+  registerSedimentWorkerCommand,
+} from "./worker-rpc";
 
 /** Per-turn window budget for frozen-snapshot backlog inside one queue claim. */
 const AGENT_END_BACKLOG_WINDOWS_PER_TURN = 8;
@@ -368,6 +394,12 @@ type AgentEndMessageSnapshot = Readonly<{
 export interface SedimentAgentEndSnapshotForTests {
   readonly cwd: string;
   readonly sessionId?: string;
+  /**
+   * Optional independent checkpoint session slot (daemon worker).
+   * When set, load/saveSessionCheckpoint use this id; provenance/C6 stay on
+   * sessionId + anchor. Ordinary intake/queue paths leave this undefined.
+   */
+  readonly checkpointSessionId?: string;
   readonly sessionFile?: string;
   readonly branchEntries: readonly unknown[];
   readonly messages: readonly AgentEndMessageSnapshot[];
@@ -577,6 +609,9 @@ function enqueueSedimentIntakeRecord(args: {
   fromRecovery: boolean;
   reason: string;
 }): void {
+  // ADR 0045: daemon execution owner keeps durable capture but does not
+  // enqueue the normal sediment pass (worker is the sole executor).
+  if (resolveSedimentSettings().executionOwner === "daemon") return;
   const abrainHome = resolveAbrainHomeForSediment();
   const diagnostic = diagnosticSnapshotFromIntake(args.record, args.modelRegistry);
   enqueueDetachedAgentEnd({
@@ -645,7 +680,10 @@ async function schedulePendingIntakeRecovery(opts: {
   reason?: string;
   modelRegistry?: unknown;
 }): Promise<number> {
-  if (!resolveSedimentSettings().enabled) return 0;
+  const recoverySettings = resolveSedimentSettings();
+  if (!recoverySettings.enabled) return 0;
+  // ADR 0045: daemon owner does not schedule ordinary recovery passes.
+  if (recoverySettings.executionOwner === "daemon") return 0;
   const abrainHome = resolveAbrainHomeForSediment();
   const ownerProjectRoot = path.resolve(opts.ownerProjectRoot);
   // Ownership is physical root equality only. Same project_id with different
@@ -2799,6 +2837,12 @@ export default function (pi: ExtensionAPI) {
   // write hooks or tools. Dispatch sets PI_ABRAIN_DISABLED=1.
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
+  // Stage0 daemon worker: only register worker-safe RPC command + install the
+  // shared agent_end pass body. No ordinary lifecycle hooks / queue / recovery
+  // / timer / footer / edge shadow recursion (ADR 0045 Stage0 / worker-rpc).
+  const sedimentWorkerMode = isSedimentWorkerMode();
+
+  if (!sedimentWorkerMode) {
   // Verify internal pi APIs we depend on. Missing APIs degrade gracefully
   // but log a warning so operators know after a pi upgrade.
   verifyPiInternals({ pi });
@@ -3116,9 +3160,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
     },
   );
+  } // end !sedimentWorkerMode ordinary lifecycle registration
 
-  // Production worker shared by live agent_end enqueue and intake recovery.
+  // Production worker shared by live agent_end enqueue, intake recovery, and
+  // Stage0 daemon worker RPC (same implementation; no duplicated writer).
   const runSedimentAgentEndPass: SedimentAgentEndPassRunner = async (snapshot, passOpts) => {
+          // Daemon worker may pin an independent checkpoint slot for the whole
+          // pass (including ready-pending more loop probes). Ordinary paths
+          // leave checkpointSessionId unset → no override.
+          const prevCheckpointSessionOverride = _checkpointSessionIdOverride;
+          if (snapshot.checkpointSessionId) {
+            _checkpointSessionIdOverride = snapshot.checkpointSessionId;
+          }
+          try {
           // Each claimed pass gets a fresh drain budget so ready-pending
           // continuation can keep walking the frozen snapshot tip.
           if (snapshot.sessionId) {
@@ -5983,8 +6037,25 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             });
           }
 
+          } finally {
+            _checkpointSessionIdOverride = prevCheckpointSessionOverride;
+          }
   };
   sedimentAgentEndPassRunner = runSedimentAgentEndPass;
+
+  if (sedimentWorkerMode) {
+    registerSedimentWorkerCommand(pi, {
+      runAgentEndPass: runSedimentAgentEndPass,
+      resolveAbrainHome: resolveAbrainHomeForSediment,
+      resolveExecutionOwner: () => resolveSedimentSettings().executionOwner,
+      loadSessionCheckpoint: (projectRoot, sessionId) =>
+        loadSessionCheckpointRaw(projectRoot, sessionId),
+      drainKnowledgePublicationOutbox: async (abrainHome) => {
+        await scheduleKnowledgePublicationOutboxDrain(abrainHome, resolveSedimentSettings());
+      },
+    });
+    return;
+  }
 
   pi.on(
     "agent_end",

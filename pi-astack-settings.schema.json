@@ -804,6 +804,13 @@
               }
             }
           }
+        },
+
+        "executionOwner": {
+          "type": "string",
+          "enum": ["foreground", "daemon"],
+          "default": "foreground",
+          "description": "ADR 0045 Stage0 single-executor ownership. foreground (default): ordinary Pi extension owns enqueue + recovery + normal sediment pass/timer; worker mode refuses. daemon: ordinary extension keeps agent_end/settled capture (intake + edge shadow) but does not enqueue, schedule recovery, or run the normal sediment pass; headless worker (PI_ASTACK_SEDIMENT_WORKER_MODE=1) is the sole pass executor. Prevents dual-executor races. Not a formal ACK/authority switch."
         }
       }
     },

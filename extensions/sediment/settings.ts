@@ -49,6 +49,11 @@ function resolveEdgeShadowFrozenContractAdapterEnabled(raw: unknown, fallback: b
   return asBoolean(raw, fallback);
 }
 
+function resolveExecutionOwner(raw: unknown, fallback: "foreground" | "daemon"): "foreground" | "daemon" {
+  if (raw === "foreground" || raw === "daemon") return raw;
+  return fallback;
+}
+
 function piStackSettingsPath(): string {
   return process.env.PI_ASTACK_SETTINGS_PATH?.trim()
     || path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
@@ -271,6 +276,17 @@ export interface SedimentSettings {
     };
   };
 
+  /**
+   * ADR 0045 Stage0 single-executor ownership.
+   * - "foreground" (default): ordinary Pi extension owns enqueue + recovery +
+   *   normal sediment pass/timer. Worker mode must refuse.
+   * - "daemon": ordinary extension keeps agent_end/settled capture (intake +
+   *   edge shadow) but does NOT enqueue, schedule recovery, or run the normal
+   *   sediment pass. Headless worker (PI_ASTACK_SEDIMENT_WORKER_MODE=1) is the
+   *   sole pass executor. Prevents dual-executor races.
+   */
+  executionOwner: "foreground" | "daemon";
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -446,6 +462,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
       enabled: false,
     },
   },
+  executionOwner: "foreground",
   promptVersion: {
     activeCorrectionClassifier: "v3",
     reasoningNormalizationPreamble: "v1",
@@ -664,6 +681,7 @@ export function resolveSedimentSettings(): SedimentSettings {
         ),
       },
     },
+    executionOwner: resolveExecutionOwner(cfg.executionOwner, DEFAULT_SEDIMENT_SETTINGS.executionOwner),
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,
