@@ -779,6 +779,31 @@
               "description": "Optional provider/model ref for rich CuratorDecision payload synthesis when Pass 2 confirms an unsynthesizable Pass 1 op (update/merge/supersede/delete). Empty means runtime falls back to sediment.curatorModel. Concrete model IDs belong in pi-astack-settings.json."
             }
           }
+        },
+
+        "edgeProtocolShadow": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ADR 0044 Pi-side capture-only protocol shadow. Default off. When enabled, agent_end writes a durable raw sidecar + candidate journal record and agent_settled writes a TerminalWitness with settlement_status=unsupported_core_capability. Never becomes memory authority; existing local sediment intake remains local_primary. Link/seal deferred by missing Pi core SessionManager transaction and launch broker. Test override: PI_ASTACK_EDGE_PROTOCOL_SHADOW=1|0. Optional frozenContractAdapter is a separate default-off read-only Stage A0 formal projection (pi-router e26f669 + memory.fds); never writes, never ACKs.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable capture-only protocol shadow. Protocol shadow only — does not cut over authority, does not close queue/recovery/publication, does not create a second semantic writer."
+            },
+            "frozenContractAdapter": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Default-off read-only adapter projecting flat edge-journal/v1 records to pi.memory.v1 EdgeShadowJournalRecord proto-JSON under frozen pi-router contract e26f669. Env override: PI_ASTACK_EDGE_SHADOW_FROZEN_CONTRACT_ADAPTER=1|0.",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "Enable read-only frozen-contract projection. Does not capture, write journals, emit ConsumerAck, advance retention, delete sources, or change local_primary."
+                }
+              }
+            }
+          }
         }
       }
     },

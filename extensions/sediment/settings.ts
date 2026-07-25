@@ -34,9 +34,25 @@ function resolveTier2RulesLegacyWriteGateMode(raw: unknown, fallback: "off" | "o
   return fallback;
 }
 
-const PI_STACK_SETTINGS_PATH = path.join(
-  os.homedir(), ".pi", "agent", "pi-astack-settings.json",
-);
+/** Settings value + optional test/env override. Env wins when set to 0/1/true/false. */
+function resolveEdgeProtocolShadowEnabled(raw: unknown, fallback: boolean): boolean {
+  const env = process.env.PI_ASTACK_EDGE_PROTOCOL_SHADOW?.trim().toLowerCase();
+  if (env === "1" || env === "true" || env === "on" || env === "yes") return true;
+  if (env === "0" || env === "false" || env === "off" || env === "no") return false;
+  return asBoolean(raw, fallback);
+}
+
+function resolveEdgeShadowFrozenContractAdapterEnabled(raw: unknown, fallback: boolean): boolean {
+  const env = process.env.PI_ASTACK_EDGE_SHADOW_FROZEN_CONTRACT_ADAPTER?.trim().toLowerCase();
+  if (env === "1" || env === "true" || env === "on" || env === "yes") return true;
+  if (env === "0" || env === "false" || env === "off" || env === "no") return false;
+  return asBoolean(raw, fallback);
+}
+
+function piStackSettingsPath(): string {
+  return process.env.PI_ASTACK_SETTINGS_PATH?.trim()
+    || path.join(os.homedir(), ".pi", "agent", "pi-astack-settings.json");
+}
 
 export interface SedimentSettings {
   enabled: boolean;
@@ -235,6 +251,25 @@ export interface SedimentSettings {
    *  Empty means fall back to classifierModel, then curatorModel. */
   stagingPromotionModel: string;
 
+  /**
+   * ADR 0044 Pi-side capture-only protocol shadow (default off).
+   * When enabled: agent_end writes durable raw sidecar + candidate journal;
+   * agent_settled writes TerminalWitness with unsupported_core_capability.
+   * Never becomes memory authority; existing local intake remains local_primary.
+   * Env override for tests: PI_ASTACK_EDGE_PROTOCOL_SHADOW=1|0.
+   *
+   * frozenContractAdapter (default off): read-only Stage A0 formal projection
+   * of flat edge-journal/v1 → pi.memory.v1 EdgeShadowJournalRecord proto-JSON.
+   * Contract pin = pi-router e26f669 + memory.fds digest. Never writes journal,
+   * never ACKs, never advances retention. Env: PI_ASTACK_EDGE_SHADOW_FROZEN_CONTRACT_ADAPTER=1|0.
+   */
+  edgeProtocolShadow: {
+    enabled: boolean;
+    frozenContractAdapter: {
+      enabled: boolean;
+    };
+  };
+
   /** ADR 0025 P0: semantic version tags for each classifier prompt.
    *  Written into every audit row so downstream aggregator/health-check
    *  can track prompt changes without manual cross-reference.
@@ -404,6 +439,12 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
    *  are configured. */
   stagingPromotionEnabled: false,
   stagingPromotionModel: "",
+  edgeProtocolShadow: {
+    enabled: false,
+    frozenContractAdapter: {
+      enabled: false,
+    },
+  },
   promptVersion: {
     activeCorrectionClassifier: "v2",
     reasoningNormalizationPreamble: "v1",
@@ -480,11 +521,12 @@ export function buildPromptVersionAudit(
 }
 
 function loadPiStackSettings(): Record<string, unknown> {
+  const settingsPath = piStackSettingsPath();
   try {
-    return JSON.parse(fsSync.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
+    return JSON.parse(fsSync.readFileSync(settingsPath, "utf-8"));
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
+    console.error(`pi-astack: failed to parse ${settingsPath}: ${message}. Using defaults.`);
     return {};
   }
 }
@@ -609,6 +651,18 @@ export function resolveSedimentSettings(): SedimentSettings {
     stagingPromotionModel: typeof cfg.stagingPromotionModel === "string" && cfg.stagingPromotionModel.trim()
       ? cfg.stagingPromotionModel.trim()
       : DEFAULT_SEDIMENT_SETTINGS.stagingPromotionModel,
+    edgeProtocolShadow: {
+      enabled: resolveEdgeProtocolShadowEnabled(
+        (cfg.edgeProtocolShadow as Record<string, unknown> | undefined)?.enabled,
+        DEFAULT_SEDIMENT_SETTINGS.edgeProtocolShadow.enabled,
+      ),
+      frozenContractAdapter: {
+        enabled: resolveEdgeShadowFrozenContractAdapterEnabled(
+          ((cfg.edgeProtocolShadow as Record<string, unknown> | undefined)?.frozenContractAdapter as Record<string, unknown> | undefined)?.enabled,
+          DEFAULT_SEDIMENT_SETTINGS.edgeProtocolShadow.frozenContractAdapter.enabled,
+        ),
+      },
+    },
     promptVersion: {
       activeCorrectionClassifier: typeof (cfg.promptVersion as Record<string,unknown>|undefined)?.activeCorrectionClassifier === "string"
         ? (cfg.promptVersion as Record<string,unknown>).activeCorrectionClassifier as string : DEFAULT_SEDIMENT_SETTINGS.promptVersion.activeCorrectionClassifier,

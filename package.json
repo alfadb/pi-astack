@@ -192,6 +192,8 @@
     "smoke:canonical-mutation-barrier": "node scripts/smoke-canonical-mutation-barrier.mjs",
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
+    "smoke:edge-shadow-frozen-contract-adapter": "node scripts/smoke-edge-shadow-frozen-contract-adapter.mjs",
+    "dossier:edge-shadow-frozen-contract-production": "node scripts/dossier-edge-shadow-frozen-contract-production.mjs",
     "smoke:sediment-intake-publication": "node scripts/smoke-sediment-intake-publication.mjs",
     "smoke:sediment-knowledge-mutations": "node scripts/smoke-sediment-knowledge-mutations.mjs",
     "dossier:sediment-intake-production-readonly": "node scripts/dossier-sediment-intake-production-readonly.mjs",
@@ -339,7 +341,8 @@
     ]
   },
   "dependencies": {
-    "openai": "6.26.0"
+    "openai": "6.26.0",
+    "protobufjs": "7.6.5"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.82.0",

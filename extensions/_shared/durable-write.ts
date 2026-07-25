@@ -8,6 +8,14 @@ export interface DurableAtomicWriteFileOptions {
   syncFile?: boolean;
   syncDirectory?: boolean;
   tmpPath?: string;
+  /**
+   * After a successful `link(temp, target)`, re-read target and compare bytes.
+   * Default true (unchanged historical behavior). Callers may set false when
+   * the successful link shares the already-fsynced temp inode, so the extra
+   * read-back is redundant. EEXIST identical/collision paths never use this
+   * flag (they always compare existing bytes).
+   */
+  verifyCreated?: boolean;
 }
 
 export async function durableAtomicWriteFile(
@@ -68,14 +76,20 @@ export async function durableAtomicCreateFile(
       await fs.link(tmpPath, filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        // Close the narrow pin-only window where a previous creator linked the
+        // name but crashed before parent-dir fsync: make the directory entry
+        // durable before identical/collision byte comparison.
+        if (options.syncDirectory ?? true) await fsyncDirectory(dir);
         const existing = await fs.readFile(filePath);
         return existing.equals(bytes) ? "identical" : "collision";
       }
       throw err;
     }
     if (options.syncDirectory ?? true) await fsyncDirectory(dir);
-    const readBack = await fs.readFile(filePath);
-    if (!readBack.equals(bytes)) throw new Error(`durable create read-back mismatch: ${filePath}`);
+    if (options.verifyCreated ?? true) {
+      const readBack = await fs.readFile(filePath);
+      if (!readBack.equals(bytes)) throw new Error(`durable create read-back mismatch: ${filePath}`);
+    }
     return "created";
   } finally {
     await handle?.close().catch(() => undefined);
