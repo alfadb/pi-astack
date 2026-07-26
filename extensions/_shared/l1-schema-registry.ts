@@ -3,6 +3,14 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 import { isPropositionEnvelopeSchema, validatePropositionBodyForEnvelope } from "./proposition";
+import {
+  identitiesMatch,
+  inventoryFingerprintFromIdentities,
+  openL1ValidatedScanCache,
+  payloadFromValidatedEnvelope,
+  readL1FileIdentity,
+  type L1FileIdentity,
+} from "./l1-validated-scan-cache";
 
 export type L1SchemaDomain = "knowledge" | "constraint" | "canonical_path" | "proposition";
 export type L1SchemaRole = "canonical" | "evidence" | "meta";
@@ -73,6 +81,20 @@ export interface WholeL1ScanOptions {
   domains?: readonly L1SchemaDomain[];
   roles?: readonly L1SchemaRole[];
   maxEventBytes?: number;
+  /**
+   * Cooperative cancel/checkpoint invoked at safe per-directory and per-file
+   * boundaries during discovery and validation. Callers (startup) may throw a
+   * typed budget error. Read-only: never aborts a mutation already under the
+   * canonical barrier. Optional and backward-compatible.
+   */
+  checkpoint?: () => void | Promise<void>;
+  /**
+   * Non-authoritative progressive validated-scan cache under `.state/`.
+   * Default **false** — only canonical startup (and explicit opt-in callers)
+   * should set `useValidatedCache: true`. Read-only surfaces must not create
+   * `.state` cache artifacts. Custom test filesystems always skip the cache.
+   */
+  useValidatedCache?: boolean;
 }
 
 export interface WholeL1ScanResult {
@@ -90,6 +112,18 @@ export interface WholeL1ScanResult {
    * Any other non-conforming name still fails the whole scan closed.
    */
   tempResidue: readonly string[];
+  /**
+   * Non-authoritative inventory fingerprint over live path identities
+   * (relativePath + dev/ino/size/mtimeNs/ctimeNs). Used by startup assert-stable
+   * and last-known-ready gates; never recovery authority.
+   */
+  inventoryFingerprint: string;
+  /** Cheap reconstruct successes (cache on). Zero when cache disabled/unavailable. */
+  cacheHits: number;
+  /** No usable cache row / identity mismatch (or cache off). */
+  cacheMisses: number;
+  /** Cache row present but cheap reconstruct failed → full disk revalidation. */
+  cacheRevalidated: number;
 }
 
 interface L1ScanFileSystem {
@@ -363,61 +397,245 @@ export async function scanWholeL1Validated(options: WholeL1ScanOptions): Promise
   return scanWholeL1ValidatedWithFileSystem(options, nodeL1ScanFileSystem);
 }
 
+async function invokeScanCheckpoint(
+  checkpoint: WholeL1ScanOptions["checkpoint"],
+  phase: "before_list" | "list_first_shard" | "list_second_shard" | "list_leaf" | "before_file" | "after_file" | "before_legacy_validate",
+): Promise<void> {
+  if (checkpoint) await checkpoint();
+  // Deterministic per-file scan delay for cooperative budget tests only.
+  // Applied only at file validation boundaries so listing does not amplify the unit.
+  if (
+    (phase === "before_file" || phase === "after_file")
+    && process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1"
+  ) {
+    const raw = process.env.PI_ASTACK_L1_SCAN_RECORD_DELAY_MS;
+    if (raw !== undefined && raw !== "") {
+      const delayMs = Number(raw);
+      if (Number.isFinite(delayMs) && delayMs > 0) {
+        // Half the configured unit at before_file and half at after_file ≈ one unit per record.
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(Math.floor(delayMs / 2), 15_000)));
+      }
+    }
+  }
+}
+
+/**
+ * Positive cache-hit contract: reconstruct ValidatedL1Envelope without JCS/hash
+ * recompute. Any anomaly returns null → caller falls back to full disk validate.
+ */
+function reconstructValidatedFromCache(options: {
+  payload: {
+    relativePath: string;
+    eventId: string;
+    bodyHash: string;
+    envelopeHash: string;
+    envelopeSchema: string;
+    envelopeJson: string;
+  };
+  registry: L1SchemaRoleRegistry;
+  abrainHome: string;
+  filePath: string;
+  relativePath: string;
+}): ValidatedL1Envelope | null {
+  try {
+    const parsed = JSON.parse(options.payload.envelopeJson) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const envelope = parsed as Record<string, unknown>;
+    if (envelope.schema !== options.payload.envelopeSchema) return null;
+    if (envelope.canonicalization !== options.registry.storage.canonicalization) return null;
+    if (envelope.hash_alg !== options.registry.storage.hash_algorithm) return null;
+    if (envelope.event_id !== options.payload.eventId) return null;
+    if (envelope.body_hash !== options.payload.bodyHash) return null;
+    if (!envelope.body || typeof envelope.body !== "object" || Array.isArray(envelope.body)) return null;
+    if (typeof options.payload.eventId !== "string" || !/^[0-9a-f]{64}$/.test(options.payload.eventId)) return null;
+    if (typeof options.payload.bodyHash !== "string" || !/^[0-9a-f]{64}$/.test(options.payload.bodyHash)) return null;
+    if (typeof options.payload.envelopeHash !== "string" || !/^[0-9a-f]{64}$/.test(options.payload.envelopeHash)) return null;
+    if (options.payload.eventId !== options.payload.bodyHash) return null;
+
+    const expectedRelative = expectedL1EventRelativePath(options.payload.eventId);
+    const normalizedRelative = options.relativePath.split(/[\\/]+/).join("/");
+    if (normalizedRelative !== expectedRelative) return null;
+    if (options.payload.relativePath !== expectedRelative) return null;
+
+    let registration: L1SchemaRegistration;
+    try {
+      registration = resolveL1EnvelopeSchema(options.registry, options.payload.envelopeSchema);
+    } catch {
+      return null;
+    }
+    if (registration.envelope_schema !== options.payload.envelopeSchema) return null;
+
+    const normalizedFilePath = path.resolve(options.filePath);
+    const expectedPath = expectedL1EventPath(options.abrainHome, options.payload.eventId);
+    if (normalizedFilePath !== expectedPath) return null;
+
+    return deepFreeze({
+      envelope,
+      body: envelope.body as Readonly<Record<string, unknown>>,
+      registration,
+      eventId: options.payload.eventId,
+      bodyHash: options.payload.bodyHash,
+      envelopeHash: options.payload.envelopeHash,
+      relativePath: normalizedRelative,
+      filePath: normalizedFilePath,
+    });
+  } catch {
+    return null;
+  }
+}
+
 async function scanWholeL1ValidatedWithFileSystem(options: WholeL1ScanOptions, scanFs: L1ScanFileSystem): Promise<WholeL1ScanResult> {
-  const registry = options.registry ?? loadL1SchemaRegistry(options.registryPath);
+  const registryPath = options.registryPath ?? defaultL1SchemaRegistryPath();
+  const registry = options.registry ?? loadL1SchemaRegistry(registryPath);
   const abrainHome = path.resolve(options.abrainHome);
   const root = path.resolve(abrainHome, ...registry.storage.root_relative_path.split("/"));
   const maxEventBytes = options.maxEventBytes ?? 16 * 1024 * 1024;
   if (!Number.isSafeInteger(maxEventBytes) || maxEventBytes <= 0) throw failure("L1_SCAN_INVALID_OPTIONS", "maxEventBytes must be a positive safe integer");
   if (!(await exists(root, scanFs))) return emptyScanResult();
   const rootReal = await assertExistingDirectoryChainNoSymlink(abrainHome, root, scanFs);
-  const { files, tempResidue } = await listContentAddressedFiles(root, rootReal, scanFs);
+  await invokeScanCheckpoint(options.checkpoint, "before_list");
+  const { files, tempResidue } = await listContentAddressedFiles(root, rootReal, scanFs, options.checkpoint);
   const records: ValidatedL1ScanRecord[] = [];
   const seenEventIds = new Set<string>();
+  const identities: L1FileIdentity[] = [];
+  // Opt-in only. Default off so proposition protected-surface / read-only callers
+  // never materialize `.state` cache writes. computeL1InventoryFingerprint never
+  // opens the cache.
+  const wantCache = options.useValidatedCache === true && scanFs === nodeL1ScanFileSystem;
+  const cache = wantCache
+    ? openL1ValidatedScanCache({ abrainHome, registry, registryPath })
+    : null;
+  let cacheHits = 0;
+  let cacheMisses = 0;
+  let cacheRevalidated = 0;
 
-  for (const file of files) {
-    let stat: fs.Stats;
-    try {
-      stat = await scanFs.lstat(file);
-    } catch (err) {
-      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during scan: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
-      throw err;
+  try {
+    for (const file of files) {
+      await invokeScanCheckpoint(options.checkpoint, "before_file");
+      let stat: fs.Stats;
+      try {
+        stat = await scanFs.lstat(file);
+      } catch (err) {
+        if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during scan: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
+        throw err;
+      }
+      if (!stat.isFile()) throw failure("L1_NON_REGULAR", `event path is not a regular file: ${file}`);
+      // maxEventBytes is always re-checked against the live size (never trusted from cache alone).
+      if (stat.size > maxEventBytes) throw failure("L1_EVENT_TOO_LARGE", `event exceeds ${maxEventBytes} bytes: ${file}`, { size: stat.size });
+      let real: string;
+      try {
+        real = await scanFs.realpath(file);
+      } catch (err) {
+        if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during realpath: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
+        throw err;
+      }
+      if (!isPathInside(rootReal, real)) throw failure("L1_PATH_ESCAPE", `event realpath escapes L1 root: ${file}`, { real });
+      const relativePath = relativeUnix(abrainHome, file);
+
+      let identity: L1FileIdentity | null = null;
+      if (wantCache) {
+        try {
+          identity = await readL1FileIdentity(file, relativePath);
+          identities.push(identity);
+        } catch {
+          identity = null;
+        }
+      }
+
+      let validated: ValidatedL1Envelope | null = null;
+      let hadCacheCandidate = false;
+      if (cache && identity) {
+        const hit = cache.get(relativePath);
+        if (hit && identitiesMatch(hit.identity, identity) && Number(hit.identity.size) <= maxEventBytes) {
+          hadCacheCandidate = true;
+          // Positive cache contract: cheap reconstruct only (no JCS / full validate).
+          validated = reconstructValidatedFromCache({
+            payload: hit.payload,
+            registry,
+            abrainHome,
+            filePath: file,
+            relativePath,
+          });
+          if (validated) {
+            cacheHits += 1;
+          }
+        }
+      }
+
+      if (!validated) {
+        if (hadCacheCandidate) cacheRevalidated += 1;
+        else cacheMisses += 1;
+        let raw: string;
+        try {
+          raw = await scanFs.readFile(file, "utf-8");
+        } catch (err) {
+          if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during read: ${relativePath}`, { error: errorMessage(err) });
+          throw failure("L1_ENVELOPE_INVALID", `event could not be read: ${relativePath}`, { error: errorMessage(err) });
+        }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (err) {
+          throw failure("L1_ENVELOPE_INVALID", `event is not valid JSON: ${relativePath}`, { error: errorMessage(err) });
+        }
+        // Full fail-closed validate on miss / reconstruct failure / malformed bytes.
+        validated = validateL1Envelope(parsed, { registry, abrainHome, filePath: file, relativePath });
+        if (cache && identity) {
+          try {
+            cache.put(identity, payloadFromValidatedEnvelope(validated));
+          } catch {
+            // Cache write failures never fail the scan; cache is non-authoritative.
+          }
+        }
+      }
+
+      if (seenEventIds.has(validated.eventId)) throw failure("L1_EVENT_DUPLICATE", `duplicate event id ${validated.eventId}`);
+      seenEventIds.add(validated.eventId);
+      // Classification always recomputed from the current domains/roles filter.
+      const classification = classifyScanRecord(validated.registration, options);
+      records.push(deepFreeze({ ...validated, classification }));
+      await invokeScanCheckpoint(options.checkpoint, "after_file");
     }
-    if (!stat.isFile()) throw failure("L1_NON_REGULAR", `event path is not a regular file: ${file}`);
-    if (stat.size > maxEventBytes) throw failure("L1_EVENT_TOO_LARGE", `event exceeds ${maxEventBytes} bytes: ${file}`, { size: stat.size });
-    let real: string;
-    try {
-      real = await scanFs.realpath(file);
-    } catch (err) {
-      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during realpath: ${relativeUnix(abrainHome, file)}`, { error: errorMessage(err) });
-      throw err;
+
+    if (cache) {
+      try {
+        cache.retainOnly(new Set(identities.map((item) => item.relativePath)));
+      } catch {
+        // hygiene only
+      }
     }
-    if (!isPathInside(rootReal, real)) throw failure("L1_PATH_ESCAPE", `event realpath escapes L1 root: ${file}`, { real });
-    const relativePath = relativeUnix(abrainHome, file);
-    let raw: string;
-    try {
-      raw = await scanFs.readFile(file, "utf-8");
-    } catch (err) {
-      if (isEnoent(err)) throw failure("L1_EVENT_DISAPPEARED", `selected event disappeared during read: ${relativePath}`, { error: errorMessage(err) });
-      throw failure("L1_ENVELOPE_INVALID", `event could not be read: ${relativePath}`, { error: errorMessage(err) });
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (err) {
-      throw failure("L1_ENVELOPE_INVALID", `event is not valid JSON: ${relativePath}`, { error: errorMessage(err) });
-    }
-    const validated = validateL1Envelope(parsed, { registry, abrainHome, filePath: file, relativePath });
-    if (seenEventIds.has(validated.eventId)) throw failure("L1_EVENT_DUPLICATE", `duplicate event id ${validated.eventId}`);
-    seenEventIds.add(validated.eventId);
-    const classification = classifyScanRecord(validated.registration, options);
-    records.push(deepFreeze({ ...validated, classification }));
+  } finally {
+    cache?.close();
   }
 
+  await invokeScanCheckpoint(options.checkpoint, "before_legacy_validate");
   validateLegacyRecoveryCohorts(records);
   records.sort((left, right) => compareCodeUnits(left.relativePath ?? "", right.relativePath ?? ""));
   const all = Object.freeze(records.slice());
   const selected = Object.freeze(all.filter((item) => item.classification === "selected"));
+  // Directory traversal / path / symlink / temp residue / duplicate / legacy cohort
+  // invariants are always revalidated above. Inventory fingerprint is identity-only.
+  let inventoryFingerprint: string;
+  if (identities.length === files.length && identities.length > 0) {
+    inventoryFingerprint = inventoryFingerprintFromIdentities(identities);
+  } else if (wantCache) {
+    // Fall back: re-stat for fingerprint when bigint identity collection partially failed.
+    const fallback: L1FileIdentity[] = [];
+    for (const file of files) {
+      const relativePath = relativeUnix(abrainHome, file);
+      fallback.push(await readL1FileIdentity(file, relativePath));
+    }
+    inventoryFingerprint = inventoryFingerprintFromIdentities(fallback);
+  } else {
+    inventoryFingerprint = inventoryFingerprintFromIdentities(files.map((file) => ({
+      relativePath: relativeUnix(abrainHome, file),
+      dev: "0",
+      ino: "0",
+      size: "0",
+      mtimeNs: "0",
+      ctimeNs: "0",
+    })));
+  }
   const result: WholeL1ScanResult = {
     all,
     selected,
@@ -427,6 +645,10 @@ async function scanWholeL1ValidatedWithFileSystem(options: WholeL1ScanOptions, s
     phaseDisabledShadow: Object.freeze(all.filter((item) => item.classification === "phase-disabled-shadow")),
     definedInactiveShadow: Object.freeze(all.filter((item) => item.classification === "defined-inactive-shadow")),
     tempResidue: Object.freeze(tempResidue.slice().sort(compareCodeUnits)),
+    inventoryFingerprint,
+    cacheHits,
+    cacheMisses,
+    cacheRevalidated,
   };
   return deepFreeze(result);
 }
@@ -780,19 +1002,27 @@ function classifyScanRecord(registration: L1SchemaRegistration, options: WholeL1
 const DURABLE_WRITE_TEMP_RESIDUE = /^\.[0-9a-f]{64}\.json\.\d+\.\d+\.[0-9a-f]+\.tmp$/;
 const CANONICAL_L1_EVENT_LEAF = /^[0-9a-f]{64}\.json$/;
 
-async function listContentAddressedFiles(root: string, rootReal: string, scanFs: L1ScanFileSystem): Promise<{ files: string[]; tempResidue: string[] }> {
+async function listContentAddressedFiles(
+  root: string,
+  rootReal: string,
+  scanFs: L1ScanFileSystem,
+  checkpoint?: WholeL1ScanOptions["checkpoint"],
+): Promise<{ files: string[]; tempResidue: string[] }> {
   const files: string[] = [];
   const tempResidue: string[] = [];
   const first = await sortedDirents(root, scanFs);
   for (const firstShard of first) {
+    await invokeScanCheckpoint(checkpoint, "list_first_shard");
     const firstPath = path.join(root, firstShard.name);
     await assertShardDirectory(firstShard, firstPath, rootReal, 1, scanFs);
     const second = await sortedDiscoveredShardDirents(firstPath, 1, scanFs);
     for (const secondShard of second) {
+      await invokeScanCheckpoint(checkpoint, "list_second_shard");
       const secondPath = path.join(firstPath, secondShard.name);
       await assertShardDirectory(secondShard, secondPath, rootReal, 2, scanFs);
       const leaves = await sortedDiscoveredShardDirents(secondPath, 2, scanFs);
       for (const leaf of leaves) {
+        await invokeScanCheckpoint(checkpoint, "list_leaf");
         const file = path.join(secondPath, leaf.name);
         if (DURABLE_WRITE_TEMP_RESIDUE.test(leaf.name)) {
           const stat = await lstatIfPresent(file, scanFs);
@@ -884,7 +1114,47 @@ async function assertWritePathNoSymlink(abrainHome: string, targetPath: string):
 
 function emptyScanResult(): WholeL1ScanResult {
   const empty = Object.freeze([]) as readonly ValidatedL1ScanRecord[];
-  return deepFreeze({ all: empty, selected: empty, foldable: empty, foreignSkipped: empty, legacyReadOnly: empty, phaseDisabledShadow: empty, definedInactiveShadow: empty, tempResidue: Object.freeze([]) as readonly string[] });
+  return deepFreeze({
+    all: empty,
+    selected: empty,
+    foldable: empty,
+    foreignSkipped: empty,
+    legacyReadOnly: empty,
+    phaseDisabledShadow: empty,
+    definedInactiveShadow: empty,
+    tempResidue: Object.freeze([]) as readonly string[],
+    inventoryFingerprint: inventoryFingerprintFromIdentities([]),
+    cacheHits: 0,
+    cacheMisses: 0,
+    cacheRevalidated: 0,
+  });
+}
+
+/**
+ * Re-list L1 content-addressed files and compute the non-authoritative inventory
+ * fingerprint from live path identities. Used by startup assert-stable and the
+ * last-known-ready gate; never skips structural fail-closed checks.
+ */
+export async function computeL1InventoryFingerprint(options: {
+  abrainHome: string;
+  registry?: L1SchemaRoleRegistry;
+  registryPath?: string;
+  checkpoint?: () => void | Promise<void>;
+}): Promise<string> {
+  const registry = options.registry ?? loadL1SchemaRegistry(options.registryPath);
+  const abrainHome = path.resolve(options.abrainHome);
+  const root = path.resolve(abrainHome, ...registry.storage.root_relative_path.split("/"));
+  if (!(await exists(root, nodeL1ScanFileSystem))) return inventoryFingerprintFromIdentities([]);
+  const rootReal = await assertExistingDirectoryChainNoSymlink(abrainHome, root, nodeL1ScanFileSystem);
+  await invokeScanCheckpoint(options.checkpoint, "before_list");
+  const { files } = await listContentAddressedFiles(root, rootReal, nodeL1ScanFileSystem, options.checkpoint);
+  const identities: L1FileIdentity[] = [];
+  for (const file of files) {
+    await invokeScanCheckpoint(options.checkpoint, "before_file");
+    identities.push(await readL1FileIdentity(file, relativeUnix(abrainHome, file)));
+    await invokeScanCheckpoint(options.checkpoint, "after_file");
+  }
+  return inventoryFingerprintFromIdentities(identities);
 }
 
 function failure(code: string, message: string, detail?: Record<string, unknown>): L1SchemaRegistryError {

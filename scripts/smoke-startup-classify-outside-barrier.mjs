@@ -548,6 +548,221 @@ const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-
   assert(raceOldReports.length === 0, `late generation 1 report polluted current notification state: ${JSON.stringify(raceOldReports)}`);
   assert(raceNewErrors.length === 1, `late generation 1 report suppressed or duplicated generation 2 error: ${JSON.stringify(raceNewReports)}`);
 
+  // Strict monotonic total budget also covers outside freeze/scan/classify.
+  // A single injected uninterruptible outside delay may overrun the budget by
+  // at most that one unit; cooperative cutpoints must then defer without
+  // continuing into later phases or Promise.race-killing mutation work.
+  // Use a fresh settings file: an earlier case intentionally poisons settingsPath.
+  const budgetRepo = initRepo("outside-budget");
+  const budgetSettingsPath = path.join(tmp, "outside-budget-enabled.json");
+  fs.writeFileSync(budgetSettingsPath, `${JSON.stringify({
+    canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" },
+  }, null, 2)}\n`);
+  const freezeDelayMs = 800;
+  const outsideBudgetMs = 600;
+  const prevFreeze = process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS;
+  const prevClassify = process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+  process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS = String(freezeDelayMs);
+  delete process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+  try {
+    // Child process isolates process-global provenance fingerprint so the
+    // intentionally poisoned earlier settingsPath does not RUNTIME_PROVENANCE_SPLIT.
+    // Defer + external-lifecycle retry are separate processes: the 600ms budget is
+    // intentionally tight for the defer proof and is NOT a realistic recovery budget
+    // (empty-repo cold startup alone can approach it under load).
+    const code = `
+const {createJiti}=require("jiti");
+const path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+(async()=>{
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS="1";
+  process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS=${JSON.stringify(String(freezeDelayMs))};
+  const options={
+    abrainHome:${JSON.stringify(budgetRepo)},
+    settingsPath:${JSON.stringify(budgetSettingsPath)},
+    sourceRoot:${JSON.stringify(root)},
+    startupBusyBudgetMs:${outsideBudgetMs},
+    startupBarrierTimeoutMs:1000,
+  };
+  const instance=await runtime.getCanonicalGitRuntime(options);
+  const started=Date.now();
+  const deferred=await instance.awaitStartup();
+  const elapsedMs=Date.now()-started;
+  process.stdout.write(JSON.stringify({ deferred, elapsedMs }));
+})().catch(error=>{console.error(error);process.exit(1)});
+`;
+    const beforeStatus = git(budgetRepo, "status", "--porcelain=v1", "-z", "-uall");
+    const beforeHead = git(budgetRepo, "rev-parse", "HEAD");
+    const child = spawn(process.execPath, ["-e", code], { cwd: root, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const result = await childResult(child);
+    const payload = JSON.parse(result.stdout);
+    const budgetDeferred = payload.deferred;
+    const elapsedMs = payload.elapsedMs;
+    assert(
+      budgetDeferred.startup === "deferred" && budgetDeferred.deferredReason === "STARTUP_BUDGET_EXHAUSTED" && budgetDeferred.retryable === true,
+      `outside-phase budget did not return STARTUP_BUDGET_EXHAUSTED: ${JSON.stringify(budgetDeferred)}`,
+    );
+    // Upper bound: budget + one uninterruptible outside unit + small scheduler epsilon.
+    assert(
+      elapsedMs <= outsideBudgetMs + freezeDelayMs + 250,
+      `outside budget elapsed far beyond budget+one unit: ${elapsedMs}ms (budget=${outsideBudgetMs}, unit=${freezeDelayMs})`,
+    );
+    assert(
+      !budgetDeferred.tail.some((row) => row.phase === "classify_initial" && row.status === "outside_barrier_ok"),
+      `budget-exhausted startup continued into classify after freeze: ${JSON.stringify(budgetDeferred.tail)}`,
+    );
+    assert(
+      !budgetDeferred.tail.some((row) => row.status === "barrier_acquired"),
+      `budget-exhausted startup entered a mutation barrier: ${JSON.stringify(budgetDeferred.tail)}`,
+    );
+    assert(git(budgetRepo, "rev-parse", "HEAD") === beforeHead, "outside budget deferred mutated HEAD");
+    assert(git(budgetRepo, "status", "--porcelain=v1", "-z", "-uall") === beforeStatus, "outside budget deferred dirtied worktree");
+
+    // External lifecycle retry: fresh process, normal budget, no freeze delay.
+    const recoverCode = `
+const {createJiti}=require("jiti");
+const path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+(async()=>{
+  delete process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS;
+  delete process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+  const instance=await runtime.getCanonicalGitRuntime({
+    abrainHome:${JSON.stringify(budgetRepo)},
+    settingsPath:${JSON.stringify(budgetSettingsPath)},
+    sourceRoot:${JSON.stringify(root)},
+    startupBusyBudgetMs:30_000,
+    startupBarrierTimeoutMs:5_000,
+  });
+  const recovered=await instance.awaitStartup();
+  process.stdout.write(JSON.stringify({ recovered }));
+})().catch(error=>{console.error(error);process.exit(1)});
+`;
+    const recoverChild = spawn(process.execPath, ["-e", recoverCode], { cwd: root, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const recovered = JSON.parse((await childResult(recoverChild)).stdout).recovered;
+    assert(recovered.startup === "ready", `post-budget external retry not ready: ${recovered.blockedReason}`);
+  } finally {
+    if (prevFreeze === undefined) delete process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS;
+    else process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS = prevFreeze;
+    if (prevClassify === undefined) delete process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+    else process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS = prevClassify;
+  }
+
+  // Cooperative whole-L1 scan budget: multi-record delay must defer mid-scan
+  // within a small epsilon of the budget, not after an entire uninterruptible
+  // full-scan unit (the production 17min scan / 10min budget failure mode).
+  {
+    const scanBudgetRepo = initRepo("scan-budget");
+    const scanBudgetSettings = path.join(tmp, "scan-budget-enabled.json");
+    fs.writeFileSync(scanBudgetSettings, `${JSON.stringify({
+      canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" },
+    }, null, 2)}\n`);
+    // Several independent L1 records so scan has multiple cooperative units.
+    for (let seq = 1; seq <= 6; seq += 1) writeKnowledge(scanBudgetRepo, seq);
+    const recordDelayMs = 80;
+    const scanBudgetMs = 150;
+    // Epsilon covers LKR probe + git status/HEAD snapshots + scheduler noise before
+    // the first cooperative scan unit. Keep the separate full-scan bound below.
+    const scanEpsilonMs = 400;
+    const beforeStatus = git(scanBudgetRepo, "status", "--porcelain=v1", "-z", "-uall");
+    const beforeHead = git(scanBudgetRepo, "rev-parse", "HEAD");
+    const scanCode = `
+const {createJiti}=require("jiti");
+const path=require("path");
+const {execFileSync}=require("child_process");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+const gitEnv={...process.env,LANG:"C",LC_ALL:"C",GIT_OPTIONAL_LOCKS:"0",GIT_TERMINAL_PROMPT:"0"};
+const repo=${JSON.stringify(scanBudgetRepo)};
+const git=(...args)=>execFileSync("git",["-C",repo,...args],{encoding:"utf8",env:gitEnv}).trim();
+(async()=>{
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS="1";
+  process.env.PI_ASTACK_L1_SCAN_RECORD_DELAY_MS=${JSON.stringify(String(recordDelayMs))};
+  delete process.env.PI_ASTACK_STARTUP_FREEZE_DELAY_MS;
+  delete process.env.PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS;
+  const options={
+    abrainHome:repo,
+    settingsPath:${JSON.stringify(scanBudgetSettings)},
+    sourceRoot:${JSON.stringify(root)},
+    startupBusyBudgetMs:${scanBudgetMs},
+    startupBarrierTimeoutMs:1000,
+  };
+  const instance=await runtime.getCanonicalGitRuntime(options);
+  const started=Date.now();
+  const deferred=await instance.awaitStartup();
+  const elapsedMs=Date.now()-started;
+  const headAfterDeferred=git("rev-parse","HEAD");
+  const statusAfterDeferred=git("status","--porcelain=v1","-z","-uall");
+  process.stdout.write(JSON.stringify({
+    deferred,
+    elapsedMs,
+    headAfterDeferred,
+    statusAfterDeferred,
+  }));
+})().catch(error=>{console.error(error);process.exit(1)});
+`;
+    const scanChild = spawn(process.execPath, ["-e", scanCode], { cwd: root, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const scanResult = await childResult(scanChild);
+    const scanPayload = JSON.parse(scanResult.stdout);
+    const scanDeferred = scanPayload.deferred;
+    const scanElapsedMs = scanPayload.elapsedMs;
+    assert(
+      scanDeferred.startup === "deferred"
+        && scanDeferred.deferredReason === "STARTUP_BUDGET_EXHAUSTED"
+        && scanDeferred.retryable === true,
+      `mid-scan budget did not return STARTUP_BUDGET_EXHAUSTED: ${JSON.stringify(scanDeferred)}`,
+    );
+    // Must NOT allow a full multi-record scan unit (6 * recordDelay) past budget.
+    assert(
+      scanElapsedMs <= scanBudgetMs + recordDelayMs + scanEpsilonMs,
+      `mid-scan budget elapsed far beyond budget+one record: ${scanElapsedMs}ms (budget=${scanBudgetMs}, unit=${recordDelayMs})`,
+    );
+    // Tight bound vs whole-scan overrun: 6 records would be ~480ms+; require defer before that.
+    assert(
+      scanElapsedMs < recordDelayMs * 6,
+      `mid-scan budget allowed a full multi-record scan to complete: ${scanElapsedMs}ms vs 6*${recordDelayMs}`,
+    );
+    assert(
+      !scanDeferred.tail.some((row) => row.status === "barrier_acquired"),
+      `mid-scan budget entered a mutation barrier: ${JSON.stringify(scanDeferred.tail)}`,
+    );
+    assert(
+      scanDeferred.tail.some((row) =>
+        row.code === "STARTUP_BUDGET_EXHAUSTED"
+        || row.phase === "freeze_initial"
+        || (row.detail && row.detail.phase === "scan_whole_l1")),
+      `mid-scan budget missing freeze/scan budget diagnostic: ${JSON.stringify(scanDeferred.tail)}`,
+    );
+    assert(scanPayload.headAfterDeferred === beforeHead, "mid-scan budget deferred mutated HEAD");
+    assert(scanPayload.statusAfterDeferred === beforeStatus, "mid-scan budget deferred dirtied worktree");
+
+    // External lifecycle retry in a fresh process with a normal budget and no
+    // per-record delay (the deferred process used a deliberately tiny budget).
+    fs.rmSync(path.join(scanBudgetRepo, "l1"), { recursive: true, force: true });
+    const recoverCode = `
+const {createJiti}=require("jiti");
+const path=require("path");
+const j=createJiti(${JSON.stringify(root)},{interopDefault:true});
+const runtime=j(path.join(${JSON.stringify(root)},"extensions/_shared/canonical-git-runtime.ts"));
+(async()=>{
+  delete process.env.PI_ASTACK_L1_SCAN_RECORD_DELAY_MS;
+  const instance=await runtime.getCanonicalGitRuntime({
+    abrainHome:${JSON.stringify(scanBudgetRepo)},
+    settingsPath:${JSON.stringify(scanBudgetSettings)},
+    sourceRoot:${JSON.stringify(root)},
+    startupBusyBudgetMs:30_000,
+    startupBarrierTimeoutMs:5_000,
+  });
+  const recovered=await instance.awaitStartup();
+  process.stdout.write(JSON.stringify({ recovered }));
+})().catch(error=>{console.error(error);process.exit(1)});
+`;
+    const recoverChild = spawn(process.execPath, ["-e", recoverCode], { cwd: root, env: gitEnv, stdio: ["ignore", "pipe", "pipe"] });
+    const recoverPayload = JSON.parse((await childResult(recoverChild)).stdout);
+    assert(recoverPayload.recovered.startup === "ready", `mid-scan external retry not ready: ${recoverPayload.recovered.blockedReason}`);
+  }
+
   console.log("startup busy retry and outside final classification: ok");
   console.log(`  A_head_advanced=${mutationHead !== headBefore} B_busy_retries=${b.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length} final_probe_ms=${finalOutsideProbeMs}`);
   console.log(`  barrier_probes=${probes} delays=${delays.join(",")} queued_budget_ms=${queuedElapsedMs} deferred_retries=${deferred.tail.filter((row) => row.status === "canonical_mutation_busy_retry").length}`);

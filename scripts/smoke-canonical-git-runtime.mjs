@@ -772,6 +772,127 @@ await check("empty startup emits no recovery event", async () => {
   assert((await activeRecoveryRecords(repo)).length === 0, "empty startup emitted a recovery event");
 });
 
+await check("pre-publish fault leaves prepared episode not_published and rethrows", async () => {
+  const previousHooks = process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+  const previousPre = process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+  const previousPost = process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+  delete process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+  delete process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+  try {
+    const repo = initRepo("prepublish-not-published");
+    const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+    assert((await runtime.awaitStartup()).startup === "ready", "prepublish fixture startup failed");
+    const knowledge = writeKnowledge(repo, 80);
+    const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+    const headBefore = git(repo, "rev-parse", "HEAD");
+    process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE = "1";
+    let code = null;
+    try {
+      await runtime.requestDrain([receipt], "prepublish not_published");
+    } catch (error) {
+      code = error.code ?? error.message;
+    }
+    assert(code === "TEST_DRAIN_PRE_PUBLISH", `prepublish did not throw typed fault: ${code}`);
+    assert(process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE === undefined, "prepublish one-shot hook was not consumed");
+    assert(git(repo, "rev-parse", "HEAD") === headBefore, "prepublish advanced HEAD");
+    assert(fs.existsSync(knowledge.file), "prepublish removed tracked content bytes");
+    assert(git(repo, "status", "--porcelain=v1", "--", knowledge.relativePath).startsWith("?? "), "prepublish consumed content path from worktree");
+    // HEAD must not contain the new content path after a true pre-publish fault.
+    assert(!git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(knowledge.relativePath), "prepublish left content path in HEAD");
+    const records = await activeRecoveryRecords(repo);
+    assert(records.some((record) => record.body.event_type === "commit_prepared"), "prepublish did not leave a prepared episode");
+    assert(!records.some((record) => record.body.event_type === "commit_published"), "prepublish falsely recorded publication");
+  } finally {
+    if (previousHooks === undefined) delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    else process.env.PI_ASTACK_ENABLE_TEST_HOOKS = previousHooks;
+    if (previousPre === undefined) delete process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+    else process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE = previousPre;
+    if (previousPost === undefined) delete process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+    else process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE = previousPost;
+  }
+});
+
+await check("existing prepared episode loop recover maps post-CAS converge fault to blocked+published", async () => {
+  const previousHooks = process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+  const previousPre = process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+  const previousPost = process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+  delete process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+  delete process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+  try {
+    const repo = initRepo("loop-prepared-post-cas");
+    const runtime = await runtimeModule.getCanonicalGitRuntime({ abrainHome: repo, settingsPath: sharedEnabledSettings, sourceRoot: root });
+    assert((await runtime.awaitStartup()).startup === "ready", "loop prepared fixture startup failed");
+    const knowledge = writeKnowledge(repo, 81);
+    const receipt = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+    const contentBefore = fs.readFileSync(knowledge.file);
+    const headBefore = git(repo, "rev-parse", "HEAD");
+
+    // First attempt: prepare episode then fail before CAS → leave durable prepared.
+    process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE = "1";
+    let firstCode = null;
+    try {
+      await runtime.requestDrain([receipt], "leave prepared episode");
+    } catch (error) {
+      firstCode = error.code ?? error.message;
+    }
+    assert(firstCode === "TEST_DRAIN_PRE_PUBLISH", `first prepublish fault missing: ${firstCode}`);
+    assert(git(repo, "rev-parse", "HEAD") === headBefore, "first prepublish advanced HEAD");
+    const preparedRecords = (await activeRecoveryRecords(repo)).filter((record) => record.body.event_type === "commit_prepared");
+    assert(preparedRecords.length === 1, `expected one prepared episode, got ${preparedRecords.length}`);
+    const episodeId = preparedRecords[0].body.episode_id;
+
+    // Second attempt hits existing episode loop branch; CAS then converge fault.
+    const receipt2 = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+    process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE = "1";
+    const drained = await runtime.requestDrain([receipt2], "loop branch post-CAS fault");
+    assert(drained.status === "blocked" && drained.localCommit === "published", `loop post-CAS did not return blocked+published: ${JSON.stringify(drained)}`);
+    assert(drained.episodeId === episodeId, `loop post-CAS escaped the prepared episode: ${JSON.stringify(drained)}`);
+    assert(typeof drained.commit === "string" && /^[0-9a-f]{40}$/.test(drained.commit), `loop post-CAS missing candidate commit: ${JSON.stringify(drained)}`);
+    assert(process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE === undefined, "post-publish one-shot hook was not consumed");
+    const headPublished = git(repo, "rev-parse", "HEAD");
+    assert(headPublished === drained.commit && headPublished !== headBefore, "loop post-CAS did not retain published HEAD");
+    assert(Buffer.compare(fs.readFileSync(knowledge.file), contentBefore) === 0, "loop post-CAS mutated worktree content bytes");
+    assert(git(repo, "ls-tree", "-r", "--name-only", "HEAD").split("\n").includes(knowledge.relativePath), "published HEAD missing content path");
+    const folded = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId));
+    const slotState = [...folded.values()].find((slot) => slot.published && !slot.aborted && !slot.converged);
+    assert(slotState, "durable recovery state is not published&&!aborted&&!converged after loop post-CAS");
+
+    // Content is already in HEAD; a noop requestDrain defers remaining recovery
+    // meta rather than re-entering the published episode. Settle the open slot
+    // via the same recoverDrainSlotV3 path startup/loop recovery uses.
+    const receipt3 = await runtimeModule.createProducedArtifactReceipt({ abrainHome: repo, filePath: knowledge.file, sourceIds: [knowledge.eventId] });
+    const deferred = await runtime.requestDrain([receipt3], "noop after published-pending");
+    assert(
+      deferred.status === "metadata_deferred" || deferred.status === "empty" || deferred.status === "index_converged" || deferred.status === "consumed",
+      `post-publish noop drain unexpected: ${JSON.stringify(deferred)}`,
+    );
+    const slot = drained.slot;
+    assert(typeof slot === "number", `published-pending missing slot: ${JSON.stringify(drained)}`);
+    const action = await recovery.recoverDrainSlotV3({
+      abrainHome: repo,
+      repo,
+      operation: recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId)).get(slot).prepared.operation,
+      slot,
+    });
+    assert(action === "index_converged" || action === "already_complete", `direct recovery after loop post-CAS: ${action}`);
+    let ancestor = false;
+    try { git(repo, "merge-base", "--is-ancestor", headPublished, "HEAD"); ancestor = true; } catch { ancestor = false; }
+    assert(ancestor, "settle rewound or diverged from published candidate ancestry");
+    assert(Buffer.compare(fs.readFileSync(knowledge.file), contentBefore) === 0, "settle mutated worktree content bytes");
+    const foldedAfter = recovery.foldRecoveryEventsV3(await recovery.readRecoveryEventsV3(repo, episodeId));
+    assert(foldedAfter.get(slot)?.converged, "settle did not mark slot converged");
+  } finally {
+    if (previousHooks === undefined) delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    else process.env.PI_ASTACK_ENABLE_TEST_HOOKS = previousHooks;
+    if (previousPre === undefined) delete process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+    else process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE = previousPre;
+    if (previousPost === undefined) delete process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+    else process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE = previousPost;
+  }
+});
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n${passed}/${passed + failures.length} checks passed`);
 if (failures.length) process.exitCode = 1;

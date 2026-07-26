@@ -325,6 +325,12 @@ export async function publishPropositionPolicyStableView(options: {
   sourceAbrainHome: string;
   repoRoot: string;
   sandboxAbrainHome?: string;
+  /**
+   * Optional caller runtime read budget (production injection maxReadBytes).
+   * When set, materialization enforces it as publication acceptance before
+   * switching `latest` so an oversize bundle cannot become the sole authority.
+   */
+  runtimeMaxReadBytes?: number;
 }): Promise<PropositionPolicyStableViewPublicationResult> {
   const sourceAbrainHome = assertExactDirectory(options.sourceAbrainHome, "source abrain home");
   const currentAbrainHome = resolvePropositionPolicyStableViewCurrentAbrainHome();
@@ -347,6 +353,7 @@ export async function publishPropositionPolicyStableView(options: {
         targetAbrainHome,
         bundle,
         productionLockCapability: PRODUCTION_LOCK_CAPABILITY,
+        runtimeMaxReadBytes: options.runtimeMaxReadBytes,
       });
       validateProductionPublicationResult(productionBinding, result);
       return result;
@@ -361,7 +368,12 @@ export async function publishPropositionPolicyStableView(options: {
     fail("SANDBOX_REQUIRED", "preview mode cannot target the caller's current production abrain home");
   }
   const bundle = await buildPropositionPolicyStableViewBundle({ sourceAbrainHome, repoRoot: options.repoRoot });
-  return materializeBundle({ mode: "preview", targetAbrainHome, bundle });
+  return materializeBundle({
+    mode: "preview",
+    targetAbrainHome,
+    bundle,
+    runtimeMaxReadBytes: options.runtimeMaxReadBytes,
+  });
 }
 
 function validateGeneralProjection(bundle: PropositionPolicyPushBundle): void {
@@ -763,6 +775,46 @@ function assertPublicationAcceptanceEnvelope(bundle: PropositionPolicyStableView
   }
 }
 
+/**
+ * Caller runtime budget gate (production injection maxReadBytes). Enforced before
+ * `latest` switches so an oversize-for-runtime bundle never becomes sole authority.
+ * Hard envelope (assertPublicationAcceptanceEnvelope) remains the absolute ceiling.
+ */
+function assertRuntimePublicationAcceptance(
+  bundle: PropositionPolicyStableViewMvpBundle,
+  runtimeMaxReadBytes: number,
+): void {
+  if (!Number.isFinite(runtimeMaxReadBytes) || runtimeMaxReadBytes < 1) {
+    fail("PUBLICATION_RUNTIME_BUDGET_INVALID", "runtimeMaxReadBytes must be a finite number >= 1");
+  }
+  const limit = Math.min(
+    PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES,
+    Math.floor(runtimeMaxReadBytes),
+  );
+  const artifacts = bundle.artifacts as Readonly<Record<string, unknown>>;
+  let totalBytes = 0;
+  for (const name of ARTIFACT_NAMES) {
+    const raw = artifacts[name];
+    if (typeof raw !== "string") fail("PUBLICATION_ARTIFACT_INVALID", "publication artifact is not exact UTF-8 text", { name });
+    const bytes = Buffer.byteLength(raw);
+    totalBytes += bytes;
+    if (bytes > limit || totalBytes > limit) {
+      fail("PUBLICATION_RUNTIME_BUDGET_EXCEEDED", "publication artifact set exceeds caller runtime maxReadBytes", {
+        name,
+        bytes: totalBytes,
+        limit,
+      });
+    }
+  }
+  const viewMdBytes = Buffer.byteLength(String(artifacts["view.md"] ?? ""));
+  if (viewMdBytes > limit) {
+    fail("PUBLICATION_RUNTIME_BUDGET_EXCEEDED", "publication view.md exceeds caller runtime maxReadBytes", {
+      bytes: viewMdBytes,
+      limit,
+    });
+  }
+}
+
 function acquireProductionPublicationLock(lockRoot: string): RetainedDirectoryOfdLock & { status: "ACQUIRED"; fd: number } {
   const lock = acquireRetainedDirectoryOfdLock(lockRoot);
   if (lock.status === "BUSY" || lock.fd === null) fail("LOCK_BUSY", "another stable-view publisher holds the exclusive production lock");
@@ -782,11 +834,17 @@ function materializeBundle(options: {
   bundle: PropositionPolicyStableViewMvpBundle;
   productionLockCapability?: symbol;
   hooks?: PublisherTestHooks;
+  runtimeMaxReadBytes?: number;
 }): PropositionPolicyStableViewPublicationResult {
   if (options.mode === "production" && options.productionLockCapability !== PRODUCTION_LOCK_CAPABILITY) {
     fail("PRODUCTION_LOCK_REQUIRED", "production materialization is reachable only inside the exclusive publisher lock");
   }
   assertPublicationAcceptanceEnvelope(options.bundle);
+  // Fail closed before any durable write when the caller runtime budget already
+  // rejects the compiled set — keeps latest on the prior readable bundle.
+  if (options.runtimeMaxReadBytes !== undefined) {
+    assertRuntimePublicationAcceptance(options.bundle, options.runtimeMaxReadBytes);
+  }
   validatePropositionPolicyStableViewBundle(options.bundle);
   const targetRoot = path.join(options.targetAbrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"));
   ensureDirectoryChainNoSymlink(options.targetAbrainHome, targetRoot);

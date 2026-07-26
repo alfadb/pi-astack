@@ -139,3 +139,7 @@ Read-side parser 仍保留 `pipeline` / `knowledge` 等 legacy path aliases，�
 - 主会话 LLM-facing write tools。
 
 旧 monolith 原文见 [../archive/memory-architecture-v7-original.md](../archive/memory-architecture-v7-original.md)。
+
+## 8. Central authority 目标边界
+
+T0 R4（[ADR 0044](../adr/0044-central-sediment-edge-authority.md)）批准把 source/job/decision 权威迁到中心 memory service；Pi 只保留 durable capture/witness 与读缓存合同。当前生产读路径仍是本文前述本地 L1/L2/L3。Pi 侧 **capture-only protocol shadow** 已落地且默认关闭（不切 authority）；[ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md) 是 Stage A daemon-owned 短命 worker 机制，**不是**并列 primary。完整 Stage A/B/C 未实施。edge 合同见 [central-sediment-edge.md](./central-sediment-edge.md)。

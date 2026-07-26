@@ -140,6 +140,29 @@ fs.writeFileSync(path.join(tmpDir, "_shared", "llm-audit.cjs"), `module.exports 
 fs.copyFileSync(path.join(tmpDir, "_shared", "llm-audit.cjs"), path.join(tmpDir, "_shared", "llm-audit.js"));
 fs.writeFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), transpile(path.join(repoRoot, "extensions/_shared/causal-anchor.ts")));
 fs.copyFileSync(path.join(tmpDir, "_shared", "causal-anchor.cjs"), path.join(tmpDir, "_shared", "causal-anchor.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "canonical-mutation-barrier.cjs"), "exports.withCanonicalMutationBarrier = async (_repo, operation) => operation(); exports.withoutCanonicalMutationBarrierContext = (operation) => operation();\n");
+fs.copyFileSync(path.join(tmpDir, "_shared", "canonical-mutation-barrier.cjs"), path.join(tmpDir, "_shared", "canonical-mutation-barrier.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "durable-write.cjs"), "exports.durableAtomicWriteFile = async () => {}; exports.durableAtomicCreateFile = async () => 'created';\n");
+fs.copyFileSync(path.join(tmpDir, "_shared", "durable-write.cjs"), path.join(tmpDir, "_shared", "durable-write.js"));
+fs.writeFileSync(path.join(tmpDir, "_shared", "canonical-git-runtime.cjs"), `
+exports.canonicalGitRuntimeEnabled = () => false;
+exports.createProducedArtifactReceipt = async () => ({});
+exports.getCanonicalGitRuntime = async () => ({ awaitStartup: async () => ({ startup: 'ready' }), requestDrain: async () => ({ status: 'empty' }) });
+exports.getCanonicalStartupPromise = async () => ({ startup: 'ready' });
+exports.peekCanonicalRuntimeDiagnostics = () => ({ status: 'none' });
+exports.reportCanonicalStartupConsumer = () => {};
+exports.scheduleCanonicalStartupConsumer = async () => {};
+exports.setCanonicalStartupReporter = () => {};
+`);
+fs.copyFileSync(path.join(tmpDir, "_shared", "canonical-git-runtime.cjs"), path.join(tmpDir, "_shared", "canonical-git-runtime.js"));
+fs.writeFileSync(path.join(tmpDir, "bind-intent.cjs"), `
+exports.applyAllPendingAbrainBindIntents = async () => ({ applied: 0, pending: 0, failed: 0, details: [] });
+exports.applyLocalMapOnlyBind = async () => ({ localPathAdded: false, localMapPath: '/tmp/local-map.json' });
+exports.intentFromPlan = (plan) => ({ itemId: '0'.repeat(64), ...plan });
+exports.planAbrainBind = async () => ({ needsTrackedAbrainWrite: false, localMapOnly: true, projectId: 'x', projectRoot: '/x', manifestPath: '/x/.abrain-project.json', registryPath: '/a/_project.json', abrainGitignorePath: '/a/.gitignore', manifestCreated: false, registryCreated: false, abrainGitignoreUpdated: false });
+exports.writeAbrainBindIntent = async () => ({ status: 'created', itemId: '0'.repeat(64), filePath: '/tmp/intent.json' });
+`);
+fs.copyFileSync(path.join(tmpDir, "bind-intent.cjs"), path.join(tmpDir, "bind-intent.js"));
 fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
@@ -165,8 +188,12 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector.js")')
+  .replace(/require\("\.\/bind-intent"\)/g, 'require("./bind-intent.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")')
+  .replace(/require\("\.\.\/_shared\/durable-write"\)/g, 'require("./_shared/durable-write.cjs")')
   .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCompiled);
 const indexModule = require(path.join(tmpDir, "index.cjs"));

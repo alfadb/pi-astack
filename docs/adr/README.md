@@ -114,7 +114,8 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | [0041](./0041-prompt-user-indefinite-wait.md) | **prompt_user 无期限等待** | Accepted（2026-07-13，用户直接决策）；仅 supersede ADR 0022 的 timeout 参数、默认值、timer、倒计时与 timeout 终态，保留主动取消/abort/shutdown 及全部隐私边界 |
 | [0042](./0042-nested-dispatch-delegation-capability.md) | **Nested dispatch delegation capability** | Superseded / retired（2026-07-24 owner 决策，current）；历史 accepted（2026-07-22 offline core/shadow）不构成恢复授权；永久恢复 main-session-only orchestration，五项 runtime deny 不可解除；未来恢复必须新 owner 决策 + 新 ADR + H5 |
 | [0043](./0043-lifecycle-convergence-and-reversible-terminal-state.md) | **Lifecycle convergence + reversible terminal state** | Accepted；有界队列 + 全文终态 + 守恒 |
-| [0045](./0045-sediment-worker-safe-rpc-command.md) | **Sediment worker-safe RPC command（Stage0）** | Accepted（2026-07-25）；daemon headless worker `/sediment-worker-run`；复用 agent_end pass；**不是** formal ConsumerAck/authority/retention |
+| [0044](./0044-central-sediment-edge-authority.md) | **Central sediment edge authority（T0 R4）** | Accepted（2026-07-24）；**目标** authority/edge contract；Pi 侧 capture-only protocol shadow（默认关）；完整 Stage A/B/C 与中心 authority 仍未落地；A0 前 local sediment 仍唯一 semantic primary |
+| [0045](./0045-sediment-worker-safe-rpc-command.md) | **Sediment worker-safe RPC command（Stage A 机制）** | Accepted（2026-07-25）；daemon-owned 短命 worker RPC 迁移面；`/sediment-worker-run` + continuous edge producer；**不是** formal ConsumerAck/authority/retention，**不是**并列 primary |}
 
 → [ADR 0027 §6](./0027-coupled-stigmergic-dual-loop-agent-system.md#6-推到独立子-adr-的能力点)
 
@@ -165,7 +166,8 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-07-13** ADR 0041 `prompt_user` indefinite wait **accepted**（用户直接决策；移除 elapsed-time 终止面，保留用户取消、turn abort、session shutdown 与 secret wipe）
 - **2026-07-22** ADR 0042 nested dispatch delegation capability **accepted**（historical；三轮 T0 一致；仅接受离线 capability/governor/limiter/required-audit 架构）
 - **2026-07-24** ADR 0042 **superseded / retired**（owner 决策，current；多层任务转述导致目标漂移，永久恢复 main-session-only orchestration；accepted offline core/shadow 不构成恢复授权，未来恢复必须新 owner 决策 + 新 ADR + H5）
-- **2026-07-25** ADR 0045 sediment worker-safe RPC command Stage0 **accepted**（daemon `pi --mode rpc` + `PI_ASTACK_SEDIMENT_WORKER_MODE=1`；terminal_witness only；worker-local receipt 幂等；非 formal ACK）
+- **2026-07-24** ADR 0044 Central Sediment Edge Authority **accepted**（用户批准 T0 R4；目标 edge contract + 中心 authority 边界；Pi 侧 capture-only protocol shadow 已实现默认关；A0 前 local sediment 仍唯一 semantic primary；edge shadow 不得升为第二 primary）
+- **2026-07-25** ADR 0045 sediment worker-safe RPC command Stage A 机制 **accepted**（daemon `pi --mode rpc` + `PI_ASTACK_SEDIMENT_WORKER_MODE=1`；terminal_witness only；worker-local receipt 幂等；非 formal ACK；叠在 0044 capture-only 之上，不是并列 primary）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 

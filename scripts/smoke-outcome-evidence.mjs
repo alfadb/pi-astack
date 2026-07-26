@@ -359,5 +359,6 @@ await check("resolver targetProposalId binds prompt-revision unlocks to exact pr
   );
 });
 
+try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best-effort temp cleanup */ }
 console.log(`\nTotal: ${passed + failures.length}  Passed: ${passed}  Failed: ${failures.length}`);
 if (failures.length) process.exit(1);

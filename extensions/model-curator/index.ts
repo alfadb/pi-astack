@@ -181,12 +181,14 @@ async function applyWhitelist(
   // Resolve the actual API key from the existing provider config
   // via pi's own auth system — no models.json reading, no env var guessing.
   const auth = await reg.getApiKeyAndHeaders(found[0]);
-  if (!auth.ok || !auth.apiKey) return { kept: 0, missing: ["(auth failed)"] };
+  const hasHeaders = Boolean(auth.headers && Object.keys(auth.headers).length > 0);
+  if (!auth.ok || (!auth.apiKey && !hasHeaders)) return { kept: 0, missing: ["(auth failed)"] };
 
   pi.registerProvider(providerName, {
     baseUrl,
     api,
     apiKey: auth.apiKey,
+    headers: auth.headers,
     models: found.map(modelToProviderConfig),
   });
 

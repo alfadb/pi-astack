@@ -112,6 +112,9 @@ const {
   inferTerminalState,
   buildTerminalStateFields,
   inferParallelTerminalState,
+  resolveCancelSource,
+  resolveTerminationSource,
+  abortEvidenceFromSignal,
 } = mod;
 
 console.log("Section: inferTerminalState (single-task mapping)");
@@ -239,12 +242,13 @@ check("completed: only terminal_state + resumable:false", () => {
   assertEq(f, { terminal_state: "completed", resumable: false });
 });
 
-check("failed: terminal_state + reason + rollback_done + resumable (no cleanup_done)", () => {
+check("failed: terminal_state + reason + rollback_done + termination_source + resumable (no cleanup_done)", () => {
   const f = buildTerminalStateFields({ error: "boom", failureType: "agent_error" });
   assertEq(f, {
     terminal_state: "failed",
     reason: "boom",
     rollback_done: true,
+    termination_source: "unknown",
     resumable: false,
   });
   // Verify cleanup_done is NOT present on failed (ADR strict scope)
@@ -269,19 +273,40 @@ check("cancelled (timeout failureType) → cancel_source=timeout + cleanup_done"
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "timeout",
+    termination_source: "timeout",
     cleanup_done: true,
     resumable: false,
   });
 });
 
-check("cancelled (aborted failureType) → cancel_source=user + cleanup_done", () => {
+check("cancelled (aborted failureType, no evidence) → cancel_source=unknown + cleanup_done", () => {
+  // Evidence-first: bare aborted without structured trigger is unknown,
+  // never invent "user" from fuzzy strings.
   const f = buildTerminalStateFields({ error: "a", failureType: "aborted" });
   assertEq(f, {
     terminal_state: "cancelled",
-    cancel_source: "user",
+    cancel_source: "unknown",
+    termination_source: "unknown",
     cleanup_done: true,
     resumable: false,
   });
+});
+
+check("cancelled (aborted + parent evidence) → cancel_source=parent", () => {
+  const f = buildTerminalStateFields(
+    { error: "a", failureType: "aborted" },
+    { abortEvidence: "parent" },
+  );
+  assertEq(f.cancel_source, "parent");
+  assertEq(f.termination_source, "parent");
+});
+
+check("cancelled (aborted + user evidence) → cancel_source=user", () => {
+  const f = buildTerminalStateFields(
+    { error: "a", failureType: "aborted" },
+    { abortEvidence: "user" },
+  );
+  assertEq(f.cancel_source, "user");
 });
 
 check("cancelled (guardrail_stop failureType) → cancel_source=guardrail + cleanup_done", () => {
@@ -289,24 +314,78 @@ check("cancelled (guardrail_stop failureType) → cancel_source=guardrail + clea
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "guardrail",
+    termination_source: "guardrail",
     cleanup_done: true,
     resumable: false,
   });
 });
 
 check("cancelled with explicit cancelSource=user override (parent signal)", () => {
-  // dispatch sets this when ctx.signal.aborted fired but failureType is
-  // timeout — the parent abort caused the timeout to win the race.
+  // dispatch may override when stronger evidence is available.
   const f = buildTerminalStateFields(
     { error: "t", failureType: "timeout" },
     { cancelSource: "user" },
   );
-  assertEq(f, {
-    terminal_state: "cancelled",
-    cancel_source: "user",
-    cleanup_done: true,
-    resumable: false,
+  assertEq(f.cancel_source, "user");
+  assertEq(f.cleanup_done, true);
+});
+
+check("failed (truncated) → termination_source=provider; stopReason alone never stream", () => {
+  // SDK StopReason is stop|length|toolUse|error|aborted — no "abort".
+  // stopReason "aborted" is also produced by local/user/parent/governor
+  // session.abort(); must NOT auto-map to stream.
+  const f = buildTerminalStateFields({
+    error: "output truncated (max tokens reached)",
+    failureType: "truncated",
+    stopReason: "length",
   });
+  assertEq(f.terminal_state, "failed");
+  assertEq(f.termination_source, "provider");
+  if ("cancel_source" in f) throw new Error("failed must not carry cancel_source");
+
+  const abortedStop = buildTerminalStateFields({
+    error: "aborted",
+    failureType: "aborted",
+    stopReason: "aborted",
+  });
+  assertEq(abortedStop.terminal_state, "cancelled");
+  assertEq(abortedStop.termination_source, "unknown"); // no lifecycle owner evidence
+
+  const explicitStream = buildTerminalStateFields(
+    { error: "cut", failureType: "truncated", stopReason: "aborted" },
+    { abortEvidence: "stream" },
+  );
+  assertEq(explicitStream.termination_source, "stream");
+});
+
+check("failed (model_not_found) → termination_source=unknown (local preflight)", () => {
+  const f = buildTerminalStateFields({
+    error: "model not in registry",
+    failureType: "model_not_found",
+  });
+  assertEq(f.terminal_state, "failed");
+  assertEq(f.termination_source, "unknown");
+});
+
+check("failed (rate_limit) → termination_source=provider", () => {
+  const f = buildTerminalStateFields({ error: "429", failureType: "rate_limit" });
+  assertEq(f.termination_source, "provider");
+});
+
+check("failed (governor) → termination_source=worker_run_governor", () => {
+  const f = buildTerminalStateFields({
+    error: "retry budget",
+    failureType: "provider_retry_budget_exceeded",
+  });
+  assertEq(f.termination_source, "worker_run_governor");
+});
+
+check("failed (agent_error / Request aborted text) → termination_source=unknown (no string guess)", () => {
+  const f = buildTerminalStateFields({
+    error: "Request aborted",
+    failureType: "agent_error",
+  });
+  assertEq(f.termination_source, "unknown");
 });
 
 console.log("\nSection: inferParallelTerminalState (aggregate)");
@@ -325,7 +404,7 @@ check("all 3 ok → completed (no tasks_not_completed)", () => {
   assertEq(r, { terminal_state: "completed", resumable: false });
 });
 
-check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_completed (no cleanup_done per R7)", () => {
+check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_completed + termination_source (no cleanup_done per R7)", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: failed, label: "modelB" },
@@ -336,6 +415,7 @@ check("2 ok / 1 failed → degraded with what_dropped + alt_path + tasks_not_com
     what_dropped: ["modelB"],
     alt_path: "use 2/3 task results",
     tasks_not_completed: ["modelB"],
+    termination_source: "unknown", // agent_error without structured owner
     resumable: false,
   });
 });
@@ -351,6 +431,7 @@ check("1 ok / 2 failed → degraded (1/3 is still some success; no cleanup_done)
     what_dropped: ["modelA", "modelC"],
     alt_path: "use 1/3 task results",
     tasks_not_completed: ["modelA", "modelC"],
+    termination_source: "unknown",
     resumable: false,
   });
 });
@@ -390,24 +471,35 @@ check("all cancelled (timeout) → cancelled + cancel_source=timeout + tasks_not
   assertEq(r, {
     terminal_state: "cancelled",
     cancel_source: "timeout",
+    termination_source: "timeout",
     cleanup_done: true,
     tasks_not_completed: ["modelA", "modelB"],
     resumable: false,
   });
 });
 
-check("all cancelled (user abort) → cancelled + cancel_source=user", () => {
+check("all cancelled (bare aborted) → cancelled + cancel_source=unknown", () => {
   const r = inferParallelTerminalState([
     { result: cancelledAbort, label: "modelA" },
     { result: cancelledAbort, label: "modelB" },
   ]);
   assertEq(r, {
     terminal_state: "cancelled",
-    cancel_source: "user",
+    cancel_source: "unknown",
+    termination_source: "unknown",
     cleanup_done: true,
     tasks_not_completed: ["modelA", "modelB"],
     resumable: false,
   });
+});
+
+check("all cancelled (parent evidence on results) → cancel_source=parent", () => {
+  const parentAbort = { error: "a", failureType: "aborted", cancelSource: "parent" };
+  const r = inferParallelTerminalState([
+    { result: parentAbort, label: "modelA" },
+    { result: parentAbort, label: "modelB" },
+  ]);
+  assertEq(r.cancel_source, "parent");
 });
 
 check("0 ok, 1 failed + 1 cancelled → failed (conservative)", () => {
@@ -438,7 +530,7 @@ check("0 tasks (degenerate) → failed with reason", () => {
   }
 });
 
-check("partial cancelled + ok → degraded (cancelled tasks count as dropped; no cleanup_done per R7)", () => {
+check("partial cancelled + ok → degraded (cancelled tasks count as dropped; termination_source from task evidence)", () => {
   const r = inferParallelTerminalState([
     { result: ok, label: "modelA" },
     { result: cancelledTimeout, label: "modelB" },
@@ -448,6 +540,7 @@ check("partial cancelled + ok → degraded (cancelled tasks count as dropped; no
     what_dropped: ["modelB"],
     alt_path: "use 1/2 task results",
     tasks_not_completed: ["modelB"],
+    termination_source: "timeout",
     resumable: false,
   });
 });
@@ -468,14 +561,30 @@ check("aggregate ctx.cancelSource=user overrides per-task heuristic", () => {
   assertEq(r.cancel_source, "user");
 });
 
-check("aggregate cancel_source=user when ANY task carries aborted (mixed)", () => {
-  // Mixed: one timeout, one user abort. No ctx override. Aggregate
-  // should prefer "user" because the user signal is the dominant cause.
+check("aggregate cancel_source=timeout when mixed timeout + bare aborted", () => {
+  // Bare aborted → unknown; timeout is more specific and wins over unknown.
+  // Priority: user > parent > timeout > guardrail > provider > stream > unknown.
   const r = inferParallelTerminalState([
     { result: cancelledTimeout, label: "modelA" },
     { result: cancelledAbort, label: "modelB" },
   ]);
+  assertEq(r.cancel_source, "timeout");
+});
+
+check("aggregate cancel_source=user when ANY task carries user cancelSource", () => {
+  const r = inferParallelTerminalState([
+    { result: cancelledTimeout, label: "modelA" },
+    { result: { error: "a", failureType: "aborted", cancelSource: "user" }, label: "modelB" },
+  ]);
   assertEq(r.cancel_source, "user");
+});
+
+check("aggregate cancel_source=parent when parent evidence present", () => {
+  const r = inferParallelTerminalState([
+    { result: cancelledTimeout, label: "modelA" },
+    { result: { error: "a", failureType: "aborted", cancelSource: "parent" }, label: "modelB" },
+  ]);
+  assertEq(r.cancel_source, "parent");
 });
 
 console.log("\nSection: schema invariants");
@@ -575,6 +684,136 @@ check("ADR aggregate ext: cancelled/failed/degraded all carry tasks_not_complete
     if (!Array.isArray(s.tasks_not_completed)) {
       throw new Error(`expected tasks_not_completed array; got ${JSON.stringify(s)}`);
     }
+  }
+});
+
+console.log("\nSection: structured abort evidence + attribution helpers");
+
+check("abortEvidenceFromSignal: aborted with no reason → parent", () => {
+  const c = new AbortController();
+  c.abort();
+  assertEq(abortEvidenceFromSignal(c.signal), "parent");
+});
+
+check("abortEvidenceFromSignal: reason=user → user", () => {
+  const c = new AbortController();
+  c.abort("user");
+  assertEq(abortEvidenceFromSignal(c.signal), "user");
+});
+
+check("abortEvidenceFromSignal: reason object kind=timeout → timeout", () => {
+  const c = new AbortController();
+  c.abort({ kind: "timeout" });
+  assertEq(abortEvidenceFromSignal(c.signal), "timeout");
+});
+
+check("abortEvidenceFromSignal: not aborted → undefined", () => {
+  const c = new AbortController();
+  assertEq(abortEvidenceFromSignal(c.signal), undefined);
+});
+
+check("resolveCancelSource never invents user from Request aborted text", () => {
+  assertEq(
+    resolveCancelSource({ error: "Request aborted", failureType: "aborted" }),
+    "unknown",
+  );
+});
+
+check("resolveCancelSource upgrades pre-stamped unknown via abortEvidence=parent", () => {
+  assertEq(
+    resolveCancelSource(
+      { error: "a", failureType: "aborted", cancelSource: "unknown" },
+      { abortEvidence: "parent" },
+    ),
+    "parent",
+  );
+});
+
+check("resolveTerminationSource: pre-stamped unknown does not suppress timeout/provider/governor", () => {
+  assertEq(
+    resolveTerminationSource(
+      { error: "t", failureType: "timeout", terminationSource: "unknown" },
+    ),
+    "timeout",
+  );
+  assertEq(
+    resolveTerminationSource(
+      { error: "429", failureType: "rate_limit", terminationSource: "unknown" },
+    ),
+    "provider",
+  );
+  assertEq(
+    resolveTerminationSource(
+      { error: "g", failureType: "repetitive_output", terminationSource: "unknown" },
+      { terminationSource: "unknown" },
+    ),
+    "worker_run_governor",
+  );
+});
+
+check("resolveTerminationSource: stream only via explicit abortEvidence, never stopReason", () => {
+  // Wrong literal "abort" must not self-prove stream.
+  assertEq(
+    resolveTerminationSource({ error: "x", failureType: "truncated", stopReason: "abort" }),
+    "provider",
+  );
+  assertEq(
+    resolveTerminationSource({ error: "x", failureType: "truncated", stopReason: "aborted" }),
+    "provider",
+  );
+  assertEq(
+    resolveTerminationSource(
+      { error: "x", failureType: "truncated", stopReason: "aborted" },
+      { abortEvidence: "stream" },
+    ),
+    "stream",
+  );
+  assertEq(
+    resolveTerminationSource({ error: "unexpected eof", failureType: "network" }),
+    "unknown",
+  );
+  assertEq(
+    resolveTerminationSource({ error: "missing", failureType: "model_not_found" }),
+    "unknown",
+  );
+});
+
+check("SDK StopReason enum source check (no self-proving wrong literal)", () => {
+  // Locate real pi-ai StopReason definition; must be the five-value union.
+  const candidates = [
+    path.join(repoRoot, "node_modules/@earendil-works/pi-ai/dist/types.d.ts"),
+    path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/types.d.ts"),
+    path.join(
+      "/home/worker/.local/npm-global/lib/node_modules/@earendil-works/pi-coding-agent",
+      "node_modules/@earendil-works/pi-ai/dist/types.d.ts",
+    ),
+  ];
+  let src = "";
+  let found = "";
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      src = fs.readFileSync(c, "utf8");
+      found = c;
+      break;
+    }
+  }
+  if (!src) throw new Error("could not locate pi-ai types.d.ts for StopReason check");
+  const m = src.match(/export type StopReason\s*=\s*([^;]+);/);
+  if (!m) throw new Error(`StopReason type not found in ${found}`);
+  const union = m[1];
+  for (const v of ['"stop"', '"length"', '"toolUse"', '"error"', '"aborted"']) {
+    if (!union.includes(v)) throw new Error(`StopReason missing ${v}: ${union}`);
+  }
+  // The wrong literal "abort" must not appear as a StopReason member.
+  if (/\|\s*"abort"\s*\|/.test(union) || /^=\s*"abort"/.test(union) || /"abort"\s*;/.test(union)) {
+    throw new Error(`unexpected StopReason member "abort" in ${union}`);
+  }
+  if (union.includes('"abort"') && !union.includes('"aborted"')) {
+    throw new Error(`StopReason has "abort" without "aborted": ${union}`);
+  }
+  // Narrower: token "abort" as a full quoted member (not part of aborted).
+  if (/(?:^|\|\s*)"abort"(?:\s*\||$)/.test(union.replace(/\s+/g, " "))) {
+    throw new Error(`StopReason must not include bare "abort": ${union}`);
   }
 });
 

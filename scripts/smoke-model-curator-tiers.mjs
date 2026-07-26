@@ -245,6 +245,30 @@ console.log("\n[4] live responsibility hints recommend Grok execution and keep o
       !flagshipModels.includes("anthropic/claude-fable-5"));
   check("live rollback no longer lists Opus 5",
     !rollbackModels.includes("anthropic/claude-opus-5"));
+
+  const liveProviders = liveSettings.modelCurator?.providers ?? {};
+  const kimiCodingKeep = liveProviders["kimi-coding"] ?? [];
+  check("live kimi-coding keep-list includes k3 and k3-256k",
+    kimiCodingKeep.includes("k3") && kimiCodingKeep.includes("k3-256k"));
+  check("live hints cover kimi-coding/k3 and kimi-coding/k3-256k",
+    typeof liveHints["kimi-coding/k3"] === "string" &&
+      typeof liveHints["kimi-coding/k3-256k"] === "string");
+  check("live flagship includes kimi-coding/k3",
+    flagshipModels.includes("kimi-coding/k3"));
+  const standardModels = liveTiers.standard?.models ?? [];
+  check("live rollback includes kimi-coding/k3-256k",
+    rollbackModels.includes("kimi-coding/k3-256k"));
+  check("live standard excludes kimi-coding/k3-256k",
+    !standardModels.includes("kimi-coding/k3-256k"));
+  check("live k3/k3-256k hints remain judgment-only and not preferred execution",
+    ["kimi-coding/k3", "kimi-coding/k3-256k"].every((id) => {
+      const hint = liveHints[id];
+      return typeof hint === "string" &&
+        hint.includes("Use only for judgment-oriented tasks") &&
+        hint.includes("do not use for coding, log review, or concrete implementation") &&
+        !hint.includes("PRIMARY DEFAULT") &&
+        !hint.includes("preferred execution layer");
+    }));
 }
 
 console.log("");

@@ -216,6 +216,8 @@ for (const file of [
   "extensions/_shared/durable-write.ts",
   "extensions/_shared/jcs.ts",
   "extensions/_shared/proposition.ts",
+  "extensions/_shared/retained-directory-ofd-lock.ts",
+  "extensions/_shared/l1-validated-scan-cache.ts",
   "extensions/_shared/l1-schema-registry.ts",
   "extensions/sediment/constraint-evidence/types.ts",
   "extensions/sediment/constraint-evidence/canonical-json.ts",

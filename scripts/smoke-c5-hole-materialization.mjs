@@ -66,14 +66,18 @@ check("materializedResults array is constructed via tasks.map (dense, no holes)"
 check("hole fallback shape matches aborted task: failureType:'aborted' + error", () => {
   // The hole synthesis must produce a result that inferTerminalState()
   // classifies as cancelled (otherwise aggregate and per-task disagree).
+  // May be a bare object or enrichResultAttribution({...failureType:"aborted"}).
   const block = dispatchSrc.match(
-    /materializedResults:\s*AgentResult\[\][\s\S]{0,500}?return\s*{[^}]*failureType:\s*"aborted"[\s\S]*?\}/,
+    /materializedResults:\s*AgentResult\[\][\s\S]{0,900}?failureType:\s*"aborted"/,
   );
   if (!block) {
     throw new Error("hole synthesis must set failureType:'aborted'");
   }
   if (!/error:\s*"task did not start/.test(block[0])) {
     throw new Error("hole synthesis must include explanatory error string");
+  }
+  if (!/parent abort before worker claim/i.test(block[0])) {
+    throw new Error("hole synthesis must mention parent abort before worker claim");
   }
 });
 
@@ -143,8 +147,11 @@ check("details.tasks builds from materializedResults (not raw results[])", () =>
   if (!/ok:\s*!r\.error\b/.test(window)) {
     throw new Error("details.tasks ok flag must read !r.error from materialized result");
   }
-  if (!/terminalState:\s*inferTerminalState\(r\)/.test(window)) {
-    throw new Error("details.tasks terminalState must call inferTerminalState(r) where r is materialized");
+  const usesInfer = /terminalState:\s*inferTerminalState\(r\)/.test(window);
+  const usesBuild = /buildTerminalStateFields\(r\)/.test(window)
+    && /terminalState:\s*taskFields\.terminal_state/.test(window);
+  if (!usesInfer && !usesBuild) {
+    throw new Error("details.tasks terminalState must derive from materialized r (inferTerminalState or buildTerminalStateFields)");
   }
 });
 

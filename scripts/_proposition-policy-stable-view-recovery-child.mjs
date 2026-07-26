@@ -1,21 +1,53 @@
 #!/usr/bin/env node
 /** Bounded child boundary for deterministic stable-view compile/publication. */
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
 const CHILD_SCHEMA = "proposition-policy-stable-view-recovery-child-result/v1";
 const MAX_ARG_BYTES = 4096;
 const MAX_ERROR_CHARS = 2048;
+// Shared contract max — same source as publisher/reader/parent recovery clamp.
+// Loaded once from the TS contract so this mjs never duplicates a magic ceiling.
+const CHILD_SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT_FROM_SCRIPT = path.resolve(CHILD_SCRIPT_DIR, "..");
+const require = createRequire(import.meta.url);
+const { createJiti } = require("jiti");
+const contractJiti = createJiti(REPO_ROOT_FROM_SCRIPT, { interopDefault: true });
+const {
+  PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES,
+} = contractJiti(path.join(
+  REPO_ROOT_FROM_SCRIPT,
+  "extensions/_shared/proposition-policy-stable-view-contract.ts",
+));
+if (
+  typeof PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES !== "number"
+  || !Number.isSafeInteger(PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES)
+  || PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES < 1
+) {
+  throw Object.assign(
+    new Error("RECOVERY_CHILD_CONTRACT_INVALID: shared max artifact-set constant missing"),
+    { code: "RECOVERY_CHILD_CONTRACT_INVALID" },
+  );
+}
+const MAX_RUNTIME_READ_BYTES = PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES;
 
 function fail(code, message) {
   throw Object.assign(new Error(`${code}: ${message}`), { code });
 }
 
 function parseArgs(argv) {
-  if (argv.length > 10 || argv.some((value) => Buffer.byteLength(value) > MAX_ARG_BYTES || value.includes("\0"))) {
+  if (argv.length > 14 || argv.some((value) => Buffer.byteLength(value) > MAX_ARG_BYTES || value.includes("\0"))) {
     fail("RECOVERY_CHILD_ARG_INVALID", "child argv exceeds the closed bounded protocol");
   }
-  const allowed = new Set(["--abrain-home", "--repo-root", "--attempt", "--test-source-race-until", "--test-busy-ms"]);
+  const allowed = new Set([
+    "--abrain-home",
+    "--repo-root",
+    "--attempt",
+    "--runtime-max-read-bytes",
+    "--test-source-race-until",
+    "--test-busy-ms",
+  ]);
   const parsed = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index];
@@ -37,7 +69,24 @@ function parseArgs(argv) {
   if (![sourceRaceUntil, busyMs].every((value) => Number.isSafeInteger(value) && value >= 0 && value <= 10_000)) {
     fail("RECOVERY_CHILD_ARG_INVALID", "child test controls are out of bounds");
   }
-  return { abrainHome: path.resolve(abrainHome), repoRoot: path.resolve(repoRoot), attempt, sourceRaceUntil, busyMs };
+  let runtimeMaxReadBytes;
+  if (parsed.has("--runtime-max-read-bytes")) {
+    const raw = parsed.get("--runtime-max-read-bytes");
+    const n = Number(raw);
+    // Upper bound from shared contract constant (not a duplicated magic number).
+    if (!Number.isSafeInteger(n) || n < 1 || n > MAX_RUNTIME_READ_BYTES) {
+      fail("RECOVERY_CHILD_ARG_INVALID", "child runtime-max-read-bytes is out of bounds");
+    }
+    runtimeMaxReadBytes = n;
+  }
+  return {
+    abrainHome: path.resolve(abrainHome),
+    repoRoot: path.resolve(repoRoot),
+    attempt,
+    sourceRaceUntil,
+    busyMs,
+    runtimeMaxReadBytes,
+  };
 }
 
 function emit(value, exitCode) {
@@ -54,14 +103,16 @@ try {
   if (options.attempt <= options.sourceRaceUntil) {
     fail("SOURCE_RACE", `test-injected source race on attempt ${options.attempt}`);
   }
-  const require = createRequire(import.meta.url);
-  const { createJiti } = require("jiti");
   const jiti = createJiti(options.repoRoot, { interopDefault: true });
   const publisher = jiti(path.join(options.repoRoot, "extensions/_shared/proposition-policy-stable-view-publisher.ts"));
   const publication = await publisher.publishPropositionPolicyStableView({
     mode: "production",
     sourceAbrainHome: options.abrainHome,
     repoRoot: options.repoRoot,
+    // When present, enforced as publication acceptance before latest switches.
+    ...(options.runtimeMaxReadBytes !== undefined
+      ? { runtimeMaxReadBytes: options.runtimeMaxReadBytes }
+      : {}),
   });
   emit({
     schema_version: CHILD_SCHEMA,

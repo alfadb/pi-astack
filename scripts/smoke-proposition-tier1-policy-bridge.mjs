@@ -67,6 +67,7 @@ const GLOBAL_SIGNAL = {
   user_quote: "所有项目都必须先跑真实 smoke 再宣称完成。",
   correction_intent: "global durable policy",
   scope_description: "所有项目 / 全局约定",
+  rule_scope: "global",
   confidence: 9,
   provenance: "user",
   quote_source: "user",
@@ -117,12 +118,14 @@ async function appendProposition(abrainHome, constraintResult, overrides = {}) {
   });
 }
 
-/** Hard recovery envelope (matches contract max artifact set). Fixture success paths use this. */
+/** Hard recovery envelope / production injection budget (settings + contract max). */
 const HARD_MAX_READ_BYTES = 262144;
-/** Production settings value — smaller than multi-item fixtures; used only for mismatch probes. */
-const PRODUCTION_RUNTIME_MAX_READ_BYTES = 16384;
-/** Tiny budget used to prove source-change ack cannot clear oversize markers. */
+/** Live production settings value after the 16384→262144 fix (must equal hard envelope). */
+const PRODUCTION_RUNTIME_MAX_READ_BYTES = 262144;
+/** Tiny budget used to prove source-change cannot advance latest / clear markers when oversize. */
 const TINY_RUNTIME_MAX_READ_BYTES = 64;
+/** Fixture genesis event id — present in input_event_ids but never candidate included. */
+const FIXTURE_GENESIS_EVENT_ID = "3975b8c76dbad212ff73aa07a232b72196ffd6ba3f355ae77701813c0d4b27d3";
 
 function strictRead(root, maxReadBytes = HARD_MAX_READ_BYTES) {
   return reader.readPropositionPolicyStableViewForRuntime({
@@ -1205,17 +1208,20 @@ await check("L1SchemaRegistryError / registry contract invalid → refused + ter
   );
 });
 
-await check("P1-B: source-change runtime budget mismatch fails closed and retains marker", async () => {
+await check("P1-B: tiny budget fails closed, latest stays, marker retained, final_read_reason set", async () => {
   const home = path.join(tmpRoot, "runtime-budget-mismatch");
   await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: home });
   configureRoot(home);
   recovery.resetPropositionPolicyStableViewSourceChangeRepublishForTests();
 
-  await publisher.publishPropositionPolicyStableView({
+  const baseline = await publisher.publishPropositionPolicyStableView({
     mode: "production",
     sourceAbrainHome: home,
     repoRoot,
   });
+  const latestPath = path.join(home, ".state/sediment/proposition-policy-stable-view/v1/latest");
+  const latestBefore = fs.readlinkSync(latestPath);
+  assert(baseline.bundle_hash && latestBefore.includes(baseline.bundle_hash), "baseline latest");
 
   const c = await appendConstraint(home, {
     candidateId: "tier1-direct:budget-mismatch",
@@ -1239,29 +1245,42 @@ await check("P1-B: source-change runtime budget mismatch fails closed and retain
   await recovery.enqueuePropositionPolicyStableViewSourceChangePendingMarker(home, p.eventId);
   assert(fs.existsSync(markerPath(home, p.eventId)), "marker before tiny budget force");
 
-  // Hard reader can accept the published set; tiny runtime budget must not.
+  // Child must reject publication acceptance before switching latest.
   const tinyForce = await recovery.forceRepublishPropositionPolicyStableView(
     sourceChangeOpts(home, [p.eventId], TINY_RUNTIME_MAX_READ_BYTES),
   );
   assert(tinyForce.status === "failed", `tiny budget must fail, got ${tinyForce.status} ${tinyForce.error_code}`);
   assert(
-    String(tinyForce.final_read_reason || "").includes("oversize")
+    tinyForce.final_read_reason === "runtime_budget_oversize"
+      || String(tinyForce.final_read_reason || "").includes("oversize")
       || String(tinyForce.error_message || "").includes("oversize")
-      || String(tinyForce.error_message || "").includes("runtime"),
-    `expected oversize/runtime validation fail, final=${tinyForce.final_read_reason} msg=${tinyForce.error_message}`,
+      || String(tinyForce.error_message || "").includes("RUNTIME_BUDGET")
+      || String(tinyForce.error_code || "").includes("RUNTIME_BUDGET"),
+    `expected runtime_budget_oversize, final=${tinyForce.final_read_reason} code=${tinyForce.error_code} msg=${tinyForce.error_message}`,
+  );
+  assert(typeof tinyForce.final_read_reason === "string" && tinyForce.final_read_reason.length > 0, "failed result carries final_read_reason");
+  assert(
+    tinyForce.final_read_reason !== "selected_valid",
+    "failed path must not secondary-read selected_valid over the original reject",
+  );
+  assert(
+    tinyForce.final_read_reason !== "publication_artifact_oversize",
+    "tiny runtime budget reject must not be reported as publisher hard-envelope oversize",
   );
   assert(fs.existsSync(markerPath(home, p.eventId)), "marker retained when runtime budget rejects");
+  const latestAfterTiny = fs.readlinkSync(latestPath);
+  assert(latestAfterTiny === latestBefore, `latest must stay on old readable bundle; before=${latestBefore} after=${latestAfterTiny}`);
 
-  // Hard envelope can read the published set (the old bug: source-change used hard,
-  // acked markers the production 16384 reader would reject).
+  // Hard envelope still reads the prior latest (no post-hoc broken authority).
   const hardRead = strictRead(home, HARD_MAX_READ_BYTES);
-  assert(hardRead.ok && hardRead.reason === "selected_valid", `hard reader must accept, got ${hardRead.reason}`);
+  assert(hardRead.ok && hardRead.reason === "selected_valid", `hard reader must accept prior latest, got ${hardRead.reason}`);
+  assert(hardRead.bundleHash === baseline.bundle_hash, "prior latest bundle hash retained");
   const tinyRead = strictRead(home, TINY_RUNTIME_MAX_READ_BYTES);
   assert(!tinyRead.ok && String(tinyRead.reason).includes("oversize"), `tiny reader oversize, got ${tinyRead.reason}`);
 
-  // Sufficient budget (hard envelope) succeeds and acks the marker.
+  // Sufficient budget (production 262144) succeeds and acks the marker.
   const okForce = await recovery.forceRepublishPropositionPolicyStableView(
-    sourceChangeOpts(home, [p.eventId], HARD_MAX_READ_BYTES),
+    sourceChangeOpts(home, [p.eventId], PRODUCTION_RUNTIME_MAX_READ_BYTES),
   );
   assert(
     okForce.status === "republished" || okForce.status === "contended_converged",
@@ -1269,6 +1288,217 @@ await check("P1-B: source-change runtime budget mismatch fails closed and retain
   );
   assert(okForce.final_read_reason === "selected_valid", `final ${okForce.final_read_reason}`);
   assert(!fs.existsSync(markerPath(home, p.eventId)), "marker cleared after runtime-budget selected_valid");
+});
+
+await check("P1-B: non-included/excluded marker is not acked (coverage uses candidate_dispositions included)", async () => {
+  const home = path.join(tmpRoot, "excluded-marker-no-ack");
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: home });
+  configureRoot(home);
+  recovery.resetPropositionPolicyStableViewSourceChangeRepublishForTests();
+
+  const published = await publisher.publishPropositionPolicyStableView({
+    mode: "production",
+    sourceAbrainHome: home,
+    repoRoot,
+  });
+  const manifest = JSON.parse(fs.readFileSync(path.join(
+    home,
+    ".state/sediment/proposition-policy-stable-view/v1/bundles",
+    published.bundle_hash,
+    "manifest.json",
+  ), "utf8"));
+  assert(
+    manifest.canonical_source.input_event_ids.includes(FIXTURE_GENESIS_EVENT_ID),
+    "genesis is in input_event_ids (old buggy coverage surface)",
+  );
+  const included = (manifest.candidate_dispositions?.dispositions || [])
+    .filter((row) => row.disposition === "included")
+    .map((row) => row.source_event_id);
+  assert(!included.includes(FIXTURE_GENESIS_EVENT_ID), "genesis must not be candidate included");
+
+  await recovery.enqueuePropositionPolicyStableViewSourceChangePendingMarker(home, FIXTURE_GENESIS_EVENT_ID);
+  assert(fs.existsSync(markerPath(home, FIXTURE_GENESIS_EVENT_ID)), "non-included marker enqueued");
+
+  const forced = await recovery.forceRepublishPropositionPolicyStableView(
+    sourceChangeOpts(home, [FIXTURE_GENESIS_EVENT_ID], PRODUCTION_RUNTIME_MAX_READ_BYTES),
+  );
+  assert(forced.status === "failed", `non-included required must fail, got ${forced.status}`);
+  assert(
+    forced.error_code === "SOURCE_CHANGE_MISSING_EVENT"
+      || String(forced.error_message || "").includes("missing included"),
+    `typed missing-included failure, code=${forced.error_code} msg=${forced.error_message}`,
+  );
+  assert(typeof forced.final_read_reason === "string" && forced.final_read_reason.length > 0, "failed carries final_read_reason");
+  assert(fs.existsSync(markerPath(home, FIXTURE_GENESIS_EVENT_ID)), "excluded/non-included marker must not be acked");
+});
+
+await check("P1-B: mixed required markers ack included subset, retain missing, typed failure", async () => {
+  const home = path.join(tmpRoot, "mixed-markers-partial-ack");
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: home });
+  configureRoot(home);
+  recovery.resetPropositionPolicyStableViewSourceChangeRepublishForTests();
+
+  const c = await appendConstraint(home, {
+    candidateId: "tier1-direct:mixed-ack",
+    createdAtUtc: "2026-07-25T07:30:00.000Z",
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目 mixed markers 必须 partial ack included 子集。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目 mixed markers 必须 partial ack included 子集。",
+      title: "mixed-ack",
+    },
+  });
+  const p = await appendProposition(home, c, {
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目 mixed markers 必须 partial ack included 子集。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目 mixed markers 必须 partial ack included 子集。",
+      title: "mixed-ack",
+    },
+  });
+  assert(p.ok && typeof p.eventId === "string", `prop ${p.code}`);
+
+  await recovery.enqueuePropositionPolicyStableViewSourceChangePendingMarker(home, p.eventId);
+  await recovery.enqueuePropositionPolicyStableViewSourceChangePendingMarker(home, FIXTURE_GENESIS_EVENT_ID);
+  assert(fs.existsSync(markerPath(home, p.eventId)), "included marker present before force");
+  assert(fs.existsSync(markerPath(home, FIXTURE_GENESIS_EVENT_ID)), "missing marker present before force");
+
+  const forced = await recovery.forceRepublishPropositionPolicyStableView(
+    sourceChangeOpts(home, [p.eventId, FIXTURE_GENESIS_EVENT_ID], PRODUCTION_RUNTIME_MAX_READ_BYTES),
+  );
+  assert(forced.status === "failed", `mixed required must fail, got ${forced.status}`);
+  assert(
+    forced.error_code === "SOURCE_CHANGE_MISSING_EVENT",
+    `typed missing failure, code=${forced.error_code} msg=${forced.error_message}`,
+  );
+  assert(
+    String(forced.error_message || "").includes(FIXTURE_GENESIS_EVENT_ID),
+    `missing id reported, msg=${forced.error_message}`,
+  );
+  assert(forced.final_read_reason === "selected_valid", `bundle still selected_valid, final=${forced.final_read_reason}`);
+  assert(!fs.existsSync(markerPath(home, p.eventId)), "included covered marker must be acked");
+  assert(fs.existsSync(markerPath(home, FIXTURE_GENESIS_EVENT_ID)), "non-included missing marker must remain");
+});
+
+await check("P1-B: production 2-item bundle is selected_valid under 262144 budget", async () => {
+  const home = path.join(tmpRoot, "production-2item-budget");
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: home });
+  configureRoot(home);
+  recovery.resetPropositionPolicyStableViewSourceChangeRepublishForTests();
+
+  const c1 = await appendConstraint(home, {
+    candidateId: "tier1-direct:prod-2item-a",
+    createdAtUtc: "2026-07-25T07:20:00.000Z",
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目 production 两条目 bundle 必须在 262144 下 selected_valid。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目 production 两条目 bundle 必须在 262144 下 selected_valid。",
+      title: "prod-2item-a",
+    },
+  });
+  const p1 = await appendProposition(home, c1, {
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目 production 两条目 bundle 必须在 262144 下 selected_valid。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目 production 两条目 bundle 必须在 262144 下 selected_valid。",
+      title: "prod-2item-a",
+    },
+  });
+  const c2 = await appendConstraint(home, {
+    candidateId: "tier1-direct:prod-2item-b",
+    createdAtUtc: "2026-07-25T07:21:00.000Z",
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目第二条目也必须进入 production stable-view。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目第二条目也必须进入 production stable-view。",
+      title: "prod-2item-b",
+    },
+  });
+  const p2 = await appendProposition(home, c2, {
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目第二条目也必须进入 production stable-view。" },
+    draft: {
+      ...GLOBAL_DRAFT,
+      body: "所有项目第二条目也必须进入 production stable-view。",
+      title: "prod-2item-b",
+    },
+  });
+  assert(p1.ok && p2.ok, `props ${p1.code} ${p2.code}`);
+
+  const forced = await recovery.forceRepublishPropositionPolicyStableView(
+    sourceChangeOpts(home, [p1.eventId, p2.eventId], PRODUCTION_RUNTIME_MAX_READ_BYTES),
+  );
+  assert(
+    forced.status === "republished" || forced.status === "contended_converged",
+    `2-item force ${forced.status} ${forced.error_code}:${forced.error_message}`,
+  );
+  assert(forced.final_read_reason === "selected_valid", `final ${forced.final_read_reason}`);
+
+  const prodRead = strictRead(home, PRODUCTION_RUNTIME_MAX_READ_BYTES);
+  assert(prodRead.ok && prodRead.reason === "selected_valid", `production 262144 read ${prodRead.reason}`);
+  assert(prodRead.itemCount >= 2, `expected multi-item view, itemCount=${prodRead.itemCount}`);
+
+  const manifest = JSON.parse(fs.readFileSync(path.join(
+    home,
+    ".state/sediment/proposition-policy-stable-view/v1/bundles",
+    prodRead.bundleHash,
+    "manifest.json",
+  ), "utf8"));
+  const included = new Set(
+    (manifest.candidate_dispositions?.dispositions || [])
+      .filter((row) => row.disposition === "included")
+      .map((row) => row.source_event_id),
+  );
+  assert(included.has(p1.eventId) && included.has(p2.eventId), "both propositions included in dispositions");
+});
+
+await check("P1-B: recovery health strict read honors runtimeMaxReadBytes (no budget split)", async () => {
+  const home = path.join(tmpRoot, "recovery-budget-consistent");
+  await preparePropositionPolicyStableViewFixture({ repoRoot, abrainHome: home });
+  configureRoot(home);
+
+  // Recover with production budget — must publish and report selected_valid.
+  const recovered = await recovery.recoverPropositionPolicyStableView({
+    abrainHome: home,
+    repoRoot,
+    runtimeMaxReadBytes: PRODUCTION_RUNTIME_MAX_READ_BYTES,
+  });
+  assert(
+    recovered.status === "recovered" || recovered.status === "already_valid",
+    `recovery status=${recovered.status} ${recovered.error_code}`,
+  );
+  assert(recovered.final_read_reason === "selected_valid", `recovery final ${recovered.final_read_reason}`);
+
+  const liveRead = strictRead(home, PRODUCTION_RUNTIME_MAX_READ_BYTES);
+  assert(liveRead.ok && liveRead.reason === "selected_valid", `live production read ${liveRead.reason}`);
+  assert(liveRead.bundleHash === recovered.bundle_hash, "recovery and production reader agree on bundle");
+
+  // Tiny recovery budget must fail-closed rather than claim already_valid under a
+  // split hard envelope (old 262144-vs-settings bug).
+  const tinyRecover = await recovery.recoverPropositionPolicyStableView({
+    abrainHome: home,
+    repoRoot,
+    runtimeMaxReadBytes: TINY_RUNTIME_MAX_READ_BYTES,
+  });
+  // Existing latest is oversize for tiny budget; recovery should not report already_valid.
+  assert(tinyRecover.status !== "already_valid", `tiny recovery must not already_valid, got ${tinyRecover.status}`);
+  assert(tinyRecover.status === "failed", `tiny recovery fail-closed, status=${tinyRecover.status}`);
+  assert(
+    tinyRecover.final_read_reason === "runtime_budget_oversize"
+      || String(tinyRecover.final_read_reason || "").includes("oversize")
+      || String(tinyRecover.error_code || "").includes("BUDGET")
+      || String(tinyRecover.error_message || "").includes("oversize")
+      || String(tinyRecover.error_message || "").includes("RUNTIME_BUDGET"),
+    `tiny recovery fail-closed, status=${tinyRecover.status} final=${tinyRecover.final_read_reason} code=${tinyRecover.error_code} msg=${tinyRecover.error_message}`,
+  );
+  assert(
+    tinyRecover.final_read_reason !== "selected_valid"
+      && tinyRecover.final_read_reason !== "not_read",
+    `recovery catch must carry stable typed reason, final=${tinyRecover.final_read_reason}`,
+  );
+  assert(
+    tinyRecover.final_read_reason !== "publication_artifact_oversize",
+    "runtime budget reject must not look like publisher hard-envelope oversize",
+  );
 });
 
 await check("test hooks require PI_ASTACK_ENABLE_TEST_HOOKS", async () => {

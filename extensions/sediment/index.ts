@@ -203,9 +203,13 @@ import {
   runWithCheckpointSessionIdOverride,
 } from "../_shared/worker-checkpoint-context";
 import {
+  captureEdgeProtocolCandidate,
   captureEdgeProtocolTerminalPair,
+  emitEdgeProtocolShadowDiagnosticOnce,
   initializeEdgeProtocolShadowSession,
   recoverEdgeProtocolMissingWitnessesForOwner,
+  writeEdgeTerminalWitness,
+  _resetEdgeProtocolShadowDiagnosticsForTests,
   type EdgeC6Identity,
   type EdgeLeafTip,
   type EdgeTerminalPairCaptureResult,
@@ -932,6 +936,8 @@ async function triggerKnowledgePublicationOneShot(
 
 /** Process-local owner-root cache: capture must stay lightweight (<100ms). */
 const sourceProjectRootByCwd = new Map<string, string>();
+/** Test-only: count owner/git root resolves on the capture path. */
+let captureOwnerResolveCountForTests = 0;
 
 /** Cheap .git walk for capture identity — avoids subprocess on the hot path. */
 function findGitRootByWalk(cwd: string): string | undefined {
@@ -947,6 +953,9 @@ function findGitRootByWalk(cwd: string): string | undefined {
 }
 
 function resolveCaptureSourceProjectRoot(cwd: string, abrainHome: string): string {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1") {
+    captureOwnerResolveCountForTests += 1;
+  }
   const key = `${path.resolve(abrainHome)}::${path.resolve(cwd)}`;
   const cached = sourceProjectRootByCwd.get(key);
   if (cached) return cached;
@@ -1244,6 +1253,156 @@ async function maybeInitAndRecoverDaemonEdgeShadow(args: {
   }
 }
 
+function edgeC6FromAnchor(
+  sessionId: string,
+  anchor: ReturnType<typeof getCurrentAnchor>,
+): EdgeC6Identity | undefined {
+  if (!sessionId) return undefined;
+  if (!anchor || anchor.turn_id === undefined || anchor.turn_id === null) {
+    // Fail closed for edge protocol when C6 cannot be resolved — never invent turn_id.
+    return undefined;
+  }
+  // Fail closed: never cross-session record (anchor.session_id must match live session).
+  if (anchor.session_id !== sessionId) return undefined;
+  return {
+    session_id: sessionId,
+    turn_id: anchor.turn_id,
+    ...(anchor.subturn !== undefined ? { subturn: anchor.subturn } : {}),
+    ...(anchor.sub_agent_label ? { sub_agent_label: anchor.sub_agent_label } : {}),
+  };
+}
+
+function edgeLeafTipFromSessionManager(sm: {
+  getLeafId?(): string | null;
+  getLeafEntry?(): unknown;
+} | undefined): EdgeLeafTip | undefined {
+  try {
+    const leafId = sm?.getLeafId?.();
+    const leaf = sm?.getLeafEntry?.();
+    if (!leafId || !leaf || typeof leaf !== "object") return undefined;
+    const entry = leaf as Record<string, unknown>;
+    if (entry.id !== leafId || typeof entry.type !== "string") return undefined;
+    if (entry.parentId !== null && typeof entry.parentId !== "string") return undefined;
+    return {
+      id: leafId,
+      parentId: entry.parentId as string | null,
+      type: entry.type,
+      ...(typeof entry.timestamp === "string" ? { timestampUtc: entry.timestamp } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * ADR 0044 capture-only protocol shadow. Independent of local intake authority.
+ * Fail closed at the edge protocol only — never blocks or rewrites intake/queue.
+ * Caller is the unique settings gate; c6 is frozen by the caller at hook entry.
+ */
+async function captureEdgeProtocolShadowFromCaller(args: {
+  eventMessages: unknown;
+  cwd: string;
+  sessionId: string;
+  ownerProjectRoot: string;
+  abrainHome: string;
+  leafTip?: EdgeLeafTip;
+  /** Frozen at agent_end entry; undefined means c6 unavailable (fail closed). */
+  c6: EdgeC6Identity | undefined;
+}): Promise<void> {
+  if (!args.sessionId) return;
+  if (!args.c6) {
+    emitEdgeProtocolShadowDiagnosticOnce("c6_unavailable");
+    await appendAudit(args.cwd, {
+      operation: "skip",
+      lane: "system",
+      reason: "edge_protocol_shadow_capture_failed",
+      error_code: "c6_unavailable",
+      session_id: args.sessionId,
+      checkpoint_advanced: false,
+      background_async: false,
+    }).catch(() => {});
+    return;
+  }
+  const result = await captureEdgeProtocolCandidate({
+    abrainHome: args.abrainHome,
+    ownerProjectRoot: args.ownerProjectRoot,
+    sessionId: args.sessionId,
+    messages: args.eventMessages,
+    c6: args.c6,
+    leafTip: args.leafTip,
+  });
+  if (result.status === "captured") return;
+  emitEdgeProtocolShadowDiagnosticOnce(result.error_code ?? result.status);
+  await appendAudit(args.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "edge_protocol_shadow_capture_failed",
+    error_code: result.error_code ?? result.status,
+    // Never audit raw body / absolute source path content.
+    payload_digest_prefix: result.source?.content_id?.slice(0, 12),
+    session_id: args.sessionId,
+    checkpoint_advanced: false,
+    background_async: false,
+  }).catch(() => {});
+}
+
+/** Caller is the unique settings gate; c6 is frozen by the caller at hook entry. */
+async function writeEdgeTerminalWitnessFromCaller(args: {
+  cwd: string;
+  sessionId: string;
+  ownerProjectRoot: string;
+  abrainHome: string;
+  leafTip?: EdgeLeafTip;
+  c6: EdgeC6Identity | undefined;
+}): Promise<void> {
+  if (!args.sessionId) return;
+  if (!args.c6) {
+    emitEdgeProtocolShadowDiagnosticOnce("witness_c6_unavailable");
+    await appendAudit(args.cwd, {
+      operation: "skip",
+      lane: "system",
+      reason: "edge_protocol_shadow_witness_failed",
+      error_code: "c6_unavailable",
+      session_id: args.sessionId,
+      checkpoint_advanced: false,
+      background_async: false,
+    }).catch(() => {});
+    return;
+  }
+  const result = await writeEdgeTerminalWitness({
+    abrainHome: args.abrainHome,
+    ownerProjectRoot: args.ownerProjectRoot,
+    sessionId: args.sessionId,
+    c6: args.c6,
+    leafTip: args.leafTip,
+  });
+  if (result.status === "written") return;
+  // no_candidate is observable (low-cardinality diagnostic + audit), never silent.
+  if (result.status === "no_candidate") {
+    emitEdgeProtocolShadowDiagnosticOnce("no_candidate");
+    await appendAudit(args.cwd, {
+      operation: "skip",
+      lane: "system",
+      reason: "edge_protocol_shadow_witness_no_candidate",
+      error_code: "no_candidate",
+      session_id: args.sessionId,
+      checkpoint_advanced: false,
+      background_async: false,
+    }).catch(() => {});
+    return;
+  }
+  emitEdgeProtocolShadowDiagnosticOnce(result.error_code ?? result.status);
+  await appendAudit(args.cwd, {
+    operation: "skip",
+    lane: "system",
+    reason: "edge_protocol_shadow_witness_failed",
+    error_code: result.error_code ?? result.status,
+    session_id: args.sessionId,
+    checkpoint_advanced: false,
+    background_async: false,
+  }).catch(() => {});
+}
+
 function captureSedimentAgentEndIntake(
   event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> },
   ctx: {
@@ -1256,6 +1415,8 @@ function captureSedimentAgentEndIntake(
     };
     modelRegistry?: unknown;
   },
+  /** Pre-resolved owner root from the agent_end handler (avoid double resolve). */
+  frozen?: { abrainHome: string; sourceProjectRoot: string },
 ): SedimentAgentEndCapture | undefined {
   const sm = ctx.sessionManager;
   const sessionId = readSessionId(sm);
@@ -1287,8 +1448,8 @@ function captureSedimentAgentEndIntake(
   const boundaryDiagnostic = boundaryUntrusted ? getSubAgentBoundaryUntrustedDiagnostic() : undefined;
   const anchor = getCurrentAnchor();
   const cwd = path.resolve(ctx.cwd || process.cwd());
-  const abrainHome = resolveAbrainHomeForSediment();
-  const sourceProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
+  const abrainHome = frozen?.abrainHome ?? resolveAbrainHomeForSediment();
+  const sourceProjectRoot = frozen?.sourceProjectRoot ?? resolveCaptureSourceProjectRoot(cwd, abrainHome);
   const record = buildSedimentIntakeRecord({
     sessionId,
     sessionFile,
@@ -3597,9 +3758,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // publication. The recovery promise retains only roots and never
           // captures ctx or UI.
           const repoRoot = path.resolve(__dirname, "..", "..");
+          // Live production injection budget — recovery health strict read and
+          // child publication acceptance must share this with the session injector
+          // (no 262144-vs-settings split).
+          const runtimeMaxReadBytes = resolveRuleInjectorSettings()
+            .propositionPolicyStableViewInjection.maxReadBytes;
           void schedulePropositionPolicyStableViewRecovery({
             abrainHome,
             repoRoot,
+            runtimeMaxReadBytes,
           }).then((result) => {
             if (result.status === "failed") {
               console.error(`[sediment] proposition policy stable-view recovery failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`);
@@ -3612,8 +3779,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // strict-valid, force republish so newly durable propositions enter
           // the source closure. Helper resolves to Result|null (not nested
           // Promise). No tight loop — next session_start/new event.
-          const runtimeMaxReadBytes = resolveRuleInjectorSettings()
-            .propositionPolicyStableViewInjection.maxReadBytes;
           void schedulePropositionPolicyStableViewSourceChangeFromPendingMarkers({
             abrainHome,
             repoRoot,
@@ -3632,6 +3797,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 status: result.status,
                 error_code: result.error_code ?? null,
                 reason: result.reason,
+                final_read_reason: result.final_read_reason,
                 // Low-sensitivity only: event ids / status / code; no statement/body.
               }).catch(() => {});
             }
@@ -3669,6 +3835,67 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // Durable intake and one-shot publishers own their own OFD attempts.
       // Sediment startup does not subscribe to the canonical startup consumer.
       await initializeAfterCanonicalBarrier(canonicalGitRuntimeEnabled());
+    },
+  );
+
+  // ADR 0044: independent edge session_start wiring (default off).
+  // Durable session layout only — not semantic / recovery / network.
+  // Default-off returns undefined synchronously (zero cost, non-thenable).
+  // When enabled: returns a Promise so callers that await session_start join
+  // the durable layout init. Independent of local sediment.enabled.
+  pi.on(
+    "session_start",
+    (
+      _event: unknown,
+      ctx: {
+        sessionManager?: {
+          getSessionId?(): string | undefined | null;
+          getSessionFile?(): string | undefined | null;
+        };
+        cwd?: string;
+      },
+    ) => {
+      // Unique caller gate — no nested settings re-read later.
+      if (resolveSedimentSettings().edgeProtocolShadow.enabled !== true) return;
+      if (isSubAgentBoundaryUntrusted()) return;
+      if (isSubAgentSession(ctx)) return;
+      const sessionId = readSessionId(ctx.sessionManager);
+      if (!sessionId) return;
+      const cwd = path.resolve(ctx.cwd || process.cwd());
+      const abrainHome = resolveAbrainHomeForSediment();
+      // Same owner resolution as agent_end; seeds capture cache.
+      const ownerProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
+      return (async () => {
+        try {
+          const init = await initializeEdgeProtocolShadowSession({
+            abrainHome,
+            ownerProjectRoot,
+            sessionId,
+          });
+          if (init.status === "ready") return;
+          emitEdgeProtocolShadowDiagnosticOnce(init.error_code ?? init.status);
+          await appendAudit(cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: "edge_protocol_shadow_session_init_failed",
+            error_code: init.error_code ?? init.status,
+            session_id: sessionId,
+            checkpoint_advanced: false,
+            background_async: false,
+          }).catch(() => {});
+        } catch {
+          emitEdgeProtocolShadowDiagnosticOnce("session_init_failed");
+          await appendAudit(cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: "edge_protocol_shadow_session_init_failed",
+            error_code: "session_init_failed",
+            session_id: sessionId,
+            checkpoint_advanced: false,
+            background_async: false,
+          }).catch(() => {});
+        }
+      })();
     },
   );
 
@@ -6804,17 +7031,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       },
     ) => {
       // pi awaits agent_end listeners before agent_settled. Capture is bounded;
-      // durable intake fsync is the only awaited local IO (target p99 <100ms).
+      // durable intake fsync + optional edge source/candidate are the only
+      // awaited local IO (target p99 <100ms). Edge is independent of intake.
       const boundaryUntrusted = isSubAgentBoundaryUntrusted();
-      if (!boundaryUntrusted && isSubAgentSession(liveCtx)) return;
-      if (!boundaryUntrusted && !resolveSedimentSettings().enabled) return;
-      // Live agent_end is the interactive foreground session. Rebind reporters
-      // without bumping epoch so same-session async and immediate failure
-      // notifies still reach the UI; foreign recovery remains fenced out.
-      const liveSessionId = readSessionId(liveCtx.sessionManager);
-      bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
-        bumpEpoch: currentForegroundSessionId() !== liveSessionId,
-      });
       if (boundaryUntrusted) {
         const diagnostic = getSubAgentBoundaryUntrustedDiagnostic();
         const message = `sediment intake blocked: sub-agent boundary untrusted (${diagnostic?.reason ?? "unknown"})`;
@@ -6831,29 +7050,30 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           operation: "skip",
           lane: "system",
           reason: "subagent_boundary_untrusted",
-          session_id: readSessionId(liveCtx.sessionManager),
+          session_id: blockedSessionId,
           boundary_diagnostic: diagnostic,
           checkpoint_advanced: false,
           background_async: false,
         }).catch(() => {});
         return;
       }
+      if (isSubAgentSession(liveCtx)) return;
 
-      const capture = captureSedimentAgentEndIntake(event, liveCtx);
-      if (!capture) return;
-      const { record } = capture;
-      const cycle = sessionAgentCycle.get(record.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
-      cycle.ended += 1;
-      sessionAgentCycle.set(record.sessionId, cycle);
-
-      // ADR 0045: daemon execution owner never writes ordinary intake pending
-      // (nobody consumes it — worker is sole pass executor and only drains edge
-      // shadow when the continuous producer triple gate is fully open). Incomplete
-      // dual flags → aggregate diagnostic + return (no foreground pipeline).
-      // Full gate → edge capture (fsync pair before return). Foreground keeps
-      // intake → queue. Capture failure is NOT knowledge ack.
       const agentEndSettings = resolveSedimentSettings();
+      const edgeEnabled = agentEndSettings.edgeProtocolShadow.enabled === true;
+      const sedimentEnabled = agentEndSettings.enabled === true;
+
+      // ADR 0045 daemon path: never ordinary intake; continuous pair only when
+      // triple gate fully open. Capture failure is NOT knowledge ack.
       if (agentEndSettings.executionOwner === "daemon") {
+        const liveSessionId = readSessionId(liveCtx.sessionManager);
+        bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
+          bumpEpoch: currentForegroundSessionId() !== liveSessionId,
+        });
+        // Pair producer needs intake-shaped coordinates (session/leaf/C6) only.
+        const capture = captureSedimentAgentEndIntake(event, liveCtx);
+        if (!capture) return;
+        const { record } = capture;
         if (isDaemonEdgeShadowCaptureEnabled(agentEndSettings)) {
           await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
           return;
@@ -6870,54 +7090,198 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         return;
       }
 
-      const started = performance.now();
-      try {
-        const written = await writeSedimentIntakeRecord(resolveAbrainHomeForSediment(), record);
-        const elapsed = performance.now() - started;
-        const approxBytes = Buffer.byteLength(JSON.stringify(written.record), "utf-8");
-        cloneMetrics.lastBytes = approxBytes;
-        cloneMetrics.lastMs = elapsed;
-        cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
-        cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, elapsed);
-        cloneMetrics.samples += 1;
-        if (written.status === "collision") throw new Error(`intake identity collision: ${written.windowId}`);
-        void appendAudit(record.cwd, {
-          operation: "skip",
-          lane: "system",
-          reason: "intake_durable",
-          session_id: record.sessionId,
-          intake_window_id: record.windowId,
-          intake_status: written.status,
-          intake_write_ms: written.durationMs,
-          checkpoint_advanced: false,
-          background_async: false,
-        }).catch(() => {});
-        enqueueSedimentIntakeRecord({
-          record: written.record,
-          modelRegistry: capture.modelRegistry,
-          fromRecovery: false,
-          reason: "agent_end",
+      // default-off both paths: no owner/git/filesystem I/O beyond settings gate.
+      if (!sedimentEnabled && !edgeEnabled) return;
+
+      // Freeze args/C6 only when at least one capture path is enabled.
+      const liveSessionId = readSessionId(liveCtx.sessionManager);
+      const cwd = path.resolve(liveCtx.cwd || process.cwd());
+      const abrainHome = resolveAbrainHomeForSediment();
+      const ownerProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
+      const leafTip = edgeEnabled
+        ? edgeLeafTipFromSessionManager(liveCtx.sessionManager)
+        : undefined;
+      const eventMessages = event.messages ?? [];
+      const frozenEdgeC6 = edgeEnabled && liveSessionId
+        ? edgeC6FromAnchor(liveSessionId, getCurrentAnchor())
+        : undefined;
+
+      // Live agent_end is the interactive foreground session. Rebind reporters
+      // without bumping epoch so same-session async and immediate failure
+      // notifies still reach the UI; foreign recovery remains fenced out.
+      bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
+        bumpEpoch: currentForegroundSessionId() !== liveSessionId,
+      });
+
+      // ADR 0044 capture-only: start edge Promise early (independent of intake).
+      // Attach reject handler immediately so intake await cannot observe a
+      // brief unhandled rejection. Does not copy semantic execution.
+      let edgePromise: Promise<void> | undefined;
+      if (edgeEnabled && liveSessionId) {
+        const rawEdge = captureEdgeProtocolShadowFromCaller({
+          eventMessages,
+          cwd,
+          sessionId: liveSessionId,
+          ownerProjectRoot,
+          abrainHome,
+          leafTip,
+          c6: frozenEdgeC6,
         });
-      } catch (err) {
-        const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
-        console.error(`[sediment] intake write failed; window not enqueued: ${error}`);
-        dynamicSedimentNotify(`sediment intake write failed: ${error}`, "error", record.sessionId);
-        applySedimentStatus(
-          (msg) => dynamicSedimentSetStatus(msg, record.sessionId),
-          record.sessionId,
-          "failed",
-          "intake_write_failed",
+        edgePromise = rawEdge.then(
+          () => undefined,
+          async (err: unknown) => {
+            emitEdgeProtocolShadowDiagnosticOnce("edge_capture_unexpected_reject");
+            const detail = sanitizeAuditText(
+              err instanceof Error ? err.message : String(err),
+              200,
+            );
+            await appendAudit(cwd, {
+              operation: "skip",
+              lane: "system",
+              reason: "edge_protocol_shadow_capture_failed",
+              error_code: "unexpected_reject",
+              error: detail,
+              session_id: liveSessionId,
+              checkpoint_advanced: false,
+              background_async: false,
+            }).catch(() => {});
+          },
         );
-        void appendAudit(record.cwd, {
+      } else if (edgeEnabled) {
+        edgePromise = (async () => {
+          emitEdgeProtocolShadowDiagnosticOnce("missing_session_id");
+          await appendAudit(cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: "edge_protocol_shadow_capture_failed",
+            error_code: "missing_session_id",
+            checkpoint_advanced: false,
+            background_async: false,
+          }).catch(() => {});
+        })();
+      }
+
+      // Local primary intake/queue — only when sediment.enabled (unique semantic primary).
+      try {
+        if (sedimentEnabled) {
+          const capture = captureSedimentAgentEndIntake(event, liveCtx, {
+            abrainHome,
+            sourceProjectRoot: ownerProjectRoot,
+          });
+          if (capture) {
+            const { record } = capture;
+            const cycle = sessionAgentCycle.get(record.sessionId) ?? { started: 0, ended: 0, drainCount: 0 };
+            cycle.ended += 1;
+            sessionAgentCycle.set(record.sessionId, cycle);
+
+            const started = performance.now();
+            try {
+              const written = await writeSedimentIntakeRecord(abrainHome, record);
+              const elapsed = performance.now() - started;
+              const approxBytes = Buffer.byteLength(JSON.stringify(written.record), "utf-8");
+              cloneMetrics.lastBytes = approxBytes;
+              cloneMetrics.lastMs = elapsed;
+              cloneMetrics.maxBytes = Math.max(cloneMetrics.maxBytes, approxBytes);
+              cloneMetrics.maxMs = Math.max(cloneMetrics.maxMs, elapsed);
+              cloneMetrics.samples += 1;
+              if (written.status === "collision") throw new Error(`intake identity collision: ${written.windowId}`);
+              void appendAudit(record.cwd, {
+                operation: "skip",
+                lane: "system",
+                reason: "intake_durable",
+                session_id: record.sessionId,
+                intake_window_id: record.windowId,
+                intake_status: written.status,
+                intake_write_ms: written.durationMs,
+                checkpoint_advanced: false,
+                background_async: false,
+              }).catch(() => {});
+              enqueueSedimentIntakeRecord({
+                record: written.record,
+                modelRegistry: capture.modelRegistry,
+                fromRecovery: false,
+                reason: "agent_end",
+              });
+            } catch (err) {
+              const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
+              console.error(`[sediment] intake write failed; window not enqueued: ${error}`);
+              dynamicSedimentNotify(`sediment intake write failed: ${error}`, "error", record.sessionId);
+              applySedimentStatus(
+                (msg) => dynamicSedimentSetStatus(msg, record.sessionId),
+                record.sessionId,
+                "failed",
+                "intake_write_failed",
+              );
+              await appendAudit(record.cwd, {
+                operation: "skip",
+                lane: "system",
+                reason: "intake_write_failed",
+                session_id: record.sessionId,
+                error,
+                checkpoint_advanced: false,
+                background_async: false,
+              }).catch(() => {});
+            }
+          }
+        }
+      } finally {
+        // Always join edge capture so both paths complete before handler returns.
+        if (edgePromise) await edgePromise;
+      }
+    },
+  );
+
+  // ADR 0044: TerminalWitness only. Missing SessionManager transaction + launch
+  // broker ⇒ settlement_status=unsupported_core_capability / capture_only.
+  // Never terminal_seal / TurnSettled / job admission.
+  // Gated by edgeProtocolShadow.enabled + boundary (not sediment.enabled).
+  // Skip when ADR 0045 continuous pair producer already owns witness (daemon triple gate).
+  pi.on(
+    "agent_settled",
+    async (
+      _event: unknown,
+      liveCtx: {
+        cwd?: string;
+        sessionManager?: {
+          getLeafId?(): string | null;
+          getLeafEntry?(): unknown;
+          getSessionId?(): string | undefined | null;
+          getSessionFile?(): string | undefined | null;
+        };
+      },
+    ) => {
+      if (resolveSedimentSettings().edgeProtocolShadow.enabled !== true) return;
+      // Daemon continuous pair already wrote witness under triple gate — do not
+      // append a second witness (public writeEdgeTerminalWitness is multi-append).
+      if (isDaemonEdgeShadowCaptureEnabled()) return;
+      if (isSubAgentBoundaryUntrusted()) return;
+      if (isSubAgentSession(liveCtx)) return;
+      const sessionId = readSessionId(liveCtx.sessionManager);
+      const cwd = path.resolve(liveCtx.cwd || process.cwd());
+      if (!sessionId) {
+        emitEdgeProtocolShadowDiagnosticOnce("witness_missing_session_id");
+        await appendAudit(cwd, {
           operation: "skip",
           lane: "system",
-          reason: "intake_write_failed",
-          session_id: record.sessionId,
-          error,
+          reason: "edge_protocol_shadow_witness_failed",
+          error_code: "missing_session_id",
           checkpoint_advanced: false,
           background_async: false,
         }).catch(() => {});
+        return;
       }
+      const abrainHome = resolveAbrainHomeForSediment();
+      const ownerProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
+      const leafTip = edgeLeafTipFromSessionManager(liveCtx.sessionManager);
+      const frozenC6 = edgeC6FromAnchor(sessionId, getCurrentAnchor());
+      await writeEdgeTerminalWitnessFromCaller({
+        cwd,
+        sessionId,
+        ownerProjectRoot,
+        abrainHome,
+        leafTip,
+        c6: frozenC6,
+      });
     },
   );
 }
@@ -7921,6 +8285,7 @@ async function tryAutoWriteLane(args: {
                 status: result.status,
                 error_code: result.error_code ?? null,
                 reason: result.reason,
+                final_read_reason: result.final_read_reason,
                 // Marker remains for session_start; capture not rolled back.
                 pending_marker_retained: true,
                 // Low-sensitivity only: no statement/body text.
@@ -7940,6 +8305,7 @@ async function tryAutoWriteLane(args: {
                 status: "rejected",
                 error_code: "SOURCE_CHANGE_PROMISE_REJECTED",
                 error_message: error instanceof Error ? error.message : String(error),
+                final_read_reason: "not_read",
                 pending_marker_retained: true,
               }).catch(() => {});
             });
@@ -8600,6 +8966,90 @@ async function tryAutoWriteLane(args: {
   };
 }
 
+/**
+ * Formal production operator for durable Tier-1 held authorized retry.
+ *
+ * Peeks the oldest pending held decision for the session and, when present,
+ * re-enters the private `tryAutoWriteLane` with the frozen held lineage
+ * (correctionSignal:null, no extractor follow-up, no re-classification).
+ * Does not invent authorization, does not run the extractor when held is
+ * missing, and does not copy CE/proposition/settle logic.
+ */
+export type ExecuteTier1HeldAuthorizedRetryResult =
+  | { kind: "empty" }
+  | {
+      kind: "retried";
+      decisionId: string;
+      outcome: AutoWriteLaneOutcome;
+    };
+
+function minimalHeldAuthorizedRetryWindow(held: Tier1HeldAuthorizedDecision): RunWindow {
+  const quote = held.signal.user_quote ?? "";
+  const text = quote;
+  return {
+    entries: [{
+      type: "message",
+      id: held.sourceTurnId,
+      timestamp: held.authorizedAtUtc,
+      message: { role: "user", content: [{ type: "text", text: quote }] },
+    }],
+    text,
+    chars: text.length,
+    totalBranchEntries: 1,
+    candidateEntries: 1,
+    includedEntries: 1,
+    checkpointFound: false,
+    lastEntryId: held.sourceTurnId,
+  };
+}
+
+export async function executeTier1HeldAuthorizedRetry(args: {
+  abrainHome: string;
+  sessionId: string;
+  correlationId: string;
+  /** Fallback only when held.projectRoot is absent. Held frozen root wins. */
+  cwd?: string;
+  settings?: SedimentSettings;
+  modelRegistry?: unknown;
+  signal?: AbortSignal;
+}): Promise<ExecuteTier1HeldAuthorizedRetryResult> {
+  const held = await peekOldestTier1HeldDecision(args.abrainHome, args.sessionId);
+  if (!held) return { kind: "empty" };
+
+  // cwd / projectId: held frozen lineage only (cwd may fall back when older
+  // held records predate projectRoot persistence).
+  const cwd = held.projectRoot ?? args.cwd;
+  if (!cwd) {
+    throw new Error(
+      "executeTier1HeldAuthorizedRetry: held.projectRoot missing and cwd not provided",
+    );
+  }
+  const projectId = held.projectId;
+  const settings = args.settings ?? resolveSedimentSettings();
+  const window = minimalHeldAuthorizedRetryWindow(held);
+
+  const outcome = await tryAutoWriteLane({
+    cwd,
+    sessionId: args.sessionId,
+    settings,
+    window,
+    modelRegistry: args.modelRegistry,
+    signal: args.signal,
+    correlationId: args.correlationId,
+    abrainHome: args.abrainHome,
+    projectId,
+    // Exact held retry: never re-classify; never spend extractor budget.
+    correctionSignal: null,
+    tier1ExtractorFollowUp: false,
+  });
+
+  return {
+    kind: "retried",
+    decisionId: held.decisionId,
+    outcome,
+  };
+}
+
 /** Compact subset of SedimentSettings safe to embed in every audit row. */
 function snapshotSedimentSettings(
   settings: ReturnType<typeof resolveSedimentSettings>,
@@ -8633,6 +9083,7 @@ export function _resetAutoWriteStateForTests(): void {
   sedimentAgentEndTestHooks = undefined;
   maintenanceScheduleObserverForTests = undefined;
   sourceProjectRootByCwd.clear();
+  captureOwnerResolveCountForTests = 0;
   _G.__sediment_latestNotify = undefined;
   _G.__sediment_latestSetStatus = undefined;
   _G.__sediment_currentSessionId = undefined;
@@ -8643,6 +9094,16 @@ export function _resetAutoWriteStateForTests(): void {
   _G.__sediment_latestNotifyEpoch = undefined;
   _G.__sediment_inflightCount = 0;
   _resetWarnedApisForTests();
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1") {
+    _resetEdgeProtocolShadowDiagnosticsForTests();
+  }
+}
+
+export function _captureOwnerResolveCountForTests(): number {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_captureOwnerResolveCountForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return captureOwnerResolveCountForTests;
 }
 
 /** Test-only: register a promise in autoWriteInFlight (clears on settle). */

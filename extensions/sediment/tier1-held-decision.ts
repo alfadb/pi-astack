@@ -354,6 +354,12 @@ async function pruneAckedHeld(abrainHome: string, keep: number): Promise<void> {
  *
  * Terminal: invalid / blocked / path_violation / collision / sanitizer — same
  * input fails identically; advance + recall flag is the net.
+ *
+ * Process-level implementation provenance faults (RUNTIME_PROVENANCE_SPLIT /
+ * PROVENANCE_DRIFT / RUNTIME_RECONFIGURE_BLOCKED) are restart-only: same
+ * process cannot heal jiti/module fingerprint or frozen source bytes, so they
+ * HOLD the authorized decision rather than terminal-ack it (PID1533336 class).
+ * Registry/schema/path mismatches remain terminal.
  */
 export function isTransientConstraintEvidenceAppendFailure(reason: string): boolean {
   if (!reason.startsWith("constraint_evidence_append_failed:")) return false;
@@ -368,10 +374,18 @@ export function isTransientConstraintEvidenceAppendFailure(reason: string): bool
     "CANONICAL_SCAN_LOCK_FAILED",
     "CANONICAL_STARTUP_BLOCKED",
     "CANONICAL_DRAIN_TRANSIENT",
+    // Process-level provenance: only restart recovers; do not terminal-ack held.
+    "RUNTIME_PROVENANCE_SPLIT",
+    "PROVENANCE_DRIFT",
+    "RUNTIME_RECONFIGURE_BLOCKED",
   ]);
   if (TRANSIENT_CODES.has(detail)) return true;
   // Prefix form: CANONICAL_DRAIN_RECOVERY_QUARANTINED etc.
   if (detail.startsWith("CANONICAL_DRAIN_")) return true;
+  // Un-normalized mid-flight / pre-stabilize shapes (code: message).
+  if (detail.startsWith("RUNTIME_PROVENANCE_SPLIT")) return true;
+  if (detail.startsWith("PROVENANCE_DRIFT")) return true;
+  if (detail.startsWith("RUNTIME_RECONFIGURE_BLOCKED")) return true;
   // Legacy un-normalized message shapes still in the wild / mid-flight.
   const lower = detail.toLowerCase();
   if (lower.includes("recovery_quarantined")) return true;
@@ -379,12 +393,25 @@ export function isTransientConstraintEvidenceAppendFailure(reason: string): bool
   if (lower.includes("canonical_mutation_busy")) return true;
   if (lower.includes("canonical_scan_busy")) return true;
   if (lower.includes("canonical_scan_lock_failed")) return true;
+  if (lower.includes("runtime_provenance_split")) return true;
+  if (lower.includes("provenance_drift")) return true;
+  if (lower.includes("runtime_reconfigure_blocked")) return true;
+  if (lower.includes("jiti/module copies loaded different implementation provenance")) return true;
+  if (lower.includes("loaded implementation/settings bytes changed before mutation")) return true;
+  if (lower.includes("canonical runtime provenance/settings are frozen for this process")) return true;
   if (/drain ended in\s+\w+/i.test(detail)) {
     if (/ended in\s+(index_converged|empty|metadata_deferred|consumed)\b/i.test(detail)) return false;
     return true;
   }
   return false;
 }
+
+/** Stable HOLD codes for process-level implementation provenance faults. */
+const PROCESS_PROVENANCE_HOLD_CODES = new Set([
+  "RUNTIME_PROVENANCE_SPLIT",
+  "PROVENANCE_DRIFT",
+  "RUNTIME_RECONFIGURE_BLOCKED",
+]);
 
 /** Normalize thrown/status failures into stable reason suffixes for HOLD taxonomy. */
 export function normalizeConstraintEvidenceAppendError(error: unknown): string {
@@ -395,6 +422,7 @@ export function normalizeConstraintEvidenceAppendError(error: unknown): string {
       || code === "CANONICAL_MUTATION_BUSY"
       || code === "CANONICAL_SCAN_BUSY"
       || code === "CANONICAL_SCAN_LOCK_FAILED"
+      || PROCESS_PROVENANCE_HOLD_CODES.has(code)
     ) {
       return code;
     }
@@ -405,6 +433,19 @@ export function normalizeConstraintEvidenceAppendError(error: unknown): string {
   if (/CANONICAL_MUTATION_BUSY/i.test(msg)) return "CANONICAL_MUTATION_BUSY";
   if (/CANONICAL_SCAN_BUSY/i.test(msg)) return "CANONICAL_SCAN_BUSY";
   if (/CANONICAL_SCAN_LOCK_FAILED/i.test(msg)) return "CANONICAL_SCAN_LOCK_FAILED";
+  // Prefer exact code tokens so "RUNTIME_PROVENANCE_SPLIT: …" stabilizes to the code.
+  if (/\bRUNTIME_PROVENANCE_SPLIT\b/.test(msg)) return "RUNTIME_PROVENANCE_SPLIT";
+  if (/\bPROVENANCE_DRIFT\b/.test(msg)) return "PROVENANCE_DRIFT";
+  if (/\bRUNTIME_RECONFIGURE_BLOCKED\b/.test(msg)) return "RUNTIME_RECONFIGURE_BLOCKED";
+  if (/jiti\/module copies loaded different implementation provenance/i.test(msg)) {
+    return "RUNTIME_PROVENANCE_SPLIT";
+  }
+  if (/loaded implementation\/settings bytes changed before mutation/i.test(msg)) {
+    return "PROVENANCE_DRIFT";
+  }
+  if (/canonical runtime provenance\/settings are frozen for this process/i.test(msg)) {
+    return "RUNTIME_RECONFIGURE_BLOCKED";
+  }
   const drain = msg.match(/canonical drain ended in\s+(\w+)/i);
   if (drain) {
     const status = drain[1]!;

@@ -42,6 +42,7 @@
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { gitSingleFlight } from "../_shared/git-singleflight";
+import { abortEvidenceFromSignal } from "../dispatch/terminal-state";
 import {
   validateWorkflow,
   WORKFLOW_MAX_CONCURRENCY,
@@ -85,6 +86,12 @@ export interface StageRunResult {
   output: string;
   error?: string;
   failureType?: string;
+  /** Structured cancel attribution from shared worker (dispatch runInProcess). */
+  cancelSource?: string;
+  /** Structured termination origin from shared worker. */
+  terminationSource?: string;
+  /** Bounded last/active tool snapshot (safe metadata only). */
+  toolSnapshot?: import("../dispatch/tool-run-snapshot").ToolRunSnapshotSummary;
   durationMs: number;
   usage?: { input: number; output: number; total: number; cost: number };
   toolCallCount?: number;
@@ -135,6 +142,13 @@ export interface StageRecord {
   error?: string;
   failure_type?: string;
   failure_source?: FailureSource;
+  /** Structured cancel attribution from shared worker (evidence-first). */
+  cancel_source?: string;
+  /** Structured termination origin from shared worker. */
+  termination_source?: string;
+  /** Safe last-tool metadata at terminal (name/id/status/timestamps only). */
+  last_tool?: Record<string, unknown>;
+  active_tool_count?: number;
   /** ids of degraded upstreams visible to this stage at launch. */
   degraded_upstreams?: string[];
   cost?: number;
@@ -407,6 +421,24 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
   const cancelSource = (): FailureSource =>
     opts.signal?.aborted ? "external_abort" : timedOut() ? "run_timeout" : "workflow_abort";
 
+  /** C5 cancel/termination attribution for synthetic "aborted before attempt"
+   *  results. Evidence-first: wall timeout → timeout; structured signal
+   *  reason → user/parent; otherwise parent (external/workflow lifecycle).
+   *  Never leave cancel/termination fields empty on synthetic cancel. */
+  const syntheticAbortAttribution = (): {
+    cancelSource: string;
+    terminationSource: string;
+  } => {
+    // Wall-clock first: deadline timer may abort runCtl without a reason.
+    if (timedOut()) return { cancelSource: "timeout", terminationSource: "timeout" };
+    const fromExternal = abortEvidenceFromSignal(opts.signal);
+    if (fromExternal === "user" || fromExternal === "timeout" || fromExternal === "parent") {
+      return { cancelSource: fromExternal, terminationSource: fromExternal };
+    }
+    // External abort without structured reason, or sibling workflow_abort drain.
+    return { cancelSource: "parent", terminationSource: "parent" };
+  };
+
   const setRecord = async (rec: StageRecord, runStatus = "running") => {
     records[rec.id] = rec;
     audit({
@@ -421,6 +453,10 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(rec.failure_source ? { failure_source: rec.failure_source } : {}),
       ...(rec.error ? { error: rec.error.slice(0, 300) } : {}),
       ...(rec.failure_type ? { failure_type: rec.failure_type } : {}),
+      ...(rec.cancel_source ? { cancel_source: rec.cancel_source } : {}),
+      ...(rec.termination_source ? { termination_source: rec.termination_source } : {}),
+      ...(rec.last_tool ? { last_tool: rec.last_tool } : {}),
+      ...(typeof rec.active_tool_count === "number" ? { active_tool_count: rec.active_tool_count } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
       ...(typeof rec.tool_call_count === "number" ? { tool_call_count: rec.tool_call_count } : {}),
       ...(rec.worker_run_governance ? { worker_run_governance: rec.worker_run_governance } : {}),
@@ -452,13 +488,29 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
     while (attempts < maxAttempts) {
       attempts++;
       if (haltSignal()) {
-        res = { output: "", error: "aborted before attempt", failureType: "aborted", durationMs: 0 };
+        const attr = syntheticAbortAttribution();
+        res = {
+          output: "",
+          error: "aborted before attempt",
+          failureType: "aborted",
+          durationMs: 0,
+          cancelSource: attr.cancelSource,
+          terminationSource: attr.terminationSource,
+        };
         break;
       }
       await sem.acquire();
       try {
         if (haltSignal()) {
-          res = { output: "", error: "aborted before attempt", failureType: "aborted", durationMs: 0 };
+          const attr = syntheticAbortAttribution();
+          res = {
+            output: "",
+            error: "aborted before attempt",
+            failureType: "aborted",
+            durationMs: 0,
+            cancelSource: attr.cancelSource,
+            terminationSource: attr.terminationSource,
+          };
           break;
         }
         // deepseek PR-10 R1 NIT-1: compute AFTER acquire — a saturated
@@ -509,6 +561,17 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
   ): Promise<StageRecord> => {
     const model = stage.model ?? opts.defaultModel;
     const file = path.join(opts.runDir, stageFileName(stage.id));
+    const lastTool = res.toolSnapshot?.last
+      ? {
+          tool_name: res.toolSnapshot.last.tool_name,
+          tool_call_id: res.toolSnapshot.last.tool_call_id,
+          status: res.toolSnapshot.last.status,
+          started_at: res.toolSnapshot.last.started_at,
+          ...(res.toolSnapshot.last.last_update_at ? { last_update_at: res.toolSnapshot.last.last_update_at } : {}),
+          ...(res.toolSnapshot.last.completed_at ? { completed_at: res.toolSnapshot.last.completed_at } : {}),
+          age_ms: res.toolSnapshot.last.age_ms,
+        }
+      : undefined;
     const base: StageRecord = {
       id: stage.id,
       ...(parent ? { parent: parent.id } : {}),
@@ -519,6 +582,12 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(typeof res.usage?.cost === "number" ? { cost: res.usage.cost } : {}),
       ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
       ...(res.failureType ? { failure_type: res.failureType } : {}),
+      ...(res.cancelSource ? { cancel_source: res.cancelSource } : {}),
+      ...(res.terminationSource ? { termination_source: res.terminationSource } : {}),
+      ...(lastTool ? { last_tool: lastTool } : {}),
+      ...(typeof res.toolSnapshot?.active_count === "number"
+        ? { active_tool_count: res.toolSnapshot.active_count }
+        : {}),
       ...(res.workerRunGovernance ? { worker_run_governance: res.workerRunGovernance } : {}),
       ...(res.reasoning_trace_path ? { reasoning_trace_path: res.reasoning_trace_path } : {}),
       ...(typeof res.reasoning_chars === "number" ? { reasoning_chars: res.reasoning_chars } : {}),
@@ -529,10 +598,59 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(res.reasoning_trace_error_code ? { reasoning_trace_error_code: res.reasoning_trace_error_code } : {}),
       ...(typeof res.reasoning_trace_bytes === "number" ? { reasoning_trace_bytes: res.reasoning_trace_bytes } : {}),
     };
+    // Observational cancel/termination attribution for cancel-class runner
+    // outcomes. Prefer runner-stamped sources; fallback by failureType so
+    // legacy/custom runners are not mislabeled as parent:
+    //   timeout|timeout_partial → timeout
+    //   guardrail_stop → guardrail
+    //   bare aborted → run-level syntheticAbortAttribution
+    // These fields NEVER change on_fail state semantics — only haltSignal does.
+    const cancelClassFailure =
+      res.failureType === "aborted" ||
+      res.failureType === "timeout" ||
+      res.failureType === "timeout_partial" ||
+      res.failureType === "guardrail_stop";
+    let obsCancel = res.cancelSource;
+    let obsTerm = res.terminationSource;
+    if (res.error && cancelClassFailure && (!obsCancel || !obsTerm)) {
+      let fallbackCancel: string;
+      let fallbackTerm: string;
+      if (res.failureType === "timeout" || res.failureType === "timeout_partial") {
+        fallbackCancel = "timeout";
+        fallbackTerm = "timeout";
+      } else if (res.failureType === "guardrail_stop") {
+        fallbackCancel = "guardrail";
+        fallbackTerm = "guardrail";
+      } else {
+        const attr = syntheticAbortAttribution();
+        fallbackCancel = attr.cancelSource;
+        fallbackTerm = attr.terminationSource;
+      }
+      obsCancel = obsCancel ?? fallbackCancel;
+      obsTerm = obsTerm ?? fallbackTerm;
+    }
+    const withObs = (rec: StageRecord): StageRecord => ({
+      ...rec,
+      ...(obsCancel ? { cancel_source: obsCancel } : {}),
+      ...(obsTerm ? { termination_source: obsTerm } : {}),
+    });
+
+    // C5 cancelled: ONLY run-level halt (external abort / run timeout /
+    // workflow lifecycle) forces StageRecord cancelled. Stage-own dispatch
+    // timeout / timeout_partial / guardrail_stop / aborted follow on_fail:
+    // degrade → write partial+failure-note and degraded; abort → failed;
+    // retry → existing nonretryable rules. cancel_source/termination_source
+    // remain observational and must not skip degrade writes or cascade.
     if (res.error && haltSignal()) {
-      // In-flight unit cut by external abort / run timeout → cancelled
-      // (C5 distinction from failed), not chargeable to the stage.
-      return { ...base, status: "cancelled", error: res.error, failure_source: cancelSource() };
+      const attr = syntheticAbortAttribution();
+      return withObs({
+        ...base,
+        status: "cancelled",
+        error: res.error,
+        failure_source: cancelSource(),
+        cancel_source: obsCancel ?? attr.cancelSource,
+        termination_source: obsTerm ?? attr.terminationSource,
+      });
     }
     if (!res.error) {
       const ok = await writeStageOutput(file, renderStageFile({
@@ -540,9 +658,9 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
         stage: { id: stage.id, model }, status: "completed",
         attempts, durationMs: res.durationMs, output: res.output,
       }));
-      if (!ok) return { ...base, status: "failed", error: "output file write failed", failure_source: "output_write_failed" };
+      if (!ok) return withObs({ ...base, status: "failed", error: "output file write failed", failure_source: "output_write_failed" });
       summaries.set(stage.id, summarize(res.output));
-      return { ...base, status: "completed", output_path: file };
+      return withObs({ ...base, status: "completed", output_path: file });
     }
     if (onFail === "degrade") {
       // §7: degraded MUST still produce its output path (partial output +
@@ -553,11 +671,11 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
         attempts, durationMs: res.durationMs,
         failureNote: res.error, output: res.output,
       }));
-      if (!ok) return { ...base, status: "failed", error: res.error, failure_source: "output_write_failed" };
+      if (!ok) return withObs({ ...base, status: "failed", error: res.error, failure_source: "output_write_failed" });
       summaries.set(stage.id, `[degraded: ${res.error.slice(0, 160)}]\n${summarize(res.output)}`);
-      return { ...base, status: "degraded", output_path: file, error: res.error, failure_source: "runner_terminal" };
+      return withObs({ ...base, status: "degraded", output_path: file, error: res.error, failure_source: "runner_terminal" });
     }
-    return { ...base, status: "failed", error: res.error, failure_source: "runner_terminal" };
+    return withObs({ ...base, status: "failed", error: res.error, failure_source: "runner_terminal" });
   };
 
   /** Launch one top-level stage (agent or parallel aggregate). */
@@ -670,10 +788,16 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       if (halted) {
         for (const id of [...pending]) {
           pending.delete(id);
+          const attr = syntheticAbortAttribution();
+          const fs = abortRequested && !haltSignal() ? "workflow_abort" : cancelSource();
           await setRecord({
             id, kind: stageById.get(id)!.kind, status: "cancelled", attempts: 0,
             duration_ms: 0,
-            failure_source: abortRequested && !haltSignal() ? "workflow_abort" : cancelSource(),
+            failure_source: fs,
+            // workflow_abort (sibling policy) still has a lifecycle owner:
+            // parent of the run graph. External/timeout use structured attr.
+            cancel_source: fs === "workflow_abort" ? "parent" : attr.cancelSource,
+            termination_source: fs === "workflow_abort" ? "parent" : attr.terminationSource,
           });
         }
       } else {
@@ -686,6 +810,8 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
             await setRecord({
               id, kind: st.kind, status: "cancelled", attempts: 0, duration_ms: 0,
               failure_source: "workflow_abort",
+              cancel_source: "parent",
+              termination_source: "parent",
               error: `upstream not satisfied: ${needs.filter((n) => records[n]?.status === "failed" || records[n]?.status === "cancelled").join(",")}`,
             });
             continue;

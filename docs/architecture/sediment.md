@@ -76,7 +76,7 @@ ABRAIN_ROOT=<path> \
   --extension <repo>/extensions/sediment/index.ts
 ```
 
-Authority: [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md). Code: `extensions/sediment/worker-rpc.ts`, worker branch + daemon edge producer in `extensions/sediment/index.ts`, `sediment.executionOwner` / `sediment.daemonWorker.edgeShadowCaptureEnabled` in settings/schema, `extensions/sediment/edge-protocol-shadow.ts`. Smoke: `npm run smoke:sediment-worker-rpc`, `npm run smoke:sediment-daemon-edge-capture`.
+Authority: [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md)（**Stage A 机制**，不是目标 authority 合同）。Code: `extensions/sediment/worker-rpc.ts`, worker branch + daemon edge producer in `extensions/sediment/index.ts`, `sediment.executionOwner` / `sediment.daemonWorker.edgeShadowCaptureEnabled` in settings/schema, `extensions/sediment/edge-protocol-shadow.ts`. Smoke: `npm run smoke:sediment-worker-rpc`, `npm run smoke:sediment-daemon-edge-capture`。层次：0045 叠在 [ADR 0044](../adr/0044-central-sediment-edge-authority.md) capture-only edge contract 之上；A0 前 §2.1 本地 intake 仍是唯一 semantic primary，edge shadow / worker 都不得升为第二 primary。
 
 ## 3. Curator operation set
 
@@ -136,10 +136,29 @@ B5 cutover 后，sediment 不再写 `<project>/.pensieve/`。
 - extractor / curator prompt 明确要求不要复制 raw secrets；看到 secret-like string 时输出 typed placeholder，且不得还原或编造 `[SECRET:<type>]` 的原值。
 - 对存储完整性，保留 schema/path/lock/atomic write hard gates。
 
-## 9. 相关文档
+## 9. 目标边界：central sediment edge（ADR 0044）
+
+2026-07-24 用户批准 T0 R4：长期记忆接收/裁决权威迁中心；Pi 的 `agent_end` / `agent_settled` 收缩为本地 durable capture / TerminalWitness（正常生产分布 p99 `<100ms`），不再在 awaited 路径跑 LLM/Git/network/recovery/drain。
+
+**当前生产权威仍是本文 §2.1 的本地 intake + queue + publication 路径。** 完整 Stage A/B/C 未落地。§2.2 ADR 0045 是 Stage A daemon-owned 短命 worker 迁移机制，**不是**并列 primary。
+
+**Pi 侧第一兼容切片（capture-only protocol shadow）已实现且默认关闭**：`sediment.edgeProtocolShadow.enabled`（测试可用 `PI_ASTACK_EDGE_PROTOCOL_SHADOW=1`）。实现见 `extensions/sediment/edge-protocol-shadow.ts` + `index.ts` 中与 local intake **独立** 的 `agent_end` candidate / `agent_settled` witness 路径。Production acceptance 见 [edge protocol shadow production acceptance](../evidence/2026-07-24-edge-protocol-shadow-production-acceptance.json)。**默认仍 off、capture-only**；Stage A/B/C 未完成；§2.1 本地 intake 仍是唯一 `local_primary`；**不**宣称 cutover。启用后：
+
+- `session_start`：幂等 durable session layout 初始化（与 capture 相同 layout；不写 source/candidate；独立于 local sediment session_start recovery；默认 off 在 settings gate 后同步 no-op）。
+- `agent_end`：与 local intake **彼此独立**（boundary 后尽早启动 edge Promise，再 intake durable write，最后 await edge；任一失败不阻止另一条）。edge 路径：content-addressed durable raw sidecar + append-only journal candidate。禁止 pin-only。**不**复制 semantic execution，不阻塞 lifecycle。
+- `agent_settled`：awaited TerminalWitness，引用本 session/C6 最新 candidate；`settlement_status=unsupported_core_capability`。**不**写 seal / TurnSettled / job admission。
+- 失败 fail-closed 于 edge protocol（低基数 audit + 一次非阻塞诊断，无 raw）；不影响既有 intake/queue。
+- **不**把 edge shadow 启用为第二 semantic primary。
+
+Pi 侧合同见 [central-sediment-edge.md](./central-sediment-edge.md) 与 [ADR 0044](../adr/0044-central-sediment-edge-authority.md)；完整中心实施规格在 `/home/worker/work/components/pi-router/docs/architecture/central-memory-sediment.md`。
+
+## 10. 相关文档
 
 - [memory.md](./memory.md)
+- [central-sediment-edge.md](./central-sediment-edge.md) — R4 edge 合同（capture-only protocol shadow 已实现默认关；Stage A/B/C 未实施；非 cutover）
 - [abrain.md](./abrain.md)
 - [../migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)
 - [../adr/0016-sediment-as-llm-curator.md](../adr/0016-sediment-as-llm-curator.md)
 - [../adr/0018-sediment-curator-defense-layers.md](../adr/0018-sediment-curator-defense-layers.md)
+- [../adr/0044-central-sediment-edge-authority.md](../adr/0044-central-sediment-edge-authority.md) — 目标 authority/edge contract
+- [../adr/0045-sediment-worker-safe-rpc-command.md](../adr/0045-sediment-worker-safe-rpc-command.md) — Stage A daemon worker 机制

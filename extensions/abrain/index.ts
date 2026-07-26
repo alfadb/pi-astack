@@ -85,11 +85,21 @@ import {
   createProducedArtifactReceipt,
   getCanonicalGitRuntime,
   getCanonicalStartupPromise,
+  peekCanonicalRuntimeDiagnostics,
   reportCanonicalStartupConsumer,
   scheduleCanonicalStartupConsumer,
   setCanonicalStartupReporter,
+  type CanonicalRuntimePeek,
   type CanonicalStartupHostMode,
 } from "../_shared/canonical-git-runtime";
+import {
+  applyAllPendingAbrainBindIntents,
+  applyLocalMapOnlyBind,
+  intentFromPlan,
+  planAbrainBind,
+  writeAbrainBindIntent,
+} from "./bind-intent";
+import { durableAtomicWriteFile } from "../_shared/durable-write";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 import type { SedimentSettings } from "../sediment/settings";
@@ -121,6 +131,8 @@ const ABRAIN_HOME = process.env.ABRAIN_ROOT
 const STATE_DIR = path.join(ABRAIN_HOME, ".state");
 const VAULT_DISABLED_FLAG = path.join(STATE_DIR, "vault-disabled");
 const ABRAIN_STARTUP_CONSUMER = "abrain-runtime";
+/** Independent of session_start continuation so deferred bind schedule cannot clobber reporter/onReady. */
+const ABRAIN_BIND_INTENT_CONSUMER = "abrain-bind-intent";
 const ABRAIN_LOCAL_SAFETY_KEY = Symbol.for("pi-astack/abrain-local-safety/v1");
 const ABRAIN_PROCESS_STATE_KEY = Symbol.for("pi-astack/abrain-process-state/v1");
 
@@ -200,6 +212,11 @@ function assertAbrainLocalWriteSafety(abrainHome = ABRAIN_HOME): void {
   if (safety.status !== "ready") {
     throw new Error(`abrain local write safety blocked: ${safety.blockedReason ?? "unknown"}`);
   }
+}
+
+/** Vault slash domain: local safety only — never awaits Path A canonical startup. */
+function assertVaultLocalSafety(abrainHome = ABRAIN_HOME): void {
+  assertAbrainLocalWriteSafety(abrainHome);
 }
 
 async function awaitAbrainCanonicalWriteBarrier(abrainHome = ABRAIN_HOME): Promise<void> {
@@ -1614,10 +1631,24 @@ export default function activate(pi: ExtensionAPI): void {
             reporter: notify,
             blockedMessage: (startup) => `abrain canonical startup blocked: ${startup.blockedReason ?? "unknown"}`,
             errorMessage: (error) => `abrain canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
-            onReady: () => {
+            onReady: async () => {
               if (getAbrainLocalSafetyStatus(ABRAIN_HOME).status !== "ready") return;
               canonicalBarrierReady = true;
               initializeAbrainRuntimeAfterBarrier();
+              // Apply durable bind intents under the existing barrier/receipt
+              // authority. Never auto-drains production backlog or pushes.
+              try {
+                const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+                if (applied.applied > 0) {
+                  const resolved = snapshotBootActiveProject(capturedCwd || process.cwd());
+                  if (resolved.activeProject) {
+                    bootActiveProject = resolved;
+                    bootActiveProjectAt = Date.now();
+                  }
+                }
+              } catch (error) {
+                console.error(`[abrain] bind intent apply on ready failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
               queueSelfHealFlush();
               // Device delivery remains advisory and follows full Path A proof.
               runStartupAutoSync({ modelRegistry: capturedModelRegistry, cwd: capturedCwd });
@@ -2353,7 +2384,7 @@ export default function activate(pi: ExtensionAPI): void {
             handleStatus(ctx.ui);
             return;
           case "init":
-            await awaitAbrainCanonicalWriteBarrier();
+            assertVaultLocalSafety();
             await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
             return;
           default:
@@ -2676,7 +2707,7 @@ function renderListing(scope: VaultScope): string {
 }
 
 async function handleSecret(args: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
-  assertAbrainLocalWriteSafety();
+  assertVaultLocalSafety();
   // Pre-flight: vault must be initialized
   const backend = readBackendFile(ABRAIN_HOME);
   if (!backend) {
@@ -2722,7 +2753,6 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
-      await awaitAbrainCanonicalWriteBarrier();
       const result = await writeSecret({
         abrainHome: ABRAIN_HOME,
         scope: resolved.scope,
@@ -2803,7 +2833,6 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
-      await awaitAbrainCanonicalWriteBarrier();
       const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
       const label = scopeReadableLabel(resolved.scope);
       // Round 7 P0 (gpt-5.5): forget outcome is tri-state. "absent" is a
@@ -2877,34 +2906,80 @@ function formatBindingStatus(result: ResolveActiveProjectResult | null): string 
   ].join("\n");
 }
 
+function formatCanonicalPeekStatus(peek: CanonicalRuntimePeek): string {
+  if (peek.status === "none") {
+    return [
+      "Canonical runtime: none (not constructed in this process)",
+      "  note: status never starts startup; session_start / writers create it",
+    ].join("\n");
+  }
+  const lines = [
+    `Canonical runtime: ${peek.status}`,
+    ...(peek.repo ? [`  repo: ${peek.repo}`] : []),
+    ...(peek.generation !== undefined ? [`  generation: ${peek.generation}`] : []),
+    ...(peek.lastPhase ? [`  last_phase: ${peek.lastPhase}`] : []),
+  ];
+  if (peek.status === "deferred") {
+    lines.push(`  deferred_reason: ${peek.deferredReason ?? "unknown"}`);
+    lines.push(`  retryable: ${peek.retryable ? "true" : "false"}`);
+    lines.push(`  reason: ${peek.reason ?? "unknown"}`);
+    lines.push("  next: external lifecycle (session_start / agent_end / /abrain sync) may retry");
+  } else if (peek.status === "blocked") {
+    lines.push(`  reason: ${peek.reason ?? "unknown"}`);
+  } else if (peek.status === "running") {
+    lines.push("  note: startup in progress; bind may queue tracked registration");
+  }
+  return lines.join("\n");
+}
+
+function refreshBootActiveProjectIfBound(cwd: string): ResolveActiveProjectResult {
+  const resolved = snapshotBootActiveProject(cwd);
+  // Only refresh boot vault scope when three-layer disk state is truly bound.
+  if (resolved.activeProject) {
+    bootActiveProject = resolved;
+    bootActiveProjectAt = Date.now();
+  }
+  return resolved;
+}
+
 async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?: string): void }, cwd = process.cwd()): Promise<void> {
   const commandCwd = path.resolve(cwd || process.cwd());
   const tokens = rawArgs.split(/\s+/).filter(Boolean);
   const sub = tokens.shift() ?? "status";
   if (sub === "status") {
-    // Binding status (ADR 0017) + git auto-sync status (ADR 0020) in one view.
+    // Immediate read-only view: binding + cached canonical peek. Never starts
+    // startup / creates runtime / refreshes boot vault scope.
     const current = snapshotBootActiveProject(commandCwd);
     const bindingMsg = formatBindingStatus(current);
+    const peek = peekCanonicalRuntimeDiagnostics({ abrainHome: ABRAIN_HOME });
+    const canonicalMsg = formatCanonicalPeekStatus(peek);
+    ui.notify(`${bindingMsg}\n\n${canonicalMsg}`, current.activeProject ? "info" : "warning");
+
     let syncStatus: AbrainSyncStatus | null = null;
     try {
       syncStatus = await getGitSyncStatus(ABRAIN_HOME);
     } catch (e: unknown) {
-      // getStatus is best-effort; if it throws, we still show binding status.
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[abrain] getGitSyncStatus failed:`, msg);
     }
     const syncMsg = syncStatus ? formatSyncStatus(syncStatus) : "";
-    // A failed or divergent configured-upstream update needs user attention.
-    const lastFetchResult = syncStatus?.lastFetch?.result;
-    const needsAttention = lastFetchResult !== undefined && !["ok", "noop", "skipped"].includes(lastFetchResult);
-    const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
-    ui.notify(fullMsg, needsAttention ? "warning" : (current.activeProject ? "info" : "warning"));
+    if (syncMsg) {
+      const lastFetchResult = syncStatus?.lastFetch?.result;
+      const needsAttention = lastFetchResult !== undefined && !["ok", "noop", "skipped"].includes(lastFetchResult);
+      ui.notify(syncMsg, needsAttention ? "warning" : "info");
+    }
     return;
   }
   if (sub === "sync") {
     // Manual sync mutates local Git state. In canonical mode it consumes the
     // same Path A startup promise as session_start and all canonical writers.
     await awaitAbrainCanonicalWriteBarrier();
+    try {
+      await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+      refreshBootActiveProjectIfBound(commandCwd);
+    } catch (error) {
+      console.error(`[abrain] bind intent apply on sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
     ui.notify("abrain: syncing with the configured upstream...", "info");
     const result = await gitSync({ abrainHome: ABRAIN_HOME });
     ui.notify(result.summary, result.ok ? "info" : "warning");
@@ -2921,55 +2996,195 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       return;
     }
     try {
-      // Fail before bindAbrainProject mutates either repository when settings
-      // are invalid. Only explicit valid enabled=false may use legacy commits.
-      await awaitAbrainCanonicalWriteBarrier();
+      assertAbrainLocalWriteSafety(ABRAIN_HOME);
+      // Disposition throws for invalid settings. Only explicit valid
+      // enabled=false may use the legacy synchronous tracked-write path.
       const canonicalBindEnabled = canonicalGitRuntimeEnabled();
-      const bindAndCommit = async () => {
+      const plan = await planAbrainBind({
+        abrainHome: ABRAIN_HOME,
+        cwd: commandCwd,
+        projectId: parsed.projectId,
+      });
+
+      // Fast path: no abrain tracked create/update required (registry + gitignore
+      // already correct). Immediately bound after local-map (+ optional project
+      // manifest) writes; registry bytes and abrain git status stay unchanged.
+      if (!plan.needsTrackedAbrainWrite) {
+        if (plan.manifestToWrite) {
+          await durableAtomicWriteFile(
+            plan.manifestPath,
+            `${JSON.stringify(plan.manifestToWrite, null, 2)}\n`,
+            { mode: 0o644 },
+          );
+        }
+        const projectCommit = plan.manifestCreated
+          ? await autoCommitPaths(
+              plan.projectRoot,
+              [".abrain-project.json"],
+              `chore: 绑定 abrain 项目 ${plan.projectId}`,
+            )
+          : { repoRoot: plan.projectRoot, paths: [".abrain-project.json"], status: "clean" as const, detail: "unchanged" };
+        const local = await applyLocalMapOnlyBind({
+          abrainHome: ABRAIN_HOME,
+          projectId: plan.projectId,
+          projectRoot: plan.projectRoot,
+        });
+        const bound = refreshBootActiveProjectIfBound(commandCwd);
+        if (!bound.activeProject) {
+          ui.notify([
+            `/abrain bind: local path confirmed for ${plan.projectId}, but three-layer binding is still incomplete.`,
+            `  local_map: ${local.localMapPath}${local.localPathAdded ? " (path added)" : " (path refreshed)"}`,
+            `  status: ${bound.reason ?? "unknown"}`,
+          ].join("\n"), "warning");
+          return;
+        }
+        ui.notify([
+          `Bound current project to abrain project: ${plan.projectId}`,
+          "",
+          plan.localMapOnly ? "Local-map-only fast path:" : "Local bind fast path (no abrain tracked write):",
+          "- local path confirmed on this machine",
+          "- no canonical abrain tracked write",
+          "- registry bytes and abrain git status unchanged",
+          `- ${local.localMapPath}${local.localPathAdded ? " (path added)" : " (path refreshed)"}`,
+          `- ${plan.manifestPath}${plan.manifestCreated ? " (created)" : " (verified)"}`,
+          `- ${plan.registryPath} (verified)`,
+          "",
+          "Project repo:",
+          formatAutoCommitResult("project repo", projectCommit),
+        ].join("\n"), "info");
+        return;
+      }
+
+      // Canonical disabled: keep the previous synchronous write+commit path.
+      if (!canonicalBindEnabled) {
         const result = await bindAbrainProject({
           abrainHome: ABRAIN_HOME,
           cwd: commandCwd,
           projectId: parsed.projectId,
         });
-        // autoCommitPaths owns its own singleflight-before-barrier sequence.
-        // Calling another same-repository singleflight wrapper here would queue
-        // behind this operation when a bind targets the abrain worktree itself.
         const projectCommit = await autoCommitPaths(
           result.projectRoot,
           [".abrain-project.json"],
           `chore: 绑定 abrain 项目 ${result.projectId}`,
         );
-        const abrainCommit = canonicalBindEnabled
-          ? await canonicalAutoCommitAbrainPaths(
-              ABRAIN_HOME,
-              [".gitignore", `projects/${result.projectId}/_project.json`],
-              `project: add ${result.projectId}`,
-            )
-          : await autoCommitPaths(
-              ABRAIN_HOME,
-              [".gitignore", `projects/${result.projectId}/_project.json`],
-              `project: 添加 ${result.projectId}`,
-            );
-        return { result, projectCommit, abrainCommit };
-      };
-      const { result, projectCommit, abrainCommit } = await withCanonicalMutationBarrier(ABRAIN_HOME, bindAndCommit);
-      bootActiveProject = snapshotBootActiveProject(commandCwd);
-      bootActiveProjectAt = Date.now();
-      const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);
+        const abrainCommit = await autoCommitPaths(
+          ABRAIN_HOME,
+          [".gitignore", `projects/${result.projectId}/_project.json`],
+          `project: 添加 ${result.projectId}`,
+        );
+        refreshBootActiveProjectIfBound(commandCwd);
+        const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);
+        ui.notify([
+          `Bound current project to abrain project: ${result.projectId}`,
+          "",
+          "Wrote/updated (legacy synchronous path; canonical disabled):",
+          `- ${result.manifestPath}${result.manifestCreated ? " (created)" : " (verified)"}`,
+          `- ${result.registryPath}${result.registryCreated ? " (created)" : " (updated)"}`,
+          `- ${result.localMapPath}${result.localPathAdded ? " (path added)" : " (path refreshed)"}`,
+          `- ${result.abrainGitignorePath}${result.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
+          "",
+          "Auto-commits:",
+          formatAutoCommitResult("project repo", projectCommit),
+          formatAutoCommitResult("abrain repo", abrainCommit),
+          ...(commitWarning ? ["", "Warning: auto-commit failed/skipped for at least one repo; fix it before `/memory migrate --go`."] : []),
+        ].join("\n"), commitWarning ? "warning" : "info");
+        return;
+      }
+
+      // Tracked abrain registration required: durable create-only intent outbox.
+      // Do not write unowned dirty registry/.gitignore before canonical apply.
+      if (plan.manifestToWrite) {
+        await durableAtomicWriteFile(
+          plan.manifestPath,
+          `${JSON.stringify(plan.manifestToWrite, null, 2)}\n`,
+          { mode: 0o644 },
+        );
+      }
+      // Best-effort project-side commit only; does not touch abrain tracked files.
+      const projectCommit = await autoCommitPaths(
+        plan.projectRoot,
+        [".abrain-project.json"],
+        `chore: 绑定 abrain 项目 ${plan.projectId}`,
+      );
+
+      const intent = intentFromPlan(plan);
+      const written = await writeAbrainBindIntent(ABRAIN_HOME, intent);
+      if (written.status === "collision") {
+        ui.notify(
+          `/abrain bind queued collision for ${plan.projectId}: durable intent identity conflict at ${written.filePath}`,
+          "warning",
+        );
+        return;
+      }
+
+      // Opportunistic apply if canonical is already ready; never await a cold startup.
+      const peek = peekCanonicalRuntimeDiagnostics({ abrainHome: ABRAIN_HOME });
+      if (peek.status === "ready") {
+        const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+        const bound = refreshBootActiveProjectIfBound(commandCwd);
+        if (bound.activeProject) {
+          ui.notify([
+            `Bound current project to abrain project: ${plan.projectId}`,
+            "",
+            "Canonical registration applied from durable bind intent:",
+            `- intent: ${intent.itemId.slice(0, 12)}… (${written.status})`,
+            `- ${plan.registryPath}${plan.registryCreated ? " (created)" : " (verified)"}`,
+            `- ${plan.abrainGitignorePath}${plan.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
+            ...applied.details.map((line) => `- ${line}`),
+            "",
+            "Project repo:",
+            formatAutoCommitResult("project repo", projectCommit),
+          ].join("\n"), "info");
+          return;
+        }
+      } else {
+        // Schedule apply on an independent consumer so session_start continuation
+        // / reporter for ABRAIN_STARTUP_CONSUMER is never overwritten.
+        void scheduleCanonicalStartupConsumer({
+          runtime: { abrainHome: ABRAIN_HOME },
+          consumerId: ABRAIN_BIND_INTENT_CONSUMER,
+          mode: "json",
+          onReady: async () => {
+            try {
+              const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+              if (applied.applied > 0) refreshBootActiveProjectIfBound(commandCwd);
+            } catch (error) {
+              console.error(`[abrain] bind intent deferred apply failed: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          },
+          blockedMessage: (diag) => {
+            if (diag.startup === "deferred") {
+              return `abrain bind still pending: canonical startup deferred (${diag.deferredReason ?? "unknown"}); retryable via external lifecycle — ${diag.blockedReason ?? "unknown"}`;
+            }
+            return `abrain bind still pending: canonical startup blocked — ${diag.blockedReason ?? "unknown"}`;
+          },
+        });
+      }
+
       ui.notify([
-        `Bound current project to abrain project: ${result.projectId}`,
+        `Queued abrain project registration: ${plan.projectId}`,
         "",
-        "Wrote/updated:",
-        `- ${result.manifestPath}${result.manifestCreated ? " (created)" : " (verified)"}`,
-        `- ${result.registryPath}${result.registryCreated ? " (created)" : " (updated)"}`,
-        `- ${result.localMapPath}${result.localPathAdded ? " (path added)" : " (path refreshed)"}`,
-        `- ${result.abrainGitignorePath}${result.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
+        "Canonical registration pending:",
+        `- durable bind intent: ${intent.itemId.slice(0, 12)}… (${written.status})`,
+        plan.registryCreated
+          ? `- abrain registry not written yet (avoids unowned dirty tracked files)`
+          : `- registry exists; remaining tracked write still goes through intent apply`,
+        plan.abrainGitignoreUpdated
+          ? `- .gitignore .state/ ensure queued with the same intent`
+          : `- .gitignore already has .state/ ignore`,
+        `- local machine is NOT fully bound until intent apply succeeds`,
         "",
-        "Auto-commits:",
+        "Project repo:",
         formatAutoCommitResult("project repo", projectCommit),
-        formatAutoCommitResult("abrain repo", abrainCommit),
-        ...(commitWarning ? ["", "Warning: auto-commit failed/skipped for at least one repo; fix it before `/memory migrate --go`."] : []),
-      ].join("\n"), commitWarning ? "warning" : "info");
+        "",
+        peek.status === "deferred"
+          ? `Canonical state: deferred (${peek.deferredReason ?? "unknown"}) — retryable via session_start / agent_end / /abrain sync`
+          : peek.status === "running"
+            ? "Canonical state: running — intent will apply when ready"
+            : peek.status === "blocked"
+              ? `Canonical state: blocked — ${peek.reason ?? "unknown"}`
+              : "Canonical state: not ready — intent will apply on next ready lifecycle",
+      ].join("\n"), "warning");
     } catch (err: any) {
       ui.notify(`/abrain bind failed: ${err.message}`, "warning");
     }

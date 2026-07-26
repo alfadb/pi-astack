@@ -350,6 +350,9 @@ await check("C5: external abort mid-run → in-flight cancelled(external_abort);
   assert(r.stages.a.reasoning_trace_path === "/tmp/workflow-reasoning-a-forced_incomplete.jsonl", "abort stage reasoning trace path recorded");
   assert(r.stages.a.reasoning_trace_status === "forced_incomplete", "abort stage reasoning status recorded");
   assert(r.stages.b.status === "cancelled", "pending b cancelled");
+  // Pending stage cancelled under external abort must carry structured parent attribution.
+  assert(r.stages.b.cancel_source === "parent", `b cancel_source=${r.stages.b.cancel_source}`);
+  assert(r.stages.b.termination_source === "parent", `b termination_source=${r.stages.b.termination_source}`);
 });
 
 await check("run timeout (injected now): pending stage cancelled(run_timeout)", async () => {
@@ -365,6 +368,225 @@ await check("run timeout (injected now): pending stage cancelled(run_timeout)", 
   });
   assert(r.status === "cancelled", `status=${r.status}`);
   assert(r.stages.b.status === "cancelled" && r.stages.b.failure_source === "run_timeout", JSON.stringify(r.stages.b));
+  // Synthetic abort before attempt under wall timeout → cancel/termination=timeout.
+  assert(r.stages.b.cancel_source === "timeout", `b cancel_source=${r.stages.b.cancel_source}`);
+  assert(r.stages.b.termination_source === "timeout", `b termination_source=${r.stages.b.termination_source}`);
+});
+
+await check("injected StageRunResult attribution + toolSnapshot reach stage record/summary/audit whitelist", async () => {
+  const runDir = tmpRunDir();
+  const auditRows = [];
+  const toolSnapshot = {
+    active_count: 1,
+    active: [{
+      tool_name: "bash",
+      tool_call_id: "tc-1",
+      status: "running",
+      started_at: "2026-01-01T00:00:00.000Z",
+      last_update_at: "2026-01-01T00:00:01.000Z",
+      age_ms: 1000,
+    }],
+    last: {
+      tool_name: "bash",
+      tool_call_id: "tc-1",
+      status: "running",
+      started_at: "2026-01-01T00:00:00.000Z",
+      last_update_at: "2026-01-01T00:00:01.000Z",
+      age_ms: 1000,
+    },
+  };
+  // Default on_fail=abort: stage-own timeout is failed (not cancelled).
+  // cancel_source/termination_source remain observational.
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a")]),
+    ...baseOpts(runDir, async () => ({
+      output: "partial",
+      error: "idle timeout",
+      failureType: "timeout",
+      cancelSource: "timeout",
+      terminationSource: "timeout",
+      toolSnapshot,
+      durationMs: 12,
+      toolCallCount: 3,
+    }), { audit: (row) => auditRows.push(row) }),
+  });
+  assert(r.stages.a.status === "failed", JSON.stringify(r.stages.a));
+  assert(r.stages.a.cancel_source === "timeout", `cancel_source=${r.stages.a.cancel_source}`);
+  assert(r.stages.a.termination_source === "timeout", `termination_source=${r.stages.a.termination_source}`);
+  assert(r.stages.a.failure_type === "timeout", r.stages.a.failure_type);
+  assert(r.stages.a.failure_source === "runner_terminal", r.stages.a.failure_source);
+  assert(r.stages.a.last_tool?.tool_name === "bash", JSON.stringify(r.stages.a.last_tool));
+  assert(r.stages.a.last_tool?.tool_call_id === "tc-1", JSON.stringify(r.stages.a.last_tool));
+  assert(r.stages.a.active_tool_count === 1, `active_tool_count=${r.stages.a.active_tool_count}`);
+  // No args/output leakage in last_tool projection.
+  const lastRaw = JSON.stringify(r.stages.a.last_tool);
+  assert(!lastRaw.includes("command") && !lastRaw.includes("args") && !lastRaw.includes("partialResult"), lastRaw);
+
+  const row = auditRows.find((item) => item.event === "stage_terminal" && item.stage === "a");
+  assert(row, "missing stage_terminal audit row");
+  assert(row.cancel_source === "timeout" && row.termination_source === "timeout", JSON.stringify(row));
+  assert(row.last_tool?.tool_name === "bash" && row.active_tool_count === 1, JSON.stringify(row));
+  // Whitelist: no tool args/output keys on audit row.
+  const rowRaw = JSON.stringify(row);
+  assert(!rowRaw.includes("partialResult") && !/"args"/.test(rowRaw), rowRaw);
+
+  // User-marked external abort before any attempt → cancel_source=user.
+  const runDir2 = tmpRunDir();
+  const ctl = new AbortController();
+  ctl.abort("user");
+  const r2 = await E.executeWorkflow({
+    doc: doc([agent("u")]),
+    ...baseOpts(runDir2, async () => {
+      throw new Error("runner must not be called when already aborted");
+    }, { signal: ctl.signal }),
+  });
+  assert(r2.stages.u.status === "cancelled", JSON.stringify(r2.stages.u));
+  assert(r2.stages.u.cancel_source === "user", `user cancel_source=${r2.stages.u.cancel_source}`);
+  assert(r2.stages.u.termination_source === "user", `user termination_source=${r2.stages.u.termination_source}`);
+  assert(r2.stages.u.failure_source === "external_abort", `failure_source=${r2.stages.u.failure_source}`);
+  // Pre-aborted runs are cancelled by the scheduler before runUnit; no runner call.
+});
+
+await check("finalizeUnit unstamped cancel-class follows on_fail; obs fields only", async () => {
+  // Stage-own cancel-class failureType must NOT force cancelled. Default
+  // on_fail=abort → failed; observational cancel/termination still stamped.
+  // Legacy/custom runners without cancelSource must not mislabel timeout/guardrail as parent.
+
+  async function runUnstamped(failureType, error, over = {}) {
+    const runDir = tmpRunDir();
+    return E.executeWorkflow({
+      doc: doc([agent("a", over)]),
+      ...baseOpts(runDir, async () => ({
+        output: "partial",
+        error,
+        failureType,
+        // intentionally omit cancelSource / terminationSource
+        durationMs: 9,
+      })),
+    });
+  }
+
+  const rTimeout = await runUnstamped("timeout", "idle timeout");
+  assert(rTimeout.stages.a.status === "failed", JSON.stringify(rTimeout.stages.a));
+  assert(rTimeout.stages.a.cancel_source === "timeout", `timeout cancel_source=${rTimeout.stages.a.cancel_source}`);
+  assert(rTimeout.stages.a.termination_source === "timeout", `timeout termination_source=${rTimeout.stages.a.termination_source}`);
+  assert(rTimeout.stages.a.failure_source === "runner_terminal", rTimeout.stages.a.failure_source);
+
+  const rPartial = await runUnstamped("timeout_partial", "max runtime partial");
+  assert(rPartial.stages.a.status === "failed", JSON.stringify(rPartial.stages.a));
+  assert(rPartial.stages.a.cancel_source === "timeout", `timeout_partial cancel_source=${rPartial.stages.a.cancel_source}`);
+  assert(rPartial.stages.a.termination_source === "timeout", `timeout_partial termination_source=${rPartial.stages.a.termination_source}`);
+
+  const rGuard = await runUnstamped("guardrail_stop", "guardrail fired");
+  assert(rGuard.stages.a.status === "failed", JSON.stringify(rGuard.stages.a));
+  assert(rGuard.stages.a.cancel_source === "guardrail", `guardrail cancel_source=${rGuard.stages.a.cancel_source}`);
+  assert(rGuard.stages.a.termination_source === "guardrail", `guardrail termination_source=${rGuard.stages.a.termination_source}`);
+
+  // Bare aborted without stamp under abort policy → failed + synthetic parent obs.
+  const rAbort = await runUnstamped("aborted", "request aborted");
+  assert(rAbort.stages.a.status === "failed", JSON.stringify(rAbort.stages.a));
+  assert(rAbort.stages.a.cancel_source === "parent", `aborted cancel_source=${rAbort.stages.a.cancel_source}`);
+  assert(rAbort.stages.a.termination_source === "parent", `aborted termination_source=${rAbort.stages.a.termination_source}`);
+
+  // Runner-stamped sources still win over failureType fallback (still failed).
+  const runDirPrefill = tmpRunDir();
+  const rPrefill = await E.executeWorkflow({
+    doc: doc([agent("a")]),
+    ...baseOpts(runDirPrefill, async () => ({
+      output: "",
+      error: "idle timeout",
+      failureType: "timeout",
+      cancelSource: "user",
+      terminationSource: "user",
+      durationMs: 3,
+    })),
+  });
+  assert(rPrefill.stages.a.status === "failed", JSON.stringify(rPrefill.stages.a));
+  assert(rPrefill.stages.a.cancel_source === "user", `prefill cancel_source=${rPrefill.stages.a.cancel_source}`);
+  assert(rPrefill.stages.a.termination_source === "user", `prefill termination_source=${rPrefill.stages.a.termination_source}`);
+});
+
+await check("on_fail:degrade + stage timeout writes output file; downstream continues", async () => {
+  const runDir = tmpRunDir();
+  const r = await E.executeWorkflow({
+    doc: doc([
+      agent("a", { on_fail: "degrade" }),
+      agent("b", { needs: ["a"] }),
+    ]),
+    ...baseOpts(runDir, async (req) => {
+      if (req.stageId === "a") {
+        return {
+          output: "timeout partial body",
+          error: "idle timeout after 100ms",
+          failureType: "timeout",
+          cancelSource: "timeout",
+          terminationSource: "timeout",
+          durationMs: 12,
+        };
+      }
+      return { output: `output of ${req.stageId}`, durationMs: 1 };
+    }),
+  });
+  assert(r.status === "degraded", `status=${r.status}`);
+  assert(r.stages.a.status === "degraded", JSON.stringify(r.stages.a));
+  assert(r.stages.a.output_path && fs.existsSync(r.stages.a.output_path), "degrade must write output path");
+  const body = fs.readFileSync(r.stages.a.output_path, "utf8");
+  assert(body.includes("timeout partial body") && body.includes("failure_note"), body);
+  assert(r.stages.a.cancel_source === "timeout" && r.stages.a.termination_source === "timeout", JSON.stringify(r.stages.a));
+  assert(r.stages.b.status === "completed", `downstream must continue, got ${r.stages.b.status}`);
+  assert(r.degraded.includes("a"), `degraded list: ${r.degraded}`);
+});
+
+await check("parallel degrade: one leg timeout still aggregate degraded; downstream continues", async () => {
+  const runDir = tmpRunDir();
+  const r = await E.executeWorkflow({
+    doc: doc([
+      {
+        id: "p",
+        kind: "parallel",
+        on_fail: "degrade",
+        children: [agent("c1"), agent("c2")],
+      },
+      agent("b", { needs: ["p"] }),
+    ]),
+    ...baseOpts(runDir, async (req) => {
+      if (req.stageId === "c2") {
+        return {
+          output: "c2 partial",
+          error: "max runtime exceeded",
+          failureType: "timeout_partial",
+          durationMs: 8,
+        };
+      }
+      return { output: `output of ${req.stageId}`, durationMs: 1 };
+    }),
+  });
+  assert(r.status === "degraded", `status=${r.status}`);
+  assert(r.stages.p.status === "degraded", JSON.stringify(r.stages.p));
+  assert(r.stages.c1.status === "completed", `c1=${r.stages.c1.status}`);
+  assert(r.stages.c2.status === "degraded", `c2=${r.stages.c2.status}`);
+  assert(r.stages.c2.output_path && fs.existsSync(r.stages.c2.output_path), "timeout leg must write degrade file");
+  assert(r.stages.c2.cancel_source === "timeout" && r.stages.c2.termination_source === "timeout", JSON.stringify(r.stages.c2));
+  assert(r.stages.b.status === "completed", `downstream must continue, got ${r.stages.b.status}`);
+  assert(r.degraded.includes("c2") && r.degraded.includes("p"), `degraded: ${r.degraded}`);
+});
+
+await check("abort policy: stage timeout remains failed (not cancelled) and cascades", async () => {
+  const runDir = tmpRunDir();
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a"), agent("b", { needs: ["a"] })]),
+    ...baseOpts(runDir, async (req) => {
+      if (req.stageId === "a") {
+        return { output: "partial", error: "idle timeout", failureType: "timeout", durationMs: 5 };
+      }
+      return { output: "should not run", durationMs: 1 };
+    }),
+  });
+  assert(r.status === "failed", `status=${r.status}`);
+  assert(r.stages.a.status === "failed", JSON.stringify(r.stages.a));
+  assert(r.stages.a.failure_source === "runner_terminal", r.stages.a.failure_source);
+  assert(r.stages.a.cancel_source === "timeout", r.stages.a.cancel_source);
+  assert(r.stages.b.status === "cancelled" && r.stages.b.failure_source === "workflow_abort", JSON.stringify(r.stages.b));
 });
 
 await check("§8 upstream path check: record present but file missing → failed(upstream_output_missing)", async () => {
