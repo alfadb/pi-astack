@@ -57,17 +57,16 @@ import {
 } from "./checkpoint";
 
 /**
- * Daemon worker may pin an independent checkpoint session slot via snapshot
- * `checkpointSessionId` without rewriting every call site. Ordinary paths leave
- * the override unset so load/save use the provenance sessionId unchanged.
+ * Daemon worker pins an independent checkpoint session slot via ALS-scoped
+ * `checkpointSessionId` (see worker-checkpoint-context). Ordinary foreground
+ * paths never enter the ALS store → load/save use provenance sessionId.
+ * Detached promises inherit the store; concurrent contexts do not clobber.
  */
-let _checkpointSessionIdOverride: string | undefined;
-
 async function loadSessionCheckpoint(
   projectRoot: string,
   sessionId: string | undefined,
 ): Promise<SedimentCheckpoint> {
-  return loadSessionCheckpointRaw(projectRoot, _checkpointSessionIdOverride ?? sessionId);
+  return loadSessionCheckpointRaw(projectRoot, effectiveCheckpointSessionId(sessionId));
 }
 
 async function saveSessionCheckpoint(
@@ -75,7 +74,7 @@ async function saveSessionCheckpoint(
   sessionId: string | undefined,
   patch: SedimentCheckpoint,
 ): Promise<void> {
-  return saveSessionCheckpointRaw(projectRoot, _checkpointSessionIdOverride ?? sessionId, patch);
+  return saveSessionCheckpointRaw(projectRoot, effectiveCheckpointSessionId(sessionId), patch);
 }
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import type { EntryStatus } from "./validation";
@@ -190,9 +189,19 @@ import {
 import { listPublicationOutboxPending } from "./publication-outbox";
 import { scheduleKnowledgePublicationOutboxDrain } from "./writer";
 import {
+  buildWorkerProgressEvent,
+  emitWorkerProgress,
   isSedimentWorkerMode,
   registerSedimentWorkerCommand,
+  SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
+  type SedimentWorkerProgressEvent,
+  type SedimentWorkerProgressStage,
+  type SedimentWorkerTrackedLane,
 } from "./worker-rpc";
+import {
+  effectiveCheckpointSessionId,
+  runWithCheckpointSessionIdOverride,
+} from "../_shared/worker-checkpoint-context";
 import {
   captureEdgeProtocolTerminalPair,
   initializeEdgeProtocolShadowSession,
@@ -240,6 +249,61 @@ const autoWriteInFlight = new Map<string, Promise<void>>();
  * unrelated multiViewReplay / foreign-session work.
  */
 const sessionPassTrackedWork = new Map<string, Set<Promise<unknown>>>();
+/** Closed-lane labels for tracked detached work (worker join progress only). */
+const trackedWorkLanes = new WeakMap<Promise<unknown>, SedimentWorkerTrackedLane>();
+
+/**
+ * Test-only observer for global maintenance schedule sites (aggregator /
+ * staging-resolver / ageout / promotion / archive-reactivation / forgetting /
+ * multiview-replay). Worker task-scoped mode must never fire these.
+ */
+let maintenanceScheduleObserverForTests: ((lane: string) => void) | undefined;
+
+function noteMaintenanceSchedule(lane: string): void {
+  try { maintenanceScheduleObserverForTests?.(lane); } catch { /* test observer best-effort */ }
+}
+
+/**
+ * Closed this-run outcome keys that mean the current candidate left an
+ * unfinished artifact (multiview pending / staging deferred / promotion-needed).
+ * Detected only from this run's internal outcome keys — never a global scan.
+ * Task-scoped worker skips global resolver/replay → fail closed as
+ * `current_candidate_deferred` (retryable; no CP / receipt / processed).
+ * Candidate-scoped resolver is a future slice.
+ */
+const CURRENT_CANDIDATE_DEFERRED_REASONS = new Set([
+  "multiview_staged_for_replay",
+  "staging_deferred",
+  "promotion_needed",
+]);
+
+/** Process-local: taskScoped session noted an unfinished current-candidate artifact this pass. */
+const taskScopedCandidateDeferredBySession = new Map<string, true>();
+
+function isCurrentCandidateDeferredReason(reason: string | undefined): boolean {
+  return typeof reason === "string" && CURRENT_CANDIDATE_DEFERRED_REASONS.has(reason);
+}
+
+function noteTaskScopedCandidateDeferredIfWorker(
+  sessionId: string | undefined,
+  taskScoped: boolean,
+): void {
+  if (!taskScoped || !sessionId) return;
+  taskScopedCandidateDeferredBySession.set(sessionId, true);
+}
+
+function consumeTaskScopedCandidateDeferred(sessionId: string | undefined): boolean {
+  if (!sessionId) return false;
+  const hit = taskScopedCandidateDeferredBySession.has(sessionId);
+  taskScopedCandidateDeferredBySession.delete(sessionId);
+  return hit;
+}
+
+function throwCurrentCandidateDeferred(): never {
+  const err = new Error("current_candidate_deferred");
+  (err as { code?: string }).code = "current_candidate_deferred";
+  throw err;
+}
 
 function sessionTrackKey(sessionId: string): string {
   return `session:${sessionId}`;
@@ -249,7 +313,11 @@ function resourceTrackKey(resourceKey: string): string {
   return `resource:${resourceKey}`;
 }
 
-function trackKeyedWork<T>(key: string | undefined, work: Promise<T>): Promise<T> {
+function trackKeyedWork<T>(
+  key: string | undefined,
+  work: Promise<T>,
+  lane: SedimentWorkerTrackedLane = "other",
+): Promise<T> {
   if (!key) return work;
   let set = sessionPassTrackedWork.get(key);
   if (!set) {
@@ -257,6 +325,7 @@ function trackKeyedWork<T>(key: string | undefined, work: Promise<T>): Promise<T
     sessionPassTrackedWork.set(key, set);
   }
   set.add(work);
+  trackedWorkLanes.set(work, lane);
   // then(cleanup, cleanup) — NOT void work.finally — so a rejected work
   // promise cannot create an unhandledRejection via a voided finally-chain
   // under Node --unhandled-rejections=strict. The original `work` is still
@@ -269,14 +338,43 @@ function trackKeyedWork<T>(key: string | undefined, work: Promise<T>): Promise<T
   return work;
 }
 
-function trackSessionPassWork<T>(sessionId: string | undefined, work: Promise<T>): Promise<T> {
+function trackSessionPassWork<T>(
+  sessionId: string | undefined,
+  work: Promise<T>,
+  lane: SedimentWorkerTrackedLane = "other",
+): Promise<T> {
   if (!sessionId) return work;
-  return trackKeyedWork(sessionTrackKey(sessionId), work);
+  return trackKeyedWork(sessionTrackKey(sessionId), work, lane);
 }
 
-function trackResourcePassWork<T>(resourceKey: string | undefined, work: Promise<T>): Promise<T> {
+function trackResourcePassWork<T>(
+  resourceKey: string | undefined,
+  work: Promise<T>,
+  lane: SedimentWorkerTrackedLane = "other",
+): Promise<T> {
   if (!resourceKey) return work;
-  return trackKeyedWork(resourceTrackKey(resourceKey), work);
+  return trackKeyedWork(resourceTrackKey(resourceKey), work, lane);
+}
+
+function collectTrackedPending(
+  sessionId: string | undefined,
+  resourceKey?: string,
+): { promises: Promise<unknown>[]; lanes: SedimentWorkerTrackedLane[] } {
+  const autoWrite = sessionId ? autoWriteInFlight.get(sessionId) : undefined;
+  const tracked = [
+    ...(sessionId ? [...(sessionPassTrackedWork.get(sessionTrackKey(sessionId)) ?? [])] : []),
+    ...(resourceKey ? [...(sessionPassTrackedWork.get(resourceTrackKey(resourceKey)) ?? [])] : []),
+  ];
+  const promises = [
+    ...(autoWrite ? [autoWrite] : []),
+    ...tracked,
+  ];
+  const lanes: SedimentWorkerTrackedLane[] = [];
+  if (autoWrite) lanes.push("auto_write");
+  for (const p of tracked) {
+    lanes.push(trackedWorkLanes.get(p) ?? "other");
+  }
+  return { promises, lanes };
 }
 
 type DeferredStopReason = "agent_error" | "agent_aborted";
@@ -568,7 +666,19 @@ export function _detachedBranchCloneMetricsForTests(): Readonly<typeof cloneMetr
 /** Production worker body shared by live intake and lifecycle recovery. */
 type SedimentAgentEndPassRunner = (
   snapshot: SedimentAgentEndSnapshotForTests,
-  opts?: { intakeWindowId?: string; fromRecovery?: boolean },
+  opts?: {
+    intakeWindowId?: string;
+    fromRecovery?: boolean;
+    /** Worker-only runtime: abort signal (foreground omits → unchanged). */
+    signal?: AbortSignal;
+    /** Cooperative abort of the worker AbortController (same as signal source). */
+    requestAbort?: () => void;
+    /** Worker-only absolute soft deadline (ms wall clock). */
+    deadlineMs?: number;
+    /** Worker-only closed progress reporter. */
+    onProgress?: (event: SedimentWorkerProgressEvent) => void;
+    now?: () => number;
+  },
 ) => Promise<void | { more: true }>;
 let sedimentAgentEndPassRunner: SedimentAgentEndPassRunner | undefined;
 
@@ -1222,20 +1332,145 @@ function detachedSessionManager(snapshot: SedimentAgentEndSnapshotForTests) {
 async function waitForDetachedSedimentWorkIdle(
   sessionId: string | undefined,
   resourceKey?: string,
+  opts?: {
+    signal?: AbortSignal;
+    /** Abort the worker controller that owns `signal` (required for abort-first). */
+    requestAbort?: () => void;
+    deadlineMs?: number;
+    onProgress?: (event: SedimentWorkerProgressEvent) => void;
+    now?: () => number;
+  },
 ): Promise<void> {
   // Wait ONLY for the current session / resource. Never join global
   // multiViewReplayInFlight — session A hanging replay must not block B.
+  // Foreground (no opts): original infinite-wait semantics.
+  // Worker mode: deadline/signal bound; dynamic registration cannot outrun deadline.
+  // Attach allSettled ONCE per pending-set identity; rebuild only when the set
+  // changes. Heartbeat timer is independent (5s) — no per-50ms handlers.
+  // On deadline/abort: abort first, then ≤5s cleanup; pending==0 → settled
+  // detached_join_deadline (no poison); pending>0 → cancel_cleanup_unreaped
+  // (poison + restart_child). Never misclassify background pending as settled.
+  const now = opts?.now ?? Date.now;
+  const workerMode = opts?.deadlineMs !== undefined || opts?.signal !== undefined;
+  let lastHeartbeatAt = 0;
+  let lastPending = -1;
+  let lastLanesKey = "";
+  /** Promise refs currently attached to a single allSettled join. */
+  let attachedPending: readonly Promise<unknown>[] | null = null;
+  /** Settled join for the attached pending set (rebuilt only on set change). */
+  let attachedSettled: Promise<void> | null = null;
+  const lanesKeyOf = (lanes: readonly SedimentWorkerTrackedLane[]) =>
+    [...new Set(lanes)].sort().join(",");
+  const samePendingSet = (
+    a: readonly Promise<unknown>[] | null,
+    b: readonly Promise<unknown>[],
+  ): boolean => {
+    if (!a || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  };
+
+  const throwDetachedJoinDeadline = async (): Promise<never> => {
+    // 1) Abort first so abort-aware work can settle inside the cleanup window.
+    try { opts?.requestAbort?.(); } catch { /* best-effort */ }
+    const { promises: before, lanes: beforeLanes } = collectTrackedPending(sessionId, resourceKey);
+    try {
+      emitWorkerProgress(opts?.onProgress, buildWorkerProgressEvent({
+        stage: "detached_join",
+        phase: "aborted",
+        pending: before.length,
+        lanes: beforeLanes,
+      }));
+    } catch { /* progress best-effort */ }
+
+    // 2) Bounded cleanup ≤5s wall-clock so abort handlers / promise settlement are
+    // observed even when tests inject a frozen/jumped `now` clock.
+    const cleanupBudgetMs = SEDIMENT_WORKER_CLEANUP_RESERVE_MS;
+    const wallStart = Date.now();
+    let cleanupAttached: readonly Promise<unknown>[] | null = null;
+    let cleanupSettled: Promise<void> | null = null;
+    while (Date.now() - wallStart < cleanupBudgetMs) {
+      const { promises: pending } = collectTrackedPending(sessionId, resourceKey);
+      if (pending.length === 0) break;
+      if (!samePendingSet(cleanupAttached, pending)) {
+        cleanupAttached = pending.slice();
+        cleanupSettled = Promise.allSettled(pending).then(() => undefined);
+      }
+      const rem = Math.max(1, Math.min(50, cleanupBudgetMs - (Date.now() - wallStart)));
+      await Promise.race([
+        cleanupSettled ?? Promise.resolve(),
+        new Promise<void>((resolve) => { setTimeout(resolve, rem); }),
+      ]);
+    }
+
+    // 3) Classify by remaining pending — never claim settled while background still runs.
+    const { promises: after, lanes: afterLanes } = collectTrackedPending(sessionId, resourceKey);
+    if (after.length === 0) {
+      const err = new Error("detached_join_deadline");
+      (err as { code?: string }).code = "detached_join_deadline";
+      throw err;
+    }
+    try {
+      emitWorkerProgress(opts?.onProgress, buildWorkerProgressEvent({
+        stage: "detached_join",
+        phase: "aborted",
+        pending: after.length,
+        lanes: afterLanes,
+      }));
+    } catch { /* progress best-effort */ }
+    const err = new Error("cancel_cleanup_unreaped");
+    (err as { code?: string }).code = "cancel_cleanup_unreaped";
+    throw err;
+  };
+
   for (;;) {
-    const autoWrite = sessionId ? autoWriteInFlight.get(sessionId) : undefined;
-    const tracked = [
-      ...(sessionId ? [...(sessionPassTrackedWork.get(sessionTrackKey(sessionId)) ?? [])] : []),
-      ...(resourceKey ? [...(sessionPassTrackedWork.get(resourceTrackKey(resourceKey)) ?? [])] : []),
-    ];
-    const pending = [
-      ...(autoWrite ? [autoWrite] : []),
-      ...tracked,
-    ];
+    if (workerMode) {
+      if (opts?.signal?.aborted || (opts?.deadlineMs !== undefined && now() >= opts.deadlineMs)) {
+        await throwDetachedJoinDeadline();
+      }
+    }
+    const { promises: pending, lanes } = collectTrackedPending(sessionId, resourceKey);
     if (pending.length === 0) return;
+    if (workerMode) {
+      const lanesKey = lanesKeyOf(lanes);
+      const setChanged = !samePendingSet(attachedPending, pending);
+      if (setChanged) {
+        // Rebuild allSettled only when the pending promise-identity set changes.
+        attachedPending = pending.slice();
+        attachedSettled = Promise.allSettled(pending).then(() => undefined);
+      }
+      const dueHeartbeat = lastHeartbeatAt === 0 || (now() - lastHeartbeatAt) >= 5_000;
+      if (setChanged || dueHeartbeat || pending.length !== lastPending || lanesKey !== lastLanesKey) {
+        if (dueHeartbeat || setChanged) {
+          lastHeartbeatAt = now();
+          lastPending = pending.length;
+          lastLanesKey = lanesKey;
+          try {
+            emitWorkerProgress(opts?.onProgress, buildWorkerProgressEvent({
+              stage: "detached_join",
+              phase: "heartbeat",
+              pending: pending.length,
+              lanes,
+            }));
+          } catch { /* progress best-effort */ }
+        }
+      }
+      // Independent deadline/heartbeat wake — no per-50ms allSettled handlers.
+      const wakeMs = (() => {
+        const heartbeatRem = Math.max(1, 5_000 - (now() - lastHeartbeatAt));
+        const deadlineRem = opts?.deadlineMs !== undefined
+          ? Math.max(1, opts.deadlineMs - now())
+          : heartbeatRem;
+        return Math.min(heartbeatRem, deadlineRem, 5_000);
+      })();
+      await Promise.race([
+        attachedSettled ?? Promise.resolve(),
+        new Promise<void>((resolve) => { setTimeout(resolve, wakeMs); }),
+      ]);
+      continue;
+    }
     await Promise.allSettled(pending);
   }
 }
@@ -2538,6 +2773,8 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     "source_timestamp_unavailable",
   ]);
   return results.every((result) => {
+    // Unfinished current-candidate artifacts must HOLD (no CP advance).
+    if (isCurrentCandidateDeferredReason(result.reason)) return false;
     if (result.status === "created" || result.status === "updated" || result.status === "merged" || result.status === "archived" || result.status === "superseded" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
     if (!result.reason) return false;
     return terminalReasons.has(result.reason)
@@ -2554,7 +2791,17 @@ function shouldAdvanceAfterAutoOutcome(auto: AutoWriteLaneOutcome): boolean {
   // A transient hold replays next turn; the repeated Tier-1 write dedups to a
   // no-op (exact body-hash / slug dedup).
   if (auto.tier1 && !(isCapturedTier1Result(auto.tier1.result) || isTerminalTier1Reject(auto.tier1.result))) return false;
-  if (auto.kind === "wrote") return shouldAdvanceAfterResults(auto.results);
+  if (auto.kind === "wrote") {
+    // This-run multiview staged / deferred unfinished artifact → HOLD CP.
+    if (auto.curatorAudits?.some((a) => {
+      if (a.multi_view?.staged) return true;
+      const d = a.decision;
+      return d.op === "skip" && isCurrentCandidateDeferredReason(d.reason);
+    })) {
+      return false;
+    }
+    return shouldAdvanceAfterResults(auto.results);
+  }
   // Hold durable pending: true provider llm_error may retry later; prompt
   // budget exceeded also holds (no ack / no checkpoint advance) but is NOT a
   // lifecycle tight-retry — same fingerprint is warned once per generation.
@@ -3480,14 +3727,63 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
   // Production worker shared by live agent_end enqueue, intake recovery, and
   // Stage0 daemon worker RPC (same implementation; no duplicated writer).
   const runSedimentAgentEndPass: SedimentAgentEndPassRunner = async (snapshot, passOpts) => {
-          // Daemon worker may pin an independent checkpoint slot for the whole
-          // pass (including ready-pending more loop probes). Ordinary paths
-          // leave checkpointSessionId unset → no override.
-          const prevCheckpointSessionOverride = _checkpointSessionIdOverride;
-          if (snapshot.checkpointSessionId) {
-            _checkpointSessionIdOverride = snapshot.checkpointSessionId;
-          }
-          try {
+          // Worker-only runtime opts (budget/abort/progress). Foreground omits → unchanged.
+          const workerSignal = passOpts?.signal;
+          const workerRequestAbort = passOpts?.requestAbort;
+          const workerDeadlineMs = passOpts?.deadlineMs;
+          const workerOnProgress = passOpts?.onProgress;
+          const workerNow = passOpts?.now ?? Date.now;
+          const workerRuntimeActive = workerSignal !== undefined || workerDeadlineMs !== undefined;
+          /**
+           * Worker runtime is task-scoped: only the current verified sidecar/run
+           * window is in scope. Global maintenance (aggregator / staging-resolver /
+           * ageout / promotion / archive-reactivation) and independent forgetting /
+           * multiview-replay are skipped — they have no causal dependency on the
+           * current record. Foreground (no worker opts) keeps original schedules.
+           * Docs must say task-scoped; never claim global maintenance completed.
+           */
+          const taskScoped = workerRuntimeActive;
+          const assertWorkerStageBudget = (stage: SedimentWorkerProgressStage) => {
+            if (!workerRuntimeActive) return;
+            if (workerSignal?.aborted || (workerDeadlineMs !== undefined && workerNow() >= workerDeadlineMs)) {
+              try {
+                emitWorkerProgress(workerOnProgress, buildWorkerProgressEvent({
+                  stage,
+                  phase: "aborted",
+                }));
+              } catch { /* progress best-effort */ }
+              const err = new Error("stage_deadline");
+              (err as { code?: string }).code = "stage_deadline";
+              throw err;
+            }
+            try {
+              emitWorkerProgress(workerOnProgress, buildWorkerProgressEvent({
+                stage,
+                phase: "start",
+              }));
+            } catch { /* progress best-effort */ }
+          };
+          const clampSettingsForWorker = (settings: SedimentSettings): SedimentSettings => {
+            if (!workerRuntimeActive || workerDeadlineMs === undefined) return settings;
+            const rem = Math.max(1, workerDeadlineMs - workerNow());
+            return {
+              ...settings,
+              extractorTimeoutMs: Math.min(settings.extractorTimeoutMs, rem),
+              classifierTimeoutMs: Math.min(settings.classifierTimeoutMs, rem),
+              curatorTimeoutMs: Math.min(settings.curatorTimeoutMs, rem),
+              aggregatorTimeoutMs: Math.min(settings.aggregatorTimeoutMs, rem),
+              lockTimeoutMs: Math.min(settings.lockTimeoutMs, rem),
+              // Worker task-scoped: no HTTP retries — budget is the only fence.
+              // multi-view already hardcodes maxRetries=0.
+              curatorMaxRetries: 0,
+              aggregatorMaxRetries: 0,
+              constraintShadowCompiler: {
+                ...settings.constraintShadowCompiler,
+                timeoutMs: Math.min(settings.constraintShadowCompiler.timeoutMs, rem),
+              },
+            };
+          };
+          const runPassBodyInner = async (): Promise<void | { more: true }> => {
           // Each claimed pass gets a fresh drain budget so ready-pending
           // continuation can keep walking the frozen snapshot tip.
           if (snapshot.sessionId) {
@@ -3548,7 +3844,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           let passResourceKey: string | undefined;
           await runWithTriggerAnchor(snapshot.anchor, async () => {
 
-      const settings = resolveSedimentSettings();
+      assertWorkerStageBudget("pass");
+      // Worker runtime re-clamps model timeouts to remaining budget each pass.
+      // Foreground: resolveSedimentSettings defaults unchanged (e.g. 1200s).
+      const settings = clampSettingsForWorker(resolveSedimentSettings());
       if (!settings.enabled) return;
 
       // All values below come from the plain enqueue-time snapshot. No
@@ -3800,8 +4099,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // also requires effective sediment auto-write global authority (boolean
       // true or legacy string "true"). Neither gate can authorize real demote by itself.
       // Archive reactivation remains on its independent block below.
+      // Worker task-scoped: skip independent forgetting maintenance (no causal
+      // dependency on the current verified sidecar record).
       const memForgettingSettings = resolveMemorySettings();
-      if (memForgettingSettings.forgetting?.enabled) {
+      if (!taskScoped && memForgettingSettings.forgetting?.enabled) {
+        noteMaintenanceSchedule("forgetting");
         const scheduleForgetting = typeof setImmediate === "function"
           ? setImmediate
           : (fn: () => void) => setTimeout(fn, 0);
@@ -3877,10 +4179,14 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // sync JSONL scans off the hot agent_end path; last-run gating keeps
       // the sidecar bounded to a daily cadence. It never prompts the user,
       // gates writes, or mutates memory entries.
+      // Worker task-scoped: skip global maintenance fire-and-forget entirely
+      // (aggregator / staging-resolver / ageout / promotion / archive-reactivation).
+      // None are required for current-candidate correctness; docs say task-scoped.
       const scheduleAggregator = typeof setImmediate === "function"
         ? setImmediate
         : (fn: () => void) => setTimeout(fn, 0);
-      scheduleAggregator(() => {
+      if (!taskScoped) scheduleAggregator(() => {
+        noteMaintenanceSchedule("aggregator");
         void (async () => {
           try {
             // Phase C.3 (ADR 0025 §4.3): pass modelRegistry so the v1
@@ -3983,7 +4289,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // It only rewrites .state staging files (never durable entries), so it
       // is safe under "staging-only" too (promotion-to-durable is deferred to
       // a multi-view follow-up; the resolver only flags promote_candidate).
-      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+      if (!taskScoped && settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+        noteMaintenanceSchedule("staging_resolver");
         void (async () => {
           try {
             const recentForStaging = branch.slice(-50);
@@ -4034,7 +4341,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // durable entries), so it is safe under "staging-only" too. Gated like
       // the resolver: false → no LLM tokens, no scheduling. Own 24h debounce /
       // lock / ledger, independent of the resolver's 6h cadence.
-      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+      if (!taskScoped && settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+        noteMaintenanceSchedule("staging_ageout");
         void (async () => {
           try {
             const recentForAgeOut = branch.slice(-50);
@@ -4081,7 +4389,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // replay lane so the callbacks are queued in that order, BUT setImmediate
       // only guarantees registration order, not execution order; each lane is an
       // independent fire-and-forget async task.
-      if (settings.stagingPromotionEnabled === true && settings.autoLlmWriteEnabled === true) scheduleAggregator(() => {
+      if (!taskScoped && settings.stagingPromotionEnabled === true && settings.autoLlmWriteEnabled === true) scheduleAggregator(() => {
+        noteMaintenanceSchedule("staging_promotion");
         void (async () => {
           try {
             const promotionResult = await runStagingPromotionIfDue({
@@ -4124,15 +4433,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // explicit marker or a natural-language auto-write window. The old
       // implementation only scheduled replay after Lane A/G, so ordinary
       // conversation turns could leave multiview-pending files undrained.
-      scheduleMultiviewReplay({
-        enabled: settings.autoLlmWriteEnabled !== false,
-        cwd,
-        sessionId,
-        settings,
-        modelRegistry,
-        abrainHome,
-        projectId,
-      });
+      // Worker task-scoped: skip independent multiview-replay maintenance
+      // (project-wide staging backlog is outside the current record).
+      if (!taskScoped) {
+        noteMaintenanceSchedule("multiview_replay");
+        scheduleMultiviewReplay({
+          enabled: settings.autoLlmWriteEnabled !== false,
+          cwd,
+          sessionId,
+          settings,
+          modelRegistry,
+          abrainHome,
+          projectId,
+          signal: workerSignal,
+        });
+      }
 
       // ADR 0025 §4.6 archive-reactivation reviewer (Stage 2).
       // Daily-debounced prompt-native review of archived entries: if a
@@ -4147,7 +4462,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       //   autoLlmWriteEnabled === false         → hard kill: NO LLM tokens, NO scheduling.
       // The settings.ts docstring promises “false = no LLM tokens spent
       // on sediment”. Honor that for archive-reactivation too.
-      if (settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+      // Worker task-scoped: skip archive-reactivation (global maintenance).
+      if (!taskScoped && settings.autoLlmWriteEnabled !== false) scheduleAggregator(() => {
+        noteMaintenanceSchedule("archive_reactivation");
         void (async () => {
           try {
             // Avoid mutation in staging-only mode (the reviewer's
@@ -4428,12 +4745,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // both directions fail open (staging written + direct write dedups).
       const directLaneOwnsWindow = classifierLane === "auto_write" && !autoWriteInFlight.has(sessionId);
       if (branch && classifierEnabled) {
+        assertWorkerStageBudget("classifier");
         correctionPromise = trackSessionPassWork(sessionId, (async () => {
           let relatedEntries: RelatedEntryCard[] = [];
+          // Deadline check must NOT sit inside the non-fatal search swallow catch.
+          assertWorkerStageBudget("search");
           try {
             const memSettings = resolveMemorySettings();
             const searchQuery = effectiveWindow.text.slice(-2000);
-            const loadedEntries = await (await import("../memory/parser")).loadEntries(cwd, memSettings, undefined);
+            const loadedEntries = await (await import("../memory/parser")).loadEntries(cwd, memSettings, workerSignal);
             // ADR 0037: correctionSearch profile(status:[active], limit:10)
             const memResult = await (await import("../memory/llm-search")).runMemorySearch(
               "correctionSearch",
@@ -4441,7 +4761,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               loadedEntries,
               memSettings,
               modelRegistry,
-              { projectRoot: cwd },
+              { projectRoot: cwd, signal: workerSignal },
             ) as Array<{ slug: unknown; title?: unknown; summary?: unknown; kind?: unknown; status?: unknown; scope?: unknown; compiled_truth?: unknown }> & {
               lowConfidence?: boolean;
               retrievalDegraded?: boolean;
@@ -4469,7 +4789,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                     ...(searchRetrievalVerdict ? { retrieval_verdict: searchRetrievalVerdict } : {}),
                   };
                 }).filter(e => e.slug) : []);
-          } catch { /* search failure is non-fatal */ }
+          } catch { /* search failure is non-fatal (deadline already checked outside) */ }
           // P2.A (ADR 0025 §4.2.5): enrich related cards with PROJECT-SCOPED
           // outcome track record so the classifier can discount low-trust entries.
           // Constraints (3-T0 Round 1, docs/notes/outcome-to-classifier-feedback-
@@ -4500,9 +4820,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             }
           } catch { /* outcome enrich best-effort; silent-skip */ }
           const cr = await runCorrectionPipeline(effectiveWindow.entries.length > 0 ? effectiveWindow.entries : branch, relatedEntries, {
-            settings,
+            settings: clampSettingsForWorker(settings),
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
-            signal: undefined,
+            signal: workerSignal,
             directLaneOwnsWindow,
             projectId,
             projectRoot: cwd,
@@ -4555,7 +4875,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             }).catch(() => undefined);
           }
           return cr;
-        })());
+        })(), "classifier");
         // Don't await — tracked in sessionPassTrackedWork so the outer queue
         // cannot claim the next pass until correction/staging settle. Auto-write
         // lane still awaits it for signal forwarding.
@@ -4903,7 +5223,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         settings,
                         window: win,
                         modelRegistry,
-                        signal: undefined,
+                        signal: workerSignal,
+                        onProgress: workerOnProgress,
+                        deadlineMs: workerDeadlineMs,
+                        now: workerNow,
                         correlationId: corrId,
                         abrainHome,
                         projectId,
@@ -5233,7 +5556,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 const escForwarded = recordCorrectionDispatch("auto_write", shortCorrelationId, classifierResult, true);
                 const auto = await tryAutoWriteLane({
                   cwd, sessionId, settings, window: effectiveWindow, modelRegistry,
-                  signal: undefined, correlationId: shortCorrelationId, abrainHome, projectId,
+                  signal: workerSignal,
+                  onProgress: workerOnProgress,
+                  deadlineMs: workerDeadlineMs,
+                  now: workerNow,
+                  correlationId: shortCorrelationId, abrainHome, projectId,
                   branchEntries: branch, sessionManager: sessMgr,
                   intakeWindowId: passIntakeWindowId,
                   correctionSignal: escForwarded ?? classifierResult.signal ?? undefined,
@@ -5256,24 +5583,49 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   : auto.kind === "wrote" && hasPositiveWriteCapture(auto.results);
                 const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
-                const advance = !holdForPromptBudget && !transient && (captured || terminalReject || safelyStaged);
-                if (advance && effectiveWindow.lastEntryId) {
-                  await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
-                  await recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId });
+                // Task-scoped: staging is unfinished without global resolver/promotion.
+                if (taskScoped && safelyStaged && !captured && !terminalReject) {
+                  noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
                 }
-                await auditDirectiveRecall({
-                  cwd,
+                const advance = !holdForPromptBudget && !transient && (
+                  captured
+                  || terminalReject
+                  || (safelyStaged && !taskScoped)
+                );
+                // Worker: race checkpoint/audit tail; CP only after main chain success.
+                const shortTailBound = {
+                  signal: workerSignal,
+                  deadlineMs: workerDeadlineMs,
+                  now: workerNow,
                   sessionId,
-                  window: effectiveWindow,
-                  lane: "auto_write",
-                  correlationId: shortCorrelationId,
-                  // R3': only a CAPTURED write covers the directive. A rejected
-                  // tier1_direct must NOT suppress the recall flag — it is the
-                  // designed net for the terminal-reject advance above.
-                  coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
-                  // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
-                  demote: { abrainHome, settings, modelRegistry, notify },
-                }).catch(() => {});
+                  unreapedIfTimeout: true as const,
+                };
+                if (advance && effectiveWindow.lastEntryId) {
+                  await raceAutoWriteAwait(
+                    saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId),
+                    shortTailBound,
+                  );
+                  await raceAutoWriteAwait(
+                    recordDeferredRecoveryIfNeeded({ cwd, sessionId, window: effectiveWindow, checkpointAdvanced: true, lane: "auto_write", correlationId: shortCorrelationId }),
+                    shortTailBound,
+                  );
+                }
+                await raceAutoWriteAwait(
+                  auditDirectiveRecall({
+                    cwd,
+                    sessionId,
+                    window: effectiveWindow,
+                    lane: "auto_write",
+                    correlationId: shortCorrelationId,
+                    // R3': only a CAPTURED write covers the directive. A rejected
+                    // tier1_direct must NOT suppress the recall flag — it is the
+                    // designed net for the terminal-reject advance above.
+                    coveredTexts: auto.kind === "tier1_direct" && isCapturedTier1Result(auto.result) ? [auto.draft.body] : [],
+                    // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+                    demote: { abrainHome, settings, modelRegistry, notify },
+                  }).catch(() => {}),
+                  shortTailBound,
+                );
                 if (auto.kind === "tier1_direct") {
                   await appendAudit(cwd, {
                     operation: "auto_write", lane: "auto_write", session_id: sessionId, ...summary,
@@ -5440,7 +5792,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               settings,
               window: effectiveWindow,
               modelRegistry,
-              signal: undefined,
+              signal: workerSignal,
+              onProgress: workerOnProgress,
+              deadlineMs: workerDeadlineMs,
+              now: workerNow,
               correlationId: autoCorrelationId,
               abrainHome,
               projectId,
@@ -5469,25 +5824,42 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               })(),
             });
             const tAutoEnd = Date.now();
+            // Checkpoint only after main chain fully succeeds (shouldAdvance).
+            // Worker: race tail awaits so audit/checkpoint cannot form a black
+            // zone outside budget/progress (autoWriteInFlight already tracks
+            // the whole bgPromise for detached_join).
+            const bgTailBound = {
+              signal: workerSignal,
+              deadlineMs: workerDeadlineMs,
+              now: workerNow,
+              sessionId,
+              unreapedIfTimeout: true as const,
+            };
             checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
               && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings);
             if (checkpointAdvanced && effectiveWindow.lastEntryId) {
-              await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId);
+              await raceAutoWriteAwait(
+                saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId),
+                bgTailBound,
+              );
             }
-            await auditDirectiveRecall({
-              cwd,
-              sessionId,
-              window: effectiveWindow,
-              lane: "auto_write",
-              correlationId: autoCorrelationId,
-              // R3' (PR-2 R1 gpt BLOCKING fix): only a CAPTURED write covers
-              // the directive — a rejected tier1_direct must NOT suppress the
-              // recall flag. PR-A2: helper sees both pure and tier1-prefixed
-              // outcome shapes.
-              coveredTexts: tier1CoveredTexts(auto),
-              // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
-              demote: { abrainHome, settings, modelRegistry, notify },
-            }).catch(() => {});
+            await raceAutoWriteAwait(
+              auditDirectiveRecall({
+                cwd,
+                sessionId,
+                window: effectiveWindow,
+                lane: "auto_write",
+                correlationId: autoCorrelationId,
+                // R3' (PR-2 R1 gpt BLOCKING fix): only a CAPTURED write covers
+                // the directive — a rejected tier1_direct must NOT suppress the
+                // recall flag. PR-A2: helper sees both pure and tier1-prefixed
+                // outcome shapes.
+                coveredTexts: tier1CoveredTexts(auto),
+                // PR-B2 (F8): stance-flip CONTRADICT 可执行强 demote。
+                demote: { abrainHome, settings, modelRegistry, notify },
+              }).catch(() => {}),
+              bgTailBound,
+            );
 
             // PR-A2 (F5): the Tier-1 write may arrive as the pure outcome or
             // as the `tier1` prefix on the follow-up extractor outcome. Audit
@@ -6300,7 +6672,28 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // promise. Keep the process queue's single-consumer guarantee by
           // waiting here, outside pi's handler, before claiming another pass.
           // Wait ONLY this session + its resource-keyed multiViewReplay work.
-          await waitForDetachedSedimentWorkIdle(snapshot.sessionId, passResourceKey);
+          // Worker mode: deadline/signal bound join; foreground still infinite.
+          await waitForDetachedSedimentWorkIdle(
+            snapshot.sessionId,
+            passResourceKey,
+            workerRuntimeActive
+              ? {
+                  signal: workerSignal,
+                  requestAbort: workerRequestAbort,
+                  deadlineMs: workerDeadlineMs,
+                  onProgress: workerOnProgress,
+                  now: workerNow,
+                }
+              : undefined,
+          );
+
+          // Task-scoped: current candidate left unfinished artifact this run
+          // (multiview pending / staging deferred / promotion-needed) →
+          // explicit current_candidate_deferred. No CP / receipt / processed.
+          // Only this-run outcome keys (process-local note); no global scan.
+          if (taskScoped && consumeTaskScopedCandidateDeferred(snapshot.sessionId)) {
+            throwCurrentCandidateDeferred();
+          }
 
           // Ready-pending: more=true ONLY when THIS pass's durable checkpoint
           // actually advanced AND the frozen tip is still ahead. No-progress
@@ -6352,9 +6745,28 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             });
           }
 
-          } finally {
-            _checkpointSessionIdOverride = prevCheckpointSessionOverride;
+          }; // end runPassBodyInner
+
+          // ALS-scoped checkpoint slot for daemon worker (inherits into detached work).
+          // Foreground leaves checkpointSessionId unset → no ALS store → provenance id.
+          const runPassBody = async (): Promise<void | { more: true }> => {
+            if (snapshot.checkpointSessionId) {
+              return await runWithCheckpointSessionIdOverride(
+                snapshot.checkpointSessionId,
+                () => runPassBodyInner(),
+              );
+            }
+            return await runPassBodyInner();
+          };
+
+          if (workerRuntimeActive && workerDeadlineMs !== undefined) {
+            const { runWithWorkerBudget } = await import("../_shared/worker-budget-context");
+            return await runWithWorkerBudget(
+              { deadlineMs: workerDeadlineMs, signal: workerSignal, now: workerNow },
+              () => runPassBody(),
+            );
           }
+          return await runPassBody();
   };
   sedimentAgentEndPassRunner = runSedimentAgentEndPass;
 
@@ -6866,13 +7278,92 @@ function stableRunWindowTurnId(window: RunWindow): string {
   return window.lastEntryId || window.lastProcessedEntryId || "unknown-turn";
 }
 
+/** Emit closed auto_write progress (no identity / free text). Foreground omits onProgress → no-op. */
+function emitAutoWriteStageProgress(
+  onProgress: ((event: SedimentWorkerProgressEvent) => void) | undefined,
+  stage: SedimentWorkerProgressStage,
+  phase: "start" | "end" | "aborted",
+): void {
+  if (!onProgress) return;
+  try {
+    emitWorkerProgress(onProgress, buildWorkerProgressEvent({ stage, phase }));
+  } catch { /* progress best-effort */ }
+}
+
 /**
- * Run the LLM auto-write lane end-to-end. The function performs all
- * gate checks, runs the LLM extractor when enabled, and applies
- * `previewExtraction` plus the curator loop so compliant candidates
- * become create/update/merge/archive/supersede/delete/skip operations. Semantic hard gates were
- * removed in ADR 0016; git + audit provide rollback.
+ * Race a main auto_write await against worker signal/deadline.
+ * Foreground (no signal/deadline): returns work unchanged.
+ * Callees without AbortSignal: set unreapedIfTimeout so a timeout keeps the
+ * work tracked (cancel_cleanup_unreaped) instead of misclassifying as settled.
  */
+async function raceAutoWriteAwait<T>(
+  work: Promise<T>,
+  opts: {
+    signal?: AbortSignal;
+    deadlineMs?: number;
+    now?: () => number;
+    unreapedIfTimeout?: boolean;
+    sessionId?: string;
+  },
+): Promise<T> {
+  const now = opts.now ?? Date.now;
+  const workerActive = opts.signal !== undefined || opts.deadlineMs !== undefined;
+  if (!workerActive) return work;
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let timedOut = false;
+  const timeoutP = new Promise<never>((_, reject) => {
+    const fail = () => {
+      timedOut = true;
+      const code = opts.unreapedIfTimeout ? "cancel_cleanup_unreaped" : "stage_deadline";
+      const err = new Error(code);
+      (err as { code?: string }).code = code;
+      reject(err);
+    };
+    if (opts.signal?.aborted) {
+      fail();
+      return;
+    }
+    if (opts.deadlineMs !== undefined && now() >= opts.deadlineMs) {
+      fail();
+      return;
+    }
+    if (opts.signal) {
+      onAbort = () => fail();
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const tick = () => {
+      if (opts.deadlineMs === undefined) return;
+      const rem = opts.deadlineMs - now();
+      if (rem <= 0) {
+        fail();
+        return;
+      }
+      timer = setTimeout(tick, Math.max(1, Math.min(50, rem)));
+    };
+    if (opts.deadlineMs !== undefined) tick();
+  });
+
+  try {
+    return await Promise.race([work, timeoutP]);
+  } catch (err) {
+    // Keep non-cancelable work visible to detached_join so outer does not
+    // misclassify background pending as settled after this race loses.
+    if (timedOut && opts.unreapedIfTimeout && opts.sessionId) {
+      trackSessionPassWork(
+        opts.sessionId,
+        work.then(() => undefined, () => undefined),
+        "auto_write",
+      );
+    }
+    throw err;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort && opts.signal) opts.signal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function tryAutoWriteLane(args: {
   cwd: string;
   sessionId: string;
@@ -6880,6 +7371,11 @@ async function tryAutoWriteLane(args: {
   window: RunWindow;
   modelRegistry: unknown;
   signal?: AbortSignal;
+  /** Worker-only closed progress (foreground omits). */
+  onProgress?: (event: SedimentWorkerProgressEvent) => void;
+  /** Worker-only absolute soft deadline. */
+  deadlineMs?: number;
+  now?: () => number;
   correlationId: string;
   // 2026-05-13 B5 cutover: writer now requires abrain identity in opts.
   // tryAutoWriteLane is a module-level function (not nested inside the
@@ -6919,6 +7415,16 @@ async function tryAutoWriteLane(args: {
   const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId, branchEntries, sessionManager } = args;
   const intakeWindowFields = args.intakeWindowId ? { windowId: args.intakeWindowId } : {};
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
+  const autoWriteOnProgress = args.onProgress;
+  const autoWriteDeadlineMs = args.deadlineMs;
+  const autoWriteNow = args.now ?? Date.now;
+  const autoWriteBound = {
+    signal: args.signal,
+    deadlineMs: autoWriteDeadlineMs,
+    now: autoWriteNow,
+    sessionId,
+  };
+  emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_preflight", "start");
 
   // ADR 0025 §5.3 P5.5 tristate gate:
   //   - false          → skip (full kill switch, also gates classifier upstream)
@@ -6936,6 +7442,13 @@ async function tryAutoWriteLane(args: {
     if (flippedSignal && shouldEscalateToCurator(flippedSignal)) {
       if (settings.autoLlmWriteEnabled === "staging-only") {
         const staged = writeStagingEntry(buildProvisionalStagingEntry(flippedSignal, window.text, { projectId, projectRoot: cwd }));
+        // Task-scoped: provisional staging is unfinished without global promotion.
+        if (staged) {
+          noteTaskScopedCandidateDeferredIfWorker(
+            sessionId,
+            autoWriteDeadlineMs !== undefined || args.signal !== undefined,
+          );
+        }
         await appendAudit(cwd, {
           operation: "tier1_degraded_capture",
           lane: "auto_write",
@@ -6955,6 +7468,7 @@ async function tryAutoWriteLane(args: {
         }).catch(() => {});
       }
     }
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_preflight", "end");
     return {
       kind: "ineligible",
       eligibility: {
@@ -7579,13 +8093,23 @@ async function tryAutoWriteLane(args: {
     // detection now lives in the constraint Evidence Event normalizer + compiler,
     // and REQ-004 recall-audit (keyed by raw transcript) catches divergence on
     // later turns. Exact-title dups still fold via exactDuplicateAsDedup.
-    const result: WriteRuleResult = await writeAbrainRule(draft, {
-      abrainHome,
-      settings,
-      exactDuplicateAsDedup: true,
-      semanticDedup: "off",
-      auditContext: tier1AuditContext,
-    });
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_preflight", "end");
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "start");
+    let result: WriteRuleResult;
+    try {
+      // writeAbrainRule has no AbortSignal — race budget; timeout = unreaped.
+      result = await raceAutoWriteAwait(writeAbrainRule(draft, {
+        abrainHome,
+        settings,
+        exactDuplicateAsDedup: true,
+        semanticDedup: "off",
+        auditContext: tier1AuditContext,
+      }), { ...autoWriteBound, unreapedIfTimeout: true });
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "end");
+    } catch (e) {
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "aborted");
+      throw e;
+    }
     const adjudication: Record<string, unknown> | undefined = { p4a_rollback_storage_only: true };
     const tier1StagingCleanup = (result.status === "created" || result.status === "updated")
       ? removeStagingEntriesBySlug(buildProvisionalStagingSlug(tier1Signal, window.text))
@@ -7674,12 +8198,14 @@ async function tryAutoWriteLane(args: {
     typeof modelRegistry.find !== "function" ||
     typeof modelRegistry.getApiKeyAndHeaders !== "function"
   ) {
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_preflight", "end");
     return {
       kind: "ineligible",
       eligibility: { eligible: false, reason: "model_registry_unavailable" },
     };
   }
 
+  emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_preflight", "end");
 
   // 1. Run extractor. It does not write or commit; it only runs the
   //    model and parses the MEMORY/SKIP response. The curator/writer
@@ -7692,16 +8218,23 @@ async function tryAutoWriteLane(args: {
   void branchEntries;
   const llmStart = Date.now();
   let llmResult: LlmExtractorResult;
+  emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_extractor", "start");
   try {
-    llmResult = await runLlmExtractor(window.text, {
+    llmResult = await raceAutoWriteAwait(runLlmExtractor(window.text, {
       settings,
       modelRegistry: modelRegistry as Parameters<
         typeof runLlmExtractor
       >[1]["modelRegistry"],
       signal: args.signal,
       windowEntryCount: window.includedEntries,
-    });
+    }), autoWriteBound);
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_extractor", "end");
   } catch (e: any) {
+    if (e instanceof Error && ((e as { code?: string }).code === "stage_deadline" || (e as { code?: string }).code === "cancel_cleanup_unreaped")) {
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_extractor", "aborted");
+      throw e;
+    }
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_extractor", "end");
     if (e instanceof BackgroundLlmBudgetExceededError) {
       llmResult = {
         ok: false,
@@ -7814,10 +8347,30 @@ async function tryAutoWriteLane(args: {
   }
 
   // 3. Apply each compliant draft through the curator lookup loop.
+  // Per-candidate: emit curator start/end (no index/count — closed stages only),
+  // dynamically re-clamp settings to remaining budget at each start.
+  // Worker mode: curator maxRetries already 0 via clamp; hang → unreaped.
+  // Candidate loop top: assert remaining BEFORE constructing any candidate work.
   const writeStart = Date.now();
   const results: WriteProjectEntryResult[] = [];
   const curatorAudits: CuratorAudit[] = [];
+  const taskScopedAutoWrite = autoWriteDeadlineMs !== undefined || args.signal !== undefined;
   for (const [i, draft] of compliantDrafts.entries()) {
+    // Assert remaining before constructing candidate promise / clamp / curator.
+    // Expired → ordinary stage_deadline; do not start new candidate work.
+    if (taskScopedAutoWrite) {
+      if (args.signal?.aborted || (autoWriteDeadlineMs !== undefined && autoWriteNow() >= autoWriteDeadlineMs)) {
+        const err = new Error("stage_deadline");
+        (err as { code?: string }).code = "stage_deadline";
+        throw err;
+      }
+      try {
+        const { assertWorkerBudgetNotExpired } = await import("../_shared/worker-budget-context");
+        assertWorkerBudgetNotExpired("candidate_before");
+      } catch (e) {
+        if (e instanceof Error && (e as { code?: string }).code === "stage_deadline") throw e;
+      }
+    }
     const candidateId = candidateIdFor(correlationId, i);
     const auditContext: WriterAuditContext = {
       lane: "auto_write",
@@ -7827,11 +8380,33 @@ async function tryAutoWriteLane(args: {
       sourceTimestampUtc: stableRunWindowTimestamp(window),
       ...intakeWindowFields,
     };
+    // Per-candidate remaining budget clamp (no identity in progress).
+    const candidateSettings = autoWriteDeadlineMs !== undefined
+      ? (() => {
+          const rem = Math.max(1, autoWriteDeadlineMs - autoWriteNow());
+          return {
+            ...settings,
+            extractorTimeoutMs: Math.min(settings.extractorTimeoutMs, rem),
+            classifierTimeoutMs: Math.min(settings.classifierTimeoutMs, rem),
+            curatorTimeoutMs: Math.min(settings.curatorTimeoutMs, rem),
+            aggregatorTimeoutMs: Math.min(settings.aggregatorTimeoutMs, rem),
+            lockTimeoutMs: Math.min(settings.lockTimeoutMs, rem),
+            curatorMaxRetries: 0,
+            aggregatorMaxRetries: 0,
+            constraintShadowCompiler: {
+              ...settings.constraintShadowCompiler,
+              timeoutMs: Math.min(settings.constraintShadowCompiler.timeoutMs, rem),
+            },
+          } satisfies SedimentSettings;
+        })()
+      : settings;
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_curator", "start");
     let curated: Awaited<ReturnType<typeof curateProjectDraft>>;
     try {
-      curated = await curateProjectDraft(draft, {
+      // Curator may hang despite signal — unreapedIfTimeout keeps work tracked.
+      curated = await raceAutoWriteAwait(curateProjectDraft(draft, {
         projectRoot: cwd,
-        sedimentSettings: settings,
+        sedimentSettings: candidateSettings,
         memorySettings: resolveMemorySettings(),
         modelRegistry,
         signal: args.signal,
@@ -7843,14 +8418,20 @@ async function tryAutoWriteLane(args: {
         taskLocalContext: getTaskLocalForCurator(sessionId),
         projectId,
         abrainHome,
-      });
+      }), { ...autoWriteBound, unreapedIfTimeout: true });
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_curator", "end");
     } catch (e: any) {
+      if (e instanceof Error && ((e as { code?: string }).code === "stage_deadline" || (e as { code?: string }).code === "cancel_cleanup_unreaped")) {
+        emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_curator", "aborted");
+        throw e;
+      }
       // F4 defense (2026-05-14): curateProjectDraft has internal try/catch
       // for loadEntries / llmSearchEntries / callCuratorModel, but no
       // catch-all at the outermost function boundary. An unexpected runtime
       // error (e.g. path.resolve on malformed data, OOM) would previously
       // kill ALL remaining candidates in the loop. Now we isolate each
       // candidate's curator call and continue to the next.
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_curator", "end");
       const error = sanitizeAuditText(e?.message ?? String(e), 500) ?? "curator crashed";
       curatorAudits.push({ decision: { op: "skip", reason: "curator_crashed", rationale: error }, neighbors: [], stage_ms: { search: 0, decide: 0, total: 0 }, error });
       results.push({
@@ -7866,6 +8447,31 @@ async function tryAutoWriteLane(args: {
       continue;
     }
     curatorAudits.push(curated.audit);
+    // Task-scoped: multiview pending / staging deferred / promotion-needed
+    // unfinished artifacts from THIS run's outcome keys only → fail closed.
+    // No global scan; global resolver/replay is skipped in taskScoped.
+    const curatedSkipReason = curated.decision.op === "skip" ? curated.decision.reason : undefined;
+    if (
+      taskScopedAutoWrite
+      && (
+        curated.audit.multi_view?.staged
+        || isCurrentCandidateDeferredReason(curatedSkipReason)
+      )
+    ) {
+      noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+      // Still materialize skip result for this-run keys; CP will HOLD; pass throws.
+      results.push({
+        slug: draft.title,
+        path: "",
+        status: "skipped",
+        reason: curatedSkipReason || "multiview_staged_for_replay",
+        lane: "auto_write",
+        sessionId,
+        correlationId,
+        candidateId,
+      });
+      continue;
+    }
     // ADR 0031 CAS parity: pass observed neighbor statuses so the curator's
     // archive/delete/merge ops pin expected_status and abort (instead of
     // silently clobbering) on a concurrent reactivation/status change.
@@ -7873,14 +8479,17 @@ async function tryAutoWriteLane(args: {
     for (const n of curated.audit.neighbors) {
       if (n.status) neighborStatusBySlug[n.slug] = n.status as EntryStatus;
     }
-    results.push(
-      ...(await executeCuratorDecisionToBrain({
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "start");
+    try {
+      // executeCuratorDecisionToBrain has no AbortSignal — race + unreaped.
+      // Writer checks worker budget ALS before critical IO/git (writer_before only).
+      const writeResults = await raceAutoWriteAwait(executeCuratorDecisionToBrain({
         decision: curated.decision,
         draft,
         projectRoot: cwd,
         abrainHome,
         projectId,
-        settings,
+        settings: candidateSettings,
         dryRun: false,
         auditContext,
         sessionId,
@@ -7891,15 +8500,36 @@ async function tryAutoWriteLane(args: {
         archiveReason: curated.decision.op === "archive" ? curated.decision.reason || curated.decision.rationale || "archived by sediment curator" : undefined,
         supersedeReason: curated.decision.op === "supersede" ? curated.decision.reason || curated.decision.rationale || "superseded by sediment curator" : undefined,
         deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
-      })),
-    );
+      }), { ...autoWriteBound, unreapedIfTimeout: true });
+      if (taskScopedAutoWrite && writeResults.some((r) => isCurrentCandidateDeferredReason(r.reason))) {
+        noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+      }
+      results.push(...writeResults);
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "end");
+    } catch (e) {
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "aborted");
+      throw e;
+    }
   }
 
   const wrotePostWriteMaintenanceRelevant = hasAdr0039L3RelevantWriteResult(results);
   // ADR 0039 L3: refresh the rebuildable SQLite mirror once after this
   // auto-write batch. Best-effort: L3 freshness must not block L1/L2 writes.
   if (wrotePostWriteMaintenanceRelevant) {
-    await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_publication", "start");
+    try {
+      await raceAutoWriteAwait(
+        syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings }),
+        { ...autoWriteBound, unreapedIfTimeout: true },
+      );
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_publication", "end");
+    } catch (e) {
+      if (e instanceof Error && ((e as { code?: string }).code === "stage_deadline" || (e as { code?: string }).code === "cancel_cleanup_unreaped")) {
+        emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_publication", "aborted");
+        throw e;
+      }
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_publication", "end");
+    }
   }
 
   // ADR 0035 P2 (方向 B): reconcile vectors for entries written this turn.
@@ -7910,6 +8540,7 @@ async function tryAutoWriteLane(args: {
   // (provider+model set; DEFAULT is empty = disabled). content-hash gated +
   // scope-safe prune inside reconcileEmbeddings.
   if (wrotePostWriteMaintenanceRelevant && modelRegistry) {
+    emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_embedding", "start");
     try {
       const memSettings = resolveMemorySettings();
       const emb = memSettings.embedding;
@@ -7918,11 +8549,39 @@ async function tryAutoWriteLane(args: {
           modelRegistry as Parameters<typeof resolveEmbeddingProviderConfig>[0],
           emb,
         );
-        const corpus = await loadEntries(cwd, memSettings, args.signal);
-        await reconcileEmbeddings(corpus, cfg, vectorIndexPath());
+        // Worker budget: clamp embedding HTTP timeout to remaining soft deadline.
+        // Prefer already-imported helpers via onProgress path; budget ALS is static.
+        try {
+          const { clampToWorkerBudget, getWorkerBudgetContext } = await import("../_shared/worker-budget-context");
+          cfg.timeoutMs = clampToWorkerBudget(cfg.timeoutMs);
+          const budget = getWorkerBudgetContext();
+          if (budget?.signal?.aborted || (budget && budget.deadlineMs <= (budget.now?.() ?? Date.now()))) {
+            const err = new Error("stage_deadline");
+            (err as { code?: string }).code = "stage_deadline";
+            throw err;
+          }
+        } catch (e) {
+          if (e instanceof Error && (e as { code?: string }).code === "stage_deadline") throw e;
+          /* non-worker path / clamp import failure */
+        }
+        const corpus = await raceAutoWriteAwait(
+          loadEntries(cwd, memSettings, args.signal),
+          autoWriteBound,
+        );
+        // reconcileEmbeddings has no AbortSignal — race + unreaped classification.
+        await raceAutoWriteAwait(
+          reconcileEmbeddings(corpus, cfg, vectorIndexPath()),
+          { ...autoWriteBound, unreapedIfTimeout: true },
+        );
       }
-    } catch {
-      /* swallow: search-time bounded-union covers un-reconciled entries */
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_embedding", "end");
+    } catch (e) {
+      if (e instanceof Error && ((e as { code?: string }).code === "stage_deadline" || (e as { code?: string }).code === "cancel_cleanup_unreaped")) {
+        emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_embedding", "aborted");
+        throw e;
+      }
+      /* swallow non-deadline: search-time bounded-union covers un-reconciled entries */
+      emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_embedding", "end");
     }
   }
 
@@ -7970,7 +8629,9 @@ export function _resetAutoWriteStateForTests(): void {
   sessionCorrectionWorkingSet.clear();
   sessionTaskLocalSet.clear();
   deferredStopBySession.clear();
+  taskScopedCandidateDeferredBySession.clear();
   sedimentAgentEndTestHooks = undefined;
+  maintenanceScheduleObserverForTests = undefined;
   sourceProjectRootByCwd.clear();
   _G.__sediment_latestNotify = undefined;
   _G.__sediment_latestSetStatus = undefined;
@@ -7982,6 +8643,113 @@ export function _resetAutoWriteStateForTests(): void {
   _G.__sediment_latestNotifyEpoch = undefined;
   _G.__sediment_inflightCount = 0;
   _resetWarnedApisForTests();
+}
+
+/** Test-only: register a promise in autoWriteInFlight (clears on settle). */
+export function _setAutoWriteInFlightForTests(sessionId: string, work: Promise<void>): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_setAutoWriteInFlightForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  autoWriteInFlight.set(sessionId, work);
+  const cleanup = () => {
+    if (autoWriteInFlight.get(sessionId) === work) autoWriteInFlight.delete(sessionId);
+  };
+  void work.then(cleanup, cleanup);
+}
+
+/** Test-only: observe global maintenance schedule sites (task-scoped must emit none). */
+export function _setMaintenanceScheduleObserverForTests(observer: ((lane: string) => void) | undefined): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_setMaintenanceScheduleObserverForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  maintenanceScheduleObserverForTests = observer;
+}
+
+/** Test-only: mark task-scoped current-candidate deferred for a session. */
+export function _noteTaskScopedCandidateDeferredForTests(sessionId: string): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_noteTaskScopedCandidateDeferredForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+}
+
+/** Test-only: closed deferred reason detection (this-run keys only). */
+export function _isCurrentCandidateDeferredReasonForTests(reason: string | undefined): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_isCurrentCandidateDeferredReasonForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return isCurrentCandidateDeferredReason(reason);
+}
+
+/** Test-only: drive production pass runner (activate extension first). */
+export async function _runSedimentAgentEndPassForTests(
+  snapshot: SedimentAgentEndSnapshotForTests,
+  opts?: Parameters<SedimentAgentEndPassRunner>[1],
+): Promise<void | { more: true }> {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_runSedimentAgentEndPassForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  if (!sedimentAgentEndPassRunner) {
+    throw new Error("_runSedimentAgentEndPassForTests requires activated extension (runner unset)");
+  }
+  return sedimentAgentEndPassRunner(snapshot, opts);
+}
+
+/** Test-only: collect session/resource tracked pending + lanes. */
+export function _collectTrackedPendingForTests(
+  sessionId: string | undefined,
+  resourceKey?: string,
+): { promises: Promise<unknown>[]; lanes: SedimentWorkerTrackedLane[] } {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_collectTrackedPendingForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return collectTrackedPending(sessionId, resourceKey);
+}
+
+/** Test-only: raceAutoWriteAwait (budget/unreaped classification). */
+export const _raceAutoWriteAwaitForTests = raceAutoWriteAwait;
+
+/** Test-only: clamp sediment settings to a remaining budget (worker maxRetries=0). */
+export function _clampSettingsToWorkerBudgetForTests(
+  settings: SedimentSettings,
+  args: { deadlineMs: number; now: () => number },
+): SedimentSettings {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_clampSettingsToWorkerBudgetForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  const rem = Math.max(1, args.deadlineMs - args.now());
+  return {
+    ...settings,
+    extractorTimeoutMs: Math.min(settings.extractorTimeoutMs, rem),
+    classifierTimeoutMs: Math.min(settings.classifierTimeoutMs, rem),
+    curatorTimeoutMs: Math.min(settings.curatorTimeoutMs, rem),
+    aggregatorTimeoutMs: Math.min(settings.aggregatorTimeoutMs, rem),
+    lockTimeoutMs: Math.min(settings.lockTimeoutMs, rem),
+    curatorMaxRetries: 0,
+    aggregatorMaxRetries: 0,
+    constraintShadowCompiler: {
+      ...settings.constraintShadowCompiler,
+      timeoutMs: Math.min(settings.constraintShadowCompiler.timeoutMs, rem),
+    },
+  };
+}
+
+/** Test-only: drive waitForDetachedSedimentWorkIdle (worker deadline/abort path). */
+export async function _waitForDetachedSedimentWorkIdleForTests(
+  sessionId: string | undefined,
+  resourceKey: string | undefined,
+  opts?: {
+    signal?: AbortSignal;
+    requestAbort?: () => void;
+    deadlineMs?: number;
+    onProgress?: (event: SedimentWorkerProgressEvent) => void;
+    now?: () => number;
+  },
+): Promise<void> {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_waitForDetachedSedimentWorkIdleForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return waitForDetachedSedimentWorkIdle(sessionId, resourceKey, opts);
 }
 
 export function _setSedimentAgentEndTestHooksForTests(hooks: SedimentAgentEndTestHooks | undefined): void {
@@ -8152,6 +8920,8 @@ function scheduleMultiviewReplay(args: {
   modelRegistry: unknown;
   abrainHome: string;
   projectId: string;
+  /** Worker-only AbortSignal; foreground leaves undefined. */
+  signal?: AbortSignal;
 }): void {
   if (!args.enabled || !args.cwd || !args.sessionId) return;
 
@@ -8165,12 +8935,16 @@ function scheduleMultiviewReplay(args: {
   if (existingReplay) {
     // Same resource already running: this session must track/await the shared
     // promise (waitForDetachedSedimentWorkIdle(session, resourceKey)), not skip.
-    trackResourcePassWork(replayKey, trackSessionPassWork(replaySessionId, existingReplay));
+    trackResourcePassWork(
+      replayKey,
+      trackSessionPassWork(replaySessionId, existingReplay, "multiview_replay"),
+      "multiview_replay",
+    );
     return;
   }
 
   // Re-bind for the closure to avoid any subsequent scope mutation.
-  const { settings, modelRegistry, abrainHome, projectId } = args;
+  const { settings, modelRegistry, abrainHome, projectId, signal: replaySignal } = args;
 
   let replayPromise!: Promise<void>;
   replayPromise = trackResourcePassWork(replayKey, trackSessionPassWork(replaySessionId, (async () => {
@@ -8183,7 +8957,7 @@ function scheduleMultiviewReplay(args: {
         currentProjectRoot: replayCwd,
         loadNeighborsBySlug: async (slugs: string[]) => {
           if (slugs.length === 0) return [];
-          const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, undefined);
+          const all = await (await import("../memory/parser")).loadEntries(replayCwd, memSettings, replaySignal);
           const filtered = relevantEntriesForCurator(all);
           const bySlug = new Map(filtered.map((entry) => [entry.slug, entry]));
           return slugs.map((slug) => bySlug.get(slug)).filter((entry): entry is NonNullable<typeof entry> => !!entry);
@@ -8269,7 +9043,7 @@ function scheduleMultiviewReplay(args: {
             await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
           }
         },
-        signal: undefined,
+        signal: replaySignal,
       });
 
       // Audit the replay batch outcome.
@@ -8337,7 +9111,7 @@ function scheduleMultiviewReplay(args: {
       }
       maybeSetIdleIfNoInflight(replaySessionId);
     }
-  })()));
+  })(), "multiview_replay"), "multiview_replay");
   multiViewReplayInFlight.set(replayKey, replayPromise);
   // Rejection is tracked via session/resource helpers; surface remains bounded.
   replayPromise.catch(() => {});

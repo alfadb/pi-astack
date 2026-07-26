@@ -125,6 +125,17 @@ export async function callSearchModel(
   timeoutMs = STAGE1_TIMEOUT_MS,
   thinking: ThinkingLevel = "off",
 ): Promise<ModelCallResult> {
+  // Daemon worker budget ALS: clamp stage timeout to remaining soft deadline.
+  // Foreground never enters worker budget ALS → STAGE1/STAGE2 defaults unchanged.
+  let effectiveTimeoutMs = timeoutMs;
+  try {
+    const { clampToWorkerBudget, assertWorkerBudgetNotExpired } = await import("../_shared/worker-budget-context");
+    assertWorkerBudgetNotExpired("memory_search");
+    effectiveTimeoutMs = clampToWorkerBudget(timeoutMs);
+  } catch (e) {
+    if (e instanceof Error && (e as { code?: string }).code === "stage_deadline") throw e;
+    /* non-worker path / import failure — keep configured timeout */
+  }
   const parsed = parseModelRef(modelRef);
   if (!parsed) throw new Error(`invalid memory.search model ref: ${modelRef || "<empty>"}; expected provider/model`);
 
@@ -186,7 +197,7 @@ export async function callSearchModel(
       apiKey: auth.apiKey,
       headers: auth.headers,
       signal,
-      timeoutMs,
+      timeoutMs: effectiveTimeoutMs,
       maxRetries: STAGE_MAX_RETRIES,
       ...reasoningField,
     },

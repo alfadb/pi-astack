@@ -2075,9 +2075,20 @@ async function withCanonicalWriterMutation<T>(
   settings: Pick<SedimentSettings, "gitCommit">,
   operation: () => Promise<T>,
 ): Promise<T> {
+  // Worker budget: abort before critical IO/git when soft deadline already past.
+  // Foreground never enters worker budget ALS → no-op.
+  try {
+    const { assertWorkerBudgetNotExpired } = await import("../_shared/worker-budget-context");
+    assertWorkerBudgetNotExpired("writer_before");
+  } catch (e) {
+    if (e instanceof Error && (e as { code?: string }).code === "stage_deadline") throw e;
+  }
   await assertCanonicalWriterSettings(abrainHome, settings);
-  if (settings.gitCommit === false) return operation();
-  return withCanonicalMutationBarrier(abrainHome, operation);
+  // Writer success is retained: no post-success budget flip.
+  // Soft deadline still gates entry via writer_before only.
+  const run = async (): Promise<T> => operation();
+  if (settings.gitCommit === false) return run();
+  return withCanonicalMutationBarrier(abrainHome, run);
 }
 
 async function withLegacyWriterCommitBarrier<T>(abrainHome: string, operation: () => Promise<T>): Promise<T> {

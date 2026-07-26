@@ -39,8 +39,10 @@ export const SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS_ENV = "PI_ASTACK_SEDIMENT_WORKE
 export const SEDIMENT_WORKER_TASK_SCHEMA = "pi-astack/sediment-worker-task/v1" as const;
 export const SEDIMENT_WORKER_RESULT_SCHEMA = "pi-astack/sediment-worker-result/v1" as const;
 export const SEDIMENT_WORKER_RECEIPT_SCHEMA = "pi-astack/sediment-worker-receipt/v1" as const;
+export const SEDIMENT_WORKER_PROGRESS_SCHEMA = "pi-astack/sediment-worker-progress/v1" as const;
 export const SEDIMENT_WORKER_COMMAND_NAME = "sediment-worker-run" as const;
 export const SEDIMENT_WORKER_RESULT_NOTIFY_PREFIX = "sediment-worker-result:" as const;
+export const SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX = "sediment-worker-progress:" as const;
 
 /** Hard cap for source sidecar regular files (matches daemon copy-store bound). */
 export const SEDIMENT_WORKER_SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
@@ -48,6 +50,15 @@ export const SEDIMENT_WORKER_SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
 export const SEDIMENT_WORKER_ARGS_MAX_BYTES = 64 * 1024;
 /** In-worker more=true continuation budget (ready-pending backlog). */
 export const SEDIMENT_WORKER_MORE_BUDGET = 16;
+/** Default task budget when old daemons omit budget_ms (10 minutes). */
+export const SEDIMENT_WORKER_DEFAULT_BUDGET_MS = 600_000;
+/** Closed budget range: 60s .. 3600s. */
+export const SEDIMENT_WORKER_BUDGET_MIN_MS = 60_000;
+export const SEDIMENT_WORKER_BUDGET_MAX_MS = 3_600_000;
+/** Reserve at end of budget for structured return (worker self-returns before daemon kill). */
+export const SEDIMENT_WORKER_CLEANUP_RESERVE_MS = 5_000;
+/** Soft-deadline / serial-wait fence poll slice (ms). ≤1s; tests may inject smaller. */
+export const SEDIMENT_WORKER_FENCE_SLICE_MS = 1_000;
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 const SAFE_INT_RE = /^-?(0|[1-9][0-9]*)$/;
@@ -65,7 +76,120 @@ const MANIFEST_TOP_KEYS = new Set([
   "c6",
   "leaf_tip",
   "candidate_ref",
+  "budget_ms",
 ]);
+
+/**
+ * Closed progress stages actually emitted by Stage0 worker paths.
+ * Observational only; no identity / free text. Do not list unwired stages.
+ * auto_write_* stages are emitted from tryAutoWriteLane via onProgress.
+ */
+export const SEDIMENT_WORKER_PROGRESS_STAGES = [
+  "claim",
+  "sidecar",
+  "checkpoint",
+  "pass",
+  "search",
+  "classifier",
+  "detached_join",
+  "receipt",
+  "auto_write_preflight",
+  "auto_write_extractor",
+  "auto_write_curator",
+  "auto_write_writer",
+  "auto_write_embedding",
+  "auto_write_publication",
+] as const;
+export type SedimentWorkerProgressStage = (typeof SEDIMENT_WORKER_PROGRESS_STAGES)[number];
+const PROGRESS_STAGE_SET = new Set<string>(SEDIMENT_WORKER_PROGRESS_STAGES);
+
+export const SEDIMENT_WORKER_PROGRESS_PHASES = ["start", "end", "heartbeat", "aborted"] as const;
+export type SedimentWorkerProgressPhase = (typeof SEDIMENT_WORKER_PROGRESS_PHASES)[number];
+const PROGRESS_PHASE_SET = new Set<string>(SEDIMENT_WORKER_PROGRESS_PHASES);
+
+/** Closed lane labels for detached-join pending (low cardinality). */
+export const SEDIMENT_WORKER_TRACKED_LANES = [
+  "auto_write",
+  "classifier",
+  "multiview_replay",
+  "embedding",
+  "maintenance",
+  "other",
+] as const;
+export type SedimentWorkerTrackedLane = (typeof SEDIMENT_WORKER_TRACKED_LANES)[number];
+const TRACKED_LANE_SET = new Set<string>(SEDIMENT_WORKER_TRACKED_LANES);
+
+/**
+ * Closed deadline/cancel error codes (default retryable=true).
+ * Plain settled codes (budget/stage/detached_join) do NOT default restart_child;
+ * only the poison closed set forces poison + restart_child=true.
+ */
+export const SEDIMENT_WORKER_DEADLINE_ERROR_CODES = [
+  "worker_budget_exhausted",
+  "global_serial_deadline",
+  "stage_deadline",
+  "detached_join_deadline",
+  "cancel_cleanup_unreaped",
+  "pass_deadline_exceeded_unreaped",
+] as const;
+export type SedimentWorkerDeadlineErrorCode = (typeof SEDIMENT_WORKER_DEADLINE_ERROR_CODES)[number];
+const DEADLINE_ERROR_SET = new Set<string>(SEDIMENT_WORKER_DEADLINE_ERROR_CODES);
+
+/**
+ * Closed non-retryable diagnostic: CP advanced under worker but no success receipt.
+ * Fail closed — cannot auto no_progress / already_processed loop. restart_child=true.
+ */
+export const SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE = "deadline_after_checkpoint_advanced" as const;
+/** Process-local poison after unreaped/deadline — subsequent worker-run refuses claim/pass. */
+export const SEDIMENT_WORKER_PROCESS_POISONED_CODE = "worker_process_poisoned" as const;
+
+/**
+ * Closed poison + restart_child set. All WorkerDeadlineError catches must route through
+ * `poisonIfSerialOrUnreaped(code)` — plain settled worker_budget_exhausted / stage_deadline /
+ * detached_join_deadline (cleanup settled, CP not advanced) must NOT poison and restart_child=false.
+ */
+export const SEDIMENT_WORKER_POISON_RESTART_CODES = [
+  "global_serial_deadline",
+  "cancel_cleanup_unreaped",
+  "pass_deadline_exceeded_unreaped",
+  SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE,
+  SEDIMENT_WORKER_PROCESS_POISONED_CODE,
+] as const;
+export type SedimentWorkerPoisonRestartCode = (typeof SEDIMENT_WORKER_POISON_RESTART_CODES)[number];
+const POISON_RESTART_SET = new Set<string>(SEDIMENT_WORKER_POISON_RESTART_CODES);
+
+export function isPoisonRestartCode(code: string | undefined): boolean {
+  return typeof code === "string" && POISON_RESTART_SET.has(code);
+}
+
+/** Progress notify payload — closed keys only; no identity or free text. */
+export interface SedimentWorkerProgressEvent {
+  schema: typeof SEDIMENT_WORKER_PROGRESS_SCHEMA;
+  stage: SedimentWorkerProgressStage;
+  phase: SedimentWorkerProgressPhase;
+  /** Optional low-cardinality elapsed bucket (seconds power-ish). */
+  elapsed_bucket?: number;
+  /** Optional low-cardinality pending work count bucket. */
+  pending_bucket?: number;
+  /** Optional closed lane set currently pending (sorted unique). */
+  lanes?: readonly SedimentWorkerTrackedLane[];
+}
+
+const PROGRESS_KEYS = new Set([
+  "schema",
+  "stage",
+  "phase",
+  "elapsed_bucket",
+  "pending_bucket",
+  "lanes",
+]);
+
+/** Low-cardinality elapsed seconds buckets (closed set). */
+const ELAPSED_BUCKETS_S = [0, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 3600] as const;
+const ELAPSED_BUCKET_SET = new Set<number>(ELAPSED_BUCKETS_S);
+/** Low-cardinality pending count buckets (closed set). */
+const PENDING_BUCKETS = [0, 1, 2, 3, 4, 5, 8, 13, 21] as const;
+const PENDING_BUCKET_SET = new Set<number>(PENDING_BUCKETS);
 const C6_KEYS = new Set(["session_id", "turn_id", "subturn", "sub_agent_label", "parent"]);
 const LEAF_TIP_KEYS = new Set(["id", "parentId", "type", "timestampUtc"]);
 const CANDIDATE_REF_KEYS = new Set(["record_id", "producer_seq", "payload_digest", "run_generation"]);
@@ -100,6 +224,12 @@ export interface SedimentWorkerTaskManifest {
     payload_digest: string;
     run_generation: number;
   };
+  /**
+   * Task wall budget in ms (closed range 60_000..3_600_000).
+   * Optional for old daemons: absent → SEDIMENT_WORKER_DEFAULT_BUDGET_MS.
+   * Worker self-returns within budget (5s return reserve); does not rely on daemon kill.
+   */
+  budget_ms: number;
 }
 
 export interface SedimentWorkerResult {
@@ -116,6 +246,22 @@ export interface SedimentWorkerResult {
   error_code?: string;
   /** Pass iterations executed inside this command (more-loop count). */
   pass_iterations?: number;
+  /**
+   * When true, Pi child may be unreaped after deadline/cancel cleanup — caller
+   * must rebuild the Pi child. Backward-compatible optional field (old daemons ignore).
+   */
+  restart_child?: boolean;
+}
+
+/** Worker-only runtime opts injected into runSedimentAgentEndPass. */
+export interface SedimentWorkerPassRuntimeOpts {
+  signal?: AbortSignal;
+  /** Abort the worker AbortController that owns `signal` (detached-join abort-first). */
+  requestAbort?: () => void;
+  /** Absolute wall-clock soft deadline (budget minus cleanup reserve). */
+  deadlineMs?: number;
+  onProgress?: (event: SedimentWorkerProgressEvent) => void;
+  now?: () => number;
 }
 
 export interface SedimentWorkerPassSnapshot {
@@ -146,7 +292,10 @@ export interface SedimentWorkerPassSnapshot {
 
 export type SedimentWorkerPassRunner = (
   snapshot: SedimentWorkerPassSnapshot,
-  opts?: { intakeWindowId?: string; fromRecovery?: boolean },
+  opts?: {
+    intakeWindowId?: string;
+    fromRecovery?: boolean;
+  } & SedimentWorkerPassRuntimeOpts,
 ) => Promise<void | { more: true }>;
 
 export interface SedimentWorkerCommandDeps {
@@ -172,6 +321,13 @@ export interface SedimentWorkerCommandDeps {
     projectRoot: string,
     sessionId: string | undefined,
   ) => Promise<{ lastProcessedEntryId?: string }>;
+  /**
+   * Optional progress notify sink (tests / command handler).
+   * Failures must never fail the task.
+   */
+  onProgress?: (event: SedimentWorkerProgressEvent) => void;
+  /** Optional monotonic/wall clock for budget tests (defaults Date.now). */
+  clock?: () => number;
 }
 
 export function isSedimentWorkerMode(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -210,6 +366,193 @@ export class WorkerValidationError extends Error {
     super(message);
     this.name = "WorkerValidationError";
     this.code = code;
+  }
+}
+
+export class WorkerDeadlineError extends Error {
+  readonly code: SedimentWorkerDeadlineErrorCode;
+  readonly restart_child: boolean;
+  constructor(code: SedimentWorkerDeadlineErrorCode, message?: string, opts?: { restart_child?: boolean }) {
+    super(message ?? code);
+    this.name = "WorkerDeadlineError";
+    this.code = code;
+    // Only poison-class codes default restart_child=true.
+    this.restart_child = opts?.restart_child ?? isPoisonRestartCode(code);
+  }
+}
+
+export function isWorkerDeadlineErrorCode(code: string | undefined): code is SedimentWorkerDeadlineErrorCode {
+  return typeof code === "string" && DEADLINE_ERROR_SET.has(code);
+}
+
+export function bucketElapsedSeconds(elapsedMs: number): number {
+  const s = Math.max(0, Math.floor(elapsedMs / 1000));
+  let chosen: number = ELAPSED_BUCKETS_S[0];
+  for (const b of ELAPSED_BUCKETS_S) {
+    if (s >= b) chosen = b;
+    else break;
+  }
+  return chosen;
+}
+
+export function bucketPendingCount(n: number): number {
+  const c = Math.max(0, Math.floor(n));
+  let chosen: number = PENDING_BUCKETS[0];
+  for (const b of PENDING_BUCKETS) {
+    if (c >= b) chosen = b;
+    else break;
+  }
+  return chosen;
+}
+
+/** Parse optional budget_ms; absent → default. Closed range 60s..3600s. */
+export function parseWorkerBudgetMs(raw: unknown): number {
+  if (raw === undefined || raw === null) return SEDIMENT_WORKER_DEFAULT_BUDGET_MS;
+  const n = parseSafeIntegerField(raw, "budget_ms");
+  if (n < SEDIMENT_WORKER_BUDGET_MIN_MS || n > SEDIMENT_WORKER_BUDGET_MAX_MS) {
+    throw new WorkerValidationError(
+      "budget_ms_out_of_range",
+      `budget_ms must be in [${SEDIMENT_WORKER_BUDGET_MIN_MS}..${SEDIMENT_WORKER_BUDGET_MAX_MS}]`,
+    );
+  }
+  return n;
+}
+
+/** Soft work deadline = absolute start + budget − cleanup reserve (≥1ms). */
+export function computeWorkerSoftDeadlineMs(args: {
+  startedAtMs: number;
+  budgetMs: number;
+  cleanupReserveMs?: number;
+}): number {
+  const reserve = args.cleanupReserveMs ?? SEDIMENT_WORKER_CLEANUP_RESERVE_MS;
+  const softBudget = Math.max(1, args.budgetMs - reserve);
+  return args.startedAtMs + softBudget;
+}
+
+export function buildWorkerProgressEvent(args: {
+  stage: SedimentWorkerProgressStage;
+  phase: SedimentWorkerProgressPhase;
+  startedAtMs?: number;
+  nowMs?: number;
+  pending?: number;
+  lanes?: readonly SedimentWorkerTrackedLane[];
+}): SedimentWorkerProgressEvent {
+  if (!PROGRESS_STAGE_SET.has(args.stage)) {
+    throw new WorkerValidationError("progress_stage_invalid", "invalid progress stage");
+  }
+  if (!PROGRESS_PHASE_SET.has(args.phase)) {
+    throw new WorkerValidationError("progress_phase_invalid", "invalid progress phase");
+  }
+  const event: SedimentWorkerProgressEvent = {
+    schema: SEDIMENT_WORKER_PROGRESS_SCHEMA,
+    stage: args.stage,
+    phase: args.phase,
+  };
+  if (args.startedAtMs !== undefined && args.nowMs !== undefined) {
+    event.elapsed_bucket = bucketElapsedSeconds(args.nowMs - args.startedAtMs);
+  }
+  if (args.pending !== undefined) {
+    event.pending_bucket = bucketPendingCount(args.pending);
+  }
+  if (args.lanes && args.lanes.length > 0) {
+    const uniq = [...new Set(args.lanes.filter((l) => TRACKED_LANE_SET.has(l)))].sort();
+    if (uniq.length > 0) event.lanes = uniq as SedimentWorkerTrackedLane[];
+  }
+  return event;
+}
+
+/** Whitelist-sanitize a progress event (drop unknown keys / identity). */
+export function sanitizeWorkerProgressEvent(raw: unknown): SedimentWorkerProgressEvent | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (!PROGRESS_KEYS.has(key)) return null;
+  }
+  if (o.schema !== SEDIMENT_WORKER_PROGRESS_SCHEMA) return null;
+  if (typeof o.stage !== "string" || !PROGRESS_STAGE_SET.has(o.stage)) return null;
+  if (typeof o.phase !== "string" || !PROGRESS_PHASE_SET.has(o.phase)) return null;
+  const event: SedimentWorkerProgressEvent = {
+    schema: SEDIMENT_WORKER_PROGRESS_SCHEMA,
+    stage: o.stage as SedimentWorkerProgressStage,
+    phase: o.phase as SedimentWorkerProgressPhase,
+  };
+  if (o.elapsed_bucket !== undefined) {
+    if (typeof o.elapsed_bucket !== "number" || !Number.isSafeInteger(o.elapsed_bucket) || !ELAPSED_BUCKET_SET.has(o.elapsed_bucket)) {
+      return null;
+    }
+    event.elapsed_bucket = o.elapsed_bucket;
+  }
+  if (o.pending_bucket !== undefined) {
+    if (typeof o.pending_bucket !== "number" || !Number.isSafeInteger(o.pending_bucket) || !PENDING_BUCKET_SET.has(o.pending_bucket)) {
+      return null;
+    }
+    event.pending_bucket = o.pending_bucket;
+  }
+  if (o.lanes !== undefined) {
+    if (!Array.isArray(o.lanes)) return null;
+    const lanes: SedimentWorkerTrackedLane[] = [];
+    for (const item of o.lanes) {
+      if (typeof item !== "string" || !TRACKED_LANE_SET.has(item)) return null;
+      lanes.push(item as SedimentWorkerTrackedLane);
+    }
+    if (lanes.length > 0) event.lanes = [...new Set(lanes)].sort() as SedimentWorkerTrackedLane[];
+  }
+  return event;
+}
+
+export function formatWorkerProgressNotify(event: SedimentWorkerProgressEvent): string {
+  const clean = sanitizeWorkerProgressEvent(event);
+  if (!clean) throw new WorkerValidationError("progress_invalid", "progress event failed whitelist");
+  return `${SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX}${JSON.stringify(clean)}`;
+}
+
+export function tryParseWorkerProgressNotify(message: string): SedimentWorkerProgressEvent | null {
+  if (!message.startsWith(SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX)) return null;
+  try {
+    return sanitizeWorkerProgressEvent(JSON.parse(message.slice(SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX.length)));
+  } catch {
+    return null;
+  }
+}
+
+/** Sensitive-content scan for progress notify payloads (must be empty of identity). */
+export function progressNotifyHasSensitiveContent(message: string): boolean {
+  // No paths, session ids, digests, content, or free-text fields allowed.
+  if (!message.startsWith(SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX)) return true;
+  const body = message.slice(SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX.length);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return true;
+  }
+  // Whitelist parse first — schema may contain '/' (pi-astack/.../v1), which is not a path.
+  // Stage names like "sidecar" are closed vocabulary, not identity fields.
+  if (sanitizeWorkerProgressEvent(parsed) === null) return true;
+  // Only flag identity *keys* (JSON key form "key":), not stage values.
+  if (/"(session_id|request_id|terminal_record_id|owner_project_root|owner_key|sidecar_path|content_id|path|message|error|text)"\s*:/.test(body)) {
+    return true;
+  }
+  // Absolute/relative filesystem path markers outside the schema string.
+  if (/(?:^|[^a-zA-Z0-9_-])(?:\/home\/|\/tmp\/|\/var\/|\/Users\/|[A-Za-z]:\\)/.test(body)) {
+    return true;
+  }
+  // 64-hex digests look like identity
+  if (/[0-9a-f]{64}/i.test(body)) return true;
+  return false;
+}
+
+export function emitWorkerProgress(
+  onProgress: ((event: SedimentWorkerProgressEvent) => void) | undefined,
+  event: SedimentWorkerProgressEvent,
+): void {
+  if (!onProgress) return;
+  try {
+    const clean = sanitizeWorkerProgressEvent(event);
+    if (!clean) return;
+    onProgress(clean);
+  } catch {
+    /* progress never fails the task */
   }
 }
 
@@ -439,6 +782,8 @@ export function validateSedimentWorkerManifest(raw: unknown): SedimentWorkerTask
       : {}),
   };
 
+  const budget_ms = parseWorkerBudgetMs(m.budget_ms);
+
   return {
     schema: SEDIMENT_WORKER_TASK_SCHEMA,
     request_id: m.request_id,
@@ -450,6 +795,7 @@ export function validateSedimentWorkerManifest(raw: unknown): SedimentWorkerTask
     content_id: m.content_id,
     task_kind: "terminal_witness",
     c6,
+    budget_ms,
     ...(leafTip ? { leaf_tip: leafTip } : {}),
     ...(candidateRef ? { candidate_ref: candidateRef } : {}),
   };
@@ -885,21 +1231,31 @@ function resultFromProcessedReceipt(receipt: WorkerReceipt, requestId: string): 
 function failResult(
   ids: { request_id: string; terminal_record_id: string },
   code: string,
-  opts?: { status?: SedimentWorkerTaskStatus; retryable?: boolean; pass_iterations?: number },
+  opts?: {
+    status?: SedimentWorkerTaskStatus;
+    retryable?: boolean;
+    pass_iterations?: number;
+    restart_child?: boolean;
+  },
 ): SedimentWorkerResult {
   const status = opts?.status ?? "failed";
   const settled = status === "processed" || status === "already_processed";
+  const deadline = isWorkerDeadlineErrorCode(code);
+  // Explicit opts win. Poison closed set → true; plain deadline → false; else omit.
+  const restartChild = opts?.restart_child
+    ?? (isPoisonRestartCode(code) ? true : deadline ? false : undefined);
   return {
     schema: SEDIMENT_WORKER_RESULT_SCHEMA,
     request_id: ids.request_id,
     terminal_record_id: ids.terminal_record_id,
     status,
     settled,
-    retryable: opts?.retryable ?? !settled,
+    retryable: opts?.retryable ?? (deadline ? true : !settled),
     memory_decisions: 0,
     memory_writes: 0,
     error_code: code,
     ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
+    ...(restartChild !== undefined ? { restart_child: restartChild } : {}),
   };
 }
 
@@ -922,19 +1278,245 @@ export function tryParseWorkerResultNotify(message: string): SedimentWorkerResul
 /** Process-wide pass serial gate (all terminal ids; per-id OFD still retained). */
 let globalPassTail: Promise<void> = Promise.resolve();
 
-async function withGlobalPassSerial<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Process-local poison after unreaped/deadline. Subsequent worker-run returns
+ * `worker_process_poisoned` immediately (no claim / no pass). Daemon must
+ * kill-and-wait this Pi child before ledger retry/redrive — do NOT healthy-reuse.
+ * Hung serial gates are NOT actively released (no detach of bad pass).
+ * OFD claim is always released on RPC return; poison is the in-process depth
+ * defense that refuses same-process work after claim release.
+ */
+let workerProcessPoisoned = false;
+let workerProcessPoisonReason: string | undefined;
+
+/** In-flight cancelable soft-deadline fences (must return to 0 after each task). */
+let activeDeadlineFenceCount = 0;
+
+/** Sentinel: fence stopped cleanly after work settled (not a business error). */
+const FENCE_STOPPED = Symbol("sediment-worker-deadline-fence-stopped");
+
+/** Test-only: reset global serial chain (does not abort in-flight work). */
+export function _resetGlobalPassSerialForTests(): void {
+  globalPassTail = Promise.resolve();
+}
+
+/** Test-only: clear process poison (production never clears). */
+export function _resetWorkerProcessPoisonForTests(): void {
+  workerProcessPoisoned = false;
+  workerProcessPoisonReason = undefined;
+}
+
+export function isWorkerProcessPoisoned(): boolean {
+  return workerProcessPoisoned;
+}
+
+export function workerProcessPoisonReasonForTests(): string | undefined {
+  return workerProcessPoisonReason;
+}
+
+/** Test-only: outstanding cancelable deadline fences (must be 0 after task return). */
+export function activeDeadlineFenceCountForTests(): number {
+  return activeDeadlineFenceCount;
+}
+
+function markWorkerProcessPoisoned(reason: string): void {
+  workerProcessPoisoned = true;
+  workerProcessPoisonReason = reason;
+}
+
+/**
+ * Unique poison entry for all WorkerDeadlineError / deadline-code paths.
+ * Only the poison closed set marks process poison; plain settled budget/stage/
+ * detached_join codes are no-ops here.
+ */
+function poisonIfSerialOrUnreaped(code: string | undefined): void {
+  if (isPoisonRestartCode(code)) {
+    markWorkerProcessPoisoned(code!);
+  }
+}
+
+/** Fail a deadline/poison code via the unique poison closed set + restart defaults. */
+function failDeadline(
+  ids: { request_id: string; terminal_record_id: string },
+  code: string,
+  opts?: { pass_iterations?: number; retryable?: boolean },
+): SedimentWorkerResult {
+  poisonIfSerialOrUnreaped(code);
+  return failResult(ids, code, {
+    restart_child: isPoisonRestartCode(code),
+    ...(opts?.retryable !== undefined ? { retryable: opts.retryable } : {}),
+    ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
+  });
+}
+
+/** Test-injectable fence slice (ms); production default SEDIMENT_WORKER_FENCE_SLICE_MS. */
+let fenceSliceMsOverride: number | undefined;
+
+export function _setWorkerFenceSliceMsForTests(ms: number | undefined): void {
+  fenceSliceMsOverride = ms;
+}
+
+function currentFenceSliceMs(): number {
+  const raw = fenceSliceMsOverride ?? SEDIMENT_WORKER_FENCE_SLICE_MS;
+  return Math.max(1, Math.min(SEDIMENT_WORKER_FENCE_SLICE_MS, raw));
+}
+
+function throwIfWorkerDeadline(opts?: {
+  signal?: AbortSignal;
+  deadlineMs?: number;
+  now?: () => number;
+  code?: SedimentWorkerDeadlineErrorCode;
+}): void {
+  if (opts?.signal?.aborted) {
+    throw new WorkerDeadlineError(opts.code ?? "worker_budget_exhausted", "aborted");
+  }
+  if (opts?.deadlineMs !== undefined) {
+    const now = opts.now ?? Date.now;
+    if (now() >= opts.deadlineMs) {
+      throw new WorkerDeadlineError(opts.code ?? "worker_budget_exhausted", "deadline exceeded");
+    }
+  }
+}
+
+/**
+ * Wait for previous serial gate with a single timer/race loop.
+ * Does not append per-slice `.then` handlers on `prev` (one safePrev attach).
+ * Fence sleep ≤1s and test-injectable via `_setWorkerFenceSliceMsForTests`.
+ */
+async function waitPrevWithDeadline(
+  prev: Promise<unknown>,
+  opts?: { signal?: AbortSignal; deadlineMs?: number; now?: () => number },
+): Promise<void> {
+  const safePrev = prev.then(() => undefined, () => undefined);
+  if (opts?.deadlineMs === undefined && !opts?.signal) {
+    await safePrev;
+    return;
+  }
+  const now = opts.now ?? Date.now;
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (opts?.signal) opts.signal.removeEventListener("abort", onAbort);
+    };
+
+    const finishOk = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const finishErr = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+
+    const onAbort = () => {
+      finishErr(new WorkerDeadlineError(
+        "global_serial_deadline",
+        "aborted while waiting for global serial",
+      ));
+    };
+
+    const schedule = () => {
+      if (settled) return;
+      if (opts?.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      if (opts?.deadlineMs !== undefined && now() >= opts.deadlineMs) {
+        finishErr(new WorkerDeadlineError(
+          "global_serial_deadline",
+          "deadline while waiting for global serial",
+        ));
+        return;
+      }
+      const slice = currentFenceSliceMs();
+      const rem = opts?.deadlineMs !== undefined
+        ? Math.max(1, Math.min(slice, opts.deadlineMs - now()))
+        : slice;
+      timer = setTimeout(schedule, rem);
+    };
+
+    // Single attach — never re-append handlers each slice.
+    void safePrev.then(finishOk, finishOk);
+
+    if (opts?.signal) {
+      if (opts.signal.aborted) {
+        onAbort();
+        return;
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    // Immediate deadline check + first fence slice (handles already-resolved prev via microtask).
+    if (opts?.deadlineMs !== undefined && now() >= opts.deadlineMs) {
+      finishErr(new WorkerDeadlineError(
+        "global_serial_deadline",
+        "deadline while waiting for global serial",
+      ));
+      return;
+    }
+    schedule();
+  });
+}
+
+/**
+ * Process-wide pass serial. Prior task rejection never poisons the tail chain.
+ * When deadline/signal fires while waiting for the previous task, this waiter
+ * releases *its own* gate without running `fn` and throws `global_serial_deadline`.
+ * It does NOT release a hung previous pass (single-inflight fence).
+ * `global_serial_deadline` is treated as process poison under single-worker contract.
+ */
+export async function withGlobalPassSerial<T>(
+  fn: () => Promise<T>,
+  opts?: { signal?: AbortSignal; deadlineMs?: number; now?: () => number },
+): Promise<T> {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
   const prev = globalPassTail;
+  // Always chain through both fulfill + reject so a rejected prev cannot poison tail.
   globalPassTail = prev.then(() => gate, () => gate);
-  await prev.catch(() => undefined);
   try {
+    await waitPrevWithDeadline(prev, opts);
+    throwIfWorkerDeadline({ ...opts, code: "global_serial_deadline" });
     return await fn();
   } finally {
     release();
   }
+}
+
+async function sleepMs(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    if (signal) {
+      if (signal.aborted) {
+        clearTimeout(timer);
+        resolve();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+  });
 }
 
 function checkpointAdvanced(
@@ -946,15 +1528,52 @@ function checkpointAdvanced(
   return a !== "" && a !== b;
 }
 
+/** True when durable CP lastProcessedEntryId equals the synthetic sidecar tip. */
+function checkpointCoversBranchTip(
+  cp: { lastProcessedEntryId?: string },
+  branchEntries: readonly unknown[],
+): boolean {
+  const tip = branchEntries.length > 0 ? branchEntries[branchEntries.length - 1] : undefined;
+  const tipId = tip && typeof tip === "object" && tip !== null && typeof (tip as { id?: unknown }).id === "string"
+    ? (tip as { id: string }).id
+    : undefined;
+  if (!tipId || !cp.lastProcessedEntryId) return false;
+  return cp.lastProcessedEntryId === tipId;
+}
+
+function failCpAdvancedNoReceipt(
+  ids: { request_id: string; terminal_record_id: string },
+  opts?: { pass_iterations?: number },
+): SedimentWorkerResult {
+  // Fail closed: not auto-retryable; poison + daemon kill-and-wait for diagnosis.
+  return failDeadline(ids, SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE, {
+    retryable: false,
+    ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
+  });
+}
+
+function failProcessPoisoned(
+  ids: { request_id: string; terminal_record_id: string },
+): SedimentWorkerResult {
+  return failDeadline(ids, SEDIMENT_WORKER_PROCESS_POISONED_CODE, {
+    retryable: true,
+  });
+}
+
 /**
  * Full worker task handler. Crash-safe: no durable success receipt until
  * real checkpoint advanced AND backlog exhausted (more=false). Busy claim is
- * OFD-backed and released on process death. Transient failures leave no receipt.
+ * OFD-backed and released on process death / RPC return (finally). Transient
+ * failures leave no receipt. Unreaped/deadline poisons the process — daemon
+ * must kill/reap before redrive; do not healthy-reuse.
  */
 export async function runSedimentWorkerTask(
   argsRaw: string,
   deps: SedimentWorkerCommandDeps,
 ): Promise<SedimentWorkerResult> {
+  // Budget clock starts at handler entry (covers validate / receipt / claim).
+  const clock = deps.clock ?? Date.now;
+  const startedAtMs = clock();
   const env = deps.env ?? process.env;
   let manifest: SedimentWorkerTaskManifest | undefined;
   try {
@@ -973,6 +1592,11 @@ export async function runSedimentWorkerTask(
     request_id: manifest.request_id,
     terminal_record_id: manifest.terminal_record_id,
   };
+
+  // Process poison: refuse immediately — no claim, no pass, no serial wait.
+  if (workerProcessPoisoned) {
+    return failProcessPoisoned(ids);
+  }
 
   try {
     if (deps.resolveExecutionOwner() !== "daemon") {
@@ -996,12 +1620,39 @@ export async function runSedimentWorkerTask(
     };
 
     const abrainHome = path.resolve(deps.resolveAbrainHome());
+    const budgetMs = manifest.budget_ms;
+    const absoluteDeadlineMs = startedAtMs + budgetMs;
+    const softDeadlineMs = computeWorkerSoftDeadlineMs({ startedAtMs, budgetMs });
+    const ac = new AbortController();
+    const onProgress = deps.onProgress;
+    const progress = (stage: SedimentWorkerProgressStage, phase: SedimentWorkerProgressPhase, extra?: {
+      pending?: number;
+      lanes?: readonly SedimentWorkerTrackedLane[];
+    }) => {
+      emitWorkerProgress(onProgress, buildWorkerProgressEvent({
+        stage,
+        phase,
+        startedAtMs,
+        nowMs: clock(),
+        pending: extra?.pending,
+        lanes: extra?.lanes,
+      }));
+    };
 
-    // Receipt pre-check (fail closed on corrupt).
+    if (softDeadlineMs - clock() <= 0) {
+      try { ac.abort(); } catch { /* ignore */ }
+    }
+
+    // Receipt pre-check (fail closed on corrupt). Only success receipt ⇒ already_processed.
     try {
+      throwIfWorkerDeadline({ signal: ac.signal, deadlineMs: softDeadlineMs, now: clock });
       const existing = await readProcessedReceipt(abrainHome, manifest.terminal_record_id);
       if (existing) return resultFromProcessedReceipt(existing, manifest.request_id);
     } catch (err) {
+      if (err instanceof WorkerDeadlineError) {
+        // Plain budget before claim: settled immediately, CP not advanced → no poison.
+        return failDeadline(ids, err.code);
+      }
       const code = err instanceof WorkerValidationError ? err.code : "receipt_corrupt_or_collision";
       return failResult(ids, code, { retryable: false });
     }
@@ -1020,154 +1671,429 @@ export async function runSedimentWorkerTask(
       return failResult(ids, "claim_busy", { status: "busy", retryable: true });
     }
 
+    // OFD claim is released in finally on every RPC return path (including unreaped).
+    // After release, daemon seeing restart_child=true must kill-and-wait the Pi child
+    // before ledger retry/redrive. Process poison is in-process depth defense that
+    // refuses same-process tasks even after OFD is free.
     try {
-      // Re-check under claim.
       try {
-        const again = await readProcessedReceipt(abrainHome, manifest.terminal_record_id);
-        if (again) return resultFromProcessedReceipt(again, manifest.request_id);
-      } catch (err) {
-        const code = err instanceof WorkerValidationError ? err.code : "receipt_corrupt_or_collision";
-        return failResult(ids, code, { retryable: false });
-      }
+        // Re-check under claim.
+        progress("claim", "start");
+        try {
+          throwIfWorkerDeadline({ signal: ac.signal, deadlineMs: softDeadlineMs, now: clock });
+          const again = await readProcessedReceipt(abrainHome, manifest.terminal_record_id);
+          if (again) {
+            progress("claim", "end");
+            return resultFromProcessedReceipt(again, manifest.request_id);
+          }
+        } catch (err) {
+          if (err instanceof WorkerDeadlineError) {
+            progress("claim", "aborted");
+            return failDeadline(ids, err.code);
+          }
+          const code = err instanceof WorkerValidationError ? err.code : "receipt_corrupt_or_collision";
+          return failResult(ids, code, { retryable: false });
+        }
+        progress("claim", "end");
 
-      let verified: VerifiedSidecarMessages;
-      try {
-        verified = await readAndVerifyWorkerSidecar({
-          sidecarPath: manifest.sidecar_path,
-          sessionId: manifest.session_id,
-          contentId: manifest.content_id,
+        progress("sidecar", "start");
+        let verified: VerifiedSidecarMessages;
+        try {
+          throwIfWorkerDeadline({ signal: ac.signal, deadlineMs: softDeadlineMs, now: clock });
+          verified = await readAndVerifyWorkerSidecar({
+            sidecarPath: manifest.sidecar_path,
+            sessionId: manifest.session_id,
+            contentId: manifest.content_id,
+          });
+        } catch (err) {
+          if (err instanceof WorkerDeadlineError) {
+            progress("sidecar", "aborted");
+            return failDeadline(ids, err.code);
+          }
+          const code = err instanceof WorkerValidationError ? err.code : "sidecar_failed";
+          // Validation / sidecar failures: settled=false, no durable failed receipt.
+          return failResult(ids, code, { retryable: false });
+        }
+        progress("sidecar", "end");
+
+        const snapshot = buildWorkerPassSnapshot({
+          manifest,
+          messages: verified.messages,
+          modelRegistry: deps.modelRegistry,
         });
-      } catch (err) {
-        const code = err instanceof WorkerValidationError ? err.code : "sidecar_failed";
-        // Validation / sidecar failures: settled=false, no durable failed receipt.
-        return failResult(ids, code, { retryable: false });
-      }
+        const cpSessionId = snapshot.checkpointSessionId;
+        const projectRoot = snapshot.cwd;
 
-      const snapshot = buildWorkerPassSnapshot({
-        manifest,
-        messages: verified.messages,
-        modelRegistry: deps.modelRegistry,
-      });
-      const cpSessionId = snapshot.checkpointSessionId;
-      const projectRoot = snapshot.cwd;
-
-      // Global serial across all terminal ids in this process.
-      return await withGlobalPassSerial(async () => {
-        let iterations = 0;
-        let lastMore = false;
-        let anyAdvanced = false;
-
-        while (iterations < SEDIMENT_WORKER_MORE_BUDGET) {
-          iterations += 1;
-          let beforeCp: { lastProcessedEntryId?: string };
-          try {
-            beforeCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
-          } catch {
-            return failResult(ids, "checkpoint_load_failed", { retryable: true, pass_iterations: iterations });
+        // Baseline CP before this attempt (deadline capture + prior-no-receipt check).
+        let beforePassCp: { lastProcessedEntryId?: string } = {};
+        try {
+          beforePassCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
+          // Prior attempt advanced CP over this sidecar tip but never wrote a
+          // success receipt → fail closed; do not guess already_processed.
+          if (checkpointCoversBranchTip(beforePassCp, snapshot.branchEntries)) {
+            return failCpAdvancedNoReceipt(ids);
           }
-
-          let passResult: void | { more: true };
-          try {
-            passResult = await deps.runAgentEndPass(snapshot, { fromRecovery: false });
-          } catch {
-            return failResult(ids, "pipeline_threw", { retryable: true, pass_iterations: iterations });
-          }
-
-          let afterCp: { lastProcessedEntryId?: string };
-          try {
-            afterCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
-          } catch {
-            return failResult(ids, "checkpoint_load_failed", { retryable: true, pass_iterations: iterations });
-          }
-
-          const advanced = checkpointAdvanced(beforeCp, afterCp);
-          if (advanced) anyAdvanced = true;
-          lastMore = !!(passResult && typeof passResult === "object" && passResult.more === true);
-
-          if (lastMore) {
-            // more=true without real CP advance is no-progress / livelock — fail closed.
-            if (!advanced) {
-              return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
-            }
-            continue;
-          }
-
-          // more=false terminal for this task attempt.
-          if (!anyAdvanced && !advanced) {
-            // Soft skip / project_not_bound / settings disabled / empty window:
-            // void return is NOT processed. No success receipt.
-            return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
-          }
-
-          // Real CP advanced and backlog exhausted → create-only success receipt.
-          const receipt: WorkerReceipt = {
-            schema: SEDIMENT_WORKER_RECEIPT_SCHEMA,
-            terminal_record_id: manifest!.terminal_record_id,
-            request_id: manifest!.request_id,
-            status: "processed",
-            settled: true,
-            memory_decisions: 0,
-            memory_writes: 0,
-            created_at: (deps.now?.() ?? new Date()).toISOString(),
-          };
-
-          let writeStatus: "created" | "identical" | "collision";
-          try {
-            writeStatus = await writeProcessedReceipt(abrainHome, receipt);
-          } catch {
-            return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
-          }
-
-          if (writeStatus === "collision") {
-            // Fail closed: never return processed unless re-read is valid processed.
-            try {
-              const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
-              if (raced) return resultFromProcessedReceipt(raced, manifest!.request_id);
-            } catch {
-              /* fall through */
-            }
-            return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
-          }
-          if (writeStatus === "identical") {
-            try {
-              const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
-              if (raced) return resultFromProcessedReceipt(raced, manifest!.request_id);
-            } catch {
-              return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
-            }
-          }
-
-          // Success: trigger knowledge publication outbox one-shot (cannot wait session_start).
-          try {
-            await deps.drainKnowledgePublicationOutbox?.(abrainHome);
-          } catch {
-            // Publication drain is best-effort after settled success; durable
-            // outbox remains for a later drain edge.
-          }
-
-          return {
-            schema: SEDIMENT_WORKER_RESULT_SCHEMA,
-            request_id: manifest!.request_id,
-            terminal_record_id: manifest!.terminal_record_id,
-            status: "processed",
-            settled: true,
-            retryable: false,
-            memory_decisions: 0,
-            memory_writes: 0,
-            pass_iterations: iterations,
-          };
+        } catch {
+          return failResult(ids, "checkpoint_load_failed", { retryable: true });
         }
 
-        // Budget exhausted with more still true: retryable non-final, no receipt.
-        return failResult(ids, "more_budget_exhausted", {
-          retryable: true,
-          pass_iterations: iterations,
-        });
-      });
+        // Pass body under global serial + soft deadline. Not a bare Promise.race:
+        // on abort we wait ≤ cleanup reserve for settlement; unreaped → restart_child.
+        let passSettled = false;
+        let lastKnownAdvanced = false;
+
+        const runPassBody = async (): Promise<SedimentWorkerResult> => {
+          return await withGlobalPassSerial(async () => {
+            let iterations = 0;
+            let lastMore = false;
+            let anyAdvanced = false;
+
+            while (iterations < SEDIMENT_WORKER_MORE_BUDGET) {
+              throwIfWorkerDeadline({
+                signal: ac.signal,
+                deadlineMs: softDeadlineMs,
+                now: clock,
+                code: "worker_budget_exhausted",
+              });
+              iterations += 1;
+              progress("pass", "start");
+
+              progress("checkpoint", "start");
+              let beforeCp: { lastProcessedEntryId?: string };
+              try {
+                beforeCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
+              } catch {
+                return failResult(ids, "checkpoint_load_failed", { retryable: true, pass_iterations: iterations });
+              }
+              progress("checkpoint", "end");
+
+              let passResult: void | { more: true };
+              try {
+                passResult = await deps.runAgentEndPass(snapshot, {
+                  fromRecovery: false,
+                  signal: ac.signal,
+                  requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
+                  deadlineMs: softDeadlineMs,
+                  onProgress: (ev) => emitWorkerProgress(onProgress, ev),
+                  now: clock,
+                });
+              } catch (err) {
+                if (err instanceof WorkerDeadlineError) {
+                  progress("pass", "aborted");
+                  return failDeadline(ids, err.code, { pass_iterations: iterations });
+                }
+                // Pass may throw plain Error with deadline code message/property
+                // (e.g. index stage precheck → stage_deadline).
+                const errCode = err instanceof Error
+                  ? (err as Error & { code?: unknown }).code
+                  : undefined;
+                const code = err instanceof Error && isWorkerDeadlineErrorCode(err.message)
+                  ? err.message
+                  : typeof errCode === "string" && isWorkerDeadlineErrorCode(errCode)
+                    ? errCode
+                    : undefined;
+                if (code) {
+                  progress("pass", "aborted");
+                  return failDeadline(ids, code, { pass_iterations: iterations });
+                }
+                // Task-scoped current-candidate deferred unfinished artifact
+                // (multiview pending / staging deferred / promotion-needed):
+                // retryable, no CP advance / no receipt / not processed.
+                if (
+                  (typeof errCode === "string" && errCode === "current_candidate_deferred")
+                  || (err instanceof Error && err.message === "current_candidate_deferred")
+                ) {
+                  return failResult(ids, "current_candidate_deferred", {
+                    retryable: true,
+                    pass_iterations: iterations,
+                  });
+                }
+                return failResult(ids, "pipeline_threw", { retryable: true, pass_iterations: iterations });
+              }
+
+              progress("checkpoint", "start");
+              let afterCp: { lastProcessedEntryId?: string };
+              try {
+                afterCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
+              } catch {
+                return failResult(ids, "checkpoint_load_failed", { retryable: true, pass_iterations: iterations });
+              }
+              progress("checkpoint", "end");
+
+              const advanced = checkpointAdvanced(beforeCp, afterCp);
+              if (advanced) {
+                anyAdvanced = true;
+                lastKnownAdvanced = true;
+              }
+              lastMore = !!(passResult && typeof passResult === "object" && passResult.more === true);
+              progress("pass", "end");
+
+              if (lastMore) {
+                // more=true without real CP advance is no-progress / livelock — fail closed.
+                if (!advanced) {
+                  return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
+                }
+                // more loop must re-check remaining budget; cannot open 16 full budgets.
+                continue;
+              }
+
+              // more=false terminal for this task attempt.
+              if (!anyAdvanced && !advanced) {
+                // Soft skip / project_not_bound / settings disabled / empty window:
+                // void return is NOT processed. No success receipt.
+                return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
+              }
+
+              // Real CP advanced and backlog exhausted → create-only success receipt.
+              // Soft deadline may already be past: use reserved hard deadline (≤5s)
+              // for the create-only write. Do NOT soft-fence before receipt.
+              // coversTip+no-receipt entry path remains fail-closed separately.
+              progress("receipt", "start");
+              const receipt: WorkerReceipt = {
+                schema: SEDIMENT_WORKER_RECEIPT_SCHEMA,
+                terminal_record_id: manifest!.terminal_record_id,
+                request_id: manifest!.request_id,
+                status: "processed",
+                settled: true,
+                memory_decisions: 0,
+                memory_writes: 0,
+                created_at: (deps.now?.() ?? new Date()).toISOString(),
+              };
+
+              let writeStatus: "created" | "identical" | "collision";
+              try {
+                const hardRem = Math.max(0, absoluteDeadlineMs - clock());
+                if (hardRem <= 0) {
+                  return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
+                }
+                const writeBudgetMs = Math.min(SEDIMENT_WORKER_CLEANUP_RESERVE_MS, hardRem);
+                writeStatus = await Promise.race([
+                  writeProcessedReceipt(abrainHome, receipt),
+                  sleepMs(writeBudgetMs).then(() => {
+                    throw new Error("receipt_write_timeout");
+                  }),
+                ]);
+              } catch {
+                return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
+              }
+
+              if (writeStatus === "collision") {
+                // Fail closed: never return processed unless re-read is valid processed.
+                try {
+                  const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
+                  if (raced) {
+                    progress("receipt", "end");
+                    return resultFromProcessedReceipt(raced, manifest!.request_id);
+                  }
+                } catch {
+                  /* fall through */
+                }
+                return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
+              }
+              if (writeStatus === "identical") {
+                try {
+                  const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
+                  if (raced) {
+                    progress("receipt", "end");
+                    return resultFromProcessedReceipt(raced, manifest!.request_id);
+                  }
+                } catch {
+                  return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
+                }
+              }
+
+              // Success: trigger knowledge publication outbox one-shot (cannot wait session_start).
+              try {
+                await deps.drainKnowledgePublicationOutbox?.(abrainHome);
+              } catch {
+                // Publication drain is best-effort after settled success; durable
+                // outbox remains for a later drain edge.
+              }
+
+              progress("receipt", "end");
+              return {
+                schema: SEDIMENT_WORKER_RESULT_SCHEMA,
+                request_id: manifest!.request_id,
+                terminal_record_id: manifest!.terminal_record_id,
+                status: "processed",
+                settled: true,
+                retryable: false,
+                memory_decisions: 0,
+                memory_writes: 0,
+                pass_iterations: iterations,
+              };
+            }
+
+            // more-iteration budget exhausted with more still true: retryable non-final, no receipt.
+            return failResult(ids, "more_budget_exhausted", {
+              retryable: true,
+              pass_iterations: iterations,
+            });
+          }, {
+            signal: ac.signal,
+            deadlineMs: softDeadlineMs,
+            now: clock,
+          });
+        };
+
+        const workPromise = (async (): Promise<SedimentWorkerResult> => {
+          try {
+            return await runPassBody();
+          } finally {
+            passSettled = true;
+          }
+        })();
+
+        // Soft-deadline fence: cancelable via AbortSignal; normal path must settle
+        // (no permanent pending async frame). Polls injected `clock` so tests can
+        // jump time. Fence slice ≤1s (test-injectable). Abort + ≤5s cleanup, then unreaped.
+        const fenceStop = new AbortController();
+        activeDeadlineFenceCount += 1;
+        const deadlineFence = (async (): Promise<never> => {
+          try {
+            for (;;) {
+              if (fenceStop.signal.aborted) {
+                throw FENCE_STOPPED;
+              }
+              const rem = softDeadlineMs - clock();
+              if (rem <= 0 || ac.signal.aborted) {
+                try { ac.abort(); } catch { /* ignore */ }
+                throw new WorkerDeadlineError(
+                  "worker_budget_exhausted",
+                  "soft deadline elapsed",
+                );
+              }
+              const slice = currentFenceSliceMs();
+              await sleepMs(Math.min(slice, Math.max(1, rem)), fenceStop.signal);
+            }
+          } finally {
+            activeDeadlineFenceCount = Math.max(0, activeDeadlineFenceCount - 1);
+          }
+        })();
+
+        const stopDeadlineFence = async (): Promise<void> => {
+          if (!fenceStop.signal.aborted) {
+            try { fenceStop.abort(); } catch { /* ignore */ }
+          }
+          try {
+            await deadlineFence;
+          } catch {
+            /* WorkerDeadlineError or FENCE_STOPPED — both settle the frame */
+          }
+        };
+
+        // Re-read CP after abort/deadline.
+        // ONLY coversTip + no receipt → deadline_after_checkpoint_advanced fatal.
+        // Partial before→after CP advance is safe resume: ordinary retryable
+        // deadline, no poison (more-loop partial watermark).
+        // Plain settled codes only poison when unreaped / poison closed set.
+        const resolveDeadlineOutcome = async (
+          fallbackCode: SedimentWorkerDeadlineErrorCode,
+        ): Promise<SedimentWorkerResult> => {
+          let coversTip = false;
+          try {
+            const after = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
+            if (checkpointCoversBranchTip(after, snapshot.branchEntries)) {
+              coversTip = true;
+            }
+          } catch {
+            /* keep coversTip=false; partial lastKnownAdvanced is non-fatal */
+          }
+          if (coversTip) {
+            return failCpAdvancedNoReceipt(ids);
+          }
+          // Partial CP advance / no advance: ordinary retryable deadline, no poison.
+          return failDeadline(ids, fallbackCode);
+        };
+
+        /** After fence deadline only: CP advanced + failed settle without receipt → closed diagnostic. */
+        const finalizeAfterDeadlineFence = async (
+          settledResult: SedimentWorkerResult,
+        ): Promise<SedimentWorkerResult> => {
+          poisonIfSerialOrUnreaped(settledResult.error_code);
+          if (settledResult.error_code === SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE) {
+            return settledResult;
+          }
+          if (
+            settledResult.status === "failed"
+            && !settledResult.settled
+            && lastKnownAdvanced
+            && settledResult.error_code !== "no_progress"
+            && !fsSync.existsSync(sedimentWorkerReceiptPath(abrainHome, ids.terminal_record_id))
+          ) {
+            return await resolveDeadlineOutcome(
+              isWorkerDeadlineErrorCode(settledResult.error_code)
+                ? settledResult.error_code
+                : "worker_budget_exhausted",
+            );
+          }
+          return settledResult;
+        };
+
+        let result: SedimentWorkerResult;
+        try {
+          try {
+            result = await Promise.race([workPromise, deadlineFence]);
+          } catch (err) {
+            if (err === FENCE_STOPPED) {
+              result = await workPromise;
+            } else if (err instanceof WorkerDeadlineError) {
+              progress("pass", "aborted");
+              if (!ac.signal.aborted) {
+                try { ac.abort(); } catch { /* ignore */ }
+              }
+              const cleanupMs = Math.max(0, Math.min(
+                SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
+                absoluteDeadlineMs - clock(),
+              ));
+              if (!passSettled && cleanupMs > 0) {
+                await Promise.race([
+                  workPromise.then(() => undefined, () => undefined),
+                  sleepMs(cleanupMs),
+                ]);
+              }
+              if (!passSettled) {
+                // Background pass still running — do NOT detach serial (hung gate stays).
+                // Poison process; daemon must kill-and-wait before redrive. OFD released in finally.
+                return await resolveDeadlineOutcome("pass_deadline_exceeded_unreaped");
+              }
+              // Settled during cleanup window — plain codes must not poison when CP not advanced.
+              try {
+                result = await workPromise;
+              } catch (inner) {
+                if (inner instanceof WorkerDeadlineError) {
+                  if (isPoisonRestartCode(inner.code)) {
+                    return failDeadline(ids, inner.code);
+                  }
+                  return await resolveDeadlineOutcome(inner.code);
+                }
+                return await resolveDeadlineOutcome(err.code);
+              }
+              return await finalizeAfterDeadlineFence(result);
+            } else {
+              throw err;
+            }
+          }
+
+          // Normal settle (work won race): poison closed set only; keep non-deadline codes intact.
+          poisonIfSerialOrUnreaped(result.error_code);
+          return result;
+        } finally {
+          // Always cancel + await fence cleanup so no permanent pending async frame remains.
+          await stopDeadlineFence();
+        }
+      } finally {
+        /* pass-scoped locals only */
+      }
     } finally {
+      // Always release OFD on RPC return — no fd leak. Unreaped does not hold claim.
+      // restart_child=true ⇒ daemon kill-and-wait before ledger retry/redrive.
       try { lock.close(); } catch { /* best-effort */ }
     }
   } catch (err) {
+    if (err instanceof WorkerDeadlineError) {
+      return failDeadline(ids, err.code);
+    }
     const code = err instanceof WorkerValidationError ? err.code : "worker_internal_error";
     return failResult(ids, code, { retryable: code !== "receipt_corrupt_or_collision" });
   }
@@ -1201,11 +2127,20 @@ export function registerSedimentWorkerCommand(
         return;
       }
 
+      const onProgress = (event: SedimentWorkerProgressEvent) => {
+        try {
+          notify(formatWorkerProgressNotify(event), "info");
+        } catch {
+          /* progress notify failure must never fail the task */
+        }
+      };
+
       let result: SedimentWorkerResult;
       try {
         result = await runSedimentWorkerTask(args, {
           ...deps,
           modelRegistry: deps.modelRegistry ?? ctx.modelRegistry,
+          onProgress: deps.onProgress ?? onProgress,
         });
       } catch (err) {
         // Last-resort structured result; try to salvage ids from manifest.
@@ -1216,10 +2151,18 @@ export function registerSedimentWorkerCommand(
           requestId = m.request_id;
           terminalId = m.terminal_record_id;
         } catch { /* keep zeros */ }
+        const code = err instanceof WorkerDeadlineError
+          ? err.code
+          : err instanceof WorkerValidationError
+            ? err.code
+            : "worker_internal_error";
         result = failResult(
           { request_id: requestId, terminal_record_id: terminalId },
-          err instanceof WorkerValidationError ? err.code : "worker_internal_error",
-          { retryable: true },
+          code,
+          {
+            retryable: true,
+            ...(err instanceof WorkerDeadlineError ? { restart_child: err.restart_child } : {}),
+          },
         );
       }
 

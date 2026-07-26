@@ -87,6 +87,7 @@ Required fields:
 | `c6` | causal identity; `c6.session_id` must match `session_id`; `turn_id`/`subturn` only safe integers (number or lossless numeric string) — non-numeric ⇒ `unsupported_integer`, never silent 0 |
 | `leaf_tip` | optional tip pin for type/timestamp only |
 | `candidate_ref` | optional; when present all of `record_id`/`producer_seq`/`payload_digest`/`run_generation` required; `payload_digest` must equal `content_id` |
+| `budget_ms` | optional wall budget ms; absent → 600_000; closed range 60_000..3_600_000 (see §2.6b) |
 
 **Forbidden**: raw transcript on argv beyond path reference; logging/stdout of raw body, paths in result, session/content/digest in result.
 
@@ -103,6 +104,102 @@ Handler opens sidecar via **open file handle + fstat** with `O_NOFOLLOW` when av
 Messages convert to synthetic branch entries with **content-stable entry IDs** (leaf_tip does **not** rename prior tips when cumulative sidecars grow). Fed into the existing agent_end pass against **owner_project_root** + source session provenance (C6/anchor).
 
 Checkpoint IO uses an independent slot `daemon-worker:<sha256(source session)>` via snapshot `checkpointSessionId` so worker evaluation does **not** share the foreground source-session watermark.
+
+### 2.6b Task budget / progress / cancel (2026-07-26)
+
+End-to-end worker self-budget — **does not** change foreground `agent_end` pass defaults. Only `/sediment-worker-run` injects worker runtime opts into the shared pass body. Scheduler/redrive remain pi-router owned.
+
+**Deploy order (hard constraint)**
+
+- Old workers do **not** understand `budget_ms` / progress / `restart_child` / poison — that is a **deployment constraint**, not a runtime fallback.
+- **Publish worker extension first**, then daemon/router that emits budget fields and acts on `restart_child` / poison codes.
+- Never roll a budget-aware daemon against an old worker process and claim healthy reuse.
+
+**`budget_ms` (task contract)**
+
+- Optional for old daemons: absent → **600_000 ms** default
+- Closed range **60_000 .. 3_600_000** (validate reject outside)
+- Budget clock `startedAt` is the **handler entry** (covers validate / receipt / claim / pass)
+- Worker creates absolute soft deadline = start + budget − **5_000 ms** return reserve + `AbortController`
+- Worker **must** return a structured result within budget; does **not** rely on daemon kill
+- Soft deadline is a hard work fence: progress is observational only and **does not extend** the deadline
+- Fence poll slice ≤ **1_000 ms** (test-injectable)
+
+**Progress notify** schema `pi-astack/sediment-worker-progress/v1` via `ctx.ui.notify` (prefix `sediment-worker-progress:`):
+
+- Closed `stage` set **actually emitted**: claim / sidecar / checkpoint / pass / search / classifier / detached_join / receipt / auto_write_preflight / auto_write_extractor / auto_write_curator / auto_write_writer / auto_write_embedding / auto_write_publication
+- Closed `phase`: start / end / heartbeat / aborted
+- Optional low-cardinality `elapsed_bucket` / `pending_bucket` (closed bucket values only) / closed `lanes`
+- **No** identity, path, session, digest, content, or free text
+- Notify failure **never** fails the task
+
+**Pass runtime opts** (worker-only): `{ signal, requestAbort, deadlineMs, onProgress, now? }`. Existing callers that omit opts keep original behavior. Signal is threaded into memory search / correction / extractor / curator / multiview / embedding paths that already accept `AbortSignal`. `requestAbort` aborts the worker controller (detached-join abort-first). Worker runtime clamps model/embedding/git-singleflight timeouts to remaining budget (reuses `gitSingleFlightWithDeadline` via worker-budget ALS); **does not** change global settings defaults (e.g. 1200s).
+
+**Checkpoint slot (ALS)**: worker pass runs under `AsyncLocalStorage` override `daemon-worker:<sha256(source session)>`. Detached promises inherit the store; nested/concurrent contexts do not clobber. Foreground never enters the store → provenance sessionId. Module-global save/restore is deleted.
+
+**Global serial**: `withGlobalPassSerial` wait is deadline/abort bound with a **single** timer/race (no per-slice handler append). Prior task rejection does not poison the *tail chain*, but a hung previous pass is **not** actively released. Timeout → `global_serial_deadline` + **process poison** + `restart_child=true`. Under single-worker single-inflight this fences the previous pass; do **not** claim healthy process reuse.
+
+**Process poison (closed set)**: only these codes poison the process **and** set `restart_child=true`:
+
+- `global_serial_deadline`
+- `cancel_cleanup_unreaped`
+- `pass_deadline_exceeded_unreaped`
+- `deadline_after_checkpoint_advanced`
+- `worker_process_poisoned`
+
+All `WorkerDeadlineError` catch sites call the unique `poisonIfSerialOrUnreaped(code)` closed set. Plain settled `worker_budget_exhausted` / `stage_deadline` / `detached_join_deadline` (cleanup already settled **and** CP not advanced) **must not** poison and return `restart_child=false`. Subsequent `/sediment-worker-run` on a poisoned process returns `worker_process_poisoned` (`restart_child=true`) **immediately** — no claim, no pass (in-process depth defense).
+
+**OFD claim + daemon restart contract**: OFD claim is **always** released on RPC return (finally) — no fd leak. After claim release, when the result has `restart_child=true` (poison closed set), the daemon **must kill-and-wait** the Pi child **before** any ledger retry / redrive. Released claim alone must never allow the same poisoned process to accept work; extension process poison is the depth defense that refuses same-process tasks.
+
+**Deadline fence lifecycle**: soft-deadline fence is AbortSignal/deferred-stop cancelable. After `workPromise` settles the handler **must** cancel and await fence cleanup — no permanent pending async frame on the success path. Fence poll slice ≤1s (test-injectable).
+
+**Detached join**: worker mode accepts deadline+signal+progress; heartbeat timer independent every **5s** or when pending/lane set changes; **attach `allSettled` once per pending-set identity** and rebuild only when the set changes (no per-50ms handlers). On deadline/abort: **abort first**, then bounded cleanup **≤5s** checking tracked pending. pending==0 → `detached_join_deadline` (settled + CP not advanced → no poison, `restart_child=false`). pending>0 → `cancel_cleanup_unreaped` (poison + `restart_child=true`). Outer must **not** misclassify background pending as settled. Foreground without opts keeps original infinite wait.
+
+**Task-scoped runtime (`taskScoped=true`)**: worker pass opts imply task scope over the **current verified sidecar/run window only**. Branch entries are synthetic from verified sidecar messages; `getBranch` never expands to foreign session backlog. Global maintenance fire-and-forget is **skipped** (no causal dependency on the current record):
+
+- aggregator
+- staging-resolver
+- staging-ageout
+- staging-promotion
+- archive-reactivation
+- independent forgetting
+- independent multiview-replay
+
+Foreground (no worker opts) keeps original schedules unchanged. Docs describe this as **task-scoped** — **never** claim that global maintenance completed for a worker task. If a future lane is required for current-candidate correctness it must be `trackSessionPassWork` + closed lane + signal/deadline (no untracked fire-and-forget).
+
+**Current-candidate unfinished artifacts (fail closed)**: when the **current** task-scoped candidate produces multiview pending / staging deferred / promotion-needed unfinished artifacts, the worker **must** return exact `current_candidate_deferred` (`retryable=true`, no poison) — **no CP advance, no success receipt, not processed**. Detection uses **only this run's internal outcome keys** (e.g. `multiview_staged_for_replay`, curator `multi_view.staged`, this-run `stagingWritten`) — **never a global staging/multiview directory scan**. Global resolver/replay remain skipped in Stage0. **Candidate-scoped resolver/replay is a future slice**; until then unfinished current-candidate artifacts fail closed as `current_candidate_deferred`.
+
+**auto_write progress**: worker `onProgress` emits closed stages auto_write_preflight / extractor / curator / writer / embedding / publication with start/end/aborted (no identity). **Per candidate** emits curator start/end (no index/count). Candidate loop **asserts remaining budget at loop top before constructing any candidate work**; expired → ordinary `stage_deadline` (do not start new work). Each candidate start dynamically re-clamps settings timeouts to remaining budget; worker mode forces `curatorMaxRetries=0` / `aggregatorMaxRetries=0` (multi-view already 0). Memory search stage timeouts clamp via worker-budget ALS. Main awaits receive signal + remaining deadline; callees without signal use worker budget race with `unreapedIfTimeout` + track (including `curateProjectDraft` / writer / embedding / publication). Writer abort-checks worker budget **before** critical IO/git only (`writer_before`); **no `writer_after`** — successful writes are retained and never flipped to failure by a post-success budget check. After writer, bgPromise tail (`auditDirectiveRecall` / checkpoint) is raced into the same budget fence — **no black zone**; checkpoint lands only after main-chain success (`shouldAdvance`).
+
+**`stage_deadline`**: produced by index stage precheck (`assertWorkerStageBudget` on pass/classifier/search, candidate-loop top, plus embedding/writer_before budget gate). Kept in the deadline closed set; settled + CP not advanced → no poison, `restart_child=false`.
+
+**Deadline / poison result fields** (backward compatible; old daemons ignore unknown codes):
+
+| `error_code` | meaning | retryable | restart_child |
+|---|---|---|---|
+| `worker_budget_exhausted` | soft budget elapsed (settled path, CP not advanced) | true | **false** (no poison) |
+| `stage_deadline` | stage pre-check past budget (settled, CP not advanced) | true | **false** (no poison) |
+| `detached_join_deadline` | detached join past budget (settled, CP not advanced) | true | **false** (no poison) |
+| `global_serial_deadline` | waited on process serial past budget; fences prev pass | true | true (poison) |
+| `cancel_cleanup_unreaped` | cancel cleanup could not reap | true | true (poison) |
+| `pass_deadline_exceeded_unreaped` | abort + ≤5s cleanup still not settled | true | true (poison) |
+| `deadline_after_checkpoint_advanced` | durable CP **covers sidecar tip** but **no** success receipt — fail closed, human diagnosis; not auto no_progress / already_processed | **false** | true (poison) |
+| `worker_process_poisoned` | process already poisoned; refused claim/pass | true | true (poison) |
+| `current_candidate_deferred` | task-scoped current candidate left unfinished artifact (multiview pending / staging deferred / promotion-needed); this-run keys only | true | **false** (no poison) |
+| `receipt_write_failed` | create-only receipt write failed/timed out under hard reserve after more=false main-chain success | true | **false** |
+
+**Checkpoint / receipt deadline rules**:
+- On deadline/abort capture, re-read CP. **Only** when durable CP **covers tip** and no success receipt → `deadline_after_checkpoint_advanced` (retryable=false, poison).
+- **Partial** before→after CP advance (more-loop intermediate watermark, tip not covered) is **safe resume**: ordinary retryable deadline (`worker_budget_exhausted` / `stage_deadline` / …), **no poison**.
+- Entry path: if durable CP already covers current sidecar tip but receipt is absent → same closed `deadline_after_checkpoint_advanced` (only a valid success receipt may return `already_processed`).
+- After `more=false` and main chain really advanced: even if **soft** deadline has elapsed, use the reserved **hard** deadline (≤5s cleanup reserve) to attempt create-only receipt — **do not soft-fence before receipt write**. Success → `processed`; failure/timeout → `receipt_write_failed` (retryable).
+- more-loop re-checks remaining budget each iteration (cannot open 16 full budgets).
+
+**Honest Stage0 bounds**
+
+- Worker budget should be **strictly less than** daemon/RPC child timeout so the worker returns first
+- Daemon kill remains the unreaped fence; after `restart_child=true`, daemon **must kill-and-wait** then redrive — never healthy-reuse the process
+- Stage0 local success receipt is **not** formal ConsumerAck / authority / retention
 
 ### 2.7 Success condition / more loop / receipts
 

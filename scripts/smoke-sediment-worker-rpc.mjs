@@ -716,14 +716,20 @@ await check("command handler notifies aggregate result; requires notify", async 
   await commands.get("sediment-worker-run").handler(JSON.stringify(m), {
     ui: { notify(msg, type) { notifies.push({ msg, type }); } },
   });
-  assert(notifies.length === 1, "one notify");
-  const parsed = worker.tryParseWorkerResultNotify(notifies[0].msg);
+  const resultNotifies = notifies.filter((n) => n.msg.startsWith("sediment-worker-result:"));
+  const progressNotifies = notifies.filter((n) => n.msg.startsWith("sediment-worker-progress:"));
+  assert(resultNotifies.length === 1, `one result notify, got ${resultNotifies.length} (total=${notifies.length})`);
+  // Progress is optional/best-effort; when present must pass whitelist scan.
+  for (const p of progressNotifies) {
+    assert(!worker.progressNotifyHasSensitiveContent(p.msg), "progress sensitive");
+  }
+  const parsed = worker.tryParseWorkerResultNotify(resultNotifies[0].msg);
   assert(parsed, "notify prefix parseable");
   assert(parsed.status === "processed" || parsed.status === "already_processed", `status=${parsed.status}`);
   assert(parsed.settled === true, "notify settled");
   assert(parsed.schema === "pi-astack/sediment-worker-result/v1", "result schema");
-  assert(!notifies[0].msg.includes(m.sidecar_path), "notify must not include sidecar path");
-  assert(!notifies[0].msg.includes(m.session_id), "notify must not include session_id");
+  assert(!resultNotifies[0].msg.includes(m.sidecar_path), "notify must not include sidecar path");
+  assert(!resultNotifies[0].msg.includes(m.session_id), "notify must not include session_id");
 });
 
 await check("worker checkpoint slot independent of source session", async () => {
@@ -991,6 +997,1272 @@ await check("ordinary queue + frozen adapter modules still import (regression)",
   assert(typeof queue.enqueueDetachedAgentEnd === "function", "queue export");
   const frozen = await jiti.import(path.join(root, "extensions/sediment/edge-shadow-frozen-contract-adapter.ts"));
   assert(frozen, "frozen adapter module loads");
+});
+
+// ── Budget / progress / cancel (Stage0 end-to-end) ─────────────────────
+// Exact error codes only (no OR). Poison tests do NOT reset serial tail.
+
+function resetWorkerBudgetTestState() {
+  worker._resetGlobalPassSerialForTests?.();
+  worker._resetWorkerProcessPoisonForTests?.();
+  worker._setWorkerFenceSliceMsForTests?.(20);
+}
+
+await check("old request without budget_ms defaults to 600_000", async () => {
+  const m = baseManifest({ request_id: hex64("req-budget-default"), terminal_record_id: hex64("term-budget-default") });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: m.terminal_record_id,
+    messages: [{ role: "user", content: "default-budget" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  delete m.budget_ms;
+  const validated = worker.validateSedimentWorkerManifest(m);
+  assert(validated.budget_ms === 600_000, `default budget_ms=${validated.budget_ms}`);
+});
+
+await check("budget_ms validation closed range 60s..3600s", async () => {
+  let code = null;
+  try {
+    worker.validateSedimentWorkerManifest({ ...baseManifest(), budget_ms: 1_000 });
+  } catch (e) {
+    code = e.code;
+  }
+  assert(code === "budget_ms_out_of_range", `too-small code=${code}`);
+
+  code = null;
+  try {
+    worker.validateSedimentWorkerManifest({ ...baseManifest(), budget_ms: 4_000_000 });
+  } catch (e) {
+    code = e.code;
+  }
+  assert(code === "budget_ms_out_of_range", `too-large code=${code}`);
+
+  const ok = worker.validateSedimentWorkerManifest({ ...baseManifest(), budget_ms: 60_000 });
+  assert(ok.budget_ms === 60_000, "min accepted");
+  const ok2 = worker.validateSedimentWorkerManifest({ ...baseManifest(), budget_ms: 3_600_000 });
+  assert(ok2.budget_ms === 3_600_000, "max accepted");
+});
+
+await check("never-resolving pass → exact pass_deadline_exceeded_unreaped + poison", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-never-pass");
+  const m = baseManifest({
+    request_id: hex64("req-never-pass"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "never" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  let t = 1_000_000;
+  const clock = () => t;
+  let seenAbort = false;
+  const progressEvents = [];
+  const started = Date.now();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    clock,
+    onProgress: (ev) => { progressEvents.push(ev); },
+    runAgentEndPass: async (_snap, opts) => {
+      t = 1_000_000 + 60_000;
+      opts?.signal?.addEventListener("abort", () => { seenAbort = true; }, { once: true });
+      await new Promise(() => {});
+    },
+    env: process.env,
+  });
+  const wall = Date.now() - started;
+  assert(wall < 15_000, `must not sleep full budget; wall=${wall}ms`);
+  assert(r.status === "failed", `status=${r.status}`);
+  assert(r.error_code === "pass_deadline_exceeded_unreaped", `exact code=${r.error_code}`);
+  assert(r.retryable === true, "deadline retryable");
+  assert(r.restart_child === true, "restart_child required");
+  assert(seenAbort === true, "pass must receive abort");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt on abort");
+  assert(worker.isWorkerProcessPoisoned() === true, "process must be poisoned after unreaped");
+  assert(progressEvents.some((e) => e.phase === "aborted" || e.stage === "pass"), "progress observed");
+
+  // No serial tail reset: next task must refuse immediately without claim/pass.
+  const term2 = hex64("term-poison-follow");
+  const m2 = baseManifest({
+    request_id: hex64("req-poison-follow"),
+    terminal_record_id: term2,
+    budget_ms: 60_000,
+  });
+  const placed2 = placeSidecar({
+    sessionId: m2.session_id,
+    terminalRecordId: term2,
+    messages: [{ role: "user", content: "poison-follow" }],
+  });
+  m2.sidecar_path = placed2.sidecarPath;
+  m2.content_id = placed2.contentId;
+  let passEntered = false;
+  const r2 = await worker.runSedimentWorkerTask(JSON.stringify(m2), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => { passEntered = true; },
+    env: process.env,
+  });
+  assert(r2.error_code === "worker_process_poisoned", `exact poison code=${r2.error_code}`);
+  assert(r2.restart_child === true, "poison restart_child");
+  assert(passEntered === false, "poison must not enter pass");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term2)), "no receipt on poison refuse");
+});
+
+await check("progress key/value whitelist + closed buckets only", async () => {
+  resetWorkerBudgetTestState();
+  const good = worker.buildWorkerProgressEvent({
+    stage: "classifier",
+    phase: "heartbeat",
+    startedAtMs: 0,
+    nowMs: 12_500,
+    pending: 3,
+    lanes: ["classifier", "auto_write"],
+  });
+  assert(good.schema === "pi-astack/sediment-worker-progress/v1", "schema");
+  assert(good.elapsed_bucket === 10, `elapsed_bucket=${good.elapsed_bucket}`);
+  assert(good.pending_bucket === 3, `pending_bucket=${good.pending_bucket}`);
+  const notify = worker.formatWorkerProgressNotify(good);
+  assert(!worker.progressNotifyHasSensitiveContent(notify), "clean progress must pass scan");
+  assert(worker.tryParseWorkerProgressNotify(notify)?.stage === "classifier", "parse roundtrip");
+
+  assert(worker.sanitizeWorkerProgressEvent({
+    schema: "pi-astack/sediment-worker-progress/v1",
+    stage: "classifier",
+    phase: "start",
+    session_id: "evil",
+  }) === null, "identity field rejected");
+
+  // Arbitrary integers outside closed bucket sets must fail sanitize.
+  assert(worker.sanitizeWorkerProgressEvent({
+    schema: "pi-astack/sediment-worker-progress/v1",
+    stage: "pass",
+    phase: "start",
+    elapsed_bucket: 7,
+  }) === null, "non-closed elapsed_bucket rejected");
+  assert(worker.sanitizeWorkerProgressEvent({
+    schema: "pi-astack/sediment-worker-progress/v1",
+    stage: "pass",
+    phase: "start",
+    pending_bucket: 6,
+  }) === null, "non-closed pending_bucket rejected");
+
+  // Bare "extractor" remains unwired; closed auto_write_* stages are accepted.
+  assert(worker.sanitizeWorkerProgressEvent({
+    schema: "pi-astack/sediment-worker-progress/v1",
+    stage: "extractor",
+    phase: "start",
+  }) === null, "bare extractor stage rejected");
+  for (const stage of [
+    "auto_write_preflight",
+    "auto_write_extractor",
+    "auto_write_curator",
+    "auto_write_writer",
+    "auto_write_embedding",
+    "auto_write_publication",
+  ]) {
+    const ev = worker.sanitizeWorkerProgressEvent({
+      schema: "pi-astack/sediment-worker-progress/v1",
+      stage,
+      phase: "start",
+    });
+    assert(ev?.stage === stage, `auto_write stage accepted: ${stage}`);
+    assert(!("session_id" in (ev ?? {})), "no identity on auto_write progress");
+  }
+
+  const evilNotify = `sediment-worker-progress:${JSON.stringify({
+    schema: "pi-astack/sediment-worker-progress/v1",
+    stage: "pass",
+    phase: "start",
+    path: "/tmp/secret",
+  })}`;
+  assert(worker.progressNotifyHasSensitiveContent(evilNotify), "path must fail sensitive scan");
+});
+
+await check("signal reaches pass runtime opts", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-signal-prop");
+  const m = baseManifest({
+    request_id: hex64("req-signal-prop"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "sig" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  let gotSignal = false;
+  let gotDeadline = false;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot, opts) => {
+      gotSignal = opts?.signal instanceof AbortSignal;
+      gotDeadline = typeof opts?.deadlineMs === "number" && opts.deadlineMs > 0;
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: "sig-tip" });
+    },
+    env: process.env,
+  });
+  assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+  assert(gotSignal, "signal must be injected into pass opts");
+  assert(gotDeadline, "deadlineMs must be injected into pass opts");
+});
+
+await check("CP covers tip + no receipt on deadline → exact deadline_after_checkpoint_advanced", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-abort-cp");
+  const messages = [{ role: "user", content: "abort-cp" }];
+  const m = baseManifest({
+    request_id: hex64("req-abort-cp"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  // Tip id must be covered for fatal path (partial advance is non-fatal).
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+
+  let t = 1_000_000;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => t,
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: tipId });
+      t = 1_000_000 + 60_000;
+      await new Promise(() => {});
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "deadline_after_checkpoint_advanced", `exact code=${r.error_code}`);
+  assert(r.settled === false, "not settled");
+  assert(r.retryable === false, "fail closed not auto-retryable");
+  assert(r.restart_child === true, "restart_child");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt after abort with CP cover tip");
+  assert(worker.isWorkerProcessPoisoned() === true, "poison after CP-covers-tip-no-receipt");
+});
+
+await check("partial CP advance (more-loop, tip not covered) → ordinary retryable deadline, no poison", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-partial-cp");
+  const messages = [
+    { role: "user", content: "partial-1" },
+    { role: "assistant", content: "partial-2", stopReason: "end_turn" },
+  ];
+  const m = baseManifest({
+    request_id: hex64("req-partial-cp"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+  const partialId = branch[0].id;
+  assert(partialId !== tipId, "partial must not equal tip");
+
+  let t = 2_000_000;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => t,
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      // more-loop partial: advance to intermediate id, not tip.
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: partialId });
+      t = 2_000_000 + 60_000;
+      await new Promise(() => {});
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "worker_budget_exhausted" || r.error_code === "pass_deadline_exceeded_unreaped",
+    `partial CP must be ordinary deadline, got=${r.error_code}`);
+  assert(r.error_code !== "deadline_after_checkpoint_advanced", "partial must not fatal coversTip code");
+  assert(r.retryable === true, "partial CP safe resume retryable");
+  // unreaped hang may poison; if settled budget path, must not poison solely for partial CP.
+  if (r.error_code === "worker_budget_exhausted") {
+    assert(r.restart_child === false, "settled partial budget must not restart");
+    assert(worker.isWorkerProcessPoisoned() === false, "settled partial must not poison");
+  }
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt on partial");
+});
+
+await check("retry with CP covering tip + no receipt → closed diagnostic, not already_processed", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-cp-cover");
+  const m = baseManifest({
+    request_id: hex64("req-cp-cover"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const messages = [{ role: "user", content: "cover-tip" }];
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  // Compute synthetic tip id the same way the worker does.
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+  const slot = worker.workerCheckpointSessionId(m.session_id);
+  const store = new Map([[slot, { lastProcessedEntryId: tipId }]]);
+
+  let passEntered = false;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async () => { passEntered = true; },
+    env: process.env,
+  });
+  assert(r.error_code === "deadline_after_checkpoint_advanced", `exact code=${r.error_code}`);
+  assert(r.status !== "already_processed", "must not fake already_processed");
+  assert(r.retryable === false, "fail closed");
+  assert(r.restart_child === true, "restart_child");
+  assert(passEntered === false, "must not enter pass when CP covers tip without receipt");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "still no receipt");
+});
+
+await check("global_serial_deadline poisons; no healthy reuse without reset", async () => {
+  resetWorkerBudgetTestState();
+  let tA = 2_000_000;
+  const clockA = () => tA;
+
+  async function runTask(seed, clock, hangMs, budgetMs = 60_000) {
+    const term = hex64(`term-gs-${seed}`);
+    const m = baseManifest({
+      request_id: hex64(`req-gs-${seed}`),
+      terminal_record_id: term,
+      budget_ms: budgetMs,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: seed }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const store = new Map();
+    return worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      clock,
+      loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+      runAgentEndPass: async (snapshot) => {
+        if (hangMs > 0) {
+          await new Promise((r) => setTimeout(r, hangMs));
+        }
+        store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: `tip-${seed}` });
+      },
+      env: process.env,
+    });
+  }
+
+  const pA = runTask("A", clockA, 150);
+  await new Promise((r) => setTimeout(r, 20));
+  let tB = 3_000_000;
+  const clockB = () => tB;
+  const pB = runTask("B", clockB, 0);
+  await new Promise((r) => setTimeout(r, 40));
+  tB = 3_000_000 + 60_000;
+  const [a, b] = await Promise.all([pA, pB]);
+  assert(a.status === "processed", `A status=${a.status} code=${a.error_code}`);
+  assert(b.error_code === "global_serial_deadline", `exact B code=${b.error_code}`);
+  assert(b.retryable === true && b.restart_child === true, "B restartable");
+  assert(worker.isWorkerProcessPoisoned() === true, "poison after global_serial_deadline");
+
+  // Do NOT reset tail/poison: next task must be worker_process_poisoned.
+  const c = await runTask("C", () => Date.now(), 0);
+  assert(c.error_code === "worker_process_poisoned", `exact C code=${c.error_code}`);
+  assert(c.restart_child === true, "C restart_child");
+});
+
+await check("detached_join_deadline exact code via pass throw", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-detached-join");
+  const m = baseManifest({
+    request_id: hex64("req-detached-join"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "dj" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async (_snap, opts) => {
+      const err = new Error("detached_join_deadline");
+      err.code = "detached_join_deadline";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "detached_join_deadline", `exact code=${r.error_code}`);
+  assert(r.settled === false && r.retryable === true, "detached join fail retryable");
+  assert(r.restart_child === false, "plain settled detached_join must not restart_child");
+  assert(worker.isWorkerProcessPoisoned() === false, "plain settled detached_join must not poison");
+});
+
+await check("never-settling auto_write → exact cancel_cleanup_unreaped + poison + restart", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const sessionId = "sess-never-autowrite";
+  const ac = new AbortController();
+  let seenAbort = false;
+  ac.signal.addEventListener("abort", () => { seenAbort = true; }, { once: true });
+  sediment._setAutoWriteInFlightForTests(sessionId, new Promise(() => {}));
+
+  const started = Date.now();
+  let thrown;
+  try {
+    await sediment._waitForDetachedSedimentWorkIdleForTests(sessionId, undefined, {
+      signal: ac.signal,
+      requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
+      deadlineMs: Date.now() + 100,
+      now: Date.now,
+    });
+  } catch (e) {
+    thrown = e;
+  }
+  const wall = Date.now() - started;
+  assert(wall < 15_000, `cleanup must bound ≤~5s+overhead; wall=${wall}ms`);
+  assert(wall >= 4_000, `must wait cleanup window; wall=${wall}ms`);
+  assert(thrown?.code === "cancel_cleanup_unreaped", `exact code=${thrown?.code}`);
+  assert(seenAbort === true, "must abort first");
+
+  // Wire the same code through worker-rpc failDeadline path: poison + restart.
+  const term = hex64("term-never-autowrite-rpc");
+  const m = baseManifest({
+    request_id: hex64("req-never-autowrite-rpc"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "never-aw-rpc" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      const err = new Error("cancel_cleanup_unreaped");
+      err.code = "cancel_cleanup_unreaped";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "cancel_cleanup_unreaped", `rpc exact code=${r.error_code}`);
+  assert(r.restart_child === true, "unreaped must restart_child");
+  assert(worker.isWorkerProcessPoisoned() === true, "unreaped must poison");
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("abort-aware auto_write settles ≤5s → detached_join_deadline no poison", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const sessionId = "sess-abort-aware-aw";
+  const ac = new AbortController();
+  let resolveWork;
+  const work = new Promise((r) => { resolveWork = r; });
+  sediment._setAutoWriteInFlightForTests(sessionId, work);
+  ac.signal.addEventListener("abort", () => { resolveWork(); }, { once: true });
+
+  const started = Date.now();
+  let thrown;
+  try {
+    await sediment._waitForDetachedSedimentWorkIdleForTests(sessionId, undefined, {
+      signal: ac.signal,
+      requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
+      deadlineMs: Date.now() + 100,
+      now: Date.now,
+    });
+  } catch (e) {
+    thrown = e;
+  }
+  const wall = Date.now() - started;
+  assert(wall < 5_000, `abort-aware must settle inside cleanup; wall=${wall}ms`);
+  assert(thrown?.code === "detached_join_deadline", `exact code=${thrown?.code}`);
+
+  // Settled detached_join through rpc must not poison.
+  const term = hex64("term-abort-aware-rpc");
+  const m = baseManifest({
+    request_id: hex64("req-abort-aware-rpc"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "abort-aw-rpc" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      const err = new Error("detached_join_deadline");
+      err.code = "detached_join_deadline";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "detached_join_deadline", `rpc code=${r.error_code}`);
+  assert(r.restart_child === false, "settled detached_join must not restart");
+  assert(worker.isWorkerProcessPoisoned() === false, "settled must not poison");
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("stage_deadline exact code via pass throw (index stage precheck closed set)", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-stage-deadline");
+  const m = baseManifest({
+    request_id: hex64("req-stage-deadline"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "stage-dl" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      // Mirrors extensions/sediment/index.ts assertWorkerStageBudget throw shape.
+      const err = new Error("stage_deadline");
+      err.code = "stage_deadline";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "stage_deadline", `exact code=${r.error_code}`);
+  assert(r.settled === false && r.retryable === true, "stage_deadline retryable");
+  assert(r.restart_child === false, "plain settled stage_deadline restart_child=false");
+  assert(worker.isWorkerProcessPoisoned() === false, "plain settled stage_deadline must not poison");
+  assert(worker.activeDeadlineFenceCountForTests() === 0, "fence must settle after stage_deadline");
+});
+
+await check("plain budget before claim: not poisoned, restart false, next task runs", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-budget-before-claim");
+  const m = baseManifest({
+    request_id: hex64("req-budget-before-claim"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "budget-before-claim" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  // startedAt from first clock(); subsequent reads past soft deadline (budget-5s).
+  let n = 0;
+  const clock = () => {
+    n += 1;
+    return n === 1 ? 1_000_000 : 1_000_000 + 60_000;
+  };
+  let passEntered = false;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock,
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => { passEntered = true; },
+    env: process.env,
+  });
+  assert(r.error_code === "worker_budget_exhausted", `exact code=${r.error_code}`);
+  assert(r.status === "failed", `status=${r.status}`);
+  assert(r.settled === false && r.retryable === true, "plain budget retryable");
+  assert(r.restart_child === false, "plain budget before claim restart_child=false");
+  assert(worker.isWorkerProcessPoisoned() === false, "plain budget before claim must not poison");
+  assert(passEntered === false, "must not enter pass when budget exhausted before claim");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+
+  // Next task must still run on the same process (no poison).
+  const term2 = hex64("term-budget-before-claim-next");
+  const m2 = baseManifest({
+    request_id: hex64("req-budget-before-claim-next"),
+    terminal_record_id: term2,
+    budget_ms: 60_000,
+  });
+  const placed2 = placeSidecar({
+    sessionId: m2.session_id,
+    terminalRecordId: term2,
+    messages: [{ role: "user", content: "next-after-plain-budget" }],
+  });
+  m2.sidecar_path = placed2.sidecarPath;
+  m2.content_id = placed2.contentId;
+  const store = new Map();
+  let nextPass = false;
+  const r2 = await worker.runSedimentWorkerTask(JSON.stringify(m2), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      nextPass = true;
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: "next-tip" });
+    },
+    env: process.env,
+  });
+  assert(nextPass === true, "next task must enter pass");
+  assert(r2.status === "processed", `next status=${r2.status} code=${r2.error_code}`);
+  assert(worker.isWorkerProcessPoisoned() === false, "still not poisoned after next success");
+  assert(worker.activeDeadlineFenceCountForTests() === 0, "fence count zero after next success");
+});
+
+await check("1000 consecutive successes: activeDeadlineFenceCount returns to zero", async () => {
+  resetWorkerBudgetTestState();
+  for (let i = 0; i < 1000; i += 1) {
+    const term = hex64(`term-fence-leak-${i}`);
+    const m = baseManifest({
+      request_id: hex64(`req-fence-leak-${i}`),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: `fence-${i}` }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const store = new Map();
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+      runAgentEndPass: async (snapshot) => {
+        store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: `tip-${i}` });
+      },
+      env: process.env,
+    });
+    assert(r.status === "processed", `i=${i} status=${r.status} code=${r.error_code}`);
+    assert(
+      worker.activeDeadlineFenceCountForTests() === 0,
+      `i=${i} activeDeadlineFenceCount=${worker.activeDeadlineFenceCountForTests()} must be 0`,
+    );
+  }
+  assert(worker.isWorkerProcessPoisoned() === false, "1000 successes must not poison");
+});
+
+await check("ALS checkpoint: concurrent contexts isolated; foreground unchanged", async () => {
+  resetWorkerBudgetTestState();
+  const cpCtx = await jiti.import(path.join(root, "extensions/_shared/worker-checkpoint-context.ts"));
+  const writes = [];
+
+  await Promise.all([
+    cpCtx.runWithCheckpointSessionIdOverride("daemon-worker:aaa", async () => {
+      await new Promise((r) => setTimeout(r, 30));
+      writes.push(["a", cpCtx.effectiveCheckpointSessionId("fg-session")]);
+    }),
+    cpCtx.runWithCheckpointSessionIdOverride("daemon-worker:bbb", async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      writes.push(["b", cpCtx.effectiveCheckpointSessionId("fg-session")]);
+    }),
+  ]);
+
+  const a = writes.find((w) => w[0] === "a");
+  const b = writes.find((w) => w[0] === "b");
+  assert(a?.[1] === "daemon-worker:aaa", `A slot=${a?.[1]}`);
+  assert(b?.[1] === "daemon-worker:bbb", `B slot=${b?.[1]}`);
+  assert(cpCtx.effectiveCheckpointSessionId("fg-session") === "fg-session", "foreground no ALS store");
+  assert(cpCtx.getCheckpointSessionIdOverride() === undefined, "no store outside run");
+});
+
+await check("ALS delayed detached write stays on daemon-worker slot", async () => {
+  resetWorkerBudgetTestState();
+  const cpCtx = await jiti.import(path.join(root, "extensions/_shared/worker-checkpoint-context.ts"));
+  let detachedSlot = null;
+  let resolveDetached;
+  const detachedDone = new Promise((r) => { resolveDetached = r; });
+
+  await cpCtx.runWithCheckpointSessionIdOverride("daemon-worker:delayed", async () => {
+    // Fire detached work that continues after the outer run returns (inherits ALS).
+    void Promise.resolve().then(async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      detachedSlot = cpCtx.effectiveCheckpointSessionId("source-session");
+      resolveDetached();
+    });
+  });
+
+  // Outer store cleared for new sync work, but detached promise still sees override.
+  assert(cpCtx.getCheckpointSessionIdOverride() === undefined, "sync store cleared after run");
+  await detachedDone;
+  assert(detachedSlot === "daemon-worker:delayed", `detached slot=${detachedSlot}`);
+});
+
+await check("worker pass injects signal; body remains optional for foreground callers", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-fg-opts");
+  const m = baseManifest({
+    request_id: hex64("req-fg-opts"),
+    terminal_record_id: term,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "fg" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  let sawSignal = false;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot, opts) => {
+      sawSignal = opts?.signal instanceof AbortSignal;
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: "fg-tip" });
+    },
+    env: process.env,
+  });
+  assert(r.status === "processed", `status=${r.status}`);
+  assert(sawSignal === true, "worker path injects signal; body remains optional for foreground callers");
+});
+
+await check("worker taskScoped skips global maintenance; never-resolving maint still processed", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const prevMode = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1";
+  try {
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+    const scheduled = [];
+    sediment._setMaintenanceScheduleObserverForTests((lane) => {
+      scheduled.push(lane);
+      // Simulate never-resolving maintenance if it were started — must not be called.
+      return new Promise(() => {});
+    });
+
+    const term = hex64("term-task-scoped-skip");
+    const m = baseManifest({
+      request_id: hex64("req-task-scoped-skip"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [
+        { role: "user", content: "task-scoped maintenance skip" },
+        { role: "assistant", content: "ok", stopReason: "end_turn" },
+      ],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const validated = worker.validateSedimentWorkerManifest(m);
+    const opened = await worker.readAndVerifyWorkerSidecar({
+      sidecarPath: validated.sidecar_path,
+      sessionId: validated.session_id,
+      contentId: validated.content_id,
+    });
+    const snapshot = worker.buildWorkerPassSnapshot({
+      manifest: validated,
+      messages: opened.messages,
+    });
+
+    // Worker opts → taskScoped=true → skip aggregator/staging/forgetting/replay.
+    await sediment._runSedimentAgentEndPassForTests(snapshot, {
+      signal: new AbortController().signal,
+      deadlineMs: Date.now() + 60_000,
+      now: Date.now,
+    });
+    // Allow any deferred setImmediate to fire if incorrectly scheduled.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert(scheduled.length === 0, `taskScoped must not schedule maintenance; got=${JSON.stringify(scheduled)}`);
+
+    // Full RPC path: still processes (no hang on never-resolve maintenance).
+    const store = new Map();
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+      runAgentEndPass: async (snap, opts) => {
+        assert(opts?.signal instanceof AbortSignal, "worker injects signal");
+        await sediment._runSedimentAgentEndPassForTests(snap, opts);
+        // Simulate CP advance so RPC can settle processed without real write.
+        store.set(snap.checkpointSessionId, {
+          lastProcessedEntryId: snap.branchEntries[snap.branchEntries.length - 1]?.id ?? "tip",
+        });
+      },
+      env: process.env,
+    });
+    assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+    assert(scheduled.length === 0, "rpc path also must not schedule maintenance");
+  } finally {
+    sediment._setMaintenanceScheduleObserverForTests(undefined);
+    sediment._resetAutoWriteStateForTests();
+    if (prevMode === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+    else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prevMode;
+  }
+});
+
+await check("foreground (no worker opts) still schedules global maintenance", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const prevMode = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1"; // runner registered in worker mode too
+  try {
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+    const scheduled = [];
+    sediment._setMaintenanceScheduleObserverForTests((lane) => scheduled.push(lane));
+
+    const term = hex64("term-fg-maint");
+    const m = baseManifest({
+      request_id: hex64("req-fg-maint"),
+      terminal_record_id: term,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [
+        { role: "user", content: "foreground maintenance" },
+        { role: "assistant", content: "ok", stopReason: "end_turn" },
+      ],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const validated = worker.validateSedimentWorkerManifest(m);
+    const opened = await worker.readAndVerifyWorkerSidecar({
+      sidecarPath: validated.sidecar_path,
+      sessionId: validated.session_id,
+      contentId: validated.content_id,
+    });
+    const snapshot = worker.buildWorkerPassSnapshot({
+      manifest: validated,
+      messages: opened.messages,
+    });
+
+    // No worker opts → taskScoped=false → aggregator still schedules.
+    await sediment._runSedimentAgentEndPassForTests(snapshot);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert(scheduled.includes("aggregator"), `foreground must schedule aggregator; got=${JSON.stringify(scheduled)}`);
+  } finally {
+    sediment._setMaintenanceScheduleObserverForTests(undefined);
+    sediment._resetAutoWriteStateForTests();
+    if (prevMode === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+    else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prevMode;
+  }
+});
+
+await check("two candidates remaining budget decreases; worker maxRetries=0", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  const settingsMod = await jiti.import(path.join(root, "extensions/sediment/settings.ts"));
+  const base = settingsMod.resolveSedimentSettings();
+  assert(base.curatorMaxRetries >= 0, "baseline settings load");
+  let t = 1_000_000;
+  const now = () => t;
+  const c1 = sediment._clampSettingsToWorkerBudgetForTests(base, { deadlineMs: 1_000_000 + 10_000, now });
+  t = 1_000_000 + 4_000;
+  const c2 = sediment._clampSettingsToWorkerBudgetForTests(base, { deadlineMs: 1_000_000 + 10_000, now });
+  assert(c1.curatorTimeoutMs > c2.curatorTimeoutMs, `budget must decrease: c1=${c1.curatorTimeoutMs} c2=${c2.curatorTimeoutMs}`);
+  assert(c1.curatorMaxRetries === 0 && c2.curatorMaxRetries === 0, "worker curator maxRetries=0");
+  assert(c1.aggregatorMaxRetries === 0 && c2.aggregatorMaxRetries === 0, "worker aggregator maxRetries=0");
+  // Per-candidate curator start/end emit (no index/count fields).
+  const progress = [];
+  const { buildWorkerProgressEvent, emitWorkerProgress } = worker;
+  emitWorkerProgress((e) => progress.push(e), buildWorkerProgressEvent({ stage: "auto_write_curator", phase: "start" }));
+  emitWorkerProgress((e) => progress.push(e), buildWorkerProgressEvent({ stage: "auto_write_curator", phase: "end" }));
+  emitWorkerProgress((e) => progress.push(e), buildWorkerProgressEvent({ stage: "auto_write_curator", phase: "start" }));
+  emitWorkerProgress((e) => progress.push(e), buildWorkerProgressEvent({ stage: "auto_write_curator", phase: "end" }));
+  assert(progress.length === 4, `expected 2 start/end pairs, got ${progress.length}`);
+  assert(progress.every((e) => e.stage === "auto_write_curator" && !("index" in e) && !("count" in e)), "no index/count on progress");
+});
+
+await check("curator hang classified unreaped + track; writer abort; no CP on incomplete", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const sessionId = "sess-curator-hang";
+
+  // Never-resolving curator work → unreapedIfTimeout tracks it.
+  let thrown;
+  const hang = new Promise(() => {});
+  try {
+    await sediment._raceAutoWriteAwaitForTests(hang, {
+      signal: AbortSignal.abort(),
+      deadlineMs: Date.now() - 1,
+      now: Date.now,
+      unreapedIfTimeout: true,
+      sessionId,
+    });
+  } catch (e) {
+    thrown = e;
+  }
+  assert(thrown?.code === "cancel_cleanup_unreaped", `code=${thrown?.code}`);
+  const pending = sediment._collectTrackedPendingForTests(sessionId);
+  assert(pending.promises.length >= 1, "hang must remain tracked");
+  assert(pending.lanes.includes("auto_write"), `lanes=${JSON.stringify(pending.lanes)}`);
+
+  // Writer abort via worker budget ALS before critical IO.
+  const budget = await jiti.import(path.join(root, "extensions/_shared/worker-budget-context.ts"));
+  let writerThrown;
+  try {
+    await budget.runWithWorkerBudget(
+      { deadlineMs: Date.now() - 1, now: Date.now, signal: AbortSignal.abort() },
+      () => {
+        budget.assertWorkerBudgetNotExpired("writer_before");
+      },
+    );
+  } catch (e) {
+    writerThrown = e;
+  }
+  assert(writerThrown?.code === "stage_deadline", `writer abort code=${writerThrown?.code}`);
+
+  // Incomplete path: no CP/receipt when pass throws unreaped before advance.
+  const term = hex64("term-no-cp-incomplete");
+  const m = baseManifest({
+    request_id: hex64("req-no-cp-incomplete"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "incomplete" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      const err = new Error("cancel_cleanup_unreaped");
+      err.code = "cancel_cleanup_unreaped";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "cancel_cleanup_unreaped", `code=${r.error_code}`);
+  assert(r.restart_child === true, "unreaped restarts");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt on incomplete");
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("worker task scope uses only verified sidecar branch (no foreign session expand)", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-scope-branch");
+  const m = baseManifest({
+    request_id: hex64("req-scope-branch"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [
+      { role: "user", content: "only this sidecar" },
+      { role: "assistant", content: "reply", stopReason: "end_turn" },
+    ],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const validated = worker.validateSedimentWorkerManifest(m);
+  const opened = await worker.readAndVerifyWorkerSidecar({
+    sidecarPath: validated.sidecar_path,
+    sessionId: validated.session_id,
+    contentId: validated.content_id,
+  });
+  const snapshot = worker.buildWorkerPassSnapshot({
+    manifest: validated,
+    messages: opened.messages,
+  });
+  assert(snapshot.sessionId === validated.session_id, "session pinned to manifest");
+  assert(Array.isArray(snapshot.branchEntries) && snapshot.branchEntries.length === 2, "branch from sidecar messages only");
+  // Prove no expansion: branch length equals verified message count; session id unique.
+  assert(
+    snapshot.branchEntries.every((e) => typeof e === "object" && e),
+    "synthetic branch entries only",
+  );
+  // getBranch in detachedSessionManager is snapshot.branchEntries.slice — fixed window.
+  // Foreign session backlog cannot appear without another sidecar task.
+  assert(typeof snapshot.checkpointSessionId === "string" && snapshot.checkpointSessionId.startsWith("daemon-worker:"), "independent CP slot");
+});
+
+await check("all promises tracked helper includes auto_write + closed lanes", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const sessionId = "sess-all-tracked";
+  let resolveHang;
+  const hang = new Promise((r) => { resolveHang = r; });
+  sediment._setAutoWriteInFlightForTests(sessionId, hang);
+  // Also track a closed-lane promise via race unreaped path.
+  const never = new Promise(() => {});
+  void sediment._raceAutoWriteAwaitForTests(never, {
+    deadlineMs: Date.now() - 1,
+    now: Date.now,
+    unreapedIfTimeout: true,
+    sessionId,
+  }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 20));
+  const pending = sediment._collectTrackedPendingForTests(sessionId);
+  assert(pending.promises.length >= 2, `expected tracked promises, got ${pending.promises.length}`);
+  assert(pending.lanes.includes("auto_write"), `lanes=${JSON.stringify(pending.lanes)}`);
+  resolveHang();
+  await hang;
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("deferred unfinished artifact → current_candidate_deferred; no CP / no receipt", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  assert(sediment._isCurrentCandidateDeferredReasonForTests("multiview_staged_for_replay") === true, "multiview pending key");
+  assert(sediment._isCurrentCandidateDeferredReasonForTests("staging_deferred") === true, "staging deferred key");
+  assert(sediment._isCurrentCandidateDeferredReasonForTests("promotion_needed") === true, "promotion-needed key");
+  assert(sediment._isCurrentCandidateDeferredReasonForTests("duplicate_slug") === false, "terminal reason not deferred");
+  assert(
+    sediment._shouldAdvanceAfterResultsForTests([
+      { status: "skipped", reason: "multiview_staged_for_replay" },
+    ]) === false,
+    "deferred must HOLD CP",
+  );
+
+  const term = hex64("term-deferred-no-cp");
+  const m = baseManifest({
+    request_id: hex64("req-deferred-no-cp"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "deferred-artifact" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async () => {
+      const err = new Error("current_candidate_deferred");
+      err.code = "current_candidate_deferred";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "current_candidate_deferred", `exact code=${r.error_code}`);
+  assert(r.status === "failed" && r.settled === false, "not processed");
+  assert(r.retryable === true, "deferred retryable");
+  assert(r.restart_child !== true, "deferred must not poison/restart");
+  assert(worker.isWorkerProcessPoisoned() === false, "deferred must not poison process");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt on deferred");
+  // CP store empty — pass threw before advance.
+  assert([...store.values()].every((v) => !v?.lastProcessedEntryId), "no CP advance on deferred");
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("more=false completed at soft deadline still writes create-only receipt via hard reserve", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-soft-receipt");
+  const m = baseManifest({
+    request_id: hex64("req-soft-receipt"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "soft-receipt" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  // Soft budget = 55s (60s-5s). Jump past soft after pass advances, still within hard.
+  let t = 3_000_000;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => t,
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: "soft-receipt-tip" });
+      // Past soft (started + 55s) but inside hard reserve (started + 60s).
+      t = 3_000_000 + 55_000 + 100;
+      // more=false void
+    },
+    env: process.env,
+  });
+  assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+  assert(r.settled === true, "settled processed");
+  assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt written past soft via hard reserve");
+});
+
+await check("candidate not started after deadline → stage_deadline; writer success retained", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  const budget = await jiti.import(path.join(root, "extensions/_shared/worker-budget-context.ts"));
+
+  // Candidate loop top: remaining expired → stage_deadline before new work.
+  let stageThrown;
+  try {
+    await budget.runWithWorkerBudget(
+      { deadlineMs: Date.now() - 1, now: Date.now, signal: AbortSignal.abort() },
+      () => {
+        budget.assertWorkerBudgetNotExpired("candidate_before");
+      },
+    );
+  } catch (e) {
+    stageThrown = e;
+  }
+  assert(stageThrown?.code === "stage_deadline", `candidate top code=${stageThrown?.code}`);
+
+  // writer_before still aborts; writer_after removed — success retained.
+  let beforeThrown;
+  try {
+    await budget.runWithWorkerBudget(
+      { deadlineMs: Date.now() - 1, now: Date.now },
+      () => budget.assertWorkerBudgetNotExpired("writer_before"),
+    );
+  } catch (e) {
+    beforeThrown = e;
+  }
+  assert(beforeThrown?.code === "stage_deadline", "writer_before still gates");
+
+  // Simulate writer success after soft: no writer_after flip.
+  let writerResult = null;
+  await budget.runWithWorkerBudget(
+    { deadlineMs: Date.now() - 1, now: Date.now },
+    async () => {
+      // Intentionally skip writer_before (already past) — success path returns value.
+      writerResult = await Promise.resolve({ status: "created", slug: "kept" });
+    },
+  );
+  assert(writerResult?.status === "created", "writer success retained after soft deadline");
+
+  // Source contract: no assertWorkerBudgetNotExpired("writer_after") call site.
+  const writerSrc = fs.readFileSync(path.join(root, "extensions/sediment/writer.ts"), "utf8");
+  assert(!/assertWorkerBudgetNotExpired\(\s*["']writer_after["']\s*\)/.test(writerSrc), "writer_after abort check must be deleted");
+  assert(writerSrc.includes("writer_before"), "writer_before retained");
+  void sediment;
+});
+
+await check("detached join attaches allSettled once per pending set; heartbeat independent", async () => {
+  resetWorkerBudgetTestState();
+  // Source contract for bounded handlers (no per-50ms allSettled rebuild).
+  const indexSrc = fs.readFileSync(path.join(root, "extensions/sediment/index.ts"), "utf8");
+  assert(indexSrc.includes("Attach allSettled ONCE per pending-set identity"), "join attach-once documented");
+  assert(indexSrc.includes("samePendingSet"), "pending-set identity compare present");
+  assert(indexSrc.includes("Rebuild allSettled only when the pending promise-identity set changes"), "rebuild on set change");
+  // Heartbeat wake is independent 5s, not a 50ms allSettled attach loop.
+  assert(indexSrc.includes("Independent deadline/heartbeat wake"), "independent heartbeat wake");
+  // Count allSettled call sites inside waitForDetachedSedimentWorkIdle body is bounded.
+  const joinFn = indexSrc.slice(
+    indexSrc.indexOf("async function waitForDetachedSedimentWorkIdle"),
+    indexSrc.indexOf("async function auditSedimentAgentEndQueueError"),
+  );
+  const allSettledCount = (joinFn.match(/Promise\.allSettled/g) || []).length;
+  assert(allSettledCount <= 3, `join allSettled sites bounded ≤3, got=${allSettledCount}`);
+});
+
+await check("more-loop partial CP then settled stage_deadline is retryable no poison", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-partial-settled");
+  const messages = [
+    { role: "user", content: "ps-1" },
+    { role: "assistant", content: "ps-2", stopReason: "end_turn" },
+  ];
+  const m = baseManifest({
+    request_id: hex64("req-partial-settled"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const partialId = branch[0].id;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: partialId });
+      const err = new Error("stage_deadline");
+      err.code = "stage_deadline";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "stage_deadline", `exact code=${r.error_code}`);
+  assert(r.retryable === true, "partial settled stage_deadline retryable");
+  assert(r.restart_child === false, "no restart on partial settled");
+  assert(worker.isWorkerProcessPoisoned() === false, "partial settled must not poison");
+  assert(store.get(worker.workerCheckpointSessionId(m.session_id))?.lastProcessedEntryId === partialId, "partial CP retained for resume");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
 });
 
 console.log(`\n${passed} checks passed`);

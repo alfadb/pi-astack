@@ -1,11 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { gitSingleFlight } from "./git-singleflight";
+import { gitSingleFlight, gitSingleFlightWithDeadline } from "./git-singleflight";
 import {
   acquireRetainedDirectoryOfdLock,
   type RetainedDirectoryOfdLock,
 } from "./retained-directory-ofd-lock";
+import { getWorkerBudgetContext } from "./worker-budget-context";
 
 interface BarrierLease {
   active: boolean;
@@ -191,6 +192,36 @@ export function withCanonicalMutationBarrier<T>(
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
   if (canonicalMutationBarrierHeld(repo)) return operation();
+  // Daemon worker budget: clamp singleflight + barrier to remaining absolute deadline.
+  // Foreground paths never enter worker budget ALS → unchanged defaults.
+  const budget = getWorkerBudgetContext();
+  if (budget) {
+    const now = budget.now ?? Date.now;
+    const remaining = Math.max(0, budget.deadlineMs - now());
+    const merged: CanonicalMutationBarrierOptions = {
+      ...options,
+      now,
+      deadlineMs: options.deadlineMs === undefined
+        ? budget.deadlineMs
+        : Math.min(options.deadlineMs, budget.deadlineMs),
+      timeoutMs: options.timeoutMs === undefined
+        ? remaining
+        : Math.min(options.timeoutMs, remaining),
+    };
+    return gitSingleFlightWithDeadline(
+      repo,
+      () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged),
+      {
+        deadlineMs: merged.deadlineMs ?? budget.deadlineMs,
+        now,
+        onExpired: (detail) => new CanonicalMutationBarrierError(
+          "CANONICAL_MUTATION_BUSY",
+          "worker budget expired waiting for git singleflight",
+          { ...detail },
+        ),
+      },
+    );
+  }
   return gitSingleFlight(repo, () => withCanonicalMutationBarrierInSingleFlight(repo, operation, options));
 }
 
