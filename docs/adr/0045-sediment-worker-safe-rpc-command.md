@@ -262,8 +262,10 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 | `request_id` | 64 hex; daemon correlation only |
 | `budget_ms` | required; closed range **60_000 .. 900_000** |
 | `kind` | Stage0 admits **only** `publication_outbox` |
+| `repair_policy` | optional closed `none\|legacy_world_project_stamp`; absent defaults to `none` |
+| `repair_limit` | optional integer `0\|1`; absent defaults to `0`; non-`none` policy requires exactly `1`; `none` with `1` is invalid |
 
-**Forbidden identity**: no project / record / session / path / item id on the request. Settings + `ABRAIN_ROOT` follow worker mode.
+**Forbidden identity**: no project / record / session / path / item id on the request. Settings + `ABRAIN_ROOT` follow worker mode. Normal daemon calls omit repair fields and therefore perform zero repair.
 
 **Gate**: effective owner must be **daemon** (configured `executionOwner=daemon` **and** full triple gate). Incomplete gate / foreground → closed `effective_owner_not_daemon` (`retryable=false`, **no writes**). Although the request has no record identity, maintenance validates the same worker copy-store env and non-empty realpath owner allowlist as task RPC before reading or writing the outbox. Any security-env/config failure is zero-write.
 
@@ -273,7 +275,11 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 
 **Before/after pending + failed residual**: production metadata-only counts. Pending count does not deserialize item bodies. Failed residual count validates legal item filename + schema/identity and **fail-closes** on symlink/corrupt/illegal entries (throw → unread). Closed buckets for both: `unknown` / `0` / `1` / `2-4` / `5-9` / `10-49` / `50+`. Owner/security/poison failures and any count that was not successfully read are `unknown`, never invented `0`. Optional result field `failed_bucket` is forward-compatible (old readers ignore; absent still accepted).
 
-**Durable `failed/` is critical residual**: maintenance **never** auto-requeues or deletes failed items. Operators need independent inspect/recovery. Task result `publication_pending` remains pending-only and must not mix failed residual.
+**Durable `failed/` is critical residual**: maintenance does not generally requeue or delete failed items. One narrow, explicit operator repair exists for the historical world-scope stamp defect. `repair_policy=legacy_world_project_stamp` plus `repair_limit=1` scans legal failed entries under the canonical barrier and accepts at most one only when the canonical Knowledge L1 exists and validates, L1 scope is world with no `project_id`, the failed item has exact legacy `projectId=pi-global`, and domain/event/slug/operation/session/source/candidate identity otherwise matches.
+
+The legacy item follows a durable two-stage path. Stage 1 creates or recognizes the deterministic normalized omit-`projectId` item in `pending/<newId>.json`, while the old failed bytes remain in place. Stage 2 atomically renames the old bytes from `failed/<oldId>.json` to same-root immutable `resolved/<oldId>.json`; ordinary drain later moves normalized pending to `done/<newId>.json`. Crash after Stage 1 resumes the identical pending item; crash after Stage 2 reports `already_repaired`. No state is deleted. Historical audit recovery traverses every legal resolved row in one invocation, derives `(oldId,newId)` only from the immutable resolved old item, and appends every missing pair once; it neither re-reads L1 nor requires normalized pending/done to remain. Audit recovery is bookkeeping, not a repair mutation, and is not limited by `repair_limit=1`.
+
+Canonical-barrier contention and repair budget expiry return retryable pending with closed `publication_repair_busy` / `publication_repair_budget`; they do not create a sticky terminal result. Identity, destination conflict, and I/O failures return closed `publication_repair_failed`, append durable `operation=repair_failed` audit with closed `reason=identity|conflict|io` and no content/path, and emit only a closed stderr code if audit append itself fails. This operator path is **not** formal ConsumerAck, source ACK, retention, delete, quarantine, generic requeue, or bulk repair. The limit is structurally one. Task result `publication_pending` remains pending-only and must not mix failed residual.
 
 **Status/result mapping** (closed, in precedence order):
 
@@ -293,7 +299,7 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 
 Soft budget expiry before drain leaves pending_before known and pending_after `unknown` (failed_bucket keeps the successfully read before residual when available). Cleanup unreaped after this invocation started a drain → `cancel_cleanup_unreaped` + poison + `restart_child=true`; `workPromise` always has a rejection observer even when cleanup reserve is zero, preventing late unhandled rejection.
 
-**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `failed_bucket`, optional `error_code`, optional `elapsed_bucket`. **No** item id / path / URL / free-text error.
+**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `failed_bucket`, optional `repaired_bucket=unknown|0|1`, optional `repair_status=repaired|already_repaired|not_eligible|busy|budget|failed`, optional `error_code`, optional `elapsed_bucket`. `repaired_bucket` and `repair_status` appear only when the request policy is non-`none`; absent/default `none` preserves the pre-repair maintenance result keys. Final `failed_bucket` is re-read after repair/drain. Resolved history count is not added to this protocol. **No** item/event id / path / URL / free-text error.
 
 **Progress**: reuses `pi-astack/sediment-worker-progress/v1` with stage `publication` (no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running.
 

@@ -19,6 +19,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "../_shared/durable-write";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined } from "../_shared/jcs";
+import {
+  canonicalL1EnvelopeJson,
+  expectedL1EventRelativePath,
+  loadL1SchemaRegistry,
+  validateL1Envelope,
+} from "../_shared/l1-schema-registry";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { abrainSedimentAuditPath, formatLocalIsoTimestamp } from "../_shared/runtime";
 
 export const SEDIMENT_PUBLICATION_OUTBOX_SCHEMA = "sediment-publication-outbox/v2" as const;
@@ -77,6 +84,11 @@ export function publicationOutboxFailedDir(abrainHome: string): string {
   return path.join(publicationOutboxRoot(abrainHome), "failed");
 }
 
+/** Operator-resolved terminal history. Retained permanently; never deleted. */
+export function publicationOutboxResolvedDir(abrainHome: string): string {
+  return path.join(publicationOutboxRoot(abrainHome), "resolved");
+}
+
 export function publicationOutboxPendingPath(abrainHome: string, itemId: string): string {
   if (!/^[0-9a-f]{64}$/.test(itemId)) {
     throw new Error(`invalid publication outbox itemId: ${itemId}`);
@@ -112,6 +124,12 @@ export function buildPublicationOutboxItem(
 ): PublicationOutboxItem {
   if (input.domain === "knowledge" && !input.eventId) {
     throw new Error("knowledge publication work requires eventId");
+  }
+  if (input.scope === "world" && input.projectId !== undefined) {
+    throw new Error("world publication work must omit projectId");
+  }
+  if (input.scope === "project" && (!input.projectId || input.projectId.trim() !== input.projectId)) {
+    throw new Error("project publication work requires exact projectId");
   }
   if ((input.batchId === undefined) !== (input.batchSize === undefined)) {
     throw new Error("publication batchId and batchSize must appear together");
@@ -150,6 +168,12 @@ export async function writePublicationOutboxItem(
 ): Promise<{ status: PublicationOutboxWriteStatus; itemId: string; filePath: string; item: PublicationOutboxItem }> {
   if (item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA) {
     throw new Error(`unsupported publication outbox schema: ${String((item as { schema?: unknown }).schema)}`);
+  }
+  if (item.scope === "world" && item.projectId !== undefined) {
+    throw new Error("world publication work must omit projectId");
+  }
+  if (item.scope === "project" && (!item.projectId || item.projectId.trim() !== item.projectId)) {
+    throw new Error("project publication work requires exact projectId");
   }
   const expected = computePublicationOutboxItemId(item);
   if (item.itemId !== expected) {
@@ -313,6 +337,423 @@ export async function hasPublicationOutboxFailed(abrainHome: string): Promise<bo
     return true;
   }
   return false;
+}
+
+const LEGACY_WORLD_PROJECT_STAMP = "pi-global";
+const LEGACY_WORLD_REPAIR_REASON = "legacy_world_project_stamp_repaired";
+const PUBLICATION_OUTBOX_ITEM_KEYS = new Set([
+  "schema", "itemId", "domain", "sessionId", "windowId", "eventId",
+  "artifactPaths", "candidateKey", "operation", "slug", "projectId", "scope",
+  "projectKnowledge", "publishGit", "sourceTimestampUtc", "batchId", "batchSize", "note",
+]);
+
+interface LegacyWorldRepairTerminalRow {
+  itemId: string;
+  filePath: string;
+  item: PublicationOutboxItem;
+}
+
+export type LegacyWorldProjectStampRepairStatus = "repaired" | "already_repaired" | "not_eligible";
+export type LegacyWorldProjectStampRepairFailureReason = "identity" | "conflict" | "io";
+
+export class LegacyWorldProjectStampRepairError extends Error {
+  readonly reason: LegacyWorldProjectStampRepairFailureReason;
+
+  constructor(reason: LegacyWorldProjectStampRepairFailureReason) {
+    super(`publication repair ${reason} failure`);
+    this.name = "LegacyWorldProjectStampRepairError";
+    this.reason = reason;
+  }
+}
+
+export interface LegacyWorldProjectStampRepairResult {
+  status: LegacyWorldProjectStampRepairStatus;
+  repaired: 0 | 1;
+}
+
+export interface LegacyWorldProjectStampRepairOptions {
+  /** Test-only deterministic crash cutpoint. */
+  crashHook?: (point: "after_pending_enqueue" | "after_failed_resolve") => Promise<void> | void;
+  clock?: () => number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+async function assertSafePublicationDirectory(dir: string, create = false): Promise<boolean> {
+  let st: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    st = await fs.lstat(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (!create) return false;
+    await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+    st = await fs.lstat(dir);
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new LegacyWorldProjectStampRepairError("conflict");
+  }
+  return true;
+}
+
+async function readRepairTerminalRows(dir: string): Promise<LegacyWorldRepairTerminalRow[]> {
+  if (!(await assertSafePublicationDirectory(dir))) return [];
+  const names = (await fs.readdir(dir)).sort();
+  const rows: LegacyWorldRepairTerminalRow[] = [];
+  for (const name of names) {
+    if (!PUBLICATION_OUTBOX_ITEM_FILENAME_RE.test(name)) {
+      throw new LegacyWorldProjectStampRepairError("identity");
+    }
+    const filePath = path.join(dir, name);
+    const st = await fs.lstat(filePath);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw new LegacyWorldProjectStampRepairError("conflict");
+    }
+    const real = await fs.realpath(filePath);
+    if (real !== path.resolve(filePath)) {
+      throw new LegacyWorldProjectStampRepairError("conflict");
+    }
+    const raw = await fs.readFile(filePath, "utf-8");
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new LegacyWorldProjectStampRepairError("identity");
+    }
+    const item = isRecord(parsed) && isRecord(parsed.item) ? parsed.item as unknown as PublicationOutboxItem : parsed as PublicationOutboxItem;
+    const itemId = name.slice(0, 64);
+    if (
+      !item
+      || item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA
+      || item.itemId !== itemId
+      || computePublicationOutboxItemId(item) !== itemId
+    ) {
+      throw new LegacyWorldProjectStampRepairError("identity");
+    }
+    rows.push({ itemId, filePath, item });
+  }
+  return rows;
+}
+
+async function readRepairStateItem(filePath: string, itemId: string): Promise<PublicationOutboxItem | null> {
+  let st: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    st = await fs.lstat(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new LegacyWorldProjectStampRepairError("conflict");
+  }
+  const real = await fs.realpath(filePath);
+  if (real !== path.resolve(filePath)) throw new LegacyWorldProjectStampRepairError("conflict");
+  const raw = await fs.readFile(filePath, "utf-8");
+  let item: PublicationOutboxItem;
+  try {
+    item = JSON.parse(raw) as PublicationOutboxItem;
+  } catch {
+    throw new LegacyWorldProjectStampRepairError("identity");
+  }
+  if (
+    item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA
+    || item.itemId !== itemId
+    || computePublicationOutboxItemId(item) !== itemId
+  ) {
+    throw new LegacyWorldProjectStampRepairError("identity");
+  }
+  return item;
+}
+
+function normalizeLegacyWorldPublicationItem(item: PublicationOutboxItem): PublicationOutboxItem {
+  const { schema: _schema, itemId: _itemId, projectId: _projectId, ...input } = item;
+  return buildPublicationOutboxItem(input);
+}
+
+function isLegacyWorldPublicationItem(item: PublicationOutboxItem): boolean {
+  return !Object.keys(item).some((key) => !PUBLICATION_OUTBOX_ITEM_KEYS.has(key))
+    && item.domain === "knowledge"
+    && item.scope === "world"
+    && item.projectId === LEGACY_WORLD_PROJECT_STAMP
+    && typeof item.eventId === "string"
+    && /^[0-9a-f]{64}$/.test(item.eventId)
+    && typeof item.slug === "string"
+    && item.slug.length > 0
+    && typeof item.operation === "string"
+    && item.operation.length > 0
+    && typeof item.sessionId === "string"
+    && item.sessionId.length > 0
+    && typeof item.candidateKey === "string"
+    && item.candidateKey.length > 0
+    && typeof item.sourceTimestampUtc === "string"
+    && item.sourceTimestampUtc.length > 0
+    && item.note === "accepted_pending_publication"
+    && item.projectKnowledge === true
+    && item.publishGit === true
+    && item.batchId === undefined
+    && item.batchSize === undefined
+    && Array.isArray(item.artifactPaths)
+    && item.artifactPaths.length === 0
+    && (item.windowId === undefined || (typeof item.windowId === "string" && item.windowId.length > 0));
+}
+
+function normalizeResolvedLegacyWorldPublicationItem(item: PublicationOutboxItem): PublicationOutboxItem {
+  if (!isLegacyWorldPublicationItem(item)) {
+    throw new LegacyWorldProjectStampRepairError("identity");
+  }
+  try {
+    return normalizeLegacyWorldPublicationItem(item);
+  } catch {
+    throw new LegacyWorldProjectStampRepairError("identity");
+  }
+}
+
+async function eligibleLegacyWorldPublicationItem(
+  abrainHome: string,
+  item: PublicationOutboxItem,
+): Promise<PublicationOutboxItem | null> {
+  if (!isLegacyWorldPublicationItem(item) || typeof item.eventId !== "string") return null;
+
+  const relativePath = expectedL1EventRelativePath(item.eventId);
+  const filePath = path.join(path.resolve(abrainHome), ...relativePath.split("/"));
+  let st: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    st = await fs.lstat(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isFile()) throw new LegacyWorldProjectStampRepairError("conflict");
+  if (await fs.realpath(filePath) !== path.resolve(filePath)) throw new LegacyWorldProjectStampRepairError("conflict");
+  const content = await fs.readFile(filePath);
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(content.toString("utf-8"));
+  } catch {
+    return null;
+  }
+  let validated: ReturnType<typeof validateL1Envelope>;
+  try {
+    validated = validateL1Envelope(envelope, {
+      registry: loadL1SchemaRegistry(),
+      abrainHome: path.resolve(abrainHome),
+      filePath,
+      relativePath,
+      expected: { domain: "knowledge", role: "canonical", phase: "active", requireWriteEnabled: true },
+    });
+  } catch {
+    return null;
+  }
+  if (!content.equals(Buffer.from(canonicalL1EnvelopeJson(envelope), "utf-8"))) return null;
+  const body = validated.body as Record<string, unknown>;
+  const scope = isRecord(body.scope) ? body.scope : null;
+  const payload = isRecord(body.payload) ? body.payload : null;
+  const intent = isRecord(body.intent) ? body.intent : null;
+  const source = isRecord(body.source) ? body.source : null;
+  if (
+    validated.eventId !== item.eventId
+    || body.event_schema_version !== "knowledge-evidence-event/v1"
+    || body.event_type !== "knowledge_entry_observed"
+    || body.session_id !== item.sessionId
+    || body.created_at_utc !== item.sourceTimestampUtc
+    || intent?.domain_hint !== item.domain
+    || intent?.operation_hint !== item.operation
+    || scope?.kind !== "world"
+    || Object.prototype.hasOwnProperty.call(scope, "project_id")
+    || payload?.slug !== item.slug
+  ) {
+    return null;
+  }
+  const expectedCandidateKey = typeof source?.candidate_id === "string"
+    ? source.candidate_id
+    : typeof source?.correlation_id === "string"
+      ? source.correlation_id
+      : `knowledge:${item.operation}:${item.slug}:${item.eventId}`;
+  if (item.candidateKey !== expectedCandidateKey) return null;
+  return normalizeLegacyWorldPublicationItem(item);
+}
+
+async function appendLegacyWorldRepairAuditOnce(args: {
+  abrainHome: string;
+  oldItemId: string;
+  newItemId: string;
+  repairedAtUtc: string;
+}): Promise<void> {
+  const auditPath = abrainSedimentAuditPath(args.abrainHome);
+  const auditDir = path.dirname(auditPath);
+  await fs.mkdir(auditDir, { recursive: true, mode: 0o700 });
+  let existing = "";
+  try {
+    existing = await fs.readFile(auditPath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  for (const line of existing.split("\n")) {
+    if (!line) continue;
+    try {
+      const row = JSON.parse(line) as Record<string, unknown>;
+      if (
+        row.operation === "publication_outbox_legacy_repair"
+        && row.reason === LEGACY_WORLD_REPAIR_REASON
+        && row.old_internal_id === args.oldItemId
+        && row.new_internal_id === args.newItemId
+      ) return;
+    } catch { /* unrelated malformed historical audit row */ }
+  }
+  const row = {
+    timestamp: formatLocalIsoTimestamp(new Date(args.repairedAtUtc)),
+    audit_version: 2,
+    pid: process.pid,
+    lane: "publication",
+    operation: "publication_outbox_legacy_repair",
+    reason: LEGACY_WORLD_REPAIR_REASON,
+    old_internal_id: args.oldItemId,
+    new_internal_id: args.newItemId,
+    repaired_at_utc: args.repairedAtUtc,
+  };
+  const handle = await fs.open(auditPath, "a", 0o600);
+  try {
+    await handle.writeFile(`${existing && !existing.endsWith("\n") ? "\n" : ""}${JSON.stringify(row)}\n`, "utf-8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fsyncDirectory(auditDir);
+}
+
+export async function appendLegacyWorldRepairFailureAuditClosed(
+  abrainHome: string,
+  reason: LegacyWorldProjectStampRepairFailureReason,
+): Promise<void> {
+  try {
+    const auditPath = abrainSedimentAuditPath(abrainHome);
+    const auditDir = path.dirname(auditPath);
+    await fs.mkdir(auditDir, { recursive: true, mode: 0o700 });
+    let needsLeadingNewline = false;
+    try {
+      const existing = await fs.readFile(auditPath);
+      needsLeadingNewline = existing.length > 0 && existing[existing.length - 1] !== 0x0a;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    const row = {
+      timestamp: formatLocalIsoTimestamp(),
+      audit_version: 2,
+      pid: process.pid,
+      lane: "publication",
+      operation: "repair_failed",
+      reason,
+    };
+    const handle = await fs.open(auditPath, "a", 0o600);
+    try {
+      await handle.writeFile(`${needsLeadingNewline ? "\n" : ""}${JSON.stringify(row)}\n`, "utf-8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fsyncDirectory(auditDir);
+  } catch {
+    console.error("[sediment-writer] publication_repair_audit_failed operation=repair_failed reason=audit_append_failed");
+  }
+}
+
+async function assertNormalizedRepairDestination(
+  abrainHome: string,
+  item: PublicationOutboxItem,
+): Promise<"pending" | "done" | null> {
+  const pending = await readRepairStateItem(
+    path.join(publicationOutboxPendingDir(abrainHome), `${item.itemId}.json`),
+    item.itemId,
+  );
+  const done = await readRepairStateItem(
+    path.join(publicationOutboxDoneDir(abrainHome), `${item.itemId}.json`),
+    item.itemId,
+  );
+  if (pending && done) throw new LegacyWorldProjectStampRepairError("conflict");
+  const existing = pending ?? done;
+  if (existing && canonicalizeJcs(existing) !== canonicalizeJcs(item)) {
+    throw new LegacyWorldProjectStampRepairError("conflict");
+  }
+  return pending ? "pending" : done ? "done" : null;
+}
+
+/**
+ * Explicit, single-item operator repair for the historical world-scope
+ * `projectId=pi-global` stamp. The old failed bytes move to resolved/; the
+ * normalized item is independently retained in pending/ or done/.
+ */
+export async function repairLegacyWorldProjectStampFailures(
+  abrainHome: string,
+  limit: 0 | 1 = 1,
+  options: LegacyWorldProjectStampRepairOptions = {},
+): Promise<LegacyWorldProjectStampRepairResult> {
+  if (limit !== 0 && limit !== 1) throw new LegacyWorldProjectStampRepairError("identity");
+  if (limit === 0) return { status: "not_eligible", repaired: 0 };
+  const root = path.resolve(abrainHome);
+  return withCanonicalMutationBarrier(root, async () => {
+    const outboxRoot = publicationOutboxRoot(root);
+    if (!(await assertSafePublicationDirectory(outboxRoot))) return { status: "not_eligible", repaired: 0 };
+    const pendingDir = publicationOutboxPendingDir(root);
+    const doneDir = publicationOutboxDoneDir(root);
+    const failedDir = publicationOutboxFailedDir(root);
+    const resolvedDir = publicationOutboxResolvedDir(root);
+    await assertSafePublicationDirectory(pendingDir);
+    await assertSafePublicationDirectory(doneDir);
+    const failedRows = await readRepairTerminalRows(failedDir);
+    const resolvedRows = await readRepairTerminalRows(resolvedDir);
+
+    // Audit recovery is historical bookkeeping, not a repair mutation: it is
+    // unbounded by repair_limit and derives identity only from immutable old bytes.
+    for (const row of resolvedRows) {
+      const normalized = normalizeResolvedLegacyWorldPublicationItem(row.item);
+      const repairedAtUtc = new Date((options.clock ?? Date.now)()).toISOString();
+      await appendLegacyWorldRepairAuditOnce({
+        abrainHome: root,
+        oldItemId: row.itemId,
+        newItemId: normalized.itemId,
+        repairedAtUtc,
+      });
+    }
+
+    for (const row of failedRows) {
+      const normalized = await eligibleLegacyWorldPublicationItem(root, row.item);
+      if (!normalized) continue;
+      const existingResolved = resolvedRows.find((candidate) => candidate.itemId === row.itemId);
+      if (existingResolved) throw new LegacyWorldProjectStampRepairError("conflict");
+      const destination = await assertNormalizedRepairDestination(root, normalized);
+      if (!destination) {
+        const written = await writePublicationOutboxItem(root, normalized);
+        if (written.status === "collision") throw new LegacyWorldProjectStampRepairError("conflict");
+      }
+      await options.crashHook?.("after_pending_enqueue");
+      await assertSafePublicationDirectory(resolvedDir, true);
+      const resolvedPath = path.join(resolvedDir, `${row.itemId}.json`);
+      if (await readRepairStateItem(resolvedPath, row.itemId)) {
+        throw new LegacyWorldProjectStampRepairError("conflict");
+      }
+      await fs.rename(row.filePath, resolvedPath);
+      await fsyncDirectory(resolvedDir);
+      await fsyncDirectory(failedDir);
+      await options.crashHook?.("after_failed_resolve");
+      const repairedAtUtc = new Date((options.clock ?? Date.now)()).toISOString();
+      await appendLegacyWorldRepairAuditOnce({
+        abrainHome: root,
+        oldItemId: row.itemId,
+        newItemId: normalized.itemId,
+        repairedAtUtc,
+      });
+      return { status: "repaired", repaired: 1 };
+    }
+
+    if (resolvedRows.length > 0) return { status: "already_repaired", repaired: 0 };
+    return { status: "not_eligible", repaired: 0 };
+  });
+}
+
+/** Resolved history count with the same legal filename/schema/identity closure. */
+export async function countPublicationOutboxResolved(abrainHome: string): Promise<number> {
+  return (await readRepairTerminalRows(publicationOutboxResolvedDir(abrainHome))).length;
 }
 
 export async function listPublicationOutboxPending(

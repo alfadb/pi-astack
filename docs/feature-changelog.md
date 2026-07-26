@@ -11,6 +11,26 @@ status: active
 
 ---
 
+## 2026-07-27 — accepted — Narrow operator repair for legacy world publication stamp
+
+### 变更
+
+New Knowledge publication items now use scope-aware identity: world scope omits outbox `projectId`; project scope preserves the exact L1 `project_id`. Maintenance v1 adds optional closed `repair_policy=none|legacy_world_project_stamp` and `repair_limit=0|1`; absent fields mean `none/0` and normal daemon maintenance performs zero repair.
+
+The sole non-none policy repairs at most one historical failed world item only when canonical Knowledge L1 is valid and every identity field except the exact legacy `projectId=pi-global` stamp matches. Its durable two-stage path first enqueues normalized `pending/<newId>`, then atomically retains old failed bytes as `resolved/<oldId>`; ordinary drain later moves normalized pending to done. It resumes both crash cutpoints idempotently. Resolved audit recovery scans every historical row in one call and fills all missing `(old,new)` audit pairs using only immutable old bytes, without L1 or pending/done. Barrier busy and repair deadline are retryable closed outcomes; other repair failures append closed durable `repair_failed` audit. Any extra mismatch/symlink/conflict is unmoved and fail-closed. Optional aggregate-only `repaired_bucket` and `repair_status` appear only for non-none policy; no IDs or resolved count leave the RPC result.
+
+### 验收边界
+
+`smoke:publication-legacy-repair`: real temp L1/outbox; world/project enqueue contract; eligible repair→pending→done (`failed=0`, `resolved=1`); mismatch/default-none no-op and old result keys; `0|1` limit; crash after pending and after resolve; two resolved rows with only the second audit missing and no L1/destination; busy/budget retryability; durable closed failure audit and closed stderr fallback; symlink fail-closed; result privacy. Existing worker and all-Knowledge mutation smokes remain regression gates.
+
+### 非目标 / 状态
+
+Explicit operator-only single-item compatibility repair. **Not** formal ACK, source ACK, delete, retention, quarantine, generic requeue, or bulk repair. Code/docs slice only: no production invocation, version, tag, deploy, or commit claim.
+
+### 关联
+
+[architecture/sediment.md](architecture/sediment.md)；[ADR 0045](adr/0045-sediment-worker-safe-rpc-command.md)；`smoke:publication-legacy-repair`。
+
 ## 2026-07-27 — accepted — Persistent publication-outbox failed residual is operator-visible critical
 
 ### 变更

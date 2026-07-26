@@ -597,7 +597,7 @@ async function enqueueKnowledgePublicationOutbox(args: {
   candidateKey: string;
   operation: string;
   slug: string;
-  projectId?: string;
+  projectId: string;
   scope: "project" | "world";
   projectKnowledge: boolean;
   publishGit: boolean;
@@ -615,7 +615,7 @@ async function enqueueKnowledgePublicationOutbox(args: {
     candidateKey: args.candidateKey,
     operation: args.operation,
     slug: args.slug,
-    ...(args.projectId ? { projectId: args.projectId } : {}),
+    ...(args.scope === "project" ? { projectId: args.projectId } : {}),
     scope: args.scope,
     projectKnowledge: args.projectKnowledge,
     publishGit: args.publishGit,
@@ -1098,10 +1098,20 @@ async function readFrozenKnowledgeL1Row(
   }
   if (validated.eventId !== item.eventId) throw new Error(`batch eventId mismatch: ${item.eventId}`);
   const body = validated.body as unknown as KnowledgeEvidenceEventBodyV1;
+  const scopeMatches = item.scope === "world"
+    ? body.scope.kind === "world"
+      && item.projectId === undefined
+      && !Object.prototype.hasOwnProperty.call(body.scope, "project_id")
+    : item.scope === "project"
+      && body.scope.kind === "project"
+      && typeof item.projectId === "string"
+      && item.projectId === body.scope.project_id;
   if (
-    (item.slug && item.slug !== body.payload.slug)
-    || (item.scope && item.scope !== body.scope.kind)
-    || (item.projectId && item.projectId !== body.scope.project_id)
+    item.domain !== "knowledge"
+    || !item.slug
+    || item.slug !== body.payload.slug
+    || !scopeMatches
+    || item.operation !== body.intent.operation_hint
   ) {
     throw new Error(`publication item identity does not match Knowledge L1: ${row.itemId}`);
   }
