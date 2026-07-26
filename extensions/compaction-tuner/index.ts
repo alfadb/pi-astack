@@ -565,7 +565,7 @@ async function runCustomCompactionSummary(
       });
       continue;
     }
-    if (!auth.apiKey) {
+    if (!auth.apiKey && !(auth.headers && Object.keys(auth.headers).length > 0)) {
       attempts.push({ model: ref, provider: parsed.provider, id: parsed.id, outcome: "missing_api_key" });
       continue;
     }
