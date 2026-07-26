@@ -83,6 +83,13 @@ interface RecoveryProcessState {
 export interface PropositionPolicyStableViewRecoveryOptions {
   abrainHome: string;
   repoRoot: string;
+  /**
+   * Live production injection budget
+   * (`ruleInjector.propositionPolicyStableViewInjection.maxReadBytes`).
+   * Health strict reads and child publication acceptance use this when set;
+   * otherwise the absolute hard artifact-set envelope is used.
+   */
+  runtimeMaxReadBytes?: number;
   contentionWaitMs?: number;
   contentionPollMs?: number;
   sourceRaceMaxRetries?: number;
@@ -225,7 +232,8 @@ async function runRecovery(
   }
 
   try {
-    const initial = strictRead(options.abrainHome);
+    const runtimeBudget = resolveRecoveryRuntimeMaxReadBytes(options.runtimeMaxReadBytes);
+    const initial = strictReadWithBudget(options.abrainHome, runtimeBudget);
     initialReason = initial.reason;
     if (initial.ok) {
       return finalizeResult({
@@ -240,7 +248,7 @@ async function runRecovery(
       });
     }
 
-    const attempted = await publishWithContention(options);
+    const attempted = await publishWithContention({ ...options, runtimeMaxReadBytes: runtimeBudget });
     contentionObserved = attempted.contentionObserved;
     if (attempted.contendedConverged) {
       finalReason = attempted.contendedConverged.reason;
@@ -257,7 +265,7 @@ async function runRecovery(
     }
 
     await recoveryTestControls.afterChildPublication?.();
-    const finalRead = strictRead(options.abrainHome);
+    const finalRead = strictReadWithBudget(options.abrainHome, runtimeBudget);
     finalReason = finalRead.reason;
     if (!finalRead.ok) {
       throw recoveryFailure(
@@ -293,6 +301,9 @@ async function runRecovery(
     });
   } catch (error) {
     const controlled = controlledError(error);
+    // Preserve a typed final_read_reason even when failure happens before/without
+    // a successful final strict read (budget reject, child oversize, etc.).
+    finalReason = resolveStableFinalReadReason(finalReason, controlled);
     return finalizeResult({
       status: "failed",
       reason: "stable-view recovery failed closed",
@@ -307,18 +318,21 @@ async function runRecovery(
   }
 }
 
-async function publishWithContention(options: PropositionPolicyStableViewRecoveryOptions): Promise<PublicationAttempt> {
+async function publishWithContention(
+  options: PropositionPolicyStableViewRecoveryOptions & { runtimeMaxReadBytes?: number },
+): Promise<PublicationAttempt> {
   const waitMs = boundedInteger(options.contentionWaitMs, PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_CONTENTION_WAIT_MS, 0, 120_000);
   const pollMs = boundedInteger(options.contentionPollMs, 50, 5, 1_000);
   const sourceRaceRetries = boundedInteger(options.sourceRaceMaxRetries, PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_SOURCE_RACE_RETRIES, 0, 10);
   const sourceRaceBackoffMs = boundedInteger(options.sourceRaceBackoffMs, PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_SOURCE_RACE_BACKOFF_MS, 5, 2_000);
+  const runtimeBudget = resolveRecoveryRuntimeMaxReadBytes(options.runtimeMaxReadBytes);
   const deadline = Date.now() + waitMs;
   let contentionObserved = false;
   let sourceRaceCount = 0;
   let childAttempt = 0;
   for (;;) {
     childAttempt += 1;
-    const child = await runPublicationChild(options, childAttempt);
+    const child = await runPublicationChild(options, childAttempt, runtimeBudget);
     if ("publication_status" in child) return { publication: child, contentionObserved };
     if (child.error_code === "SOURCE_RACE") {
       if (sourceRaceCount >= sourceRaceRetries) {
@@ -336,7 +350,7 @@ async function publishWithContention(options: PropositionPolicyStableViewRecover
       throw recoveryFailure(child.error_code, child.error_message);
     }
     contentionObserved = true;
-    const observed = strictRead(options.abrainHome);
+    const observed = strictReadWithBudget(options.abrainHome, runtimeBudget);
     if (observed.ok) return { contendedConverged: observed, contentionObserved };
     if (Date.now() >= deadline) {
       throw recoveryFailure("RECOVERY_LOCK_CONTENTION_TIMEOUT", "publisher OFD lock remained busy before bounded recovery deadline");
@@ -348,6 +362,7 @@ async function publishWithContention(options: PropositionPolicyStableViewRecover
 function runPublicationChild(
   options: PropositionPolicyStableViewRecoveryOptions,
   attempt: number,
+  runtimeMaxReadBytes: number,
 ): Promise<ChildPublication | ChildFailure> {
   const script = path.join(options.repoRoot, ...PROPOSITION_POLICY_STABLE_VIEW_RECOVERY_CHILD_RELATIVE.split("/"));
   const args = [
@@ -355,6 +370,9 @@ function runPublicationChild(
     "--abrain-home", options.abrainHome,
     "--repo-root", options.repoRoot,
     "--attempt", String(attempt),
+    // Always pass the caller's runtime budget so child enforces publication
+    // acceptance before switching latest (avoids post-hoc latest rollback).
+    "--runtime-max-read-bytes", String(runtimeMaxReadBytes),
   ];
   const testRace = boundedInteger(recoveryTestControls.childSourceRaceUntilAttempt, 0, 0, 10);
   const testBusy = boundedInteger(recoveryTestControls.childBusyMs, 0, 0, 10_000);
@@ -468,12 +486,7 @@ function assertBoundedChildLaunch(executable: string, args: readonly string[], e
   if (envBytes > MAX_CHILD_ENV_BYTES) throw recoveryFailure("RECOVERY_CHILD_ENV_INVALID", "publication child env exceeds its hard limit");
 }
 
-/** Hard-contract recovery reader (missing/invalid stable-view recovery path). */
-function strictRead(abrainHome: string): PropositionPolicyStableViewRuntimeReadResult {
-  return strictReadWithBudget(abrainHome, PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES);
-}
-
-/** Source-change final/ack reader — uses the production runtime budget. */
+/** Source-change / recovery health reader — uses the provided runtime budget. */
 function strictReadWithBudget(
   abrainHome: string,
   maxReadBytes: number,
@@ -485,6 +498,7 @@ function strictReadWithBudget(
   });
 }
 
+/** Required for source-change paths — caller must pass live production budget. */
 function resolveSourceChangeRuntimeMaxReadBytes(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw recoveryFailure(
@@ -496,6 +510,30 @@ function resolveSourceChangeRuntimeMaxReadBytes(value: unknown): number {
   if (n < 1) {
     throw recoveryFailure(
       "SOURCE_CHANGE_RUNTIME_BUDGET_INVALID",
+      "runtimeMaxReadBytes must be >= 1",
+    );
+  }
+  return Math.min(PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES, n);
+}
+
+/**
+ * Recovery health budget: live production injection value when provided,
+ * otherwise the absolute hard artifact-set envelope (legacy tests).
+ */
+function resolveRecoveryRuntimeMaxReadBytes(value: unknown): number {
+  if (value === undefined || value === null) {
+    return PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw recoveryFailure(
+      "RECOVERY_RUNTIME_BUDGET_INVALID",
+      "runtimeMaxReadBytes must be a finite number matching production injection budget",
+    );
+  }
+  const n = Math.floor(value);
+  if (n < 1) {
+    throw recoveryFailure(
+      "RECOVERY_RUNTIME_BUDGET_INVALID",
       "runtimeMaxReadBytes must be >= 1",
     );
   }
@@ -1230,15 +1268,17 @@ export async function forceRepublishPropositionPolicyStableView(
     });
   }
 
+  let runtimeMaxReadBytes: number | undefined;
   try {
-    // Production runtime budget: final selected_valid + marker ack must pass the
-    // same envelope the session injector uses (not only the hard recovery max).
-    const runtimeMaxReadBytes = resolveSourceChangeRuntimeMaxReadBytes(options.runtimeMaxReadBytes);
+    // Production runtime budget: child publication acceptance (before latest),
+    // final selected_valid, and marker ack all share this envelope.
+    runtimeMaxReadBytes = resolveSourceChangeRuntimeMaxReadBytes(options.runtimeMaxReadBytes);
 
     // Intentionally skip any pre-publish already_valid short-circuit.
     const attempted = await publishWithContention({
       abrainHome,
       repoRoot: path.resolve(options.repoRoot),
+      runtimeMaxReadBytes,
       contentionWaitMs: options.contentionWaitMs,
       contentionPollMs: options.contentionPollMs,
       sourceRaceMaxRetries: options.sourceRaceMaxRetries,
@@ -1248,8 +1288,8 @@ export async function forceRepublishPropositionPolicyStableView(
     contentionObserved = attempted.contentionObserved;
 
     if (attempted.contendedConverged) {
-      // publishWithContention only hard-reads; re-strictRead with the runtime
-      // budget before ack so oversize production views do not clear markers.
+      // Contended path already budget-read; re-confirm identity then ack only
+      // included dispositions so excluded/non-candidate markers stay durable.
       const runtimeRead = strictReadWithBudget(abrainHome, runtimeMaxReadBytes);
       finalReason = runtimeRead.reason;
       if (!runtimeRead.ok) {
@@ -1265,11 +1305,16 @@ export async function forceRepublishPropositionPolicyStableView(
         );
       }
       const missing = missingRequiredEventIds(abrainHome, runtimeRead.bundleHash, requiredEventIds);
+      // Ack covered included markers first; missing must not block partial cleanup.
+      const covered = requiredEventIds.filter((id) => !missing.includes(id));
+      if (covered.length) {
+        await ackCoveredMarkersBestEffort(abrainHome, runtimeRead.bundleHash, covered);
+      }
       if (missing.length) {
         return Object.freeze({
           schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
           status: "failed" as const,
-          reason: "contended stable view is selected_valid but missing required proposition event ids",
+          reason: "contended stable view is selected_valid but missing required included proposition event ids",
           abrain_home: abrainHome,
           started_at: startedAt,
           finished_at: new Date().toISOString(),
@@ -1279,11 +1324,9 @@ export async function forceRepublishPropositionPolicyStableView(
           bundle_hash: runtimeRead.bundleHash,
           already_valid_short_circuit: false as const,
           error_code: "SOURCE_CHANGE_MISSING_EVENT",
-          error_message: `missing event ids: ${missing.join(",")}`,
+          error_message: `missing included event ids: ${missing.join(",")}`,
         });
       }
-      const covered = requiredEventIds.filter((id) => !missing.includes(id));
-      await ackCoveredMarkersBestEffort(abrainHome, runtimeRead.bundleHash, covered);
       return Object.freeze({
         schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
         status: "contended_converged" as const,
@@ -1319,13 +1362,29 @@ export async function forceRepublishPropositionPolicyStableView(
       );
     }
     const missing = missingRequiredEventIds(abrainHome, finalRead.bundleHash, requiredEventIds);
-    if (missing.length) {
-      throw recoveryFailure(
-        "SOURCE_CHANGE_MISSING_EVENT",
-        `published selected_valid bundle is missing required proposition event ids: ${missing.join(",")}`,
-      );
+    // Ack the included subset first. Missing required ids remain durable markers
+    // and surface as typed failure; they must not block covered-marker cleanup.
+    const covered = requiredEventIds.filter((id) => !missing.includes(id));
+    if (covered.length) {
+      await ackCoveredMarkersBestEffort(abrainHome, finalRead.bundleHash, covered);
     }
-    await ackCoveredMarkersBestEffort(abrainHome, finalRead.bundleHash, requiredEventIds);
+    if (missing.length) {
+      return Object.freeze({
+        schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
+        status: "failed" as const,
+        reason: "published selected_valid bundle is missing required included proposition event ids",
+        abrain_home: abrainHome,
+        started_at: startedAt,
+        finished_at: new Date().toISOString(),
+        required_event_ids: requiredEventIds,
+        final_read_reason: finalReason,
+        contention_observed: contentionObserved,
+        bundle_hash: finalRead.bundleHash,
+        already_valid_short_circuit: false as const,
+        error_code: "SOURCE_CHANGE_MISSING_EVENT",
+        error_message: `missing included event ids: ${missing.join(",")}`,
+      });
+    }
     return Object.freeze({
       schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
       status: "republished" as const,
@@ -1342,6 +1401,9 @@ export async function forceRepublishPropositionPolicyStableView(
     });
   } catch (error) {
     const controlled = controlledError(error);
+    // Typed reason from error code only — never secondary-read selected_valid
+    // over a pre-latest reject (would mask the original failure).
+    finalReason = resolveStableFinalReadReason(finalReason, controlled);
     return Object.freeze({
       schema_version: "proposition-policy-stable-view-source-change-result/v1" as const,
       status: "failed" as const,
@@ -1364,15 +1426,15 @@ async function ackCoveredMarkersBestEffort(
   bundleHash: string,
   requiredEventIds: readonly string[],
 ): Promise<void> {
-  // Ack required ids that are present, plus any other durable markers already
-  // covered by this whole-L1 republish (derived todo cleanup only).
+  // Ack only markers covered by candidate_dispositions with disposition
+  // `included`. Excluded and non-candidate markers must remain durable for retry.
   // Delete/list/fsync failures must propagate: stable-view may already cover the
   // events, but durable ack is incomplete — force reports failed and markers
   // remain for a later cleanup/retry. Never swallow into a false success.
-  const published = new Set(readPublishedInputEventIds(abrainHome, bundleHash));
-  const fromRequired = requiredEventIds.filter((id) => published.has(id));
+  const covered = new Set(readPublishedIncludedEventIds(abrainHome, bundleHash));
+  const fromRequired = requiredEventIds.filter((id) => covered.has(id));
   const listed = await listPropositionPolicyStableViewSourceChangePendingMarkers(abrainHome);
-  const extras = listed.filter((id) => published.has(id) && !fromRequired.includes(id));
+  const extras = listed.filter((id) => covered.has(id) && !fromRequired.includes(id));
   await ackPropositionPolicyStableViewSourceChangePendingMarkers(
     abrainHome,
     [...fromRequired, ...extras],
@@ -1385,12 +1447,18 @@ function missingRequiredEventIds(
   requiredEventIds: readonly string[],
 ): string[] {
   if (requiredEventIds.length === 0) return [];
-  const inputIds = readPublishedInputEventIds(abrainHome, bundleHash);
-  const present = new Set(inputIds);
+  const present = new Set(readPublishedIncludedEventIds(abrainHome, bundleHash));
   return requiredEventIds.filter((id) => !present.has(id));
 }
 
-function readPublishedInputEventIds(abrainHome: string, bundleHash: string): string[] {
+/**
+ * Marker coverage uses candidate_dispositions, not canonical_source.input_event_ids.
+ * input_event_ids is the whole L1 source closure (genesis/evidence/lifecycle +
+ * excluded candidates). Only disposition `included` covers a pending marker for
+ * ack. Production publication schema emits included|excluded only — do not treat
+ * unreachable fixture-only `merged` as coverage.
+ */
+function readPublishedIncludedEventIds(abrainHome: string, bundleHash: string): string[] {
   if (!SHA256_PATTERN.test(bundleHash)) return [];
   const manifestPath = path.join(
     abrainHome,
@@ -1402,17 +1470,68 @@ function readPublishedInputEventIds(abrainHome: string, bundleHash: string): str
   try {
     const raw = fs.readFileSync(manifestPath, "utf8");
     const manifest = JSON.parse(raw) as {
-      canonical_source?: { input_event_ids?: unknown };
+      candidate_dispositions?: { dispositions?: unknown };
     };
-    const ids = manifest.canonical_source?.input_event_ids;
-    if (!Array.isArray(ids)) return [];
-    return ids.filter((id): id is string => typeof id === "string" && SHA256_PATTERN.test(id));
+    const rows = manifest.candidate_dispositions?.dispositions;
+    if (!Array.isArray(rows)) return [];
+    const ids: string[] = [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const rec = row as { source_event_id?: unknown; disposition?: unknown };
+      if (typeof rec.source_event_id !== "string" || !SHA256_PATTERN.test(rec.source_event_id)) continue;
+      // Only disposition `included` covers markers; excluded/other must not ack.
+      if (rec.disposition === "included") {
+        ids.push(rec.source_event_id);
+      }
+    }
+    return ids;
   } catch {
     // Fail-closed for coverage checks: empty means every required id is missing
     // when the required set is non-empty. Do not treat parse/IO errors as
     // "no requirements".
     return [];
   }
+}
+
+/**
+ * Map controlled failure codes to a stable final_read_reason without re-reading
+ * latest (which can be selected_valid on the prior bundle and mask the error).
+ * Distinguishes runtime-budget oversize from publisher hard-envelope oversize.
+ */
+function resolveStableFinalReadReason(
+  current: string,
+  controlled: { code: string; message: string },
+): string {
+  if (current && current !== "not_read") return current;
+  const code = controlled.code || "";
+  const message = controlled.message || "";
+  if (
+    code === "PUBLICATION_RUNTIME_BUDGET_EXCEEDED"
+    || message.includes("PUBLICATION_RUNTIME_BUDGET_EXCEEDED")
+  ) {
+    return "runtime_budget_oversize";
+  }
+  if (
+    code === "PUBLICATION_ARTIFACT_OVERSIZE"
+    || code === "PUBLICATION_BUNDLE_OVERSIZE"
+    || code === "FILE_OVERSIZE"
+    || message.includes("PUBLICATION_ARTIFACT_OVERSIZE")
+    || message.includes("PUBLICATION_BUNDLE_OVERSIZE")
+  ) {
+    return "publication_artifact_oversize";
+  }
+  if (code === "statement_oversize" || /statement_oversize/i.test(message)) {
+    return "statement_oversize";
+  }
+  if (code === "payload_oversize" || /payload_oversize/i.test(message)) {
+    return "payload_oversize";
+  }
+  // Post-publish validation embeds the reader reason after the colon.
+  const embedded = /rejected the (?:published|contended) artifact:\s*(\S+)/.exec(message);
+  if (embedded?.[1]) return embedded[1];
+  // Generic reader oversize (hard or runtime) from message path.
+  if (/\boversize\b/i.test(message) || code === "oversize") return "oversize";
+  return code || "not_read";
 }
 
 export function getPropositionPolicyStableViewSourceChangeDiagnostics(abrainHome?: string): Readonly<{

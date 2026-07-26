@@ -3350,9 +3350,15 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // publication. The recovery promise retains only roots and never
           // captures ctx or UI.
           const repoRoot = path.resolve(__dirname, "..", "..");
+          // Live production injection budget — recovery health strict read and
+          // child publication acceptance must share this with the session injector
+          // (no 262144-vs-settings split).
+          const runtimeMaxReadBytes = resolveRuleInjectorSettings()
+            .propositionPolicyStableViewInjection.maxReadBytes;
           void schedulePropositionPolicyStableViewRecovery({
             abrainHome,
             repoRoot,
+            runtimeMaxReadBytes,
           }).then((result) => {
             if (result.status === "failed") {
               console.error(`[sediment] proposition policy stable-view recovery failed: ${result.error_code ?? result.reason}: ${result.error_message ?? "unknown"}`);
@@ -3365,8 +3371,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // strict-valid, force republish so newly durable propositions enter
           // the source closure. Helper resolves to Result|null (not nested
           // Promise). No tight loop — next session_start/new event.
-          const runtimeMaxReadBytes = resolveRuleInjectorSettings()
-            .propositionPolicyStableViewInjection.maxReadBytes;
           void schedulePropositionPolicyStableViewSourceChangeFromPendingMarkers({
             abrainHome,
             repoRoot,
@@ -3385,6 +3389,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 status: result.status,
                 error_code: result.error_code ?? null,
                 reason: result.reason,
+                final_read_reason: result.final_read_reason,
                 // Low-sensitivity only: event ids / status / code; no statement/body.
               }).catch(() => {});
             }
@@ -7407,6 +7412,7 @@ async function tryAutoWriteLane(args: {
                 status: result.status,
                 error_code: result.error_code ?? null,
                 reason: result.reason,
+                final_read_reason: result.final_read_reason,
                 // Marker remains for session_start; capture not rolled back.
                 pending_marker_retained: true,
                 // Low-sensitivity only: no statement/body text.
@@ -7426,6 +7432,7 @@ async function tryAutoWriteLane(args: {
                 status: "rejected",
                 error_code: "SOURCE_CHANGE_PROMISE_REJECTED",
                 error_message: error instanceof Error ? error.message : String(error),
+                final_read_reason: "not_read",
                 pending_marker_retained: true,
               }).catch(() => {});
             });
