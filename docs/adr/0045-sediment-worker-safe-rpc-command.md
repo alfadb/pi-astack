@@ -22,7 +22,11 @@ Central sediment edge authority migrates semantic evaluation off the interactive
 
 Default **`foreground`** — ordinary Pi extension owns enqueue + recovery + normal sediment pass/timer. **Zero behavior change** for existing installs.
 
-**`daemon`**: ordinary Pi extension **does not** write ordinary intake pending (nobody consumes it under daemon ownership), does **not** enqueue / schedule recovery / run the normal sediment pass/timer. When the continuous edge-protocol-shadow producer triple gate is fully open, `agent_end` captures healthy terminals into edge shadow; when dual producer flags are incomplete, `agent_end` emits aggregate audit/config diagnostic `daemon_capture_disabled` and returns (no foreground pipeline, no pending leak). Headless worker (`PI_ASTACK_SEDIMENT_WORKER_MODE=1`) is the sole pass executor. Worker start **requires** `executionOwner=daemon` else returns `execution_owner_not_daemon` (prevents dual-executor races).
+**Configured `daemon`** uses an **effective owner** fail-safe (never orphan ordinary intake, never dual semantic primary, never bypass triple gate):
+
+- **Full triple gate** (`executionOwner=daemon` **and** `edgeProtocolShadow.enabled` **and** `daemonWorker.edgeShadowCaptureEnabled`): effective owner = **daemon**. Ordinary Pi extension does **not** write ordinary intake / enqueue / recovery / normal pass; `agent_end` captures healthy terminals into edge shadow only. Headless worker (`PI_ASTACK_SEDIMENT_WORKER_MODE=1`) is the sole pass executor.
+- **Incomplete triple gate**: effective owner **degrades to foreground** for the whole process so local intake still has a consumer (enqueue/recovery/pass). Audit/diagnostic `daemon_effective_owner_foreground`. **No** force edge capture without full triple gate; **no** durable intake without consumer.
+- Worker start still **requires** configured `executionOwner=daemon` else returns `execution_owner_not_daemon` (prevents dual-executor races when properly gated).
 
 ### 2.1b Continuous edge-protocol-shadow producer (`sediment.daemonWorker.edgeShadowCaptureEnabled`)
 
@@ -37,7 +41,7 @@ Default **`false`**. Triple gate — all required: `executionOwner=daemon` **and
 - Concurrent same (session,C6,content) under OFD lock → one candidate + one witness. Same C6 different content → fail closed `c6_content_conflict`
 - Sidecar always create/verify content-addressed; missing restored; corrupt collision fail closed; never witness → missing sidecar
 - Candidate-only partial failure: owner-wide bounded `session_start` recovery fills witnesses only
-- Daemon owner **never** writes ordinary intake (no unbounded `pending/` orphans) regardless of producer source / flag completeness. Full triple gate → edge capture; incomplete flags → `daemon_capture_disabled` skip. Foreground keeps intake→queue. Capture receipt is **not** ConsumerAck / knowledge ack / formal authority / retention / delete
+- Full triple gate → edge capture only; daemon owner **never** writes ordinary intake under effective daemon ownership (no unbounded `pending/` orphans). Incomplete triple gate → effective owner degrades to foreground (intake→queue with consumer); never bypass triple gate for edge. Capture receipt is **not** ConsumerAck / knowledge ack / formal authority / retention / delete
 - `agent_end` awaits local fsync only (no LLM). Worker mode never producer-captures
 - Production is settings-JSON only. Env `PI_ASTACK_DAEMON_WORKER_EDGE_SHADOW_CAPTURE` requires `PI_ASTACK_ENABLE_TEST_HOOKS=1`
 
@@ -138,7 +142,7 @@ End-to-end worker self-budget — **does not** change foreground `agent_end` pas
 
 **Checkpoint slot (ALS)**: worker pass runs under `AsyncLocalStorage` override `daemon-worker:<sha256(source session)>`. Detached promises inherit the store; nested/concurrent contexts do not clobber. Foreground never enters the store → provenance sessionId. Module-global save/restore is deleted.
 
-**Global serial**: `withGlobalPassSerial` wait is deadline/abort bound with a **single** timer/race (no per-slice handler append). Prior task rejection does not poison the *tail chain*, but a hung previous pass is **not** actively released. Timeout → `global_serial_deadline` + **process poison** + `restart_child=true`. Under single-worker single-inflight this fences the previous pass; do **not** claim healthy process reuse.
+**Global serial**: `withGlobalPassSerial` wait is deadline/abort bound. **Signal-only** waits are event-driven (prev settle OR abort) with **no poll timer**. When a deadline is present, a single timer/race fence (slice ≤1s) is used (no per-slice handler append). Prior task rejection does not poison the *tail chain*, but a hung previous pass is **not** actively released. Timeout → `global_serial_deadline` + **process poison** + `restart_child=true`. Under single-worker single-inflight this fences the previous pass; do **not** claim healthy process reuse.
 
 **Process poison (closed set)**: only these codes poison the process **and** set `restart_child=true`:
 
@@ -190,18 +194,20 @@ Foreground (no worker opts) keeps original schedules unchanged. Docs describe th
 | `receipt_write_failed` | create-only receipt write failed/timed out under hard reserve after more=false main-chain success | true | **false** |
 
 **Checkpoint / receipt deadline rules**:
-- On **every** deadline/abort/unreaped outcome path, first re-read the create-only **processed receipt**. If a valid receipt is durable → return settled `processed` / `already_processed` (**never** `deadline_after_checkpoint_advanced` / `pass_deadline_exceeded_unreaped` poison). Publication outbox drain after receipt is **budget-bounded** (≤ cleanup reserve / remaining hard deadline) or best-effort skipped; it must not pin the task unboundedly.
+- On **every** deadline/abort/unreaped outcome path, first re-read the create-only **processed receipt**. If a valid receipt is durable → return settled `processed` / `already_processed` (**never** `deadline_after_checkpoint_advanced` / `pass_deadline_exceeded_unreaped` poison).
+- After success receipt, worker task does **not** drain knowledge publication in-task (no uncancelled `Promise.race`). Result/audit is observable as `publication_pending=true`; durable outbox + independent maintenance own publication.
 - On deadline/abort capture without receipt, re-read CP. **Only** when durable CP **covers tip** and no success receipt → `deadline_after_checkpoint_advanced` (retryable=false, poison).
 - **Partial** before→after CP advance (more-loop intermediate watermark, tip not covered) is **safe resume**: ordinary retryable deadline (`worker_budget_exhausted` / `stage_deadline` / …), **no poison**.
 - Entry path: if durable CP already covers current sidecar tip but receipt is absent → same closed `deadline_after_checkpoint_advanced` (only a valid success receipt may return `already_processed`).
-- After `more=false` and main chain really advanced: even if **soft** deadline has elapsed, use the reserved **hard** deadline (≤5s cleanup reserve) to attempt create-only receipt — **do not soft-fence before receipt write**. Success → `processed`; failure/timeout → `receipt_write_failed` (retryable).
+- After `more=false` and main chain really advanced: even if **soft** deadline has elapsed, use the reserved **hard** deadline (≤5s cleanup reserve) to attempt create-only receipt (`verifyCreated=true`) — **do not soft-fence before receipt write**. Success → `processed` + `publication_pending`; failure/timeout → `receipt_write_failed` (retryable). Corrupt receipt / collision without valid re-read → `receipt_corrupt_or_collision` fail-closed, **no** force-retry path.
 - more-loop re-checks remaining budget each iteration (cannot open 16 full budgets).
-- Canonical startup under worker budget ALS clamps `startupBusyBudgetMs` to remaining soft deadline and may cooperative-defer (`STARTUP_BUDGET_EXHAUSTED`); same-process later generations can retry. Does **not** hard-kill in-flight mutation. CE/writer share the process runtime singleton.
+- **Canonical ownership**: process-level startup attempt is created/retried in `runOutsideWorkerBudget` (outside task ALS; full busy budget; not bound to short task deadline). RPC tasks never wait 60m — if process-level startup is not already ready, return cooperative deferred (`STARTUP_BUDGET_EXHAUSTED`) immediately (retryable/held, no poison). Each external task best-effort kicks the next generation; bootstrap continues for worker process lifetime. Worker shutdown/restart drops in-memory attempt; a new process re-bootstraps. Does **not** hard-kill in-flight mutation. CE/writer share the process runtime singleton.
 
 **`no_progress` classification (M4)**:
 - Pass may return `{ no_progress: true, code, retryable? }` for explicit skips.
-- **Deterministic non-retryable** closed codes: `project_not_bound`, `settings_disabled`, `empty_window`, `ephemeral_session` (`retryable=false`, no receipt, no poison). Daemon attempt policy: do **not** auto-redrive these; surface for operator/config fix. Stage0 has no automatic attempt cap beyond this classification — daemon **must not** treat them as ordinary retryable deadline.
-- Unclassified void / soft no-progress remains `no_progress` with `retryable=true` (transient).
+- **Deterministic non-retryable** closed codes: `project_not_bound`, `settings_disabled`, `empty_window`, `ephemeral_session` (`retryable=false`, no receipt, no poison) — **only when this task never advanced CP** (`!anyAdvanced`). Daemon attempt policy: do **not** auto-redrive these; surface for operator/config fix.
+- If the task **already advanced** CP (e.g. more-loop advance then `empty_window`), worker **must** write processed receipt / settle normally — never lose progress on redrive.
+- Unclassified void / soft no-progress remains `no_progress` with `retryable=true` (transient) when `!anyAdvanced`.
 - Process poison reason is sticky (first root cause wins; subsequent `worker_process_poisoned` refuses do not overwrite).
 
 **Honest Stage0 bounds**
@@ -241,7 +247,7 @@ Receipts and claims have **no GC** (known Stage0 bound).
 
 ### 2.8 Knowledge publication after worker success
 
-On settled processed success the worker **explicitly** triggers knowledge publication outbox one-shot/drain (reuse existing function). It cannot wait for foreground `session_start`.
+On settled processed success the worker writes create-only receipt and stamps `publication_pending=true`. It does **not** drain publication outbox in-task. Durable outbox + independent maintenance / ordinary session edges own publication. Worker cannot wait for foreground `session_start`.
 
 ### 2.9 Suggested worker argv
 

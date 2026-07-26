@@ -682,11 +682,13 @@ async function runAgentEndCaptureMatrix(label, settingsExtra, sessionId) {
   };
 }
 
-await check("capture matrix: daemon incomplete gate uses safe fallback, no dual-write", async () => {
-  // 1) daemon-only, sediment.enabled (default true) → durable intake fallback, no edge, no enqueue side-effects beyond write.
+await check("capture matrix: incomplete triple gate degrades to foreground effective owner", async () => {
+  // Configured daemon + incomplete triple → effective owner=foreground.
+  // Local intake has consumer (enqueue/pass). Never orphan, never bypass triple gate for edge.
+  // 1) daemon-only, sediment.enabled → foreground intake (pending), no edge.
   {
     const r = await runAgentEndCaptureMatrix(
-      "daemon-only-intake-fallback",
+      "daemon-only-effective-fg",
       {
         executionOwner: "daemon",
         enabled: true,
@@ -694,16 +696,19 @@ await check("capture matrix: daemon incomplete gate uses safe fallback, no dual-
         edgeProtocolShadow: { enabled: false },
         autoLlmWriteEnabled: false,
       },
-      "sess-daemon-only-intake-fallback",
+      "sess-daemon-only-effective-fg",
     );
     assert(r.tripleOpen === false, "triple gate off");
-    assert(r.edgeDelta === 0, `daemon-only must not write edge (delta=${r.edgeDelta})`);
-    assert(r.pendingDelta === 1, `daemon-only intake fallback pending delta=1 got=${r.pendingDelta}`);
+    assert(r.sediment._resolveEffectiveExecutionOwnerForTests() === "foreground", "effective owner foreground");
+    assert(r.edgeDelta === 0, `incomplete gate must not write edge (delta=${r.edgeDelta})`);
+    assert(r.pendingDelta === 1, `foreground effective owner intake pending delta=1 got=${r.pendingDelta}`);
   }
-  // 2) daemon + edgeProtocolShadow only → capture-only edge fallback, no intake dual-write.
+  // 2) daemon + edgeProtocolShadow only (capture flag off) → still incomplete triple.
+  // Effective owner = foreground: ordinary edgeProtocolShadow path may write edge
+  // (not daemon continuous pair / forceCaptureOnly bypass), and intake has consumer.
   {
     const r = await runAgentEndCaptureMatrix(
-      "daemon-edge-fallback",
+      "daemon-edge-incomplete-no-bypass",
       {
         executionOwner: "daemon",
         enabled: true,
@@ -711,13 +716,16 @@ await check("capture matrix: daemon incomplete gate uses safe fallback, no dual-
         edgeProtocolShadow: { enabled: true },
         autoLlmWriteEnabled: false,
       },
-      "sess-daemon-edge-fallback",
+      "sess-daemon-edge-incomplete-no-bypass",
     );
     assert(r.tripleOpen === false, "triple gate still off without capture flag");
-    assert(r.edgeDelta >= 1, `edge fallback must write edge records (delta=${r.edgeDelta})`);
-    assert(r.pendingDelta === 0, `edge fallback must not dual-write intake (pending=${r.pendingDelta})`);
+    assert(r.sediment._resolveEffectiveExecutionOwnerForTests() === "foreground", "effective foreground");
+    assert(r.sediment._isDaemonEdgeShadowCaptureEnabledForTests() === false, "daemon continuous pair off");
+    assert(r.pendingDelta === 1, `effective foreground intake pending=1 got=${r.pendingDelta}`);
+    // Ordinary foreground edge is allowed when edgeProtocolShadow.enabled; not a triple-gate bypass.
+    assert(r.edgeDelta >= 0, `edgeDelta=${r.edgeDelta}`);
   }
-  // 3) daemon + capture flag without edge substrate → intake fallback (edge substrate missing).
+  // 3) daemon + capture flag without edge substrate → incomplete; no edge; intake.
   {
     const r = await runAgentEndCaptureMatrix(
       "daemon-capture-flag-no-edge",
@@ -732,7 +740,7 @@ await check("capture matrix: daemon incomplete gate uses safe fallback, no dual-
     );
     assert(r.tripleOpen === false, "triple incomplete");
     assert(r.edgeDelta === 0, "no edge substrate → no edge write");
-    assert(r.pendingDelta === 1, `intake fallback pending=1 got=${r.pendingDelta}`);
+    assert(r.pendingDelta === 1, `effective foreground pending=1 got=${r.pendingDelta}`);
   }
   // 4) both capture paths disabled + sediment disabled → pure diagnostic skip (no dual-write).
   {
@@ -1087,7 +1095,7 @@ await check("strict tsc on producer surface including index.ts", async () => {
     .filter((line) => /extensions\/sediment\/index\.ts\(/.test(line));
   // Producer surface symbols must not appear in error text.
   const producerHits = indexErrors.filter((line) =>
-    /maybeCaptureDaemonEdgeProtocolShadow|resolveDaemonEdgeOwnerRoot|isDaemonEdgeShadowCaptureEnabled|resolveHealthyTerminalAssistant|maybeInitAndRecoverDaemonEdgeShadow|EDGE_ACCEPTED_TERMINAL|captureEdgeProtocolTerminalPair|recoverEdgeProtocolMissingWitnessesForOwner|daemon_capture_disabled|daemon_capture_fallback_edge|daemon_capture_fallback_intake|daemon_edge_owner_root_realpath_failed/.test(line),
+    /maybeCaptureDaemonEdgeProtocolShadow|resolveDaemonEdgeOwnerRoot|isDaemonEdgeShadowCaptureEnabled|resolveEffectiveExecutionOwner|isDaemonTripleGateComplete|resolveHealthyTerminalAssistant|maybeInitAndRecoverDaemonEdgeShadow|EDGE_ACCEPTED_TERMINAL|captureEdgeProtocolTerminalPair|recoverEdgeProtocolMissingWitnessesForOwner|daemon_effective_owner_foreground|daemon_edge_owner_root_realpath_failed/.test(line),
   );
   if (producerHits.length > 0) {
     throw new Error(`tsc producer errors in index.ts:\n${producerHits.join("\n")}`);

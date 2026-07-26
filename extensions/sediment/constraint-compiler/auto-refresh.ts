@@ -982,6 +982,42 @@ function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: n
   arm();
 }
 
+/**
+ * Durable needs_refresh marker only — no timer / LLM arm.
+ * Worker task scope suppresses free-floating compile (timer/LLM) but must still
+ * append the marker so session_start / resumeConstraintShadowAutoRefreshAtStartup
+ * can recover. Shares markerWriteTail serialization with full schedule path.
+ */
+export async function recordConstraintShadowNeedsRefresh(
+  trigger: ConstraintShadowAutoRefreshTrigger,
+): Promise<{ scheduled: boolean; reason: string }> {
+  const live = resolveLiveAutoRefreshTrigger(trigger);
+  if (!live.enabled) return { scheduled: false, reason: live.reason };
+  trigger = live.trigger;
+  const now = Date.now();
+  const modelRef = defaultModelRef(trigger.settings);
+  const markerWrite = (state.markerWriteTail ?? Promise.resolve())
+    .then(() => appendNeedsRefreshMarker(trigger, now, modelRef));
+  state.markerWriteTail = markerWrite.catch(() => undefined);
+  try {
+    await markerWrite;
+  } catch (err) {
+    await appendAuditLineNoThrow(trigger.abrainHome, {
+      schemaVersion: "constraint-shadow-auto-refresh/v1",
+      observedAtUtc: new Date().toISOString(),
+      ok: false,
+      reason: trigger.reason,
+      sourceEventId: trigger.sourceEventId ?? null,
+      sourceEventIds: triggerEventIds(trigger),
+      modelRef,
+      status: "needs_refresh_marker_write_failed",
+      error: errorMessage(err),
+    });
+    return { scheduled: false, reason: "needs_refresh_marker_write_failed" };
+  }
+  return { scheduled: true, reason: "needs_refresh_marker_only" };
+}
+
 export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string }> {
   const live = resolveLiveAutoRefreshTrigger(trigger);
   if (!live.enabled) return { scheduled: false, reason: live.reason };
@@ -997,6 +1033,7 @@ export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintSha
   const pending = state.pending;
   const now = Date.now();
   const modelRef = defaultModelRef(pending.settings);
+  // Production path reuses the same durable marker API as worker marker-only.
   const markerWrite = (state.markerWriteTail ?? Promise.resolve())
     .then(() => appendNeedsRefreshMarker(pending, now, modelRef));
   state.markerWriteTail = markerWrite.catch(() => undefined);

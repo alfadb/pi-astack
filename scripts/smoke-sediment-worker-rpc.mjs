@@ -467,7 +467,8 @@ await check("success receipt only when CP advanced + settled; idempotent", async
   assert(r1.settled === true, "r1 settled");
   assert(r1.retryable === false, "r1 not retryable");
   assert(deps._passCount() === 1, "pipeline once");
-  assert(drained === 1, "publication drain on success");
+  assert(r1.publication_pending === true, "publication_pending observable after receipt");
+  assert(drained === 0, "no in-task publication drain after receipt");
 
   const r2 = await worker.runSedimentWorkerTask(JSON.stringify({
     ...m,
@@ -476,7 +477,7 @@ await check("success receipt only when CP advanced + settled; idempotent", async
   assert(r2.status === "already_processed", `r2 status=${r2.status}`);
   assert(r2.settled === true, "r2 settled");
   assert(deps._passCount() === 1, "pipeline must not re-run");
-  assert(drained === 1, "no re-drain on already_processed");
+  assert(drained === 0, "no drain on already_processed either");
 });
 
 await check("no-progress (void pass) => no receipt, retryable", async () => {
@@ -2265,7 +2266,7 @@ await check("more-loop partial CP then settled stage_deadline is retryable no po
   assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
 });
 
-await check("H1: durable receipt on unreaped deadline → settled success, no poison", async () => {
+await check("H1: durable receipt settles success without in-task publication drain", async () => {
   resetWorkerBudgetTestState();
   const term = hex64("term-receipt-unreaped");
   const messages = [{ role: "user", content: "receipt-unreaped" }];
@@ -2284,48 +2285,43 @@ await check("H1: durable receipt on unreaped deadline → settled success, no po
   const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
   const tipId = branch[branch.length - 1].id;
 
-  let t = 3_000_000;
   const store = new Map();
   let drainCalls = 0;
   const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
     resolveAbrainHome: () => abrainHome,
     resolveExecutionOwner: () => "daemon",
-    clock: () => t,
     loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
     drainKnowledgePublicationOutbox: async () => {
       drainCalls += 1;
-      // Hang after receipt would be written — publication must not unbounded-block.
-      t = 3_000_000 + 60_000;
-      await new Promise(() => {});
+      await new Promise(() => {}); // would hang if called
     },
     runAgentEndPass: async (snapshot) => {
       store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: tipId });
     },
     env: process.env,
   });
-  // Receipt is durable before drain hang; deadline outcome must settle success.
-  assert(
-    r.status === "processed" || r.status === "already_processed",
-    `status=${r.status} code=${r.error_code}`,
-  );
-  assert(r.settled === true, "settled success when receipt durable");
+  assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+  assert(r.settled === true, "settled success");
   assert(r.retryable === false, "settled not retryable");
-  assert(r.error_code !== "deadline_after_checkpoint_advanced", "must not fatal coversTip poison");
-  assert(r.error_code !== "pass_deadline_exceeded_unreaped", "must not unreaped poison with receipt");
-  assert(r.restart_child !== true, "no restart_child when receipt durable");
+  assert(r.publication_pending === true, "publication_pending observable");
+  assert(r.restart_child !== true, "no restart_child");
   assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt durable");
-  assert(worker.isWorkerProcessPoisoned() === false, "must not poison after durable receipt");
-  assert(drainCalls === 1, "drain attempted once under budget race");
+  assert(worker.isWorkerProcessPoisoned() === false, "must not poison");
+  assert(drainCalls === 0, "must not call in-task publication drain");
 });
 
-await check("H1: publication drain is budget-bounded (source contract)", async () => {
+await check("H1: no in-task publication drain; receipt verifyCreated; deadline rechecks receipt (source)", async () => {
   const src = fs.readFileSync(path.join(root, "extensions/sediment/worker-rpc.ts"), "utf8");
-  assert(src.includes("drainBudgetMs"), "drain budget clamp present");
-  assert(src.includes("absoluteDeadlineMs - clock()"), "hard remaining used for drain");
+  assert(src.includes("publication_pending: true"), "result stamps publication_pending");
+  assert(src.includes("Do NOT drain publication in-task"), "in-task drain removed");
+  assert(!src.includes("drainBudgetMs"), "no drainBudgetMs race");
+  assert(src.includes("verifyCreated: true"), "processed receipt verifyCreated=true");
   assert(src.includes("readProcessedReceipt(abrainHome, ids.terminal_record_id)"), "deadline outcome checks receipt");
+  assert(src.includes("Signal-only: no infinite poll timer") || src.includes("signal-only"),
+    "waitPrev signal-only contract documented");
 });
 
-await check("M4: deterministic no_progress codes are non-retryable", async () => {
+await check("M4: deterministic no_progress codes are non-retryable when never advanced", async () => {
   resetWorkerBudgetTestState();
   for (const code of ["project_not_bound", "settings_disabled", "empty_window", "ephemeral_session"]) {
     const term = hex64(`term-det-${code}`);
@@ -2357,6 +2353,65 @@ await check("M4: deterministic no_progress codes are non-retryable", async () =>
   }
   assert(worker.isDeterministicNoProgressCode("project_not_bound") === true, "classifier export");
   assert(worker.isDeterministicNoProgressCode("no_progress") === false, "plain no_progress not deterministic");
+});
+
+await check("M4: advance then empty_window writes processed receipt (redrive-safe)", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-advance-empty");
+  const messages = [{ role: "user", content: "advance-then-empty" }];
+  const m = baseManifest({
+    request_id: hex64("req-advance-empty"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+  const store = new Map();
+  let passN = 0;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      passN += 1;
+      if (passN === 1) {
+        store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: tipId });
+        return { more: true };
+      }
+      // Second iteration: empty_window after prior advance — must settle with receipt.
+      return { no_progress: true, code: "empty_window", retryable: false };
+    },
+    env: process.env,
+  });
+  assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+  assert(r.settled === true, "settled after advance+empty_window");
+  assert(r.retryable === false, "not retryable");
+  assert(r.publication_pending === true, "publication_pending");
+  assert(passN === 2, `pass iterations=${passN}`);
+  assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt durable");
+
+  // Redrive: already_processed, no re-run of pipeline progress loss.
+  const r2 = await worker.runSedimentWorkerTask(JSON.stringify({
+    ...m,
+    request_id: hex64("req-advance-empty-2"),
+  }), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async () => {
+      throw new Error("must not re-run after receipt");
+    },
+    env: process.env,
+  });
+  assert(r2.status === "already_processed", `redrive status=${r2.status}`);
+  assert(r2.settled === true, "redrive settled");
 });
 
 await check("L5: poison root cause sticky across subsequent refuses", async () => {
@@ -2427,45 +2482,99 @@ await check("L5: poison root cause sticky across subsequent refuses", async () =
   }
 });
 
-await check("H2: worker budget ALS clamps canonical startup (source + unit)", async () => {
+await check("H2: process-level startup outside worker ALS; task defers immediately", async () => {
   resetWorkerBudgetTestState();
   const budgetMod = await jiti.import(path.join(root, "extensions/_shared/worker-budget-context.ts"));
   const runtimeSrc = fs.readFileSync(path.join(root, "extensions/_shared/canonical-git-runtime.ts"), "utf8");
-  assert(runtimeSrc.includes("clampStartupBudgetToWorker"), "startup clamps to worker budget");
-  assert(runtimeSrc.includes("workerBudgetStartupDeferredDiag"), "cooperative deferred under worker budget");
-  assert(typeof budgetMod.clampStartupBudgetToWorker === "function", "clamp helper export");
+  assert(runtimeSrc.includes("runOutsideWorkerBudget"), "startup kicks outside worker ALS");
+  assert(runtimeSrc.includes("workerBudgetStartupDeferredDiag"), "cooperative deferred");
+  assert(runtimeSrc.includes("queueMicrotask"), "non-blocking ready probe");
   assert(typeof budgetMod.runOutsideWorkerBudget === "function", "runOutsideWorkerBudget export");
 
-  // Unit: clamp returns remaining under ALS; outside ALS unchanged.
-  assert(budgetMod.clampStartupBudgetToWorker(3_600_000) === 3_600_000, "outside ALS unchanged");
-  const clamped = await budgetMod.runWithWorkerBudget(
-    { deadlineMs: Date.now() + 1_500, now: () => Date.now() },
-    () => budgetMod.clampStartupBudgetToWorker(3_600_000),
-  );
-  assert(clamped <= 1_500 && clamped >= 0, `clamped=${clamped}`);
-
-  // getCanonicalStartupPromise under expired worker budget returns deferred immediately.
+  // getCanonicalStartupPromise under worker budget returns deferred quickly (no 60m wait).
   const runtime = await jiti.import(path.join(root, "extensions/_shared/canonical-git-runtime.ts"));
+  const t0 = Date.now();
   const diag = await budgetMod.runWithWorkerBudget(
-    { deadlineMs: Date.now() - 1, now: () => Date.now() },
+    { deadlineMs: Date.now() + 60_000, now: () => Date.now() },
     () => runtime.getCanonicalStartupPromise({ abrainHome }),
   );
-  assert(diag.startup === "deferred", `startup=${diag.startup}`);
-  assert(diag.deferredReason === "STARTUP_BUDGET_EXHAUSTED" || /STARTUP_BUDGET_EXHAUSTED/.test(String(diag.blockedReason || "")),
-    `deferred reason=${diag.deferredReason} blocked=${diag.blockedReason}`);
-  assert(diag.retryable === true, "deferred retryable for later generation");
+  const elapsed = Date.now() - t0;
+  assert(elapsed < 2_000, `task must not wait for cold startup (elapsed=${elapsed}ms)`);
+  assert(diag.startup === "deferred" || diag.startup === "ready", `startup=${diag.startup}`);
+  if (diag.startup === "deferred") {
+    assert(diag.deferredReason === "STARTUP_BUDGET_EXHAUSTED" || /STARTUP_BUDGET_EXHAUSTED/.test(String(diag.blockedReason || "")),
+      `deferred reason=${diag.deferredReason} blocked=${diag.blockedReason}`);
+    assert(diag.retryable === true, "deferred retryable for later generation");
+  }
+
+  // Multi-generation: second short observation still returns quickly; process attempt may progress.
+  const t1 = Date.now();
+  const diag2 = await budgetMod.runWithWorkerBudget(
+    { deadlineMs: Date.now() + 60_000, now: () => Date.now() },
+    () => runtime.getCanonicalStartupPromise({ abrainHome }),
+  );
+  assert(Date.now() - t1 < 2_000, "generation-2 also returns quickly");
+  assert(diag2.startup === "deferred" || diag2.startup === "ready", `gen2 startup=${diag2.startup}`);
 });
 
-await check("M2/M3: free-floating worker work exits budget / is suppressed (source)", async () => {
+await check("M2/M3: worker suppresses timer/LLM but durable needs_refresh marker", async () => {
   const indexSrc = fs.readFileSync(path.join(root, "extensions/sediment/index.ts"), "utf8");
   const writerSrc = fs.readFileSync(path.join(root, "extensions/sediment/writer.ts"), "utf8");
   const autoSrc = fs.readFileSync(path.join(root, "extensions/sediment/constraint-compiler/auto-refresh.ts"), "utf8");
   assert(indexSrc.includes("taskScopedAutoWrite"), "taskScopedAutoWrite present");
+  assert(indexSrc.includes("recordConstraintShadowNeedsRefresh"), "worker uses marker-only API");
   assert(indexSrc.includes("free-floating republish"), "republish suppressed under worker");
-  assert(indexSrc.includes("free-floating"), "free-floating worker work gated");
   assert(writerSrc.includes("free-floating push"), "writer push suppressed under worker budget");
-  assert(autoSrc.includes("unref"), "auto-refresh timer unref");
+  assert(autoSrc.includes("recordConstraintShadowNeedsRefresh"), "marker-only export");
+  assert(autoSrc.includes("needs_refresh_marker_only"), "marker-only reason");
   assert(autoSrc.includes("runOutsideWorkerBudget"), "auto-refresh exits budget ALS");
+
+  // Behavior: marker-only path is recoverable by session startup resume.
+  const auto = await jiti.import(path.join(root, "extensions/sediment/constraint-compiler/auto-refresh.ts"));
+  auto._resetConstraintShadowAutoRefreshForTests();
+  const settings = {
+    constraintShadowCompiler: {
+      enabled: true,
+      autoRefresh: { enabled: true, debounceMs: 60_000, minIntervalMs: 60_000, eventStaleAfterMs: 0, maxPromptChars: 0 },
+      model: "test/provider",
+      l2OutputRoot: "state",
+    },
+  };
+  auto._setConstraintShadowSettingsResolverForTests(() => settings);
+  const eventId = hex64("needs-refresh-event");
+  const recorded = await auto.recordConstraintShadowNeedsRefresh({
+    abrainHome,
+    cwd: projectRoot,
+    settings,
+    reason: "constraint_evidence_event_appended",
+    sourceEventId: eventId,
+  });
+  assert(recorded.scheduled === true, `recorded=${JSON.stringify(recorded)}`);
+  assert(recorded.reason === "needs_refresh_marker_only", `reason=${recorded.reason}`);
+  const markerPath = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "auto-refresh", "needs-refresh.jsonl");
+  assert(fs.existsSync(markerPath), "durable needs_refresh marker must exist");
+  const markerBody = fs.readFileSync(markerPath, "utf8");
+  assert(markerBody.includes(eventId), "marker contains source event");
+
+  // Resume at session startup should see the marker (may schedule or report durability).
+  const resumed = await auto.resumeConstraintShadowAutoRefreshAtStartup({
+    abrainHome,
+    cwd: projectRoot,
+    settings,
+    reason: "session_start",
+  });
+  assert(resumed.reason !== "needs_refresh_marker_missing", `resume must find marker (got ${resumed.reason})`);
+  auto._setConstraintShadowSettingsResolverForTests(undefined);
+  auto._resetConstraintShadowAutoRefreshForTests();
+});
+
+await check("waitPrev signal-only has no poll timer (source)", async () => {
+  const src = fs.readFileSync(path.join(root, "extensions/sediment/worker-rpc.ts"), "utf8");
+  assert(src.includes("Signal-only: no infinite poll timer") || src.includes("no poll timer"),
+    "signal-only branch present");
+  // Signal-only path uses addEventListener abort, not schedule() for the no-deadline case.
+  assert(/deadlineMs === undefined && opts\?\.signal/.test(src) || /deadlineMs === undefined && opts\.signal/.test(src),
+    "signal-only branch condition");
 });
 
 console.log(`\n${passed} checks passed`);

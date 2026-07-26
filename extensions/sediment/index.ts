@@ -118,7 +118,7 @@ import {
   peekOldestTier1HeldDecision,
   type Tier1HeldAuthorizedDecision,
 } from "./tier1-held-decision";
-import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
+import { ensureConstraintShadowLiveness, readConstraintPublicationDurability, recordConstraintShadowNeedsRefresh, resumeConstraintShadowAutoRefreshAtStartup, scheduleConstraintShadowAutoRefresh, type ConstraintPublicationDurability } from "./constraint-compiler/auto-refresh";
 import { verifyPiInternals, _resetWarnedApisForTests, isSubAgentSession, isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
@@ -737,9 +737,10 @@ function enqueueSedimentIntakeRecord(args: {
   fromRecovery: boolean;
   reason: string;
 }): void {
-  // ADR 0045: daemon execution owner keeps durable capture but does not
-  // enqueue the normal sediment pass (worker is the sole executor).
-  if (resolveSedimentSettings().executionOwner === "daemon") return;
+  // ADR 0045: effective daemon owner does not enqueue ordinary pass (worker is
+  // sole executor). Incomplete triple gate degrades to foreground effective
+  // owner so local intake still has a consumer (no orphan).
+  if (resolveEffectiveExecutionOwner() === "daemon") return;
   const abrainHome = resolveAbrainHomeForSediment();
   const diagnostic = diagnosticSnapshotFromIntake(args.record, args.modelRegistry);
   enqueueDetachedAgentEnd({
@@ -810,8 +811,9 @@ async function schedulePendingIntakeRecovery(opts: {
 }): Promise<number> {
   const recoverySettings = resolveSedimentSettings();
   if (!recoverySettings.enabled) return 0;
-  // ADR 0045: daemon owner does not schedule ordinary recovery passes.
-  if (recoverySettings.executionOwner === "daemon") return 0;
+  // ADR 0045: effective daemon owner does not schedule ordinary recovery passes.
+  // Incomplete triple gate → foreground effective owner (recovery still runs).
+  if (resolveEffectiveExecutionOwner(recoverySettings) === "daemon") return 0;
   const abrainHome = resolveAbrainHomeForSediment();
   const ownerProjectRoot = path.resolve(opts.ownerProjectRoot);
   // Ownership is physical root equality only. Same project_id with different
@@ -1008,12 +1010,30 @@ const EDGE_ACCEPTED_TERMINAL_STOP_REASONS = new Set(["stop", "length"]);
  * Triple gate: executionOwner=daemon && edgeProtocolShadow.enabled &&
  * daemonWorker.edgeShadowCaptureEnabled. Worker mode never producer-captures.
  */
-function isDaemonEdgeShadowCaptureEnabled(settings?: SedimentSettings): boolean {
+function isDaemonTripleGateComplete(settings?: SedimentSettings): boolean {
   const s = settings ?? resolveSedimentSettings();
   return s.executionOwner === "daemon"
     && s.edgeProtocolShadow.enabled === true
-    && s.daemonWorker.edgeShadowCaptureEnabled === true
-    && !isSedimentWorkerMode();
+    && s.daemonWorker.edgeShadowCaptureEnabled === true;
+}
+
+/**
+ * Effective execution owner for this process.
+ * Configured daemon + incomplete triple gate → fail-safe degrade to foreground
+ * so local intake still has a consumer (no orphan pending, no dual primary with
+ * an incomplete edge producer). Full triple gate → daemon (edge capture; worker
+ * evaluates). Never bypasses triple gate for edge capture.
+ */
+function resolveEffectiveExecutionOwner(settings?: SedimentSettings): "foreground" | "daemon" {
+  const s = settings ?? resolveSedimentSettings();
+  if (s.executionOwner !== "daemon") return "foreground";
+  if (!isDaemonTripleGateComplete(s)) return "foreground";
+  return "daemon";
+}
+
+function isDaemonEdgeShadowCaptureEnabled(settings?: SedimentSettings): boolean {
+  const s = settings ?? resolveSedimentSettings();
+  return isDaemonTripleGateComplete(s) && !isSedimentWorkerMode();
 }
 
 /** Last real assistant message with accepted terminal stopReason, or skip code. */
@@ -1073,23 +1093,10 @@ async function maybeCaptureDaemonEdgeProtocolShadow(args: {
   event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> };
   /** Capture coordinates from live SessionManager + anchor (not intake persistence). */
   record: SedimentIntakeRecord;
-  /**
-   * Capture-gap safe fallback: allow capture-only when edge substrate is on
-   * even if edgeShadowCaptureEnabled is incomplete (still requires
-   * executionOwner=daemon + edgeProtocolShadow.enabled; never worker mode).
-   */
-  forceCaptureOnly?: boolean;
 }): Promise<void> {
+  // Never bypass triple gate. Incomplete gate uses effective-owner foreground path.
   const settings = resolveSedimentSettings();
-  if (args.forceCaptureOnly) {
-    if (
-      settings.executionOwner !== "daemon"
-      || settings.edgeProtocolShadow.enabled !== true
-      || isSedimentWorkerMode()
-    ) {
-      return;
-    }
-  } else if (!isDaemonEdgeShadowCaptureEnabled(settings)) {
+  if (!isDaemonEdgeShadowCaptureEnabled(settings)) {
     return;
   }
 
@@ -7033,9 +7040,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       resolveExecutionOwner: () => resolveSedimentSettings().executionOwner,
       loadSessionCheckpoint: (projectRoot, sessionId) =>
         loadSessionCheckpointRaw(projectRoot, sessionId),
-      drainKnowledgePublicationOutbox: async (abrainHome) => {
-        await scheduleKnowledgePublicationOutboxDrain(abrainHome, resolveSedimentSettings());
-      },
+      // Publication is durable-outbox only; worker task does not drain in-task.
+      // Independent maintenance / session_start owns publication drain.
     });
     return;
   }
@@ -7092,10 +7098,31 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const edgeEnabled = agentEndSettings.edgeProtocolShadow.enabled === true;
       const sedimentEnabled = agentEndSettings.enabled === true;
 
-      // ADR 0045 daemon path: never ordinary enqueue/pass. Continuous pair when
-      // triple gate fully open. Incomplete gate uses explicit safe fallback so
-      // the turn is not silently dropped (capture gap). Capture is NOT knowledge ack.
-      if (agentEndSettings.executionOwner === "daemon") {
+      // ADR 0045 effective owner:
+      // - Full triple gate → daemon path: edge capture only, never ordinary intake/enqueue.
+      // - Configured daemon + incomplete triple gate → fail-safe degrade to foreground
+      //   effective owner (local intake still has consumer). Audit/diagnostic. No orphan,
+      //   no dual semantic primary, never bypass triple gate for edge capture.
+      const effectiveOwner = resolveEffectiveExecutionOwner(agentEndSettings);
+      if (
+        agentEndSettings.executionOwner === "daemon"
+        && effectiveOwner === "foreground"
+      ) {
+        const liveSessionId = readSessionId(liveCtx.sessionManager);
+        emitEdgeShadowAggregateOnce("daemon_effective_owner_foreground");
+        void appendAudit(path.resolve(liveCtx.cwd || process.cwd()), {
+          operation: "skip",
+          lane: "system",
+          reason: "daemon_effective_owner_foreground",
+          session_id: liveSessionId,
+          configured_execution_owner: "daemon",
+          effective_execution_owner: "foreground",
+          triple_gate_complete: false,
+          checkpoint_advanced: false,
+          background_async: false,
+        }).catch(() => {});
+        // Fall through to ordinary foreground intake→enqueue path below.
+      } else if (effectiveOwner === "daemon") {
         const liveSessionId = readSessionId(liveCtx.sessionManager);
         bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
           bumpEpoch: currentForegroundSessionId() !== liveSessionId,
@@ -7104,69 +7131,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         const capture = captureSedimentAgentEndIntake(event, liveCtx);
         if (!capture) return;
         const { record } = capture;
-        if (isDaemonEdgeShadowCaptureEnabled(agentEndSettings)) {
-          await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
-          return;
-        }
-        // Incomplete triple gate — safe fallback (no dual-write with full gate):
-        // 1) edgeProtocolShadow.enabled → capture-only edge (daemon-consumable)
-        // 2) else sediment.enabled → durable local intake WITHOUT enqueue/pass
-        // 3) else diagnostic skip (nothing consumable)
-        if (agentEndSettings.edgeProtocolShadow.enabled === true) {
-          await maybeCaptureDaemonEdgeProtocolShadow({ event, record, forceCaptureOnly: true });
-          emitEdgeShadowAggregateOnce("daemon_capture_fallback_edge");
-          void appendAudit(record.cwd, {
-            operation: "skip",
-            lane: "system",
-            reason: "daemon_capture_fallback_edge",
-            session_id: record.sessionId,
-            checkpoint_advanced: false,
-            background_async: false,
-          }).catch(() => {});
-          return;
-        }
-        if (agentEndSettings.enabled === true) {
-          try {
-            const abrainHome = resolveAbrainHomeForSediment();
-            const written = await writeSedimentIntakeRecord(abrainHome, record);
-            if (written.status === "collision") {
-              throw new Error(`intake identity collision: ${written.windowId}`);
-            }
-            // Durable semantic primary only — do NOT enqueue/pass under daemon ownership.
-            void appendAudit(record.cwd, {
-              operation: "skip",
-              lane: "system",
-              reason: "daemon_capture_fallback_intake",
-              session_id: record.sessionId,
-              intake_window_id: record.windowId,
-              intake_status: written.status,
-              intake_write_ms: written.durationMs,
-              checkpoint_advanced: false,
-              background_async: false,
-            }).catch(() => {});
-          } catch (err) {
-            const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
-            void appendAudit(record.cwd, {
-              operation: "skip",
-              lane: "system",
-              reason: "daemon_capture_fallback_intake_failed",
-              session_id: record.sessionId,
-              error,
-              checkpoint_advanced: false,
-              background_async: false,
-            }).catch(() => {});
-          }
-          return;
-        }
-        emitEdgeShadowAggregateOnce("daemon_capture_disabled");
-        void appendAudit(record.cwd, {
-          operation: "skip",
-          lane: "system",
-          reason: "daemon_capture_disabled",
-          session_id: record.sessionId,
-          checkpoint_advanced: false,
-          background_async: false,
-        }).catch(() => {});
+        await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
         return;
       }
 
@@ -7332,17 +7297,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
     ) => {
       const settledSettings = resolveSedimentSettings();
       if (settledSettings.edgeProtocolShadow.enabled !== true) return;
-      // Daemon continuous pair (full triple gate OR capture-gap edge fallback)
-      // already owns witness under agent_end — do not append a second witness
-      // (public writeEdgeTerminalWitness is multi-append).
-      if (
-        isDaemonEdgeShadowCaptureEnabled(settledSettings)
-        || (
-          settledSettings.executionOwner === "daemon"
-          && settledSettings.edgeProtocolShadow.enabled === true
-          && !isSedimentWorkerMode()
-        )
-      ) {
+      // Full triple gate continuous pair already owns witness under agent_end —
+      // do not append a second witness (public writeEdgeTerminalWitness is multi-append).
+      // Incomplete triple degrades to foreground effective owner (no edge pair).
+      if (isDaemonEdgeShadowCaptureEnabled(settledSettings)) {
         return;
       }
       if (isSubAgentBoundaryUntrusted()) return;
@@ -8043,20 +8001,21 @@ async function tryAutoWriteLane(args: {
             constraintEvidenceEvent.append.eventId ?? null,
           );
           if (!constraintPublicationDurability.durable) {
-            // M2/M3: worker task scope keeps durable CE only — no free-floating
-            // auto-refresh timer that would inherit expired budget ALS.
-            if (!taskScopedAutoWrite) {
-              constraintAutoRefreshSchedule = await scheduleConstraintShadowAutoRefresh({
-                abrainHome,
-                cwd,
-                activeProjectId: projectId,
-                knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
-                settings,
-                modelRegistry: args.modelRegistry,
-                reason: "constraint_evidence_event_appended",
-                sourceEventId: constraintEvidenceEvent.append.eventId,
-              });
-            }
+            // M2/M3: worker task scope suppresses timer/LLM only — must still
+            // durable-append needs_refresh marker so session_start can resume.
+            const autoRefreshTrigger = {
+              abrainHome,
+              cwd,
+              activeProjectId: projectId,
+              knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
+              settings,
+              modelRegistry: args.modelRegistry,
+              reason: "constraint_evidence_event_appended" as const,
+              sourceEventId: constraintEvidenceEvent.append.eventId,
+            };
+            constraintAutoRefreshSchedule = taskScopedAutoWrite
+              ? await recordConstraintShadowNeedsRefresh(autoRefreshTrigger)
+              : await scheduleConstraintShadowAutoRefresh(autoRefreshTrigger);
           }
         } else {
           constraintEvidenceAppendError = constraintEvidenceEvent.append.status;
@@ -9339,6 +9298,20 @@ export function _isDaemonEdgeShadowCaptureEnabledForTests(): boolean {
     throw new Error("_isDaemonEdgeShadowCaptureEnabledForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
   }
   return isDaemonEdgeShadowCaptureEnabled();
+}
+
+export function _resolveEffectiveExecutionOwnerForTests(): "foreground" | "daemon" {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_resolveEffectiveExecutionOwnerForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return resolveEffectiveExecutionOwner();
+}
+
+export function _isDaemonTripleGateCompleteForTests(): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_isDaemonTripleGateCompleteForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return isDaemonTripleGateComplete();
 }
 
 /** Test-only: fail-closed realpath owner root resolver. */

@@ -65,6 +65,7 @@ import { sha256Hex } from "./jcs";
 import {
   clampStartupBudgetToWorker,
   getWorkerBudgetContext,
+  runOutsideWorkerBudget,
 } from "./worker-budget-context";
 
 const execFileAsync = promisify(execFile);
@@ -2869,34 +2870,51 @@ function getCanonicalStartupAttempt(options: CanonicalGitRuntimeOptions): {
 
 /** Return the one process-global in-flight/successful startup promise for this
  * runtime. Rejections are evicted so a repaired repo can retry in-process.
- * Under worker budget ALS: race remaining soft deadline so a cold scan cannot
- * pin the short-lived worker for the 60m default (H2). Exhaustion yields a
- * cooperative deferred diagnostic; same-process later generations can retry.
- * Does not hard-kill in-flight mutation. */
+ *
+ * Canonical ownership under daemon worker tasks:
+ * - Process-level startup attempt is created/retried **outside** worker-budget ALS
+ *   (`runOutsideWorkerBudget`) so cold scan uses the full configured busy budget
+ *   and is not bound to a short task deadline / task ALS.
+ * - RPC tasks never wait 60m for startup. If process-level startup is not already
+ *   ready, return cooperative deferred immediately (retryable/held, no poison).
+ * - Each external task best-effort kicks the next generation; bootstrap continues
+ *   for the worker process lifetime. Does not hard-kill in-flight mutation.
+ * - Worker shutdown/restart drops in-memory attempt; a new process re-bootstraps.
+ */
 export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
-  const attempt = getCanonicalStartupAttempt(options);
   const budget = getWorkerBudgetContext();
-  if (!budget) return attempt.promise;
-  const now = budget.now ?? Date.now;
-  const rem = Math.max(0, budget.deadlineMs - now());
-  if (rem <= 0) {
-    return Promise.resolve(workerBudgetStartupDeferredDiag(options, 0));
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<CanonicalRuntimeDiagnostics>((resolve) => {
-    timer = setTimeout(() => {
-      resolve(workerBudgetStartupDeferredDiag(options, rem));
-    }, rem);
-    (timer as { unref?: () => void }).unref?.();
-  });
-  return Promise.race([attempt.promise, timeout]).finally(() => {
-    if (timer !== undefined) clearTimeout(timer);
+  if (!budget) return getCanonicalStartupAttempt(options).promise;
+
+  // Kick / observe process-level attempt outside task ALS (full busy budget).
+  const attempt = runOutsideWorkerBudget(() => getCanonicalStartupAttempt(options));
+
+  // Non-blocking readiness: if already fulfilled as ready on the current
+  // microtask queue, return it; otherwise cooperative-defer immediately so the
+  // short task can held/retry without waiting for cold start.
+  return new Promise<CanonicalRuntimeDiagnostics>((resolve) => {
+    let settled = false;
+    const finish = (diag: CanonicalRuntimeDiagnostics) => {
+      if (settled) return;
+      settled = true;
+      resolve(diag);
+    };
+    void attempt.promise.then(
+      (diag) => {
+        if (diag.startup === "ready") finish(diag);
+        else finish(workerBudgetStartupDeferredDiag(options, attempt.generation));
+      },
+      () => finish(workerBudgetStartupDeferredDiag(options, attempt.generation)),
+    );
+    // Attach after .then so an already-fulfilled ready promise wins the microtask queue.
+    queueMicrotask(() => {
+      finish(workerBudgetStartupDeferredDiag(options, attempt.generation));
+    });
   });
 }
 
 function workerBudgetStartupDeferredDiag(
   options: CanonicalGitRuntimeOptions,
-  observedBudgetMs: number,
+  generation: number = 0,
 ): CanonicalRuntimeDiagnostics {
   const repo = path.resolve(options.abrainHome);
   const settings = resolveCanonicalGitRuntimeSettings(options.settingsPath);
@@ -2904,12 +2922,14 @@ function workerBudgetStartupDeferredDiag(
     apiVersion: API_VERSION,
     repo,
     settings,
-    startupGeneration: 0,
+    startupGeneration: generation,
     startup: "deferred" as const,
     retryable: true as const,
     deferredReason: "STARTUP_BUDGET_EXHAUSTED" as const,
     blockedReason:
-      `STARTUP_BUDGET_EXHAUSTED: worker budget deferred startup after ${Math.floor(observedBudgetMs)}ms; retry requires an external lifecycle trigger`,
+      "STARTUP_BUDGET_EXHAUSTED: worker task observed process-level startup not-ready; "
+      + "task returns held/retryable without waiting. Process bootstrap continues outside task ALS; "
+      + "next external task may observe ready generation or re-kick.",
     loadedProvenance: Object.freeze([] as CanonicalRuntimeDiagnostics["loadedProvenance"]),
     implementationFingerprint: peekGlobalState()?.implementationFingerprint ?? "worker-budget-deferred",
     tail: Object.freeze([] as CanonicalRuntimeDiagnostics["tail"]),

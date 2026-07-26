@@ -251,6 +251,11 @@ export interface SedimentWorkerResult {
    * must rebuild the Pi child. Backward-compatible optional field (old daemons ignore).
    */
   restart_child?: boolean;
+  /**
+   * Settled success left durable knowledge publication outbox pending.
+   * Worker task does NOT drain publication in-task; independent maintenance owns it.
+   */
+  publication_pending?: boolean;
 }
 
 /** Worker-only runtime opts injected into runSedimentAgentEndPass. */
@@ -330,8 +335,9 @@ export interface SedimentWorkerCommandDeps {
   /** Must be "daemon" for worker to execute; otherwise execution_owner_not_daemon. */
   resolveExecutionOwner: () => "foreground" | "daemon";
   /**
-   * After settled processed success, drain knowledge publication outbox once.
-   * Worker cannot wait for foreground session_start.
+   * @deprecated Worker tasks no longer drain publication in-task (durable outbox
+   * + independent maintenance only). Kept optional for call-site compatibility;
+   * ignored by the handler after success receipt.
    */
   drainKnowledgePublicationOutbox?: (abrainHome: string) => Promise<void> | void;
   /** Optional model registry from the worker process (usually undefined). */
@@ -1236,7 +1242,8 @@ async function writeProcessedReceipt(
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const file = sedimentWorkerReceiptPath(abrainHome, receipt.terminal_record_id);
   const body = `${JSON.stringify(receipt)}\n`;
-  const status = await durableAtomicCreateFile(file, body, { mode: 0o600, verifyCreated: false });
+  // verifyCreated=true: fail closed on create/read-back mismatch (no silent corrupt receipt).
+  const status = await durableAtomicCreateFile(file, body, { mode: 0o600, verifyCreated: true });
   await fsyncDirectory(dir).catch(() => undefined);
   return status;
 }
@@ -1408,9 +1415,11 @@ function throwIfWorkerDeadline(opts?: {
 }
 
 /**
- * Wait for previous serial gate with a single timer/race loop.
- * Does not append per-slice `.then` handlers on `prev` (one safePrev attach).
- * Fence sleep ≤1s and test-injectable via `_setWorkerFenceSliceMsForTests`.
+ * Wait for previous serial gate.
+ * - No deadline + no signal: plain await.
+ * - Signal-only: event-driven (prev settle OR abort) — **no poll timer**.
+ * - Deadline present: single timer/race fence (slice ≤1s, test-injectable);
+ *   does not append per-slice `.then` handlers on `prev` (one safePrev attach).
  */
 async function waitPrevWithDeadline(
   prev: Promise<unknown>,
@@ -1421,7 +1430,39 @@ async function waitPrevWithDeadline(
     await safePrev;
     return;
   }
-  const now = opts.now ?? Date.now;
+
+  // Signal-only: no infinite poll timer — wait for prev or abort event.
+  if (opts?.deadlineMs === undefined && opts?.signal) {
+    if (opts.signal.aborted) {
+      throw new WorkerDeadlineError(
+        "global_serial_deadline",
+        "aborted while waiting for global serial",
+      );
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finishOk = () => {
+        if (settled) return;
+        settled = true;
+        opts.signal!.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        opts.signal!.removeEventListener("abort", onAbort);
+        reject(new WorkerDeadlineError(
+          "global_serial_deadline",
+          "aborted while waiting for global serial",
+        ));
+      };
+      void safePrev.then(finishOk, finishOk);
+      opts.signal!.addEventListener("abort", onAbort, { once: true });
+    });
+    return;
+  }
+
+  const now = opts!.now ?? Date.now;
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
@@ -1855,11 +1896,12 @@ export async function runSedimentWorkerTask(
                 lastKnownAdvanced = true;
               }
               // Explicit pass classification (M4): deterministic vs retryable no_progress.
-              if (
-                passResult
+              // no_progress may fail-without-receipt ONLY when this task never advanced CP.
+              // If anyAdvanced (e.g. advance then empty_window), write processed receipt.
+              const classifiedNoProgress = !!(passResult
                 && typeof passResult === "object"
-                && (passResult as { no_progress?: unknown }).no_progress === true
-              ) {
+                && (passResult as { no_progress?: unknown }).no_progress === true);
+              if (classifiedNoProgress && !anyAdvanced) {
                 const classified = passResult as {
                   no_progress: true;
                   code: string;
@@ -1873,7 +1915,8 @@ export async function runSedimentWorkerTask(
                 progress("pass", "end");
                 return failResult(ids, code, { retryable, pass_iterations: iterations });
               }
-              lastMore = !!(passResult && typeof passResult === "object" && (passResult as { more?: unknown }).more === true);
+              lastMore = !classifiedNoProgress
+                && !!(passResult && typeof passResult === "object" && (passResult as { more?: unknown }).more === true);
               progress("pass", "end");
 
               if (lastMore) {
@@ -1885,7 +1928,7 @@ export async function runSedimentWorkerTask(
                 continue;
               }
 
-              // more=false terminal for this task attempt.
+              // more=false (or classified no_progress after prior advance) terminal.
               if (!anyAdvanced && !advanced) {
                 // Void return without classification remains retryable no_progress
                 // (transient / unknown soft skip). Deterministic codes must be
@@ -1916,23 +1959,37 @@ export async function runSedimentWorkerTask(
                   return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
                 }
                 const writeBudgetMs = Math.min(SEDIMENT_WORKER_CLEANUP_RESERVE_MS, hardRem);
-                writeStatus = await Promise.race([
-                  writeProcessedReceipt(abrainHome, receipt),
-                  sleepMs(writeBudgetMs).then(() => {
-                    throw new Error("receipt_write_timeout");
-                  }),
-                ]);
+                let timedOut = false;
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  writeStatus = await Promise.race([
+                    writeProcessedReceipt(abrainHome, receipt),
+                    new Promise<never>((_, reject) => {
+                      timer = setTimeout(() => {
+                        timedOut = true;
+                        reject(new Error("receipt_write_timeout"));
+                      }, writeBudgetMs);
+                    }),
+                  ]);
+                } finally {
+                  if (timer !== undefined) clearTimeout(timer);
+                  void timedOut;
+                }
               } catch {
                 return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
               }
 
               if (writeStatus === "collision") {
                 // Fail closed: never return processed unless re-read is valid processed.
+                // Consistent code receipt_corrupt_or_collision; no force-retry path.
                 try {
                   const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
                   if (raced) {
                     progress("receipt", "end");
-                    return resultFromProcessedReceipt(raced, manifest!.request_id);
+                    return {
+                      ...resultFromProcessedReceipt(raced, manifest!.request_id),
+                      publication_pending: true,
+                    };
                   }
                 } catch {
                   /* fall through */
@@ -1944,32 +2001,19 @@ export async function runSedimentWorkerTask(
                   const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
                   if (raced) {
                     progress("receipt", "end");
-                    return resultFromProcessedReceipt(raced, manifest!.request_id);
+                    return {
+                      ...resultFromProcessedReceipt(raced, manifest!.request_id),
+                      publication_pending: true,
+                    };
                   }
                 } catch {
                   return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
                 }
               }
 
-              // Success receipt is durable. Publication drain is best-effort under
-              // remaining hard budget only — never unbounded (H1). Skip when no
-              // reserve remains; durable outbox stays for a later drain edge.
-              try {
-                if (deps.drainKnowledgePublicationOutbox) {
-                  const drainRem = Math.max(0, absoluteDeadlineMs - clock());
-                  if (drainRem > 0 && !ac.signal.aborted) {
-                    const drainBudgetMs = Math.min(SEDIMENT_WORKER_CLEANUP_RESERVE_MS, drainRem);
-                    await Promise.race([
-                      Promise.resolve(deps.drainKnowledgePublicationOutbox(abrainHome)),
-                      sleepMs(drainBudgetMs, ac.signal).then(() => undefined),
-                    ]);
-                  }
-                }
-              } catch {
-                // Publication drain is best-effort after settled success; durable
-                // outbox remains for a later drain edge.
-              }
-
+              // Success receipt is durable. Do NOT drain publication in-task
+              // (no uncancelled Promise.race). Durable outbox + independent
+              // maintenance own publication; result is observable as pending.
               progress("receipt", "end");
               return {
                 schema: SEDIMENT_WORKER_RESULT_SCHEMA,
@@ -1981,6 +2025,7 @@ export async function runSedimentWorkerTask(
                 memory_decisions: 0,
                 memory_writes: 0,
                 pass_iterations: iterations,
+                publication_pending: true,
               };
             }
 
