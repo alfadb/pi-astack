@@ -19,9 +19,10 @@
  *   1. Reordering ...tsFields and failure_type so one stomps the other
  *   2. Dropping ...tsFields from one audit site but keeping in another
  *   3. aggregateAnchor.subturn=0 and sub_agent_label being refactored away
- *   4. audit_version: 3 bump being silently rolled back
- *   5. PR-C heartbeat trace enrichment missing from v3 audit rows
+ *   4. audit_version: 4 bump being silently rolled back
+ *   5. PR-C heartbeat trace enrichment missing from audit rows
  *   6. PR-C per-file audit singleFlight chain missing from append path
+ *   7. v4 additive fields: termination_source / active_tool_count / last_tool
  *
  * Each invariant is asserted by reading the file and grepping for the
  * exact code shape; refactors that change the shape MUST update this
@@ -106,9 +107,13 @@ check("message_end and agent_end await summary flush before terminal append", ()
 
 console.log("Section: audit version bump");
 
-check("DISPATCH_AUDIT_VERSION = 3 (Stage 1c heartbeat enrichment)", () => {
-  if (!/const DISPATCH_AUDIT_VERSION = 3;/.test(dispatchSrc)) {
-    throw new Error("expected DISPATCH_AUDIT_VERSION = 3; v3 adds heartbeat_trace_path enrichment");
+check("DISPATCH_AUDIT_VERSION = 4 (termination_source + tool snapshot fields)", () => {
+  if (!/const DISPATCH_AUDIT_VERSION = 4;/.test(dispatchSrc)) {
+    throw new Error("expected DISPATCH_AUDIT_VERSION = 4; v4 adds termination_source/active_tool_count/active_tools/last_tool");
+  }
+  // Comment documents v3→v4 and 3|4 reader compatibility.
+  if (!/v3 → v4/.test(dispatchSrc) || !/3\|4/.test(dispatchSrc)) {
+    throw new Error("DISPATCH_AUDIT_VERSION comment must document v3→v4 and 3|4 reader compatibility");
   }
 });
 
@@ -260,18 +265,40 @@ check("aggregate spreads ...aggregateTsFields", () => {
 
 console.log("\nSection: aggregate cancelSource override (R6 P1-2 fix)");
 
-check("aggregate inferParallelTerminalState receives cancelSource override", () => {
-  // The fix: inferParallelTerminalState must get { cancelSource: signal.aborted ? "user" : undefined }
-  // so aggregate and per-task rows cannot diverge on cancel_source.
+check("aggregate attribution trusts per-task stamps; holes carry parent evidence", () => {
+  // Aggregate must NOT re-read live signal to override settled failures.
+  // Per-task cancelSource/terminationSource + hole materialization are the
+  // structured evidence path. Live signal.aborted must never invent "user".
   const m = dispatchSrc.match(
     /inferParallelTerminalState\([\s\S]{0,800}?\)/,
   );
   if (!m) throw new Error("could not locate inferParallelTerminalState call");
-  if (!/signal\.aborted\s*\?\s*"user"\s*:\s*undefined/.test(m[0])) {
+  if (/signal\.aborted\s*\?\s*"user"/.test(m[0])) {
+    throw new Error("aggregate must not invent cancelSource=user from signal.aborted");
+  }
+  // Hole materialization still stamps parent abort evidence.
+  const hole = dispatchSrc.match(
+    /parent abort before worker claim[\s\S]{0,400}?abortEvidence/,
+  );
+  if (!hole) {
     throw new Error(
-      "inferParallelTerminalState call missing { cancelSource: signal.aborted ? \"user\" : undefined } " +
-      "(R6 GPT-5.5 P1-2 fix)",
+      "hole materialization must stamp abortEvidence (parent) for unstarted tasks",
     );
+  }
+  if (!/parallelSignalEvidence\s*\?\?\s*"parent"/.test(dispatchSrc)) {
+    throw new Error("hole materialization must fall back to abortEvidence parent");
+  }
+});
+
+check("dispatch audit rows spread tool snapshot safe fields", () => {
+  if (!/dispatchToolSnapshotAuditFields/.test(dispatchSrc)) {
+    throw new Error("dispatch audit path must spread dispatchToolSnapshotAuditFields");
+  }
+  if (!/toolTracker\.onStart|ToolRunTracker/.test(dispatchSrc)) {
+    throw new Error("runInProcess must maintain ToolRunTracker from tool_execution_* events");
+  }
+  if (!/tool_execution_update/.test(dispatchSrc)) {
+    throw new Error("runInProcess must handle tool_execution_update for last_update_at");
   }
 });
 
@@ -441,15 +468,21 @@ check("dispatch_parallel summary details include terminalState", () => {
 });
 
 check("per-task details include terminalState (R7: derived from materializedResults)", () => {
-  // R7 P1 fix changed the lookup pattern: const r = materializedResults[i];
-  // terminalState: inferTerminalState(r). The previous pattern
-  // `inferTerminalState(results[i])` is gone (deliberately) because
-  // results[i] could be undefined for holes.
-  if (!/terminalState:\s*inferTerminalState\(r\)/.test(dispatchSrc)) {
+  // R7 P1 fix: const r = materializedResults[i]. Attribution upgrade keeps
+  // that dense-array source of truth and may use either inferTerminalState(r)
+  // or buildTerminalStateFields(r).terminal_state (preferred: also yields
+  // cancelSource / terminationSource).
+  const usesInfer = /terminalState:\s*inferTerminalState\(r\)/.test(dispatchSrc);
+  const usesBuild = /const taskFields = buildTerminalStateFields\(r\)/.test(dispatchSrc)
+    && /terminalState:\s*taskFields\.terminal_state/.test(dispatchSrc);
+  if (!usesInfer && !usesBuild) {
     throw new Error(
-      "per-task details must call inferTerminalState(r) where r = materializedResults[i] (R7 P1-A fix). " +
-      "Previously used results[i] which yielded inconsistent state for holes.",
+      "per-task details must derive terminalState from materializedResults[i] " +
+      "via inferTerminalState(r) or buildTerminalStateFields(r).terminal_state",
     );
+  }
+  if (!/materializedResults\[i\]/.test(dispatchSrc)) {
+    throw new Error("per-task details must read materializedResults[i] (not sparse results[i])");
   }
 });
 
@@ -496,8 +529,16 @@ check("legacy result:\"ok\"|\"fail\" field retained on all audit rows", () => {
   // to derive from terminal_state via aggregateLegacyResult identifier:
   //   result: aggregateLegacyResult
   // so the regex needs to allow that form too.
-  const sites = dispatchSrc.match(
+  //
+  // Filter out TypeScript type/signature sites such as
+  //   operation: "dispatch_agent" | "dispatch_parallel"
+  // which are not audit writes (parent-context-files expansion made the
+  // old 4500-char window more likely to false-match those).
+  const sites = (dispatchSrc.match(
     /operation:\s*"dispatch_(?:agent|parallel\.task|parallel\.summary)"[\s\S]{0,4500}?\}\s*\)\s*;/g,
+  ) ?? []).filter((block) =>
+    !/operation:\s*"dispatch_agent"\s*\|/.test(block)
+    && /row_kind:\s*"(?:task|aggregate)"/.test(block),
   );
   if (!sites || sites.length < 5) {
     throw new Error(`expected ≥5 audit write sites; got ${sites?.length ?? 0}`);

@@ -100,6 +100,7 @@
     "smoke:dispatch-parent-context-files": "node scripts/smoke-dispatch-parent-context-files.mjs",
     "smoke:dispatch-session-runtime-isolation": "node scripts/smoke-dispatch-session-runtime-isolation.mjs",
     "smoke:dispatch-task-governor": "node scripts/smoke-dispatch-task-governor.mjs",
+    "smoke:dispatch-tool-run-snapshot": "node scripts/smoke-dispatch-tool-run-snapshot.mjs",
     "smoke:worker-run-governor": "node scripts/smoke-worker-run-governor.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:vision": "node scripts/smoke-vision.mjs",

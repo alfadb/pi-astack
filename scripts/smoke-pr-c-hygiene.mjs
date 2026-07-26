@@ -145,7 +145,7 @@ console.log("\nSection: F15 heartbeat consumer wiring");
 
 check("dispatch enriches audit fields from heartbeat consumer without changing settled result", () => {
   for (const re of [
-    /const DISPATCH_AUDIT_VERSION = 3;/,
+    /const DISPATCH_AUDIT_VERSION = 4;/,
     /import \{ assessLivenessForAnchor \} from "\.\/heartbeat-consumer"/,
     /const heartbeat_liveness = assessLivenessForAnchor\(heartbeatProjectRoot, heartbeatAnchor\)/,
     /const resultWithHeartbeat\s*=\s*enrichHeartbeat\([A-Za-z_$][\w$]*\);[\s\S]{0,180}?return finalizeReasoningTrace\(resultWithHeartbeat/,

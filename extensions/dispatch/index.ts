@@ -61,11 +61,23 @@ import {
   type DispatchReasoningTraceWriter,
 } from "./reasoning-trace";
 import {
+  abortEvidenceFromSignal,
   buildTerminalStateFields,
   inferParallelTerminalState,
   inferTerminalState,
+  resolveCancelSource,
+  resolveTerminationSource,
+  type AbortEvidenceKind,
+  type CancelSource,
   type TaskSummary,
+  type TerminationSource,
 } from "./terminal-state";
+import {
+  ToolRunTracker,
+  toolSnapshotAuditFields,
+  toolSnapshotDetailsFields,
+  type ToolRunSnapshotSummary,
+} from "./tool-run-snapshot";
 import { startHeartbeat, type HeartbeatHandle } from "../_shared/heartbeat";
 import { assessLivenessForAnchor } from "./heartbeat-consumer";
 import { randomUUID } from "node:crypto";
@@ -185,8 +197,14 @@ const DISABLED_SUBAGENT_TOOL_NAMES = new Set<string>(DISABLED_SUBAGENT_TOOLS);
  *  ADDITIVE — readers can pick either schema, but new analysis tooling
  *  should prefer `terminal_state` because it distinguishes cancelled vs
  *  failed and surfaces degraded outcomes that the old binary schema
- *  collapses into "fail". */
-const DISPATCH_AUDIT_VERSION = 3;
+ *  collapses into "fail".
+ *
+ *  v2 → v3: heartbeat_trace_path / heartbeat_liveness enrichment.
+ *
+ *  v3 → v4: additive terminal observability fields on dispatch audit rows:
+ *  termination_source / active_tool_count / active_tools / last_tool.
+ *  Readers that only accepted v3 should accept 3|4 (additive, no migration). */
+const DISPATCH_AUDIT_VERSION = 4;
 
 const _DISPATCH_AUDIT_SINGLEFLIGHT_KEY = Symbol.for("pi-astack/dispatch/audit-singleflight/v1");
 
@@ -885,7 +903,7 @@ type FailureType =
   | "context_overflow"  // prompt exceeded model's max context window
   | "agent_error"       // generic agent stopReason="error" (no specific classification)
   | "retry_exhausted"   // pi-ai auto_retry exhausted maxRetries
-  | "truncated"         // stopReason="length" (max tokens) or "abort" (provider cut stream)
+  | "truncated"         // stopReason="length" (max tokens); stream cuts need explicit abortEvidence
   | "guardrail_stop"    // retained for historical terminal-state/audit reads only
   | "repetitive_output"
   | "provider_retry_budget_exceeded"
@@ -1118,6 +1136,12 @@ export interface AgentResult {
   timeoutKind?: "idle" | "max_runtime";
   /** Diagnostic marker for idle timeout decisions. */
   lastProgressReason?: string;
+  /** Structured cancel attribution (evidence-first; cancelled rows). */
+  cancelSource?: CancelSource;
+  /** Structured termination origin for any non-success outcome. */
+  terminationSource?: TerminationSource;
+  /** Bounded last/active tool snapshot (safe metadata only). */
+  toolSnapshot?: ToolRunSnapshotSummary;
   workerRunGovernance?: WorkerRunGovernanceSummary;
   stopReason?: string;
   durationMs: number;
@@ -1162,6 +1186,90 @@ export interface AgentResult {
 export function dispatchGovernanceFields(result: unknown): Record<string, unknown> {
   const governance = (result as { workerRunGovernance?: WorkerRunGovernanceSummary } | undefined)?.workerRunGovernance;
   return governance ? { worker_run_governance: governance } : {};
+}
+
+export function dispatchToolSnapshotAuditFields(result: unknown): Record<string, unknown> {
+  const snap = (result as { toolSnapshot?: ToolRunSnapshotSummary } | undefined)?.toolSnapshot;
+  return toolSnapshotAuditFields(snap);
+}
+
+export function dispatchToolSnapshotDetailsFields(result: unknown): Record<string, unknown> {
+  const snap = (result as { toolSnapshot?: ToolRunSnapshotSummary } | undefined)?.toolSnapshot;
+  return toolSnapshotDetailsFields(snap);
+}
+
+/**
+ * Pure judgment: SDK stopReason "aborted" on a normally-resolved
+ * session.prompt() is a non-success lifecycle outcome. Keep partial output,
+ * surface error + failureType "aborted" + stopReason; settlement then
+ * attributes parent/user/governor/unknown from lifecycle evidence.
+ * Must never be classified as stream/truncated from stopReason alone.
+ */
+export function agentResultFromResolvedAbort(input: {
+  output?: string;
+  errorMessage?: string;
+  durationMs: number;
+  toolCallCount?: number;
+  usage?: AgentResult["usage"];
+  retryHistory?: AgentResult["retryHistory"];
+}): AgentResult {
+  const msg = typeof input.errorMessage === "string" && input.errorMessage.length > 0
+    ? input.errorMessage
+    : "aborted";
+  return {
+    output: input.output ?? "",
+    error: msg,
+    failureType: "aborted",
+    stopReason: "aborted",
+    durationMs: input.durationMs,
+    ...(typeof input.toolCallCount === "number" ? { toolCallCount: input.toolCallCount } : {}),
+    ...(input.usage ? { usage: input.usage } : {}),
+    ...(input.retryHistory ? { retryHistory: input.retryHistory } : {}),
+  };
+}
+
+/** True when a resolved (non-throwing) prompt stopReason is the SDK abort token. */
+export function isResolvedAbortStopReason(stopReason: string | undefined | null): boolean {
+  return stopReason === "aborted";
+}
+
+/**
+ * Attach structured cancel/termination attribution + tool snapshot to a
+ * non-success AgentResult. Pure enrichment — does not change failureType
+ * or terminal_state mapping.
+ */
+export function enrichResultAttribution(
+  result: AgentResult,
+  opts: {
+    abortEvidence?: AbortEvidenceKind;
+    toolSnapshot?: ToolRunSnapshotSummary;
+  } = {},
+): AgentResult {
+  if (!result.error) {
+    return opts.toolSnapshot ? { ...result, toolSnapshot: opts.toolSnapshot } : result;
+  }
+  const ctx = {
+    abortEvidence: opts.abortEvidence,
+    cancelSource: result.cancelSource,
+    terminationSource: result.terminationSource,
+  };
+  // cancel_source is only meaningful for cancelled lifecycle outcomes.
+  // failed rows carry termination_source only (ADR §C5 audit schema).
+  const state = inferTerminalState(result);
+  const cancelSource = state === "cancelled" ? resolveCancelSource(result, ctx) : undefined;
+  const terminationSource =
+    resolveTerminationSource(result, ctx) ??
+    (state === "cancelled" ? cancelSource : undefined) ??
+    "unknown";
+  // Drop any prior cancelSource on failed rows so audit consumers never see
+  // a stale cancel_source on non-cancelled outcomes.
+  const { cancelSource: _priorCancel, ...base } = result;
+  return {
+    ...base,
+    ...(cancelSource ? { cancelSource } : {}),
+    terminationSource,
+    ...(opts.toolSnapshot ? { toolSnapshot: opts.toolSnapshot } : result.toolSnapshot ? { toolSnapshot: result.toolSnapshot } : {}),
+  };
 }
 
 export function dispatchReasoningTraceFields(result: unknown): Record<string, unknown> {
@@ -1660,7 +1768,7 @@ export async function runInProcess(
   // Runtime guard: TS requires parentContextFiles, but JS/any may omit it.
   const parentContextFiles = executionContext?.parentContextFiles;
   if (!isParentContextFilesSnapshot(parentContextFiles)) {
-    return finalizeReasoningTrace({
+    return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error:
         "parent_context_files_snapshot_missing: runInProcess requires the parent " +
@@ -1669,18 +1777,18 @@ export async function runInProcess(
       failureType: "context_files_snapshot_missing",
       durationMs: Date.now() - start,
       toolCallCount: 0,
-    });
+    }));
   }
 
   const directToolCheck = validateTools(toolAllowlist);
   if (!directToolCheck.ok) {
-    return finalizeReasoningTrace({
+    return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error: `tool_rejected: ${directToolCheck.reason}`,
       failureType: "tool_rejected",
       durationMs: Date.now() - start,
       toolCallCount: 0,
-    });
+    }));
   }
 
   const refreshedModelRegistry = await refreshModelRegistry(modelRegistry);
@@ -1689,13 +1797,13 @@ export async function runInProcess(
   // Resolve model against the awaited-refreshed parent registry.
   const model = resolveModel(modelStr, refreshedModelRegistry);
   if (!model) {
-    return finalizeReasoningTrace({
+    return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error: `Model not found: ${modelStr}`,
       failureType: "model_not_found",
       durationMs: Date.now() - start,
       toolCallCount,
-    });
+    }));
   }
 
   const effectiveMaxOutputTokens = resolveMaxOutputTokens(model);
@@ -1826,6 +1934,20 @@ export async function runInProcess(
   // Retry observability (P1 fix: restore retryHistory from auto_retry_* events)
   const retryHistory: AgentResult["retryHistory"] = { entries: [] };
 
+  // Bounded tool_execution_* snapshot (safe metadata only). Heartbeat alive
+  // is NOT tool progress and never enters this tracker.
+  const toolTracker = new ToolRunTracker();
+
+  // Structured abort evidence: set only by known lifecycle owners
+  // (parent signal / idle|max-runtime timeout / governor). First writer wins
+  // so a later timeout racing a parent abort does not erase parent evidence
+  // when the parent listener already fired — but timeout path sets its own
+  // evidence on the timeout result directly.
+  let abortEvidence: AbortEvidenceKind | undefined;
+  const noteAbortEvidence = (kind: AbortEvidenceKind) => {
+    if (abortEvidence === undefined) abortEvidence = kind;
+  };
+
   // Handle abort. Calls session.abort() (best-effort, fire-and-forget) +
   // localCtl.abort() (checked post-session-creation).
   // Cross-path idempotence: abortOnce guards prevent double-abort from onAbort
@@ -1839,14 +1961,20 @@ export async function runInProcess(
 
   const onAbort = () => {
     if (settled) return;
+    // Parent/user AbortSignal — attribute from structured reason only.
+    noteAbortEvidence(abortEvidenceFromSignal(signal) ?? "parent");
     settled = true;
     localCtl.abort();
     abortSessionOnce();
   };
 
   if (signal.aborted) {
+    const preEvidence = abortEvidenceFromSignal(signal) ?? "parent";
     return finalizeReasoningTrace(
-      { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount },
+      enrichResultAttribution(
+        { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount },
+        { abortEvidence: preEvidence, toolSnapshot: toolTracker.snapshot() },
+      ),
       { forceIncomplete: true },
     );
   }
@@ -1874,11 +2002,12 @@ export async function runInProcess(
   let lastProgressReason = "started";
   let recordProgress = (_reason: string) => {};
   const governancePromise = workerGovernor.termination.then((decision): AgentResult => {
+    noteAbortEvidence("worker_run_governor");
     localCtl.abort();
     abortSessionOnce();
     settled = true;
     const output = governanceOutputOverride ?? boundedUtf8Prefix(finalOutput || responsePartial);
-    return {
+    return enrichResultAttribution({
       output,
       error: governanceFailureMessage(decision),
       failureType: decision.failureType as FailureType,
@@ -1888,11 +2017,19 @@ export async function runInProcess(
       stopReason,
       retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       workerRunGovernance: workerGovernor.snapshot(),
-    };
+    }, { abortEvidence: "worker_run_governor", toolSnapshot: toolTracker.snapshot() });
   });
 
   const timeoutPromise = new Promise<AgentResult>((resolve) => {
     const resolveTimeout = (timeoutKind: "idle" | "max_runtime") => {
+      // If parent already aborted, do not claim timeout ownership — the race
+      // loser may still resolve, but attribution should keep the first owner.
+      // When we are first, stamp timeout evidence before onAbort so a
+      // subsequent parent noteAbortEvidence (first-writer-wins) cannot steal it.
+      const alreadyOwned = abortEvidence !== undefined || settled;
+      if (!alreadyOwned) noteAbortEvidence("timeout");
+      const evidenceForResult: AbortEvidenceKind =
+        abortEvidence === "timeout" || !alreadyOwned ? "timeout" : (abortEvidence ?? "timeout");
       onAbort();
       const hasPartial = finalOutput.length > 0;
       const now = Date.now();
@@ -1901,7 +2038,10 @@ export async function runInProcess(
       const baseError = timeoutKind === "idle"
         ? `idle timeout after ${limitMs}ms without progress (last progress: ${lastProgressReason}, ${idleForMs}ms ago)`
         : `max runtime ${limitMs}ms exceeded`;
-      resolve({
+      // Only emit a timeout-shaped result when timeout is the lifecycle owner.
+      // If parent already settled the run, this resolve is a no-op race loser
+      // (Promise.race already took the other result) — still safe to resolve.
+      resolve(enrichResultAttribution({
         output: finalOutput,
         error: hasPartial ? `${baseError} (partial output captured)` : baseError,
         failureType: hasPartial ? "timeout_partial" : "timeout",
@@ -1912,7 +2052,7 @@ export async function runInProcess(
         usage,
         stopReason,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
-      });
+      }, { abortEvidence: evidenceForResult, toolSnapshot: toolTracker.snapshot(now) }));
     };
     const armIdleTimeout = () => {
       if (idleTimeoutId) clearTimeout(idleTimeoutId);
@@ -2034,6 +2174,8 @@ export async function runInProcess(
 
         if (eventType === "tool_execution_start") {
           toolCallCount++;
+          // Safe metadata only — never pass args into the snapshot tracker.
+          toolTracker.onStart(event.toolName, event.toolCallId);
           const verdict = evaluateTaskGovernor(dispatchSettings.taskGovernor, governorProfile, toolCallCount, governorEmittedStages);
           if (verdict.stage) {
             governorEmittedStages.add(verdict.stage);
@@ -2062,7 +2204,13 @@ export async function runInProcess(
           ));
         }
 
+        if (eventType === "tool_execution_update") {
+          // Touch last_update_at only — drop partialResult/args (attacker-controlled).
+          toolTracker.onUpdate(event.toolName, event.toolCallId);
+        }
+
         if (eventType === "tool_execution_end") {
+          toolTracker.onEnd(event.toolName, event.toolCallId, event.isError === true);
           emitWorkerRunDecision(workerGovernor.observeToolEnd(
             String(event.toolName ?? "unknown"),
             event.result,
@@ -2169,15 +2317,16 @@ export async function runInProcess(
 
       const durationMs = Date.now() - start;
 
-      // Truncation: max-tokens ("length"/"max_tokens") or provider stream abort ("abort").
-      // P0 fix: these were previously returned as success with truncated output;
+      // Truncation: max-tokens (SDK stopReason "length"; defensive alias "max_tokens").
+      // SDK StopReason is "stop"|"length"|"toolUse"|"error"|"aborted" — there is no
+      // "abort". stopReason "aborted" is lifecycle-ambiguous (local/user/parent/
+      // governor session.abort()) and must NOT be auto-classified as stream/truncated.
+      // P0 fix: length was previously returned as success with truncated output;
       // now surfaced as failures so the caller knows the output is incomplete.
-      if (stopReason === "length" || stopReason === "max_tokens" || stopReason === "abort") {
+      if (stopReason === "length" || stopReason === "max_tokens") {
         return {
           output: finalOutput,
-          error: stopReason === "length" || stopReason === "max_tokens"
-            ? "output truncated (max tokens reached)"
-            : "stream aborted by provider",
+          error: "output truncated (max tokens reached)",
           failureType: "truncated",
           stopReason,
           durationMs,
@@ -2197,6 +2346,22 @@ export async function runInProcess(
       const la = lastAssistant as { errorMessage?: unknown } | null;
       const errorMessage =
         typeof la?.errorMessage === "string" ? la.errorMessage : undefined;
+
+      // SDK stopReason "aborted" even when session.prompt() resolved without
+      // throw: non-success. Prefer this over errorMessage-driven agent_error
+      // so lifecycle abort is not reclassified as stream/agent_error. Keep
+      // partial output; settlement attributes parent/user/governor/unknown.
+      if (isResolvedAbortStopReason(stopReason)) {
+        return agentResultFromResolvedAbort({
+          output: finalOutput,
+          errorMessage,
+          durationMs,
+          toolCallCount,
+          usage,
+          retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+        });
+      }
+
       const agentReportedError = stopReason === "error" || !!errorMessage;
       if (agentReportedError) {
         // R3-r3 P1 fix: use || not ?? — SDK could in theory send
@@ -2255,10 +2420,43 @@ export async function runInProcess(
   let runPromiseSettled = false;
   const trackedRunPromise = runPromise.finally(() => { runPromiseSettled = true; });
   const result = await Promise.race([trackedRunPromise, timeoutPromise, governancePromise]);
+  // Final attribution: prefer evidence already on the result (timeout/governor
+  // paths stamp it); otherwise use lifecycle abortEvidence. Signal evidence is
+  // a safe fallback ONLY for cancelled/aborted lifecycle outcomes — never
+  // re-attribute an already-settled rate_limit/network/other failure just
+  // because the parent signal later aborted during audit/cleanup.
+  // Stream is never inferred from stopReason (SDK "aborted" is ambiguous).
+  // Tool snapshot always taken at settlement so idle-timeout audit sees the
+  // last/active tools even when the winning path didn't stamp one.
+  const settlementEvidence: AbortEvidenceKind | undefined =
+    result.terminationSource === "timeout" || result.failureType === "timeout" || result.failureType === "timeout_partial"
+      ? "timeout"
+      : result.terminationSource === "worker_run_governor" ||
+          result.failureType === "repetitive_output" ||
+          result.failureType === "provider_retry_budget_exceeded" ||
+          result.failureType === "empty_visible_retry_budget_exceeded" ||
+          result.failureType === "full_output_cap_budget_exceeded"
+        ? "worker_run_governor"
+        : result.terminationSource === "stream" || result.cancelSource === "stream"
+          ? "stream"
+          : abortEvidence;
+  const isCancelledLifecycle =
+    result.failureType === "aborted" ||
+    result.failureType === "timeout" ||
+    result.failureType === "timeout_partial" ||
+    result.failureType === "guardrail_stop";
+  const signalFallback =
+    isCancelledLifecycle && settlementEvidence === undefined
+      ? abortEvidenceFromSignal(signal)
+      : undefined;
+  const attributed = enrichResultAttribution(result, {
+    abortEvidence: settlementEvidence ?? signalFallback,
+    toolSnapshot: result.toolSnapshot ?? toolTracker.snapshot(),
+  });
   const resultWithBudget: AgentResult = {
-    ...result,
+    ...attributed,
     ...(effectiveMaxOutputTokens === undefined ? {} : { maxOutputTokens: effectiveMaxOutputTokens }),
-    workerRunGovernance: result.workerRunGovernance ?? workerGovernor.snapshot(),
+    workerRunGovernance: attributed.workerRunGovernance ?? workerGovernor.snapshot(),
   };
   if (idleTimeoutId) clearTimeout(idleTimeoutId);
   if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
@@ -2728,15 +2926,15 @@ export default function (pi: ExtensionAPI) {
       // ADR 0027 C6a + §C5 v1: dispatch audit row — cross-layer join key
       // for tracing a user turn through L1 (sediment / abrain) and L2
       // (this row + any sub-agent self-traces). v2 schema adds
-      // terminal_state + side-effect fields. cancelSource heuristic: if
-      // signal.aborted fired, prefer "user" (parent abort); the
-      // buildTerminalStateFields default would otherwise infer from
-      // failureType="timeout" → "timeout", missing the case where the
-      // parent signal fires before the timeout. Best-effort:
-      // appendDispatchAudit swallows IO errors so audit failures never
-      // break the dispatch path.
+      // terminal_state + side-effect fields. Attribution trusts the
+      // structured fields already stamped by runInProcess — do NOT re-read
+      // the live parent signal here (it may abort later during cleanup and
+      // must not re-label an earlier rate_limit/network failure as parent).
+      // Best-effort: appendDispatchAudit swallows IO errors so audit
+      // failures never break the dispatch path.
       const tsFields = buildTerminalStateFields(result, {
-        cancelSource: signal.aborted ? "user" : undefined,
+        cancelSource: result.cancelSource,
+        terminationSource: result.terminationSource,
       });
       void appendDispatchAudit(
         ctx.cwd || process.cwd(),
@@ -2762,6 +2960,7 @@ export default function (pi: ExtensionAPI) {
           ...(result.maxOutputTokens ? { max_output_tokens: result.maxOutputTokens } : {}),
           ...(typeof result.toolCallCount === "number" ? { tool_call_count: result.toolCallCount } : {}),
           ...dispatchGovernanceFields(result),
+          ...dispatchToolSnapshotAuditFields(result),
           ...dispatchReasoningTraceFields(result),
           ...parentContextFilesAuditFields(parentContextFiles),
           output_chars: result.output?.length ?? 0,
@@ -2789,8 +2988,11 @@ export default function (pi: ExtensionAPI) {
           ...dispatchReasoningTraceFields(result),
           // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
           // distinguish cancelled (timeout / user abort) from failed.
+          // Only safe attribution + tool-name metadata — never args/output.
           terminalState: tsFields.terminal_state,
           ...(tsFields.cancel_source ? { cancelSource: tsFields.cancel_source } : {}),
+          ...(tsFields.termination_source ? { terminationSource: tsFields.termination_source } : {}),
+          ...dispatchToolSnapshotDetailsFields(result),
           ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
           ...(result.timeoutKind ? { timeoutKind: result.timeoutKind } : {}),
@@ -3088,11 +3290,12 @@ export default function (pi: ExtensionAPI) {
           // ADR 0027 C6a + §C5 v1: per-task audit row. Cross-layer
           // consumers join on (session_id, turn_id, subturn) to
           // reconstruct one dispatch_parallel invocation's full sub-agent
-          // fan-out. v2 schema adds per-task terminal_state. Parent
-          // signal: distinguish parent abort ("user") from per-task
-          // timeout — same logic as dispatch_agent above.
+          // fan-out. v2 schema adds per-task terminal_state. Attribution
+          // trusts runInProcess-stamped fields only — never re-read live
+          // parent signal at audit time (would re-label settled failures).
           const taskTsFields = buildTerminalStateFields(res, {
-            cancelSource: signal.aborted ? "user" : undefined,
+            cancelSource: res.cancelSource,
+            terminationSource: res.terminationSource,
           });
           void appendDispatchAudit(projectRoot, subAnchor, {
             operation: "dispatch_parallel.task",
@@ -3116,6 +3319,7 @@ export default function (pi: ExtensionAPI) {
             ...(res.maxOutputTokens ? { max_output_tokens: res.maxOutputTokens } : {}),
             ...(typeof res.toolCallCount === "number" ? { tool_call_count: res.toolCallCount } : {}),
             ...dispatchGovernanceFields(res),
+            ...dispatchToolSnapshotAuditFields(res),
             ...dispatchReasoningTraceFields(res),
             ...parentContextFilesAuditFields(parentContextFiles),
             output_chars: res.output?.length ?? 0,
@@ -3152,15 +3356,21 @@ export default function (pi: ExtensionAPI) {
       // downstream `results[i]?...` pattern. Hole synthesis matches the
       // shape used in taskSummaries (failureType: "aborted") so terminal_
       // state classification is identical across all consumers.
+      // Hole materialization is the only audit-time place that may consult
+      // the live parent signal — holes never ran, so lifecycle owner is the
+      // parent abort itself. Settled per-task results already carry their
+      // own cancelSource/terminationSource from runInProcess.
+      const parallelSignalEvidence = abortEvidenceFromSignal(signal);
       const materializedResults: AgentResult[] = tasks.map((_t: any, i: number) => {
         const r = results[i];
         if (r) return r;
-        return {
+        // Hole = parent abort before worker claim (structured parent evidence).
+        return enrichResultAttribution({
           output: "",
           error: "task did not start (parent abort before worker claim)",
           failureType: "aborted",
           durationMs: 0,
-        };
+        }, { abortEvidence: parallelSignalEvidence ?? "parent" });
       });
 
       // taskSummaries now derives from the dense array — single source of
@@ -3169,10 +3379,11 @@ export default function (pi: ExtensionAPI) {
         result: r,
         label: tasks[i]?.model ?? `task[${i}]`,
       }));
-      // R6 P1 fix (GPT-5.5 P1-2): thread parent-abort context into aggregate.
-      const aggregateTsFields = inferParallelTerminalState(taskSummaries, {
-        cancelSource: signal.aborted ? "user" : undefined,
-      });
+      // Aggregate from per-task stamped evidence only. Do not re-apply the
+      // live parent signal here — that would re-label settled rate_limit/
+      // network failures as parent when the signal aborts during cleanup.
+      // Holes already carry parent attribution above.
+      const aggregateTsFields = inferParallelTerminalState(taskSummaries);
       // R6 P2 fix (DeepSeek P2-3): footer state machine now surfaces
       // cancelled distinctly from failed.
       const finalState: DispatchState =
@@ -3343,6 +3554,8 @@ export default function (pi: ExtensionAPI) {
           // caller LLM so it can read the dispatch outcome (degraded /
           // failed) without re-aggregating per-task error fields.
           terminalState: aggregateTsFields.terminal_state,
+          ...(aggregateTsFields.cancel_source ? { cancelSource: aggregateTsFields.cancel_source } : {}),
+          ...(aggregateTsFields.termination_source ? { terminationSource: aggregateTsFields.termination_source } : {}),
           ...(aggregateTsFields.what_dropped ? { whatDropped: aggregateTsFields.what_dropped } : {}),
           ...(aggregateTsFields.alt_path ? { altPath: aggregateTsFields.alt_path } : {}),
           // R7 P1 fix (Opus P1-A + GPT-5.5 P1-1 + DeepSeek P2-1):
@@ -3352,6 +3565,7 @@ export default function (pi: ExtensionAPI) {
           // (ok=true, terminalState=failed, no error) shape.
           tasks: tasks.map((t: any, i: number) => {
             const r = materializedResults[i];
+            const taskFields = buildTerminalStateFields(r);
             return {
               model: t.model,
               durationMs: r.durationMs,
@@ -3362,7 +3576,10 @@ export default function (pi: ExtensionAPI) {
               ...(typeof r.toolCallCount === "number" ? { toolCallCount: r.toolCallCount } : {}),
               ...(r.workerRunGovernance ? { workerRunGovernance: r.workerRunGovernance } : {}),
               ...dispatchReasoningTraceFields(r),
-              terminalState: inferTerminalState(r),
+              ...dispatchToolSnapshotDetailsFields(r),
+              terminalState: taskFields.terminal_state,
+              ...(taskFields.cancel_source ? { cancelSource: taskFields.cancel_source } : {}),
+              ...(taskFields.termination_source ? { terminationSource: taskFields.termination_source } : {}),
             };
           }),
         },
