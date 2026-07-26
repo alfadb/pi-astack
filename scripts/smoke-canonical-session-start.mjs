@@ -343,8 +343,12 @@ try {
       getSessionId: () => "canonical-disabled-session-start-smoke",
     },
   });
-  await new Promise((resolve) => setImmediate(resolve));
+  // session_start returns before detached mkdir/liveness; poll for staging only.
   const disabledStaging = runtimePaths.abrainSedimentStagingPath(disabledHome);
+  const disabledStagingDeadline = Date.now() + 1_000;
+  while (!fs.existsSync(disabledStaging) && Date.now() < disabledStagingDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   const disabledStableRoot = path.join(disabledHome, ".state", "sediment", "proposition-policy-stable-view", "v1");
   const disabledRecovery = stableRecovery.getPropositionPolicyStableViewRecoveryDiagnostics(disabledHome);
   assert(fs.existsSync(disabledStaging), "canonical-disabled initialization did not retain staging setup");

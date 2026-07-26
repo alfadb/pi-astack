@@ -47,11 +47,20 @@ import {
   type CombinedRecoveryHistoryResult,
 } from "./recovery-history-classifier";
 import {
+  computeL1InventoryFingerprint,
   loadL1SchemaRegistry,
   scanWholeL1Validated,
   validateL1Envelope,
   type WholeL1ScanResult,
 } from "./l1-schema-registry";
+import {
+  deviceJoinJournalPresent,
+  L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT,
+  readLastKnownReadyFingerprint,
+  registryContentHash,
+  tryAcquireL1ScanMutex,
+  writeLastKnownReadyFingerprint,
+} from "./l1-validated-scan-cache";
 import { sha256Hex } from "./jcs";
 
 const execFileAsync = promisify(execFile);
@@ -168,6 +177,12 @@ export interface LoadedProvenanceEntry {
   headBlobOid: string | null;
 }
 
+export type CanonicalStartupDeferredReason =
+  | "CANONICAL_MUTATION_BUSY"
+  | "STARTUP_BUDGET_EXHAUSTED"
+  | "CANONICAL_SCAN_BUSY"
+  | "CANONICAL_SCAN_LOCK_FAILED";
+
 export interface CanonicalRuntimeDiagnostics {
   apiVersion: number;
   repo: string;
@@ -175,12 +190,25 @@ export interface CanonicalRuntimeDiagnostics {
   startupGeneration: number;
   startup: "not_started" | "running" | "ready" | "blocked" | "deferred";
   blockedReason?: string;
-  deferredReason?: "CANONICAL_MUTATION_BUSY";
+  deferredReason?: CanonicalStartupDeferredReason;
   retryable?: true;
   ownerAlert?: true;
   loadedProvenance: readonly LoadedProvenanceEntry[];
   implementationFingerprint: string;
   tail: readonly Record<string, unknown>[];
+}
+
+/** Cached/process-local diagnostics only. Never starts startup, creates a runtime,
+ *  installs a promise/singleflight, or acquires the mutation barrier. */
+export interface CanonicalRuntimePeek {
+  status: "none" | "not_started" | "running" | "ready" | "blocked" | "deferred";
+  reason?: string;
+  deferredReason?: CanonicalStartupDeferredReason;
+  retryable?: true;
+  generation?: number;
+  lastPhase?: string;
+  repo?: string;
+  implementationFingerprint?: string;
 }
 
 export type CanonicalStartupHostMode = "tui" | "rpc" | "json" | "print";
@@ -216,6 +244,7 @@ interface FrozenStartupClassificationInputs {
   scan: WholeL1ScanResult;
   scanRoot: string;
   statusHash: string;
+  inventoryFingerprint: string;
 }
 
 export interface BacklogPreflightResult {
@@ -285,6 +314,18 @@ export interface CanonicalGitRuntimeOptions {
   startupRetryRandom?: () => number;
   startupRetrySleep?: (delayMs: number) => Promise<void>;
   startupMonotonicNow?: () => number;
+  /**
+   * Test-only: invoked after CAS publish, before index converge. Production never
+   * sets this. Also gated by PI_ASTACK_ENABLE_TEST_HOOKS=1 at the call site.
+   * Used to deterministically produce blocked+localCommit==="published".
+   */
+  drainPostPublishTestHook?: () => void | Promise<void>;
+  /**
+   * Test-only: invoked after mutation preflight inside prePublishCheck, before CAS.
+   * Production never sets this. Dual-gated by PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   * Used to leave a prepared episode without publication (not_published rollback path).
+   */
+  drainPrePublishTestHook?: () => void | Promise<void>;
 }
 
 export interface CanonicalGitRuntime {
@@ -350,6 +391,33 @@ function globalState(): GlobalRuntimeState {
   if (!(existing.startupFailureNotificationGenerations instanceof Map)) existing.startupFailureNotificationGenerations = new Map();
   if (!(existing.startupWarningNotifications instanceof Map)) existing.startupWarningNotifications = new Map();
   return existing as GlobalRuntimeState;
+}
+
+/** Read-only view of the process-global runtime singleton. Never creates one. */
+function peekGlobalState(): GlobalRuntimeState | null {
+  const global = globalThis as Record<symbol, unknown>;
+  const existing = global[GLOBAL_KEY] as Partial<GlobalRuntimeState> | undefined;
+  if (!existing || existing.apiVersion !== API_VERSION || !(existing.runtimes instanceof Map)) return null;
+  return existing as GlobalRuntimeState;
+}
+
+function resolvePeekRepoKey(abrainHome?: string): string | null {
+  if (!abrainHome) return null;
+  const resolved = path.resolve(abrainHome);
+  try {
+    return fsSync.realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function lastStartupPhaseFromTail(tail: readonly Record<string, unknown>[]): string | undefined {
+  for (let index = tail.length - 1; index >= 0; index -= 1) {
+    const row = tail[index]!;
+    if (row.operation === "startup_phase" && typeof row.phase === "string") return row.phase;
+    if (row.operation === "startup" && typeof row.status === "string") return `startup:${row.status}`;
+  }
+  return undefined;
 }
 
 function defaultSettingsPath(): string {
@@ -530,9 +598,15 @@ async function captureLoadedProvenance(sourceRoot: string, settingsPath: string)
 }
 
 function provenanceFingerprint(entries: readonly LoadedProvenanceEntry[]): string {
-  // Process identity follows the bytes actually loaded. A later source commit
-  // may move HEAD to those same bytes without changing the running program.
-  return sha256Hex(JSON.stringify(entries.map((entry) => [entry.label, entry.path, entry.bytesSha256])));
+  // Process identity follows the bytes actually loaded, not the absolute path of
+  // the source copy. Equivalent jiti/sourceRoot copies of the same bytes must
+  // not split the process-level implementation fingerprint. LoadedProvenance
+  // still retains path for diagnostics and freeze asserts.
+  return sha256Hex(JSON.stringify(
+    [...entries]
+      .map((entry) => [entry.label, entry.bytesSha256] as const)
+      .sort((a, b) => compareAscii(a[0], b[0])),
+  ));
 }
 
 async function assertProvenanceFrozen(sourceRoot: string, settingsPath: string, frozen: readonly LoadedProvenanceEntry[]): Promise<void> {
@@ -814,10 +888,14 @@ export async function renderLatestCanonicalConstraintL2Projection(options: {
   return rendered;
 }
 
-export async function buildCanonicalOwnershipContext(options: { abrainHome: string }): Promise<CanonicalOwnershipContext> {
+export async function buildCanonicalOwnershipContext(options: {
+  abrainHome: string;
+  /** When provided, reuse a just-frozen whole-L1 scan (semantic-equivalent). */
+  scan?: WholeL1ScanResult;
+}): Promise<CanonicalOwnershipContext> {
   const started = Date.now();
   const repo = await repoRealpath(options.abrainHome);
-  const scan = await scanWholeL1Validated({ abrainHome: repo });
+  const scan = options.scan ?? await scanWholeL1Validated({ abrainHome: repo });
   const knowledge = await import("../sediment/knowledge-evidence");
   const knowledgeNodes = scan.selected
     .filter((record) => record.registration.domain === "knowledge" && record.registration.role === "canonical")
@@ -1014,8 +1092,8 @@ function recoveryHistoryScanRoot(scan: WholeL1ScanResult): string {
   ])));
 }
 
-/** Multi-process harness delays. All classification delays run outside the barrier. */
-function startupTestDelayMs(name: "PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS" | "PI_ASTACK_STARTUP_FINAL_CLASSIFY_DELAY_MS" | "PI_ASTACK_STARTUP_MUTATION_HOLD_DELAY_MS"): number {
+/** Multi-process harness delays. Outside-phase delays are cooperative budget units. */
+function startupTestDelayMs(name: "PI_ASTACK_STARTUP_CLASSIFY_DELAY_MS" | "PI_ASTACK_STARTUP_FINAL_CLASSIFY_DELAY_MS" | "PI_ASTACK_STARTUP_MUTATION_HOLD_DELAY_MS" | "PI_ASTACK_STARTUP_FREEZE_DELAY_MS"): number {
   const raw = process.env[name];
   if (raw === undefined || raw === "") return 0;
   const value = Number(raw);
@@ -1068,7 +1146,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   private startupGeneration = 0;
   private startupPromise?: Promise<CanonicalRuntimeDiagnostics>;
   private blockedReason?: string;
-  private deferredReason?: "CANONICAL_MUTATION_BUSY";
+  private deferredReason?: CanonicalStartupDeferredReason;
   private startupRetryable = false;
   private ownerAlert = false;
   private frozenOwnershipContext?: { statusHash: string; context: CanonicalOwnershipContext };
@@ -1136,6 +1214,138 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   }
 
   /**
+   * Publish preflight. Production only runs mutation preflight (+ optional extra).
+   * Under PI_ASTACK_ENABLE_TEST_HOOKS, optional one-shot env / options hook can
+   * throw before CAS to exercise prepared-not-published / rollback paths.
+   */
+  private async prePublishCheckWithTestHook(extra?: () => Promise<void>): Promise<void> {
+    await this.mutationPreflight();
+    if (extra) await extra();
+    if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") return;
+    if (process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE === "1") {
+      delete process.env.PI_ASTACK_DRAIN_PRE_PUBLISH_THROW_ONCE;
+      throw new CanonicalGitRuntimeError(
+        "TEST_DRAIN_PRE_PUBLISH",
+        "deterministic pre-publish fault for tests",
+      );
+    }
+    if (typeof this.options.drainPrePublishTestHook === "function") {
+      await this.options.drainPrePublishTestHook();
+    }
+  }
+
+  /**
+   * Index-converge preflight. Production only checks the shared index lock.
+   * Under PI_ASTACK_ENABLE_TEST_HOOKS, optional one-shot env / options hook can
+   * throw after CAS publish to exercise blocked+localCommit==="published".
+   */
+  private async preConvergeCheckWithTestHook(): Promise<void> {
+    await preflightSharedIndexLock(this.repo);
+    if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") return;
+    if (process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE === "1") {
+      delete process.env.PI_ASTACK_DRAIN_POST_PUBLISH_THROW_ONCE;
+      throw new CanonicalGitRuntimeError(
+        "TEST_DRAIN_POST_PUBLISH",
+        "deterministic post-publish converge fault for tests",
+      );
+    }
+    if (typeof this.options.drainPostPublishTestHook === "function") {
+      await this.options.drainPostPublishTestHook();
+    }
+  }
+
+  /**
+   * After recoverDrainSlotV3 throws, decide whether CAS/publication already
+   * crossed the irreversible boundary. Shared by loop-branch recovery of an
+   * existing prepared episode and the final newly-prepared branch.
+   */
+  private async resolvePublishedPendingAfterRecoverFault(options: {
+    error: unknown;
+    episodeId: string;
+    slot: number;
+    preparedHint?: { candidate: string; cohortManifestRoot?: string };
+  }): Promise<DrainResult | null> {
+    let candidate = options.preparedHint?.candidate;
+    let cohort = options.preparedHint?.cohortManifestRoot;
+    let durablePublishedFact = false;
+    try {
+      const state = foldRecoveryEventsV3(await readRecoveryEventsV3(this.repo, options.episodeId)).get(options.slot);
+      durablePublishedFact = !!state?.published && !state.aborted;
+      const durableCandidate = typeof state?.published?.body?.candidate === "string"
+        ? String(state.published.body.candidate)
+        : typeof state?.prepared?.body?.candidate === "string"
+          ? String(state.prepared.body.candidate)
+          : undefined;
+      if (!candidate && durableCandidate) candidate = durableCandidate;
+      if (!cohort && typeof state?.prepared?.operation?.cohort_semantic_root === "string") {
+        cohort = state.prepared.operation.cohort_semantic_root;
+      }
+    } catch {
+      // Candidate ancestry remains an independent irreversible publication
+      // fact even when recovery metadata itself is quarantined.
+    }
+    if (!candidate) return null;
+    const current = await resolveRef(this.repo, this.options.refName);
+    const refPublished = await gitIsAncestor(this.repo, candidate, current);
+    if (!refPublished && !durablePublishedFact) return null;
+    const reason = options.error instanceof Error ? options.error.message : String(options.error);
+    this.record({
+      operation: "drain_v3",
+      episodeId: options.episodeId,
+      slot: options.slot,
+      action: "published_pending",
+      candidate,
+      ...(cohort ? { cohort } : {}),
+      reason,
+    });
+    return {
+      status: "blocked",
+      commit: candidate,
+      episodeId: options.episodeId,
+      slot: options.slot,
+      localCommit: "published",
+      reason,
+    };
+  }
+
+  /**
+   * recoverDrainSlotV3 wrapper used by both the existing-episode loop branch
+   * and the final newly-prepared branch. Post-CAS faults map to
+   * blocked+localCommit==="published"; true pre-publish faults rethrow.
+   */
+  private async recoverDrainSlotPublicationAware(options: {
+    operation: Parameters<typeof recoverDrainSlotV3>[0]["operation"];
+    slot: number;
+    episodeId: string;
+    prePublishCheck: () => Promise<void>;
+    preparedHint?: { candidate: string; cohortManifestRoot?: string };
+  }): Promise<
+    | { kind: "action"; action: Awaited<ReturnType<typeof recoverDrainSlotV3>> }
+    | { kind: "published_pending"; result: DrainResult }
+  > {
+    try {
+      const action = await recoverDrainSlotV3({
+        abrainHome: this.repo,
+        repo: this.repo,
+        operation: options.operation,
+        slot: options.slot,
+        prePublishCheck: options.prePublishCheck,
+        preConvergeCheck: () => this.preConvergeCheckWithTestHook(),
+      });
+      return { kind: "action", action };
+    } catch (error) {
+      const published = await this.resolvePublishedPendingAfterRecoverFault({
+        error,
+        episodeId: options.episodeId,
+        slot: options.slot,
+        preparedHint: options.preparedHint,
+      });
+      if (published) return { kind: "published_pending", result: published };
+      throw error;
+    }
+  }
+
+  /**
    * One startup key owns one promise and one retry timer. The phase machine is:
    * outside freeze/classify -> bootstrap mutation -> outside recovery classify
    * -> recovery/backlog mutation -> outside final classify -> stable ready publish.
@@ -1168,9 +1378,67 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     return this.startupPromise;
   }
 
-  private async freezeStartupClassificationInputs(): Promise<FrozenStartupClassificationInputs> {
+  /**
+   * Whole-L1 scan with optional non-authoritative OFD scan mutex.
+   * Never waits for the scan lock inside the mutation barrier (no lock-order
+   * deadlock with the abrainHome mutation OFD). Outside the barrier, BUSY is a
+   * typed deferred signal for startup.
+   */
+  private async scanWholeL1ForStartup(opts?: {
+    checkpoint?: () => void | Promise<void>;
+    /** When true (outside phases), nonblocking scan mutex is required. */
+    requireScanMutex?: boolean;
+  }): Promise<WholeL1ScanResult> {
+    const underBarrier = canonicalMutationBarrierHeld(this.repo);
+    // Canonical startup is the sole production opt-in for the progressive validated cache.
+    const scanOptions = {
+      abrainHome: this.repo,
+      useValidatedCache: true as const,
+      ...(opts?.checkpoint ? { checkpoint: opts.checkpoint } : {}),
+    };
+    if (underBarrier || !opts?.requireScanMutex) {
+      // Barrier-held paths never block on the scan mutex.
+      return scanWholeL1Validated(scanOptions);
+    }
+    let lock: ReturnType<typeof tryAcquireL1ScanMutex>;
+    try {
+      lock = tryAcquireL1ScanMutex(this.repo);
+    } catch (error) {
+      // Infrastructure failure (state path unsafe, etc.) — typed fail-closed,
+      // never remapped into STARTUP_CLASSIFY_INPUT_DRIFT four-round giant scans.
+      throw new CanonicalGitRuntimeError(
+        "CANONICAL_SCAN_LOCK_FAILED",
+        "failed to acquire the non-authoritative whole-L1 scan mutex",
+        { repo: this.repo, reason: error instanceof Error ? error.message : String(error) },
+      );
+    }
+    if (lock.status === "BUSY") {
+      throw new CanonicalGitRuntimeError(
+        "CANONICAL_SCAN_BUSY",
+        "another process holds the non-authoritative whole-L1 scan mutex",
+        { repo: this.repo },
+      );
+    }
+    try {
+      return await scanWholeL1Validated(scanOptions);
+    } finally {
+      lock.close();
+    }
+  }
+
+  private async freezeStartupClassificationInputs(opts?: {
+    /** Outside-phase only. Never pass a budget checkpoint into barrier mutations. */
+    checkpoint?: () => void | Promise<void>;
+    requireScanMutex?: boolean;
+  }): Promise<FrozenStartupClassificationInputs> {
     const headBefore = await resolveRef(this.repo, this.options.refName);
-    const scan = await scanWholeL1Validated({ abrainHome: this.repo });
+    // Cooperative scan deadline lives at per-dir/per-file boundaries inside
+    // scanWholeL1Validated. Mutation-path freezes omit checkpoint so barrier
+    // work is never aborted mid-flight by STARTUP_BUDGET_EXHAUSTED.
+    const scan = await this.scanWholeL1ForStartup({
+      checkpoint: opts?.checkpoint,
+      requireScanMutex: opts?.requireScanMutex === true,
+    });
     const scanRoot = recoveryHistoryScanRoot(scan);
     const statusHash = (await statusSnapshot(this.repo)).hash;
     const headAfter = await resolveRef(this.repo, this.options.refName);
@@ -1181,26 +1449,141 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         { headBefore, headAfter, scanRoot, statusHash },
       );
     }
-    return { head: headAfter, scan, scanRoot, statusHash };
+    return {
+      head: headAfter,
+      scan,
+      scanRoot,
+      statusHash,
+      inventoryFingerprint: scan.inventoryFingerprint,
+    };
   }
 
   private async assertStartupClassificationInputsStable(
-    frozen: Pick<FrozenStartupClassificationInputs, "head" | "scanRoot" | "statusHash">,
+    frozen: Pick<FrozenStartupClassificationInputs, "head" | "statusHash" | "inventoryFingerprint">,
   ): Promise<void> {
+    // Minimal stable proof: re-resolve HEAD + statusHash and re-list L1 file
+    // identities. Do not blind-reuse the frozen scan object and do not perform a
+    // second full materializing validation when identities still match.
     const currentHead = await resolveRef(this.repo, this.options.refName);
-    const currentScan = await scanWholeL1Validated({ abrainHome: this.repo });
-    const currentScanRoot = recoveryHistoryScanRoot(currentScan);
     const currentStatusHash = (await statusSnapshot(this.repo)).hash;
-    if (currentHead !== frozen.head || currentScanRoot !== frozen.scanRoot || currentStatusHash !== frozen.statusHash) {
-      throw new CanonicalGitRuntimeError("STARTUP_CLASSIFY_INPUT_DRIFT", "HEAD/scan-root/status drifted after outside immutable classification", {
+    const currentInventory = await computeL1InventoryFingerprint({ abrainHome: this.repo });
+    if (
+      currentHead !== frozen.head
+      || currentStatusHash !== frozen.statusHash
+      || currentInventory !== frozen.inventoryFingerprint
+    ) {
+      throw new CanonicalGitRuntimeError("STARTUP_CLASSIFY_INPUT_DRIFT", "HEAD/status/L1-inventory drifted after outside immutable classification", {
         frozenHead: frozen.head,
         currentHead,
-        frozenScanRoot: frozen.scanRoot,
-        currentScanRoot,
         frozenStatusHash: frozen.statusHash,
         currentStatusHash,
+        frozenInventoryFingerprint: frozen.inventoryFingerprint,
+        currentInventoryFingerprint: currentInventory,
       });
     }
+  }
+
+  /**
+   * Fail-closed last-known-ready gate. Only skips a cold attempt when the
+   * durable fingerprint exists and HEAD + statusHash + L1 inventory +
+   * implementation/validator/registry fingerprints all match, no device-join
+   * journal is present, and cold-grade read-only preflight succeeds. Any
+   * missing/corrupt/drift/unstable path returns false (start cold). Never
+   * fail-open. Does **not** take the scan mutex (lock-order safety).
+   */
+  private async tryLastKnownReadyGate(): Promise<{
+    matched: boolean;
+    reason: string;
+    head?: string;
+    statusHash?: string;
+    inventoryFingerprint?: string;
+  }> {
+    const previous = await readLastKnownReadyFingerprint(this.repo);
+    if (!previous) return { matched: false, reason: "missing" };
+    if (await deviceJoinJournalPresent(this.repo)) {
+      return { matched: false, reason: "device_join_journal_present" };
+    }
+
+    // Same-class read-only safety as cold mutation preflight, but without taking
+    // the scan mutex or mutation barrier. Detached HEAD / bisect / index.lock /
+    // implementation drift must force cold, never skip.
+    try {
+      await assertProvenanceFrozen(this.sourceRoot, this.settings.settingsPath, this.loadedProvenance);
+      await assertRepoMutationPreflight(this.repo, this.options.refName);
+      await preflightSharedIndexLock(this.repo);
+    } catch (error) {
+      return {
+        matched: false,
+        reason: `preflight_failed:${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+
+    let head: string;
+    let statusHash: string;
+    let inventoryFingerprint: string;
+    let dirtyRows: number;
+    let registryHash: string;
+    try {
+      const headBefore = await resolveRef(this.repo, this.options.refName);
+      const statusBefore = await statusSnapshot(this.repo);
+      dirtyRows = statusBefore.rows.length;
+      // Dirty worktree (including deferred recovery metadata tails) must still
+      // enter the cold phase machine so backlog/recovery diagnostics remain
+      // reachable. Last-known-ready only accelerates the clean idle case.
+      if (dirtyRows > 0) {
+        return {
+          matched: false,
+          reason: "dirty_status_requires_cold",
+          head: headBefore,
+          statusHash: statusBefore.hash,
+        };
+      }
+      // Inventory is wrapped by head/status before+after snapshots. Any movement
+      // during the probe is treated as unstable → cold.
+      inventoryFingerprint = await computeL1InventoryFingerprint({ abrainHome: this.repo });
+      const headAfter = await resolveRef(this.repo, this.options.refName);
+      const statusAfter = await statusSnapshot(this.repo);
+      if (headBefore !== headAfter || statusBefore.hash !== statusAfter.hash || statusAfter.rows.length > 0) {
+        return {
+          matched: false,
+          reason: "probe_unstable",
+          head: headAfter,
+          statusHash: statusAfter.hash,
+          inventoryFingerprint,
+        };
+      }
+      head = headAfter;
+      statusHash = statusAfter.hash;
+      registryHash = registryContentHash(loadL1SchemaRegistry());
+    } catch (error) {
+      return {
+        matched: false,
+        reason: `probe_failed:${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (
+      head !== previous.head
+      || statusHash !== previous.statusHash
+      || inventoryFingerprint !== previous.inventoryFingerprint
+      || this.implementationFingerprint !== previous.implementationFingerprint
+      || previous.validatorFingerprint !== L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT
+      || registryHash !== previous.registryHash
+    ) {
+      return {
+        matched: false,
+        reason: "drift",
+        head,
+        statusHash,
+        inventoryFingerprint,
+      };
+    }
+    return {
+      matched: true,
+      reason: "matched",
+      head,
+      statusHash,
+      inventoryFingerprint,
+    };
   }
 
   private async startupTestDelay(
@@ -1254,25 +1637,55 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     );
   }
 
+  private assertStartupBudgetAvailable(busyDeadline: number, now: () => number, phase: string): void {
+    if (now() < busyDeadline) return;
+    throw new CanonicalGitRuntimeError(
+      "STARTUP_BUDGET_EXHAUSTED",
+      "canonical startup monotonic budget exhausted at a cooperative cutpoint",
+      { repo: this.repo, phase, deadlineMs: busyDeadline, nowMs: now() },
+    );
+  }
+
   private async runStartupPhases(
     driftAttempt: number,
     busyRetry: number,
     busyDeadline: number,
     now: () => number,
   ): Promise<CanonicalRuntimeDiagnostics> {
-    if (now() >= busyDeadline) {
-      throw new CanonicalMutationBarrierError(
-        "CANONICAL_MUTATION_BUSY",
-        "canonical startup busy deadline expired before the next phase attempt",
-        { repo: this.repo, phase: "startup_phase_entry", deadlineMs: busyDeadline },
-      );
-    }
+    // Cooperative cutpoint before any outside work. Pure outside-phase budget
+    // exhaustion reports STARTUP_BUDGET_EXHAUSTED; if this attempt already had
+    // barrier contention retries, the outer catch remaps the final cutpoint
+    // exhaustion to CANONICAL_MUTATION_BUSY to keep busy root-cause semantics.
+    this.assertStartupBudgetAvailable(busyDeadline, now, "startup_phase_entry");
+    const outsideScanCheckpoint = () => this.assertStartupBudgetAvailable(busyDeadline, now, "scan_whole_l1");
     let initialFrozen: FrozenStartupClassificationInputs | undefined;
     let freezeError: unknown;
     this.record({ operation: "startup_phase", phase: "freeze_initial", status: "enter", driftAttempt, busyRetry });
     try {
-      initialFrozen = await this.freezeStartupClassificationInputs();
+      await this.startupTestDelay(
+        "freeze_initial",
+        startupTestDelayMs("PI_ASTACK_STARTUP_FREEZE_DELAY_MS"),
+        "PI_ASTACK_STARTUP_FREEZE_MARKER",
+      );
+      // Read-only whole-L1 scan is cooperative: budget checkpoints sink into
+      // per-directory / per-file boundaries so a multi-minute scan cannot
+      // silently overrun startupBusyBudgetMs by a full scan unit.
+      // Outside phases take the non-authoritative scan mutex; barrier freezes do not.
+      initialFrozen = await this.freezeStartupClassificationInputs({
+        checkpoint: outsideScanCheckpoint,
+        requireScanMutex: true,
+      });
     } catch (error) {
+      // Budget exhaustion / scan-mutex busy during cooperative scan must surface
+      // as deferred, not as a freeze failure that retries under the mutation barrier.
+      if (
+        error instanceof CanonicalGitRuntimeError
+        && (
+          error.code === "STARTUP_BUDGET_EXHAUSTED"
+          || error.code === "CANONICAL_SCAN_BUSY"
+          || error.code === "CANONICAL_SCAN_LOCK_FAILED"
+        )
+      ) throw error;
       freezeError = error;
       this.record({
         operation: "startup_phase",
@@ -1284,18 +1697,23 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         ...(error instanceof CanonicalGitRuntimeError ? { code: error.code, detail: error.detail } : {}),
       });
     }
+    // Safe cutpoint after outside freeze/scan (scan itself already checkpointed).
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_freeze_initial");
 
     let initialClassification: CombinedRecoveryHistoryResult | undefined;
     let initialClassificationError: unknown;
     if (initialFrozen) {
       try {
+        this.assertStartupBudgetAvailable(busyDeadline, now, "before_classify_initial");
         initialClassification = await this.classifyStartupHistoryOutsideBarrier(initialFrozen, "classify_initial");
         this.record({ operation: "startup_phase", phase: "classify_initial", status: "outside_barrier_ok", driftAttempt, busyRetry, head: initialFrozen.head, scanRoot: initialFrozen.scanRoot, statusHash: initialFrozen.statusHash });
       } catch (error) {
+        if (error instanceof CanonicalGitRuntimeError && error.code === "STARTUP_BUDGET_EXHAUSTED") throw error;
         initialClassificationError = error;
         this.record({ operation: "startup_phase", phase: "classify_initial", status: "outside_barrier_failed", driftAttempt, busyRetry, reason: error instanceof Error ? error.message : String(error) });
       }
     }
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_classify_initial");
 
     const recoveryFrozen = await this.runStartupBarrier(busyDeadline, now, async () => {
       this.record({ operation: "startup_phase", phase: "bootstrap_mutation", status: "barrier_acquired", driftAttempt, busyRetry });
@@ -1330,15 +1748,21 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       return frozen;
     });
 
+    // Safe cutpoint after bootstrap mutation returns; never interrupt mid-barrier.
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_bootstrap_mutation");
+
     let recoveryClassification: CombinedRecoveryHistoryResult | undefined;
     let recoveryClassificationError: unknown;
     try {
+      this.assertStartupBudgetAvailable(busyDeadline, now, "before_classify_recovery");
       recoveryClassification = await this.classifyStartupHistoryOutsideBarrier(recoveryFrozen, "classify_recovery");
       this.record({ operation: "startup_phase", phase: "classify_recovery", status: "outside_barrier_ok", driftAttempt, busyRetry, head: recoveryFrozen.head, scanRoot: recoveryFrozen.scanRoot, statusHash: recoveryFrozen.statusHash });
     } catch (error) {
+      if (error instanceof CanonicalGitRuntimeError && error.code === "STARTUP_BUDGET_EXHAUSTED") throw error;
       recoveryClassificationError = error;
       this.record({ operation: "startup_phase", phase: "classify_recovery", status: "outside_barrier_failed", driftAttempt, busyRetry, reason: error instanceof Error ? error.message : String(error) });
     }
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_classify_recovery");
 
     const finalFrozen = await this.runStartupBarrier(busyDeadline, now, async () => {
       this.record({ operation: "startup_phase", phase: "recovery_mutation", status: "barrier_acquired", driftAttempt, busyRetry });
@@ -1349,7 +1773,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       await this.mutationPreflight();
       await this.recoverMetadataCheckpointIndexUnlocked(recoveryFrozen);
       await this.recoverStartupEpisodesUnlocked(recoveryFrozen.scan, recoveryClassification);
-      const backlog = await this.requestBacklogPreflightUnlocked();
+      const backlog = await this.requestBacklogPreflightUnlocked(recoveryFrozen);
       if (backlog.status === "ready") {
         if (isCanonicalMetadataOnlyCohort(backlog.receipts)) {
           this.record({ operation: "startup_backlog", status: "metadata_deferred", receiptCount: backlog.receipts.length });
@@ -1378,14 +1802,20 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       return frozen;
     });
 
+    // Safe cutpoint after recovery/backlog mutation returns.
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_recovery_mutation");
+
     let finalClassificationError: unknown;
     try {
+      this.assertStartupBudgetAvailable(busyDeadline, now, "before_classify_final");
       await this.classifyStartupHistoryOutsideBarrier(finalFrozen, "classify_final");
       this.record({ operation: "startup_phase", phase: "classify_final", status: "outside_barrier_ok", driftAttempt, busyRetry, head: finalFrozen.head, scanRoot: finalFrozen.scanRoot, statusHash: finalFrozen.statusHash });
     } catch (error) {
+      if (error instanceof CanonicalGitRuntimeError && error.code === "STARTUP_BUDGET_EXHAUSTED") throw error;
       finalClassificationError = error;
       this.record({ operation: "startup_phase", phase: "classify_final", status: "outside_barrier_failed", driftAttempt, busyRetry, reason: error instanceof Error ? error.message : String(error) });
     }
+    this.assertStartupBudgetAvailable(busyDeadline, now, "after_classify_final");
 
     return this.runStartupBarrier(busyDeadline, now, async () => {
       this.record({ operation: "startup_phase", phase: "publish_ready", status: "barrier_acquired", driftAttempt, busyRetry });
@@ -1409,6 +1839,49 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       this.startupState = "ready";
       this.record({ operation: "startup_phase", phase: "publish_ready", status: "tuple_stable", driftAttempt, busyRetry });
       this.record({ operation: "startup", status: "local_ready", attempt: driftAttempt, busyRetry });
+      // Persist fail-closed last-known-ready fingerprint for future session_start
+      // cold-skip. Only clean worktrees are eligible; deferred metadata tails must
+      // keep entering the cold phase machine. Non-authoritative; write failures
+      // are diagnostic-only.
+      try {
+        const publishStatus = await statusSnapshot(this.repo);
+        if (publishStatus.rows.length === 0 && publishStatus.hash === finalFrozen.statusHash) {
+          await writeLastKnownReadyFingerprint(this.repo, {
+            head: finalFrozen.head,
+            statusHash: finalFrozen.statusHash,
+            inventoryFingerprint: finalFrozen.inventoryFingerprint,
+            implementationFingerprint: this.implementationFingerprint,
+            validatorFingerprint: L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT,
+            registryHash: registryContentHash(loadL1SchemaRegistry()),
+          });
+          this.record({
+            operation: "startup_phase",
+            phase: "publish_ready",
+            status: "last_known_ready_written",
+            head: finalFrozen.head,
+            statusHash: finalFrozen.statusHash,
+            inventoryFingerprint: finalFrozen.inventoryFingerprint,
+            implementationFingerprint: this.implementationFingerprint,
+            validatorFingerprint: L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT,
+          });
+        } else {
+          this.record({
+            operation: "startup_phase",
+            phase: "publish_ready",
+            status: "last_known_ready_skipped_dirty",
+            dirtyRows: publishStatus.rows.length,
+            statusHash: publishStatus.hash,
+            frozenStatusHash: finalFrozen.statusHash,
+          });
+        }
+      } catch (error) {
+        this.record({
+          operation: "startup_phase",
+          phase: "publish_ready",
+          status: "last_known_ready_write_failed",
+          reason: error instanceof Error ? error.message : String(error),
+        });
+      }
       return this.diagnostics();
     });
   }
@@ -1426,6 +1899,25 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     this.startupRetryable = false;
     this.ownerAlert = false;
 
+    // Fail-closed last-known-ready gate: only skip cold attempt when durable
+    // fingerprint matches live HEAD + statusHash + L1 inventory and no journal.
+    // Consumer continuation/reporter still run against the resulting ready diag.
+    const readyGate = await this.tryLastKnownReadyGate();
+    this.record({
+      operation: "startup_phase",
+      phase: "last_known_ready_gate",
+      status: readyGate.matched ? "skip_cold" : "cold_required",
+      reason: readyGate.reason,
+      ...(readyGate.head ? { head: readyGate.head } : {}),
+      ...(readyGate.statusHash ? { statusHash: readyGate.statusHash } : {}),
+      ...(readyGate.inventoryFingerprint ? { inventoryFingerprint: readyGate.inventoryFingerprint } : {}),
+    });
+    if (readyGate.matched) {
+      this.startupState = "ready";
+      this.record({ operation: "startup", status: "local_ready", attempt: 0, busyRetry: 0, via: "last_known_ready" });
+      return this.diagnostics();
+    }
+
     const maxDriftAttempts = 4;
     const now = this.options.startupMonotonicNow ?? monotonicNowMs;
     const sleep = this.options.startupRetrySleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
@@ -1442,6 +1934,75 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       try {
         return await this.runStartupPhases(driftAttempt, busyRetry, busyDeadline, now);
       } catch (error) {
+        if (error instanceof CanonicalGitRuntimeError && error.code === "STARTUP_BUDGET_EXHAUSTED") {
+          const current = now();
+          const elapsedMs = Math.max(0, current - busyStarted);
+          // Root-cause stability: after barrier contention retries, the total
+          // deadline can land on a later outside freeze/scan/classify cutpoint.
+          // Preserve CANONICAL_MUTATION_BUSY so busy diagnostics/retry semantics
+          // do not flip to STARTUP_BUDGET_EXHAUSTED at the final cutpoint.
+          // Pure outside-phase exhaustion (busyRetry === 0) stays budget-exhausted.
+          const deferredCode: CanonicalStartupDeferredReason = busyRetry > 0
+            ? "CANONICAL_MUTATION_BUSY"
+            : "STARTUP_BUDGET_EXHAUSTED";
+          this.startupState = "deferred";
+          this.deferredReason = deferredCode;
+          this.startupRetryable = true;
+          this.blockedReason = deferredCode === "CANONICAL_MUTATION_BUSY"
+            ? `CANONICAL_MUTATION_BUSY: startup deferred after ${Math.floor(elapsedMs)}ms busy budget; retry requires an external lifecycle trigger`
+            : `STARTUP_BUDGET_EXHAUSTED: startup deferred after ${Math.floor(elapsedMs)}ms total budget; retry requires an external lifecycle trigger`;
+          this.record({
+            operation: "startup",
+            status: "deferred",
+            code: deferredCode,
+            retryable: true,
+            retryTrigger: "external_lifecycle",
+            busyRetry,
+            elapsedMs: Math.floor(elapsedMs),
+            budgetMs: busyBudgetMs,
+            detail: error.detail,
+          });
+          return this.diagnostics();
+        }
+
+        if (error instanceof CanonicalGitRuntimeError && error.code === "CANONICAL_SCAN_BUSY") {
+          // Non-authoritative scan mutex contention: typed deferred, promise is
+          // evicted by the outer singleflight so an external lifecycle can retry.
+          this.startupState = "deferred";
+          this.deferredReason = "CANONICAL_SCAN_BUSY";
+          this.startupRetryable = true;
+          this.blockedReason = "CANONICAL_SCAN_BUSY: whole-L1 scan mutex held by another process; retry requires an external lifecycle trigger";
+          this.record({
+            operation: "startup",
+            status: "deferred",
+            code: "CANONICAL_SCAN_BUSY",
+            retryable: true,
+            retryTrigger: "external_lifecycle",
+            busyRetry,
+            detail: error.detail,
+          });
+          return this.diagnostics();
+        }
+
+        if (error instanceof CanonicalGitRuntimeError && error.code === "CANONICAL_SCAN_LOCK_FAILED") {
+          // Scan-lock infrastructure failure is fail-closed and must not be
+          // remapped into STARTUP_CLASSIFY_INPUT_DRIFT four-round giant scans.
+          this.startupState = "deferred";
+          this.deferredReason = "CANONICAL_SCAN_LOCK_FAILED";
+          this.startupRetryable = true;
+          this.blockedReason = "CANONICAL_SCAN_LOCK_FAILED: whole-L1 scan mutex infrastructure failed; retry requires an external lifecycle trigger";
+          this.record({
+            operation: "startup",
+            status: "deferred",
+            code: "CANONICAL_SCAN_LOCK_FAILED",
+            retryable: true,
+            retryTrigger: "external_lifecycle",
+            busyRetry,
+            detail: error.detail,
+          });
+          return this.diagnostics();
+        }
+
         if (error instanceof CanonicalMutationBarrierError && error.code === "CANONICAL_MUTATION_BUSY") {
           const current = now();
           const remainingMs = Math.max(0, busyDeadline - current);
@@ -1757,13 +2318,18 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     return gitSingleFlight(this.repo, () => this.requestBacklogPreflightUnlocked());
   }
 
-  private async requestBacklogPreflightUnlocked(): Promise<BacklogPreflightResult> {
+  private async requestBacklogPreflightUnlocked(preclassified?: FrozenStartupClassificationInputs): Promise<BacklogPreflightResult> {
     if (!this.settings.enabled || !this.settings.valid) return { status: "empty", statusHash: sha256Hex("disabled"), receipts: [], ownership: {} };
     await assertProvenanceFrozen(this.sourceRoot, this.settings.settingsPath, this.loadedProvenance);
     await assertRepoMutationPreflight(this.repo, this.options.refName);
     await preflightSharedIndexLock(this.repo);
     const first = await statusSnapshot(this.repo);
-    const ownershipContext = await buildCanonicalOwnershipContext({ abrainHome: this.repo });
+    // Startup recovery mutation already holds a frozen scan; reuse it so ownership
+    // does not re-materialize whole-L1 under the barrier.
+    const ownershipContext = await buildCanonicalOwnershipContext({
+      abrainHome: this.repo,
+      ...(preclassified ? { scan: preclassified.scan } : {}),
+    });
     const receipts: ProducedArtifact[] = [];
     const ownership: Record<string, string[]> = { knowledge: [], constraint: [], canonical_path: [] };
     try {
@@ -1995,14 +2561,16 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         return { status: "blocked", episodeId, localCommit: "not_published", reason, ownerAlert: true };
       }
       if (claim.status === "complete") return { status: "consumed", episodeId, localCommit: "not_published", reason: claim.status };
-      const action = await recoverDrainSlotV3({
-        abrainHome: this.repo,
-        repo: this.repo,
+      // Existing prepared/pending episode: recover must use the same post-CAS
+      // publication-aware disposition as the final newly-prepared branch.
+      const recovered = await this.recoverDrainSlotPublicationAware({
         operation,
         slot: claim.slot,
-        prePublishCheck: () => this.mutationPreflight(),
-        preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+        episodeId,
+        prePublishCheck: () => this.prePublishCheckWithTestHook(),
       });
+      if (recovered.kind === "published_pending") return recovered.result;
+      const action = recovered.action;
       this.record({ operation: "recover_drain_v3", episodeId, slot: claim.slot, action, source: "request_drain" });
       if (action === "index_converged" || action === "already_complete") {
         return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId, slot: claim.slot, localCommit: "index_converged" };
@@ -2017,37 +2585,17 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     await preflightSharedIndexLock(this.repo);
     const prepared = await prepareExactCohortCommit({ repo: this.repo, refName: this.options.refName, frozenCommit, plan, message, protocolVersion: LOCAL_DRAIN_PROTOCOL_V3 });
     await recordDrainPreparedV3({ abrainHome: this.repo, operation, slot: claim.slot, prepared, frozenIndexSnapshot });
-    let action: Awaited<ReturnType<typeof recoverDrainSlotV3>>;
-    try {
-      action = await recoverDrainSlotV3({
-        abrainHome: this.repo,
-        repo: this.repo,
-        operation,
-        slot: claim.slot,
-        prePublishCheck: async () => {
-          await this.mutationPreflight();
-          for (const item of validated) await readArtifactBytes(this.repo, item.receipt);
-        },
-        preConvergeCheck: () => preflightSharedIndexLock(this.repo),
-      });
-    } catch (error) {
-      const current = await resolveRef(this.repo, this.options.refName);
-      const refPublished = await gitIsAncestor(this.repo, prepared.candidate, current);
-      let durablePublishedFact = false;
-      try {
-        const state = foldRecoveryEventsV3(await readRecoveryEventsV3(this.repo, episodeId)).get(claim.slot);
-        durablePublishedFact = !!state?.published && !state.aborted;
-      } catch {
-        // Candidate ancestry remains an independent irreversible publication
-        // fact even when recovery metadata itself is quarantined.
-      }
-      if (refPublished || durablePublishedFact) {
-        const reason = error instanceof Error ? error.message : String(error);
-        this.record({ operation: "drain_v3", episodeId, slot: claim.slot, action: "published_pending", candidate: prepared.candidate, cohort: prepared.cohortManifestRoot, reason });
-        return { status: "blocked", commit: prepared.candidate, episodeId, slot: claim.slot, localCommit: "published", reason };
-      }
-      throw error;
-    }
+    const recovered = await this.recoverDrainSlotPublicationAware({
+      operation,
+      slot: claim.slot,
+      episodeId,
+      preparedHint: { candidate: prepared.candidate, cohortManifestRoot: prepared.cohortManifestRoot },
+      prePublishCheck: () => this.prePublishCheckWithTestHook(async () => {
+        for (const item of validated) await readArtifactBytes(this.repo, item.receipt);
+      }),
+    });
+    if (recovered.kind === "published_pending") return recovered.result;
+    const action = recovered.action;
     this.record({ operation: "drain_v3", episodeId, slot: claim.slot, action, candidate: prepared.candidate, cohort: prepared.cohortManifestRoot });
     if (action !== "index_converged" && action !== "already_complete") return { status: "blocked", episodeId, slot: claim.slot, localCommit: "not_published", reason: action };
     return { status: "index_converged", commit: await resolveRef(this.repo, this.options.refName), episodeId, slot: claim.slot, localCommit: "index_converged" };
@@ -2087,6 +2635,65 @@ export async function getCanonicalGitRuntime(options: CanonicalGitRuntimeOptions
   const runtime = new CanonicalGitRuntimeImpl({ repo, options, settings, sourceRoot, provenance });
   state.runtimes.set(repo, runtime);
   return runtime;
+}
+
+/**
+ * Pure synchronous peek of an already-constructed canonical runtime.
+ * Must not call getCanonicalGitRuntime / getCanonicalStartupPromise / awaitStartup,
+ * and must not create runtimes, promises, singleflight turns, or barriers.
+ */
+export function peekCanonicalRuntimeDiagnostics(options: {
+  abrainHome?: string;
+} = {}): CanonicalRuntimePeek {
+  const state = peekGlobalState();
+  if (!state) return Object.freeze({ status: "none" as const });
+  const want = resolvePeekRepoKey(options.abrainHome);
+  let runtime: CanonicalGitRuntimeImpl | undefined;
+  if (want) {
+    runtime = state.runtimes.get(want);
+    if (!runtime) {
+      for (const [repo, candidate] of state.runtimes) {
+        if (repo === want || path.resolve(repo) === want) {
+          runtime = candidate;
+          break;
+        }
+      }
+    }
+  } else if (state.runtimes.size === 1) {
+    runtime = state.runtimes.values().next().value;
+  }
+  if (!runtime) {
+    return Object.freeze({
+      status: "none" as const,
+      ...(state.implementationFingerprint ? { implementationFingerprint: state.implementationFingerprint } : {}),
+    });
+  }
+  const diag = runtime.diagnostics();
+  const status = diag.startup === "not_started" && !state.startupPromises.size
+    ? "not_started"
+    : diag.startup;
+  return Object.freeze({
+    status,
+    ...(diag.blockedReason ? { reason: diag.blockedReason } : {}),
+    ...(diag.deferredReason ? { deferredReason: diag.deferredReason } : {}),
+    ...(diag.retryable ? { retryable: true as const } : {}),
+    generation: diag.startupGeneration,
+    ...(lastStartupPhaseFromTail(diag.tail) ? { lastPhase: lastStartupPhaseFromTail(diag.tail) } : {}),
+    repo: diag.repo,
+    implementationFingerprint: diag.implementationFingerprint,
+  });
+}
+
+/** Test-only: count process-local startup attempts currently cached. */
+export function __canonicalStartupPromiseMapSizeForTests(): number {
+  const state = peekGlobalState();
+  return state?.startupPromises.size ?? 0;
+}
+
+/** Test-only: count process-local runtime instances. */
+export function __canonicalRuntimeMapSizeForTests(): number {
+  const state = peekGlobalState();
+  return state?.runtimes.size ?? 0;
 }
 
 function canonicalStartupKey(options: CanonicalGitRuntimeOptions): string {

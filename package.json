@@ -193,6 +193,8 @@
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
     "smoke:l1-schema-registry-faults": "node scripts/smoke-l1-schema-registry-faults.mjs",
     "smoke:canonical-git-runtime": "node scripts/smoke-canonical-git-runtime.mjs",
+    "smoke:canonical-provenance-fingerprint": "node scripts/smoke-canonical-provenance-fingerprint.mjs",
+    "smoke:canonical-startup-scan-cache": "node scripts/smoke-canonical-startup-scan-cache.mjs",
     "smoke:canonical-mutation-barrier": "node scripts/smoke-canonical-mutation-barrier.mjs",
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
