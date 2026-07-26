@@ -7941,6 +7941,90 @@ async function tryAutoWriteLane(args: {
   };
 }
 
+/**
+ * Formal production operator for durable Tier-1 held authorized retry.
+ *
+ * Peeks the oldest pending held decision for the session and, when present,
+ * re-enters the private `tryAutoWriteLane` with the frozen held lineage
+ * (correctionSignal:null, no extractor follow-up, no re-classification).
+ * Does not invent authorization, does not run the extractor when held is
+ * missing, and does not copy CE/proposition/settle logic.
+ */
+export type ExecuteTier1HeldAuthorizedRetryResult =
+  | { kind: "empty" }
+  | {
+      kind: "retried";
+      decisionId: string;
+      outcome: AutoWriteLaneOutcome;
+    };
+
+function minimalHeldAuthorizedRetryWindow(held: Tier1HeldAuthorizedDecision): RunWindow {
+  const quote = held.signal.user_quote ?? "";
+  const text = quote;
+  return {
+    entries: [{
+      type: "message",
+      id: held.sourceTurnId,
+      timestamp: held.authorizedAtUtc,
+      message: { role: "user", content: [{ type: "text", text: quote }] },
+    }],
+    text,
+    chars: text.length,
+    totalBranchEntries: 1,
+    candidateEntries: 1,
+    includedEntries: 1,
+    checkpointFound: false,
+    lastEntryId: held.sourceTurnId,
+  };
+}
+
+export async function executeTier1HeldAuthorizedRetry(args: {
+  abrainHome: string;
+  sessionId: string;
+  correlationId: string;
+  /** Fallback only when held.projectRoot is absent. Held frozen root wins. */
+  cwd?: string;
+  settings?: SedimentSettings;
+  modelRegistry?: unknown;
+  signal?: AbortSignal;
+}): Promise<ExecuteTier1HeldAuthorizedRetryResult> {
+  const held = await peekOldestTier1HeldDecision(args.abrainHome, args.sessionId);
+  if (!held) return { kind: "empty" };
+
+  // cwd / projectId: held frozen lineage only (cwd may fall back when older
+  // held records predate projectRoot persistence).
+  const cwd = held.projectRoot ?? args.cwd;
+  if (!cwd) {
+    throw new Error(
+      "executeTier1HeldAuthorizedRetry: held.projectRoot missing and cwd not provided",
+    );
+  }
+  const projectId = held.projectId;
+  const settings = args.settings ?? resolveSedimentSettings();
+  const window = minimalHeldAuthorizedRetryWindow(held);
+
+  const outcome = await tryAutoWriteLane({
+    cwd,
+    sessionId: args.sessionId,
+    settings,
+    window,
+    modelRegistry: args.modelRegistry,
+    signal: args.signal,
+    correlationId: args.correlationId,
+    abrainHome: args.abrainHome,
+    projectId,
+    // Exact held retry: never re-classify; never spend extractor budget.
+    correctionSignal: null,
+    tier1ExtractorFollowUp: false,
+  });
+
+  return {
+    kind: "retried",
+    decisionId: held.decisionId,
+    outcome,
+  };
+}
+
 /** Compact subset of SedimentSettings safe to embed in every audit row. */
 function snapshotSedimentSettings(
   settings: ReturnType<typeof resolveSedimentSettings>,
