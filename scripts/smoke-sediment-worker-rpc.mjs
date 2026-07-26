@@ -2637,6 +2637,22 @@ async function clearPendingOutbox() {
   for (const row of pending) {
     try { fs.unlinkSync(row.filePath); } catch { /* ignore */ }
   }
+  // Also clear durable failed residual so maintenance idle probes stay isolated.
+  const failedDir = outbox.publicationOutboxFailedDir(abrainHome);
+  if (fs.existsSync(failedDir)) {
+    for (const name of fs.readdirSync(failedDir)) {
+      try { fs.unlinkSync(path.join(failedDir, name)); } catch { /* ignore */ }
+    }
+  }
+}
+
+async function seedFailedOutbox(count) {
+  const ids = await seedPendingOutbox(count);
+  for (const itemId of ids) {
+    const moved = await outbox.failPublicationOutboxItem(abrainHome, itemId, "smoke terminal fixture");
+    assert(moved.status === "failed", `seed failed move ${itemId}`);
+  }
+  return ids;
 }
 
 await check("publication_pending true/false from actual outbox; fail-closed true", async () => {
@@ -2709,6 +2725,7 @@ await check("maintenance: empty idle; no drain write", async () => {
   assert(r.retryable === false, "idle not retryable");
   assert(r.restart_child === false, "no restart");
   assert(r.pending_before_bucket === "0" && r.pending_after_bucket === "0", "buckets 0");
+  assert(r.failed_bucket === "0", `idle failed_bucket=${r.failed_bucket}`);
   assert(drainCalls === 0, "idle must not drain");
   assert(r.schema === "pi-astack/sediment-worker-maintenance-result/v1", "result schema");
 });
@@ -2823,7 +2840,127 @@ await check("maintenance: real production drain terminal failure is never draine
   assert(result.retryable === false, "terminal publication failure is nonretryable");
   assert(result.error_code === "publication_terminal_failed", `terminal code=${result.error_code}`);
   assert(result.pending_before_bucket === "1" && result.pending_after_bucket === "0", "terminal after-zero remains failed");
+  assert(result.failed_bucket === "1", `terminal failed_bucket=${result.failed_bucket}`);
   await clearPendingOutbox();
+});
+
+await check("maintenance: durable failed residual is sticky critical (pending0 failed1 / restart / drained-with-history)", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedFailedOutbox(1);
+
+  const first = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-failed-present-1"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      throw new Error("must not drain when only failed residual remains");
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(first.status === "failed" && first.retryable === false, `pending0 failed1=${JSON.stringify(first)}`);
+  assert(first.error_code === "publication_terminal_failed_present", `code=${first.error_code}`);
+  assert(first.pending_before_bucket === "0" && first.pending_after_bucket === "0", "pending buckets stay 0");
+  assert(first.failed_bucket === "1", `failed_bucket=${first.failed_bucket}`);
+  assert(first.publication_pending === undefined, "maintenance result must not mix publication_pending");
+
+  // Daemon restart equivalent: fresh call, same durable residual still critical.
+  const again = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-failed-present-2"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain(),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(again.status === "failed" && again.error_code === "publication_terminal_failed_present", `restart still failed=${JSON.stringify(again)}`);
+  assert(again.failed_bucket === "1" && again.retryable === false, "restart residual sticky");
+
+  // Pending drained while historical failed remains → still failed, not drained.
+  await seedPendingOutbox(1);
+  const drainedPending = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-drained-with-failed"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: () => outbox.schedulePublicationOutboxDrain(abrainHome, async () => "done"),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(drainedPending.status === "failed", `history failed after drain=${JSON.stringify(drainedPending)}`);
+  assert(drainedPending.error_code === "publication_terminal_failed_present", `history code=${drainedPending.error_code}`);
+  assert(drainedPending.pending_after_bucket === "0", "pending drained");
+  assert(drainedPending.failed_bucket === "1", "historical failed remains");
+  assert(drainedPending.retryable === false, "historical failed not auto-retryable");
+  await clearPendingOutbox();
+});
+
+await check("maintenance: failed count symlink/corrupt fail closed; failed_bucket unknown on read fail", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  const failedDir = outbox.publicationOutboxFailedDir(abrainHome);
+  fs.mkdirSync(failedDir, { recursive: true });
+
+  // Symlink fail closed.
+  const linkTarget = path.join(abrainHome, "evil-target.json");
+  fs.writeFileSync(linkTarget, "{}");
+  const linkName = `${"a".repeat(64)}.json`;
+  fs.symlinkSync(linkTarget, path.join(failedDir, linkName));
+  let symlinkThrew = false;
+  try {
+    await outbox.countPublicationOutboxFailed(abrainHome);
+  } catch {
+    symlinkThrew = true;
+  }
+  assert(symlinkThrew, "symlink failed entry must fail closed");
+  assert(await outbox.hasPublicationOutboxFailed(abrainHome).then(() => false, () => true) === true, "hasFailed symlink fail closed");
+  fs.unlinkSync(path.join(failedDir, linkName));
+
+  // Corrupt body fail closed.
+  const corruptName = `${"b".repeat(64)}.json`;
+  fs.writeFileSync(path.join(failedDir, corruptName), "{not-json");
+  let corruptThrew = false;
+  try {
+    await outbox.countPublicationOutboxFailed(abrainHome);
+  } catch {
+    corruptThrew = true;
+  }
+  assert(corruptThrew, "corrupt failed entry must fail closed");
+  fs.unlinkSync(path.join(failedDir, corruptName));
+
+  // Illegal filename fail closed.
+  fs.writeFileSync(path.join(failedDir, "not-a-legal-item.json"), "{}");
+  let illegalThrew = false;
+  try {
+    await outbox.countPublicationOutboxFailed(abrainHome);
+  } catch {
+    illegalThrew = true;
+  }
+  assert(illegalThrew, "illegal filename must fail closed");
+  fs.unlinkSync(path.join(failedDir, "not-a-legal-item.json"));
+
+  // Maintenance maps failed-count throw → unknown bucket, no invented 0.
+  const countFailed = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-failed-count-failed"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain(),
+    countPublicationOutboxPending: async () => 0,
+    countPublicationOutboxFailed: async () => { throw new Error("failed count boom"); },
+  });
+  assert(countFailed.status === "failed", `failed count status=${countFailed.status}`);
+  assert(countFailed.error_code === "publication_outbox_failed_count_failed", `failed count code=${countFailed.error_code}`);
+  assert(countFailed.failed_bucket === "unknown", `failed_bucket on read fail=${countFailed.failed_bucket}`);
+  assert(countFailed.pending_before_bucket === "0", "pending known before failed-count fail");
+
+  // Valid failed item counts as 1.
+  await seedFailedOutbox(1);
+  assert(await outbox.countPublicationOutboxFailed(abrainHome) === 1, "valid failed counts");
+  assert(await outbox.hasPublicationOutboxFailed(abrainHome) === true, "hasFailed true");
+  await clearPendingOutbox();
+  assert(await outbox.countPublicationOutboxFailed(abrainHome) === 0, "empty failed is 0");
+  assert(await outbox.hasPublicationOutboxFailed(abrainHome) === false, "hasFailed false empty");
 });
 
 await check("maintenance: config gate; deadline/restart unreaped", async () => {
@@ -2843,6 +2980,7 @@ await check("maintenance: config gate; deadline/restart unreaped", async () => {
   assert(cfg.error_code === "effective_owner_not_daemon", `code=${cfg.error_code}`);
   assert(cfg.retryable === false, "config not retry thrash");
   assert(cfg.pending_before_bucket === "unknown" && cfg.pending_after_bucket === "unknown", "config failure count is unknown");
+  assert(cfg.failed_bucket === "unknown", "config gate failed_bucket unknown");
   assert(drainCalls === 0, "config gate must not drain");
   assert((await outbox.listPublicationOutboxPending(abrainHome)).length === 1, "no write on config fail");
 
@@ -2875,6 +3013,7 @@ await check("maintenance: config gate; deadline/restart unreaped", async () => {
   });
   assert(countFailed.status === "failed" && countFailed.error_code === "publication_outbox_count_failed", `count=${JSON.stringify(countFailed)}`);
   assert(countFailed.pending_before_bucket === "unknown" && countFailed.pending_after_bucket === "unknown", "count failure buckets unknown");
+  assert(countFailed.failed_bucket === "unknown", "pending count failure leaves failed_bucket unknown");
   assert(drainCalls === 0, "before count failure must not drain");
 
   // Budget unreaped hang → restart_child + poison.
@@ -3034,9 +3173,28 @@ await check("maintenance: result/progress key whitelist + sensitive scan", async
     onProgress: (ev) => progressEvents.push(ev),
   });
   assert(worker.sanitizeWorkerMaintenanceResult(r) !== null, "result whitelist ok");
+  assert(r.failed_bucket === "0" || r.failed_bucket === "unknown", `idle-path failed_bucket=${r.failed_bucket}`);
   const notify = worker.formatWorkerMaintenanceResultNotify(r);
   assert(worker.maintenanceResultNotifyHasSensitiveContent(notify) === false, "no sensitive content");
   assert(notify.startsWith("sediment-worker-maintenance-result:"), "prefix");
+  // Optional failed_bucket is whitelisted; absent remains forward-compatible.
+  assert(worker.sanitizeWorkerMaintenanceResult({
+    schema: r.schema,
+    request_id: r.request_id,
+    status: r.status,
+    retryable: r.retryable,
+    restart_child: r.restart_child,
+    pending_before_bucket: r.pending_before_bucket,
+    pending_after_bucket: r.pending_after_bucket,
+  }) !== null, "result without failed_bucket accepted");
+  assert(worker.sanitizeWorkerMaintenanceResult({
+    ...r,
+    failed_bucket: "1",
+  }) !== null, "closed failed_bucket accepted");
+  assert(worker.sanitizeWorkerMaintenanceResult({
+    ...r,
+    failed_bucket: "99",
+  }) === null, "non-closed failed_bucket rejected");
 
   // Reject free-text / path / item id keys.
   assert(worker.sanitizeWorkerMaintenanceResult({
@@ -3052,6 +3210,12 @@ await check("maintenance: result/progress key whitelist + sensitive scan", async
     path: "/tmp/secret",
   })}`;
   assert(worker.maintenanceResultNotifyHasSensitiveContent(evil) === true, "path sensitive");
+  const evilFailed = `sediment-worker-maintenance-result:${JSON.stringify({
+    ...r,
+    failed_bucket: "1",
+    item_id: "a".repeat(64),
+  })}`;
+  assert(worker.maintenanceResultNotifyHasSensitiveContent(evilFailed) === true, "item_id with failed_bucket still sensitive");
 
   // Progress stage publication allowed (idle path may not emit; force via pending).
   await seedPendingOutbox(1);

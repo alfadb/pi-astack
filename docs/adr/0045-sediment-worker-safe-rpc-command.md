@@ -271,24 +271,29 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 
 **Body**: directly awaits production `drainKnowledgePublicationOutbox`, which returns the real `PublicationOutboxDrainResult`; it does not discard `status`, `processed`, `terminalFailed`, or `lastError`. The direct path performs a one-shot nonblocking canonical OFD probe **before** scheduling/reading a batch. Contention returns real `status=busy` immediately, without retrying against or consuming the maintenance budget. After acquisition, every candidate Knowledge item must resolve and validate its exact L1 event before selection. Missing L1 is held/not-ready (same pending item/event identity); other independent ready groups still drain, and the result closes with `lastError=publication_l1_pending`, `pending>0`, `terminalFailed=0`. After selection it checks worker `AbortSignal`/remaining budget at frozen-batch cutpoints and retains the existing fixed git subprocess timeouts. The foreground one-shot remains unchanged: canonical contention is represented as `completed` with retryable `lastError`. The outer worker fence remains authoritative for a drain started by this invocation that cannot be reaped. **Does not** run agent-end / other maintenance lanes; **does not** touch checkpoint / receipt / ledger / source.
 
-**Before/after pending**: production metadata-only count, without deserializing item content. Closed buckets: `unknown` / `0` / `1` / `2-4` / `5-9` / `10-49` / `50+`. Owner/security/poison failures and any count that was not successfully read are `unknown`, never invented `0`.
+**Before/after pending + failed residual**: production metadata-only counts. Pending count does not deserialize item bodies. Failed residual count validates legal item filename + schema/identity and **fail-closes** on symlink/corrupt/illegal entries (throw → unread). Closed buckets for both: `unknown` / `0` / `1` / `2-4` / `5-9` / `10-49` / `50+`. Owner/security/poison failures and any count that was not successfully read are `unknown`, never invented `0`. Optional result field `failed_bucket` is forward-compatible (old readers ignore; absent still accepted).
+
+**Durable `failed/` is critical residual**: maintenance **never** auto-requeues or deletes failed items. Operators need independent inspect/recovery. Task result `publication_pending` remains pending-only and must not mix failed residual.
 
 **Status/result mapping** (closed, in precedence order):
 
 | condition | status | retryable | `error_code` |
 |---|---|---|---|
-| pending_before = 0 | `idle` | false | absent |
+| pending_before = 0 **and** failed residual = 0 | `idle` | false | absent |
+| pending_before = 0 **and** failed residual > 0 | `failed` | false | `publication_terminal_failed_present` |
+| `terminalFailed > 0` this round (even when pending_after = 0) | `failed` | false | `publication_terminal_failed` |
+| failed residual after > 0 (historical or remaining; regardless of pending) | `failed` | false | `publication_terminal_failed_present` |
 | production drain `status=busy` | `pending` | true | `publication_drain_busy` |
-| `terminalFailed > 0` (even when pending_after = 0) | `failed` | false | `publication_terminal_failed` |
 | production `lastError=publication_l1_pending` | `pending` | true | `publication_l1_pending` |
 | other production `lastError` or drain throw | `failed` | true | `publication_drain_failed` |
-| after-count read fails | `failed` | true | `publication_outbox_count_failed` |
+| after pending-count read fails | `failed` | true | `publication_outbox_count_failed` |
+| after failed-count read fails | `failed` | true | `publication_outbox_failed_count_failed` |
 | pending_after > 0 without the errors above | `pending` | true | `publication_remaining` |
-| pending_before > 0 and pending_after = 0 without failed/error | `drained` | false | absent |
+| pending drained and failed residual = 0 without failed/error | `drained` | false | absent |
 
-Soft budget expiry before drain leaves pending_before known and pending_after `unknown`. Cleanup unreaped after this invocation started a drain → `cancel_cleanup_unreaped` + poison + `restart_child=true`; `workPromise` always has a rejection observer even when cleanup reserve is zero, preventing late unhandled rejection.
+Soft budget expiry before drain leaves pending_before known and pending_after `unknown` (failed_bucket keeps the successfully read before residual when available). Cleanup unreaped after this invocation started a drain → `cancel_cleanup_unreaped` + poison + `restart_child=true`; `workPromise` always has a rejection observer even when cleanup reserve is zero, preventing late unhandled rejection.
 
-**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `error_code`, optional `elapsed_bucket`. **No** item id / path / URL / free-text error.
+**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `failed_bucket`, optional `error_code`, optional `elapsed_bucket`. **No** item id / path / URL / free-text error.
 
 **Progress**: reuses `pi-astack/sediment-worker-progress/v1` with stage `publication` (no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running.
 

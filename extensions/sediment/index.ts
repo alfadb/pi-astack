@@ -188,6 +188,7 @@ import {
 } from "./intake";
 import {
   countPublicationOutboxPending,
+  countPublicationOutboxFailed,
   hasPublicationOutboxPending,
   listPublicationOutboxPending,
 } from "./publication-outbox";
@@ -7063,6 +7064,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       drainKnowledgePublicationOutbox: (abrainHome) =>
         drainKnowledgePublicationOutbox(abrainHome, resolveSedimentSettings()),
       countPublicationOutboxPending,
+      // Failed residual is critical metadata; never auto-requeue/delete from maintenance.
+      countPublicationOutboxFailed,
     });
     return;
   }

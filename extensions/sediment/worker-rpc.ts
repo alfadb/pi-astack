@@ -33,6 +33,7 @@ import {
   type EdgeLeafTip,
 } from "./edge-protocol-shadow";
 import {
+  countPublicationOutboxFailed as countPublicationOutboxFailedProduction,
   hasPublicationOutboxPending,
   type PublicationOutboxDrainResult,
 } from "./publication-outbox";
@@ -2400,13 +2401,16 @@ const MAINTENANCE_RESULT_KEYS = new Set([
   "restart_child",
   "pending_before_bucket",
   "pending_after_bucket",
+  "failed_bucket",
   "error_code",
   "elapsed_bucket",
 ]);
 
-/** Closed outbox pending count buckets for maintenance result (not progress pending). */
+/** Closed outbox count buckets for maintenance result (pending/failed residual; not progress pending). */
 export const SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS = ["unknown", "0", "1", "2-4", "5-9", "10-49", "50+"] as const;
 export type SedimentWorkerOutboxPendingBucket = (typeof SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS)[number];
+/** Alias: failed residual uses the same closed bucket set as pending. */
+export type SedimentWorkerOutboxFailedBucket = SedimentWorkerOutboxPendingBucket;
 const OUTBOX_PENDING_BUCKET_SET = new Set<string>(SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS);
 
 export type SedimentWorkerMaintenanceStatus = "idle" | "drained" | "pending" | "failed";
@@ -2427,6 +2431,11 @@ export interface SedimentWorkerMaintenanceResult {
   restart_child: boolean;
   pending_before_bucket: SedimentWorkerOutboxPendingBucket;
   pending_after_bucket: SedimentWorkerOutboxPendingBucket;
+  /**
+   * Optional forward-compatible failed residual bucket (schema v1).
+   * Closed: unknown|0|1|2-4|5-9|10-49|50+. Gate/read failure → unknown (never invented 0).
+   */
+  failed_bucket?: SedimentWorkerOutboxFailedBucket;
   error_code?: string;
   elapsed_bucket?: number;
 }
@@ -2442,6 +2451,12 @@ export interface SedimentWorkerMaintenanceDeps {
   drainKnowledgePublicationOutbox: (abrainHome: string) => Promise<PublicationOutboxDrainResult>;
   /** Production metadata-only pending count; must not deserialize item bodies. */
   countPublicationOutboxPending: (abrainHome: string) => Promise<number>;
+  /**
+   * Production metadata-only failed residual count (filename/schema/identity validated;
+   * symlink/corrupt fail closed). Historical failed is critical and never auto-drained.
+   * Optional: defaults to production countPublicationOutboxFailed.
+   */
+  countPublicationOutboxFailed?: (abrainHome: string) => Promise<number>;
   onProgress?: (event: SedimentWorkerProgressEvent) => void;
   clock?: () => number;
   env?: NodeJS.ProcessEnv;
@@ -2541,6 +2556,8 @@ function buildMaintenanceResult(args: {
   restart_child: boolean;
   pending_before: number | null;
   pending_after: number | null;
+  /** null/undefined → failed_bucket unknown (never invent 0). */
+  failed?: number | null;
   error_code?: string;
   startedAtMs?: number;
   nowMs?: number;
@@ -2553,6 +2570,8 @@ function buildMaintenanceResult(args: {
     restart_child: args.restart_child,
     pending_before_bucket: bucketOutboxPendingCount(args.pending_before),
     pending_after_bucket: bucketOutboxPendingCount(args.pending_after),
+    // Always surface failed residual bucket (optional field for old readers; unknown when unread).
+    failed_bucket: bucketOutboxPendingCount(args.failed),
   };
   if (args.error_code) result.error_code = args.error_code;
   if (args.startedAtMs !== undefined && args.nowMs !== undefined) {
@@ -2575,6 +2594,10 @@ export function sanitizeWorkerMaintenanceResult(raw: unknown): SedimentWorkerMai
   if (typeof o.restart_child !== "boolean") return null;
   if (typeof o.pending_before_bucket !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o.pending_before_bucket)) return null;
   if (typeof o.pending_after_bucket !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o.pending_after_bucket)) return null;
+  // Optional forward-compatible failed residual bucket.
+  if (o.failed_bucket !== undefined) {
+    if (typeof o.failed_bucket !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o.failed_bucket)) return null;
+  }
   if (o.error_code !== undefined && (typeof o.error_code !== "string" || !o.error_code || /[\s\/\\]/.test(o.error_code))) {
     return null;
   }
@@ -2592,6 +2615,9 @@ export function sanitizeWorkerMaintenanceResult(raw: unknown): SedimentWorkerMai
     pending_before_bucket: o.pending_before_bucket as SedimentWorkerOutboxPendingBucket,
     pending_after_bucket: o.pending_after_bucket as SedimentWorkerOutboxPendingBucket,
   };
+  if (typeof o.failed_bucket === "string") {
+    result.failed_bucket = o.failed_bucket as SedimentWorkerOutboxFailedBucket;
+  }
   if (typeof o.error_code === "string") result.error_code = o.error_code;
   if (typeof o.elapsed_bucket === "number") result.elapsed_bucket = o.elapsed_bucket;
   return result;
@@ -2718,6 +2744,8 @@ export async function runSedimentWorkerMaintenance(
     restart_child: boolean;
     pending_before: number | null;
     pending_after: number | null;
+    /** null/undefined → failed_bucket unknown. */
+    failed?: number | null;
     error_code?: string;
   }): SedimentWorkerMaintenanceResult => buildMaintenanceResult({
     request_id: requestId,
@@ -2794,25 +2822,54 @@ export async function runSedimentWorkerMaintenance(
       });
     }
 
-    const beforeProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
-    if (!beforeProbe.ok) {
+    const beforePendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+    if (!beforePendingProbe.ok) {
       return finish({
         status: "failed",
         retryable: true,
         restart_child: false,
         pending_before: null,
         pending_after: null,
+        failed: null,
         error_code: "publication_outbox_count_failed",
       });
     }
-    const pendingBefore = beforeProbe.count;
-    if (pendingBefore === 0) {
+    const countFailedFn = deps.countPublicationOutboxFailed ?? countPublicationOutboxFailedProduction;
+    const beforeFailedProbe = await safeCountPublicationPending(abrainHome, countFailedFn);
+    if (!beforeFailedProbe.ok) {
+      return finish({
+        status: "failed",
+        retryable: true,
+        restart_child: false,
+        pending_before: beforePendingProbe.count,
+        pending_after: null,
+        failed: null,
+        error_code: "publication_outbox_failed_count_failed",
+      });
+    }
+    const pendingBefore = beforePendingProbe.count;
+    const failedBefore = beforeFailedProbe.count;
+    // idle only when both pending and failed residual are empty.
+    if (pendingBefore === 0 && failedBefore === 0) {
       return finish({
         status: "idle",
         retryable: false,
         restart_child: false,
         pending_before: 0,
         pending_after: 0,
+        failed: 0,
+      });
+    }
+    // Historical failed residual is critical: never claim idle/drained; do not auto-requeue/delete.
+    if (pendingBefore === 0 && failedBefore > 0) {
+      return finish({
+        status: "failed",
+        retryable: false,
+        restart_child: false,
+        pending_before: 0,
+        pending_after: 0,
+        failed: failedBefore,
+        error_code: "publication_terminal_failed_present",
       });
     }
     if (softDeadlineMs <= clock()) {
@@ -2823,6 +2880,7 @@ export async function runSedimentWorkerMaintenance(
         restart_child: false,
         pending_before: pendingBefore,
         pending_after: null,
+        failed: failedBefore,
         error_code: "worker_budget_exhausted",
       });
     }
@@ -2871,18 +2929,14 @@ export async function runSedimentWorkerMaintenance(
     };
 
     const classifyDrain = async (drain: PublicationOutboxDrainResult): Promise<SedimentWorkerMaintenanceResult> => {
-      const afterProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
-      const pendingAfter = afterProbe.ok ? afterProbe.count : null;
-      if (drain.status === "busy") {
-        return finish({
-          status: "pending",
-          retryable: true,
-          restart_child: false,
-          pending_before: pendingBefore,
-          pending_after: pendingAfter,
-          error_code: "publication_drain_busy",
-        });
-      }
+      const afterPendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+      const afterFailedProbe = await safeCountPublicationPending(abrainHome, countFailedFn);
+      const pendingAfter = afterPendingProbe.ok ? afterPendingProbe.count : null;
+      // Prefer after failed residual; fall back to before when after unread (never invent 0).
+      const failedAfter = afterFailedProbe.ok ? afterFailedProbe.count : null;
+      const failedKnown = failedAfter ?? failedBefore;
+
+      // This-round terminal move takes the specific code; residual still surfaces failed_bucket.
       if (drain.terminalFailed > 0) {
         return finish({
           status: "failed",
@@ -2890,7 +2944,31 @@ export async function runSedimentWorkerMaintenance(
           restart_child: false,
           pending_before: pendingBefore,
           pending_after: pendingAfter,
+          failed: failedKnown,
           error_code: "publication_terminal_failed",
+        });
+      }
+      // Durable failed residual is critical regardless of pending/busy/held remaining.
+      if (failedAfter !== null && failedAfter > 0) {
+        return finish({
+          status: "failed",
+          retryable: false,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          failed: failedAfter,
+          error_code: "publication_terminal_failed_present",
+        });
+      }
+      if (drain.status === "busy") {
+        return finish({
+          status: "pending",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          failed: failedKnown,
+          error_code: "publication_drain_busy",
         });
       }
       if (drain.lastError === "publication_l1_pending") {
@@ -2900,6 +2978,7 @@ export async function runSedimentWorkerMaintenance(
           restart_child: false,
           pending_before: pendingBefore,
           pending_after: pendingAfter,
+          failed: failedKnown,
           error_code: "publication_l1_pending",
         });
       }
@@ -2910,17 +2989,30 @@ export async function runSedimentWorkerMaintenance(
           restart_child: false,
           pending_before: pendingBefore,
           pending_after: pendingAfter,
+          failed: failedKnown,
           error_code: "publication_drain_failed",
         });
       }
-      if (!afterProbe.ok) {
+      if (!afterPendingProbe.ok) {
         return finish({
           status: "failed",
           retryable: true,
           restart_child: false,
           pending_before: pendingBefore,
           pending_after: null,
+          failed: failedKnown,
           error_code: "publication_outbox_count_failed",
+        });
+      }
+      if (!afterFailedProbe.ok) {
+        return finish({
+          status: "failed",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          failed: null,
+          error_code: "publication_outbox_failed_count_failed",
         });
       }
       if (pendingAfter! > 0) {
@@ -2930,6 +3022,7 @@ export async function runSedimentWorkerMaintenance(
           restart_child: false,
           pending_before: pendingBefore,
           pending_after: pendingAfter,
+          failed: failedAfter,
           error_code: "publication_remaining",
         });
       }
@@ -2939,17 +3032,33 @@ export async function runSedimentWorkerMaintenance(
         restart_child: false,
         pending_before: pendingBefore,
         pending_after: 0,
+        failed: 0,
       });
     };
 
     const classifyThrow = async (): Promise<SedimentWorkerMaintenanceResult> => {
-      const afterProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+      const afterPendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+      const afterFailedProbe = await safeCountPublicationPending(abrainHome, countFailedFn);
+      const failedAfter = afterFailedProbe.ok ? afterFailedProbe.count : null;
+      // Historical failed residual still critical even when drain threw.
+      if (failedAfter !== null && failedAfter > 0) {
+        return finish({
+          status: "failed",
+          retryable: false,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: afterPendingProbe.ok ? afterPendingProbe.count : null,
+          failed: failedAfter,
+          error_code: "publication_terminal_failed_present",
+        });
+      }
       return finish({
         status: "failed",
         retryable: true,
         restart_child: false,
         pending_before: pendingBefore,
-        pending_after: afterProbe.ok ? afterProbe.count : null,
+        pending_after: afterPendingProbe.ok ? afterPendingProbe.count : null,
+        failed: failedAfter ?? failedBefore,
         error_code: "publication_drain_failed",
       });
     };
@@ -2978,6 +3087,7 @@ export async function runSedimentWorkerMaintenance(
               restart_child: true,
               pending_before: pendingBefore,
               pending_after: null,
+              failed: failedBefore,
               error_code: "cancel_cleanup_unreaped",
             });
           }

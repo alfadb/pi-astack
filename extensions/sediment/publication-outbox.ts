@@ -198,6 +198,8 @@ export async function writePublicationOutboxItem(
   return { status: "collision", itemId: item.itemId, filePath, item };
 }
 
+const PUBLICATION_OUTBOX_ITEM_FILENAME_RE = /^[0-9a-f]{64}\.json$/;
+
 /** Count durable pending directory entries without reading semantic item bodies. */
 export async function countPublicationOutboxPending(abrainHome: string): Promise<number> {
   const dir = publicationOutboxPendingDir(abrainHome);
@@ -208,7 +210,7 @@ export async function countPublicationOutboxPending(abrainHome: string): Promise
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
     throw err;
   }
-  return names.filter((name) => /^[0-9a-f]{64}\.json$/.test(name)).length;
+  return names.filter((name) => PUBLICATION_OUTBOX_ITEM_FILENAME_RE.test(name)).length;
 }
 
 /** Existence-only pending probe; stops at the first valid directory entry. */
@@ -217,13 +219,100 @@ export async function hasPublicationOutboxPending(abrainHome: string): Promise<b
   try {
     const handle = await fs.opendir(dir);
     for await (const entry of handle) {
-      if (/^[0-9a-f]{64}\.json$/.test(entry.name)) return true;
+      if (PUBLICATION_OUTBOX_ITEM_FILENAME_RE.test(entry.name)) return true;
     }
     return false;
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw err;
   }
+}
+
+/**
+ * Validate one durable failed/ entry without semantic body processing.
+ * Legal filename + regular file + schema/identity only. Symlink / corrupt / illegal → throw (fail closed).
+ */
+async function validatePublicationOutboxFailedEntry(dir: string, name: string): Promise<void> {
+  if (!PUBLICATION_OUTBOX_ITEM_FILENAME_RE.test(name)) {
+    throw new Error(`publication outbox failed entry illegal filename: ${name}`);
+  }
+  const filePath = path.join(dir, name);
+  let st: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    st = await fs.lstat(filePath);
+  } catch (err) {
+    throw err;
+  }
+  if (st.isSymbolicLink()) {
+    throw new Error(`publication outbox failed entry is symlink: ${name}`);
+  }
+  if (!st.isFile()) {
+    throw new Error(`publication outbox failed entry is not a regular file: ${name}`);
+  }
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf-8");
+  } catch (err) {
+    throw err;
+  }
+  let parsed: PublicationOutboxItem | { item?: PublicationOutboxItem };
+  try {
+    parsed = JSON.parse(raw) as PublicationOutboxItem | { item?: PublicationOutboxItem };
+  } catch {
+    throw new Error(`publication outbox failed entry invalid JSON: ${name}`);
+  }
+  // Read-only compatibility for former copy/unlink terminal receipts.
+  const item = (parsed as { item?: PublicationOutboxItem }).item ?? parsed as PublicationOutboxItem;
+  const itemId = name.slice(0, 64);
+  if (
+    !item
+    || item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA
+    || item.itemId !== itemId
+    || computePublicationOutboxItemId(item) !== itemId
+  ) {
+    throw new Error(`publication outbox failed entry identity invalid: ${name}`);
+  }
+}
+
+/**
+ * Metadata-only failed residual count. Validates legal filename/schema/identity;
+ * symlink / corrupt / illegal entries fail closed (throw) — never silent skip.
+ */
+export async function countPublicationOutboxFailed(abrainHome: string): Promise<number> {
+  const dir = publicationOutboxFailedDir(abrainHome);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
+  let count = 0;
+  for (const name of names) {
+    await validatePublicationOutboxFailedEntry(dir, name);
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Existence-only failed residual probe with the same fail-closed validation as count.
+ * Stops at the first validated entry; empty/missing dir → false.
+ */
+export async function hasPublicationOutboxFailed(abrainHome: string): Promise<boolean> {
+  const dir = publicationOutboxFailedDir(abrainHome);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+  for (const name of names) {
+    await validatePublicationOutboxFailedEntry(dir, name);
+    return true;
+  }
+  return false;
 }
 
 export async function listPublicationOutboxPending(

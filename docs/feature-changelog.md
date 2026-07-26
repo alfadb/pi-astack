@@ -11,6 +11,24 @@ status: active
 
 ---
 
+## 2026-07-27 — accepted — Persistent publication-outbox failed residual is operator-visible critical
+
+### 变更
+
+Publication outbox durable `failed/` residual must stay **persistently visible** to daemon maintenance health. Maintenance no longer reports `idle`/`drained` when only historical failed items remain; every maintenance invocation counts failed residual before/after and surfaces optional closed `failed_bucket` (`unknown|0|1|2-4|5-9|10-49|50+`, forward-compatible). Failed residual is **critical**: never auto-requeue/delete; needs independent inspect/recovery. Task `publication_pending` remains pending-only and does not mix failed. Failed metadata count validates legal filename/schema/identity and fail-closes on symlink/corrupt/illegal entries.
+
+### 验收边界
+
+`smoke:sediment-worker-rpc`：pending0 failed1 → nonretryable `publication_terminal_failed_present`；重复调用（daemon restart 等价）仍 failed；pending drained 但历史 failed 仍 failed；symlink/corrupt fail closed；`failed_bucket` 白名单/隐私；gate/read 失败 bucket=`unknown`。架构/ADR 0045 operator 说明同步。
+
+### 状态
+
+`accepted`（代码切片；**不** production maintenance 成功声明；**不**升版本/tag/deploy）。
+
+### 关联
+
+[architecture/sediment.md](architecture/sediment.md)；[ADR 0045](adr/0045-sediment-worker-safe-rpc-command.md)；`smoke:sediment-worker-rpc`。
+
 ## 2026-07-24 — accepted — Sediment extractor bounded-window prompt boundary (budget flood fix)
 
 ### 变更
