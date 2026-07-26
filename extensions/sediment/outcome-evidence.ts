@@ -1,3 +1,4 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -717,12 +718,411 @@ function indexRow(envelope: OutcomeEvidenceEnvelopeV1): OutcomeEvidenceIndexRow 
 export interface OutcomeEvidenceIndexRebuildResult {
   ok: boolean;
   rows: number;
+  /** Candidate L1 event files visited during the hardened walk (includes foreign schemas). */
+  candidates: number;
   /** Loud per-file diagnostics. A single foreign/invalid event never blanks the whole index. */
   diagnostics: string[];
   error?: string;
 }
 
-/** Deterministic L3/read-model rebuild. L1 files remain the only semantic SOT. */
+export const OUTCOME_EVIDENCE_INDEX_REBUILD_CHILD_RELATIVE = "scripts/outcome-evidence-index-rebuild-child.mjs" as const;
+export const OUTCOME_EVIDENCE_INDEX_REBUILD_CHILD_RESULT_SCHEMA = "outcome-evidence-index-rebuild-child-result/v1" as const;
+
+export interface OutcomeEvidenceIndexIsolatedRebuildResult extends OutcomeEvidenceIndexRebuildResult {
+  mode: "child";
+  wall_time_ms: number;
+  child_pid?: number;
+  exit_code?: number | null;
+  signal?: string | null;
+  stderr: string;
+  diagnostics_total: number;
+  diagnostics_truncated: boolean;
+}
+
+export interface OutcomeEvidenceIsolatedRebuildTestControls {
+  /** Child-only synthetic CPU busy wait so smokes can prove parent event-loop liveness. */
+  childBusyMs?: number;
+}
+
+const OUTCOME_INDEX_ISOLATED_STATE_KEY = Symbol.for("pi-astack/sediment/outcome-evidence-index-isolated-rebuild/v1");
+/** Bumped when process-global isolated-rebuild state shape changes (active children + exit hook). */
+const OUTCOME_INDEX_ISOLATED_STATE_VERSION = 2;
+const OUTCOME_INDEX_CHILD_TIMEOUT_MS = 10 * 60 * 1000;
+const OUTCOME_INDEX_CHILD_MAX_STDOUT_BYTES = 256 * 1024;
+const OUTCOME_INDEX_CHILD_MAX_STDERR_BYTES = 64 * 1024;
+const OUTCOME_INDEX_CHILD_MAX_ARG_BYTES = 4096;
+const OUTCOME_INDEX_CHILD_DIAGNOSTICS_CAP = 32;
+
+interface OutcomeIndexIsolatedState {
+  version: number;
+  inFlight: Map<string, Promise<OutcomeEvidenceIndexIsolatedRebuildResult>>;
+  /** Live rebuild children still running; used for best-effort parent-exit kill. */
+  activeChildren: Set<ChildProcess>;
+  /** Shared process `exit` hook — installed only while activeChildren is non-empty. */
+  exitHook?: () => void;
+}
+
+let isolatedRebuildTestControls: OutcomeEvidenceIsolatedRebuildTestControls = {};
+
+/** Test-only controls for the isolated rebuild child (never used on production hot paths). */
+export function __TEST_setOutcomeEvidenceIsolatedRebuildControls(
+  controls: OutcomeEvidenceIsolatedRebuildTestControls = {},
+): void {
+  isolatedRebuildTestControls = { ...controls };
+}
+
+/** Test-only: pids of currently tracked isolated rebuild children. */
+export function __TEST_getOutcomeEvidenceIsolatedRebuildChildPids(): number[] {
+  const pids: number[] = [];
+  for (const child of outcomeIndexIsolatedState().activeChildren) {
+    if (typeof child.pid === "number" && Number.isFinite(child.pid) && child.pid > 0) {
+      pids.push(child.pid);
+    }
+  }
+  return pids;
+}
+
+function outcomeIndexIsolatedState(): OutcomeIndexIsolatedState {
+  const g = globalThis as Record<symbol, unknown>;
+  let state = g[OUTCOME_INDEX_ISOLATED_STATE_KEY] as Partial<OutcomeIndexIsolatedState> | undefined;
+  if (!state || typeof state !== "object" || state.version !== OUTCOME_INDEX_ISOLATED_STATE_VERSION) {
+    state = {
+      version: OUTCOME_INDEX_ISOLATED_STATE_VERSION,
+      inFlight: new Map(),
+      activeChildren: new Set(),
+    };
+    g[OUTCOME_INDEX_ISOLATED_STATE_KEY] = state;
+    return state as OutcomeIndexIsolatedState;
+  }
+  if (!(state.inFlight instanceof Map)) state.inFlight = new Map();
+  if (!(state.activeChildren instanceof Set)) state.activeChildren = new Set();
+  return state as OutcomeIndexIsolatedState;
+}
+
+function killIsolatedRebuildChild(child: ChildProcess): void {
+  try {
+    if (child.killed) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGKILL");
+  } catch {
+    /* already reaped / ESRCH */
+  }
+}
+
+function ensureIsolatedRebuildExitHook(state: OutcomeIndexIsolatedState): void {
+  if (state.exitHook) return;
+  const exitHook = () => {
+    for (const child of state.activeChildren) killIsolatedRebuildChild(child);
+  };
+  state.exitHook = exitHook;
+  process.on("exit", exitHook);
+}
+
+function releaseIsolatedRebuildExitHook(state: OutcomeIndexIsolatedState): void {
+  if (!state.exitHook || state.activeChildren.size > 0) return;
+  process.removeListener("exit", state.exitHook);
+  state.exitHook = undefined;
+}
+
+function trackIsolatedRebuildChild(child: ChildProcess): void {
+  const state = outcomeIndexIsolatedState();
+  state.activeChildren.add(child);
+  ensureIsolatedRebuildExitHook(state);
+  // Keep the ChildProcess and its stdio handles referenced so a normal await
+  // (including bare top-level await with no other live handles) observes close
+  // and settles instead of Node exiting early with code 13. Explicit process
+  // exit still best-effort kills active children via the shared exit hook.
+}
+
+function untrackIsolatedRebuildChild(child: ChildProcess): void {
+  const state = outcomeIndexIsolatedState();
+  state.activeChildren.delete(child);
+  releaseIsolatedRebuildExitHook(state);
+}
+
+/**
+ * Guard child stream/process event callbacks against uncaughtException.
+ * Optional onThrow lets critical paths (especially `close`) still settle the
+ * rebuild Promise with a structured failure instead of leaving it pending.
+ */
+function isolatedRebuildSafeCallback<
+  T extends unknown[],
+>(fn: (...args: T) => void, onThrow?: (error: unknown) => void): (...args: T) => void {
+  return (...args: T) => {
+    try {
+      fn(...args);
+    } catch (error) {
+      try {
+        onThrow?.(error);
+      } catch {
+        /* final error boundary for isolated rebuild I/O callbacks */
+      }
+    }
+  };
+}
+
+function resolvePiAstackPackageRoot(): string {
+  // jiti loads this module as CJS, so __dirname is the portable package-relative anchor.
+  return path.resolve(__dirname, "..", "..");
+}
+
+function isolatedRebuildFailure(
+  resolvedHome: string,
+  error: string,
+  extra: Partial<OutcomeEvidenceIndexIsolatedRebuildResult> = {},
+): OutcomeEvidenceIndexIsolatedRebuildResult {
+  return {
+    ok: false,
+    rows: 0,
+    candidates: 0,
+    diagnostics: [],
+    diagnostics_total: 0,
+    diagnostics_truncated: false,
+    error,
+    mode: "child",
+    wall_time_ms: 0,
+    stderr: "",
+    ...extra,
+  };
+}
+
+function runOutcomeEvidenceIndexIsolatedRebuild(resolvedHome: string): Promise<OutcomeEvidenceIndexIsolatedRebuildResult> {
+  const started = Date.now();
+  const packageRoot = resolvePiAstackPackageRoot();
+  const script = path.join(packageRoot, ...OUTCOME_EVIDENCE_INDEX_REBUILD_CHILD_RELATIVE.split("/"));
+  if (!fs.existsSync(script)) {
+    return Promise.resolve(isolatedRebuildFailure(resolvedHome, `child_script_missing:${script}`, { wall_time_ms: Date.now() - started }));
+  }
+  const args = [script, "--abrain-home", resolvedHome];
+  const busyMs = isolatedRebuildTestControls.childBusyMs;
+  if (typeof busyMs === "number" && Number.isFinite(busyMs) && busyMs > 0) {
+    args.push("--test-busy-ms", String(Math.min(Math.floor(busyMs), 30_000)));
+  }
+  for (const value of args) {
+    if (value.includes("\0") || Buffer.byteLength(value) > OUTCOME_INDEX_CHILD_MAX_ARG_BYTES) {
+      return Promise.resolve(isolatedRebuildFailure(resolvedHome, "child_arg_invalid", { wall_time_ms: Date.now() - started }));
+    }
+  }
+  // Fixed argv only: never shell, never pass source/user content, never inherit caller AbortSignal.
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH && process.env.PATH.length <= 16 * 1024 ? process.env.PATH : "/usr/bin:/bin",
+    LANG: "C",
+    LC_ALL: "C",
+  };
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: OutcomeEvidenceIndexIsolatedRebuildResult) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    let child: ChildProcess;
+    try {
+      child = spawn(process.execPath, args, {
+        cwd: packageRoot,
+        env,
+        shell: false,
+        stdio: ["ignore", "pipe", "pipe"],
+        // Keep the child in the same process group by default so we can SIGKILL on timeout;
+        // do not detach (would orphan) and do not pass signal/AbortSignal from foreground ctx.
+        // Non-detached alone does not stop orphans on parent death — shared process exit hook
+        // best-effort kills tracked children (listener is installed only while active).
+        windowsHide: true,
+      });
+    } catch (error) {
+      return finish(isolatedRebuildFailure(resolvedHome, `child_spawn_failed:${error instanceof Error ? error.message : String(error)}`, {
+        wall_time_ms: Date.now() - started,
+      }));
+    }
+
+    trackIsolatedRebuildChild(child);
+
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let protocolError: string | undefined;
+    let spawnError: Error | undefined;
+    const timer = setTimeout(isolatedRebuildSafeCallback(() => {
+      protocolError = `child_timeout:${OUTCOME_INDEX_CHILD_TIMEOUT_MS}ms`;
+      killIsolatedRebuildChild(child);
+    }), OUTCOME_INDEX_CHILD_TIMEOUT_MS);
+    // Timeout must not alone pin the event loop; close/error paths clear it on settle.
+    timer.unref?.();
+
+    const stderrTextNow = (): string =>
+      Buffer.concat(stderr).toString("utf8").slice(0, OUTCOME_INDEX_CHILD_MAX_STDERR_BYTES);
+
+    const failStructured = (error: string, extra: Partial<OutcomeEvidenceIndexIsolatedRebuildResult> = {}): void => {
+      clearTimeout(timer);
+      untrackIsolatedRebuildChild(child);
+      killIsolatedRebuildChild(child);
+      finish(isolatedRebuildFailure(resolvedHome, error, {
+        wall_time_ms: Date.now() - started,
+        child_pid: child.pid,
+        stderr: stderrTextNow(),
+        ...extra,
+      }));
+    };
+
+    child.stdout?.on("data", isolatedRebuildSafeCallback((chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > OUTCOME_INDEX_CHILD_MAX_STDOUT_BYTES) {
+        protocolError = "child_stdout_limit";
+        killIsolatedRebuildChild(child);
+        return;
+      }
+      stdout.push(chunk);
+    }));
+    child.stderr?.on("data", isolatedRebuildSafeCallback((chunk: Buffer) => {
+      stderrBytes += chunk.length;
+      if (stderrBytes > OUTCOME_INDEX_CHILD_MAX_STDERR_BYTES) {
+        // Keep a bounded prefix; still kill so a noisy child cannot run unbounded.
+        protocolError = protocolError ?? "child_stderr_limit";
+        killIsolatedRebuildChild(child);
+        return;
+      }
+      stderr.push(chunk);
+    }));
+    // Stream errors must never surface as uncaughtException and must settle the Promise.
+    child.stdout?.on("error", isolatedRebuildSafeCallback((error: Error) => {
+      protocolError = protocolError ?? `child_stdout_error:${error.message}`;
+      failStructured(protocolError);
+    }));
+    child.stderr?.on("error", isolatedRebuildSafeCallback((error: Error) => {
+      protocolError = protocolError ?? `child_stderr_error:${error.message}`;
+      failStructured(protocolError);
+    }));
+    child.once("error", isolatedRebuildSafeCallback((error: Error) => { spawnError = error; }));
+    child.once("close", isolatedRebuildSafeCallback((code: number | null, signal: NodeJS.Signals | null) => {
+      clearTimeout(timer);
+      untrackIsolatedRebuildChild(child);
+      const wall_time_ms = Date.now() - started;
+      const stderrText = stderrTextNow();
+      if (protocolError) {
+        return finish(isolatedRebuildFailure(resolvedHome, protocolError, {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      if (spawnError) {
+        return finish(isolatedRebuildFailure(resolvedHome, `child_spawn_failed:${spawnError.message}`, {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      if (signal) {
+        return finish(isolatedRebuildFailure(resolvedHome, `child_signal:${signal}`, {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      const raw = Buffer.concat(stdout).toString("utf8").trim();
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); }
+      catch {
+        return finish(isolatedRebuildFailure(resolvedHome, `child_protocol_invalid:${stderrText ? stderrText.slice(0, 200) : "invalid_json"}`, {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return finish(isolatedRebuildFailure(resolvedHome, "child_protocol_invalid:not_object", {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      const row = parsed as Record<string, unknown>;
+      if (row.schema_version !== OUTCOME_EVIDENCE_INDEX_REBUILD_CHILD_RESULT_SCHEMA || typeof row.ok !== "boolean") {
+        return finish(isolatedRebuildFailure(resolvedHome, "child_protocol_invalid:schema", {
+          wall_time_ms,
+          child_pid: child.pid,
+          exit_code: code,
+          signal,
+          stderr: stderrText,
+        }));
+      }
+      const diagnostics = Array.isArray(row.diagnostics)
+        ? row.diagnostics.filter((item): item is string => typeof item === "string").slice(0, OUTCOME_INDEX_CHILD_DIAGNOSTICS_CAP)
+        : [];
+      const diagnostics_total = typeof row.diagnostics_total === "number" && Number.isFinite(row.diagnostics_total)
+        ? Math.max(0, Math.floor(row.diagnostics_total))
+        : diagnostics.length;
+      const result: OutcomeEvidenceIndexIsolatedRebuildResult = {
+        ok: row.ok === true,
+        rows: typeof row.rows === "number" && Number.isFinite(row.rows) ? Math.max(0, Math.floor(row.rows)) : 0,
+        candidates: typeof row.candidates === "number" && Number.isFinite(row.candidates) ? Math.max(0, Math.floor(row.candidates)) : 0,
+        diagnostics,
+        diagnostics_total,
+        diagnostics_truncated: row.diagnostics_truncated === true || diagnostics_total > diagnostics.length,
+        ...(typeof row.error === "string" && row.error ? { error: row.error } : row.ok === true ? {} : { error: "index_rebuild_failed" }),
+        mode: "child",
+        wall_time_ms: typeof row.wall_time_ms === "number" && Number.isFinite(row.wall_time_ms)
+          ? Math.max(0, Math.floor(row.wall_time_ms))
+          : wall_time_ms,
+        child_pid: typeof row.pid === "number" && Number.isFinite(row.pid) ? Math.floor(row.pid) : child.pid,
+        exit_code: code,
+        signal,
+        stderr: stderrText,
+      };
+      // Non-zero exit without an explicit rebuild error is still a visible failure.
+      if (code !== 0 && result.ok) {
+        result.ok = false;
+        result.error = result.error ?? `child_exit_${code}`;
+      }
+      return finish(result);
+    }, (error) => {
+      // Close-handler throws must not leave the rebuild Promise pending forever.
+      failStructured(
+        `child_close_handler_failed:${error instanceof Error ? error.message : String(error)}`,
+        { exit_code: child.exitCode, signal: child.signalCode },
+      );
+    }));
+  });
+}
+
+/**
+ * Production live rebuild: runs the existing sync rebuild in a fixed Node child
+ * process so CPU/FS/JSON.parse never block the pi main event loop.
+ * Process-global singleflight is keyed by resolved abrainHome; concurrent
+ * callers for the same home share one child and all await index convergence.
+ * Always settles (never rejects) so live paths cannot leak unhandled rejections.
+ */
+export function rebuildOutcomeEvidenceIndexIsolated(
+  abrainHome = resolveUserGlobalAbrainHome(),
+): Promise<OutcomeEvidenceIndexIsolatedRebuildResult> {
+  const key = path.resolve(abrainHome);
+  const state = outcomeIndexIsolatedState();
+  const existing = state.inFlight.get(key);
+  if (existing) return existing;
+  const created = runOutcomeEvidenceIndexIsolatedRebuild(key).finally(() => {
+    if (state.inFlight.get(key) === created) state.inFlight.delete(key);
+  });
+  state.inFlight.set(key, created);
+  return created;
+}
+
+/** Deterministic L3/read-model rebuild. L1 files remain the only semantic SOT.
+ *  Synchronous API for explicit CLI/tests. Production live paths must use
+ *  {@link rebuildOutcomeEvidenceIndexIsolated} so the pi event loop stays free.
+ */
 export function rebuildOutcomeEvidenceIndex(abrainHome = resolveUserGlobalAbrainHome()): OutcomeEvidenceIndexRebuildResult {
   const resolvedHome = path.resolve(abrainHome);
   try {
@@ -776,12 +1176,12 @@ export function rebuildOutcomeEvidenceIndex(abrainHome = resolveUserGlobalAbrain
       }
       rows.sort((a, b) => a.created_at_utc.localeCompare(b.created_at_utc) || a.event_id.localeCompare(b.event_id));
       atomicWriteText(outcomeEvidenceIndexPath(resolvedHome), rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : ""));
-      return { rows: rows.length, diagnostics };
+      return { rows: rows.length, candidates: files.length, diagnostics };
     });
-    if (!locked.ok) return { ok: false, rows: 0, diagnostics: [], error: "index_lock_contention" };
-    return { ok: true, rows: locked.value.rows, diagnostics: locked.value.diagnostics };
+    if (!locked.ok) return { ok: false, rows: 0, candidates: 0, diagnostics: [], error: "index_lock_contention" };
+    return { ok: true, rows: locked.value.rows, candidates: locked.value.candidates, diagnostics: locked.value.diagnostics };
   } catch (error) {
-    return { ok: false, rows: 0, diagnostics: [], error: error instanceof Error ? error.message : String(error) };
+    return { ok: false, rows: 0, candidates: 0, diagnostics: [], error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -1029,7 +1429,7 @@ export async function collectAndAppendOutcomeEvidence(args: {
     else errors.push(rejudge.error ?? rejudge.status);
   }
   if (exposures.length || outcomes.length || rejudges.length) {
-    const rebuilt = rebuildOutcomeEvidenceIndex(abrainHome);
+    const rebuilt = await rebuildOutcomeEvidenceIndexIsolated(abrainHome);
     if (!rebuilt.ok) errors.push(rebuilt.error ?? "index_rebuild_failed");
   }
   return { exposures: exposures.map((item) => item.eventId), outcomes, rejudges, errors };
@@ -1109,8 +1509,18 @@ export async function appendNaturalCorrectionOutcomeEvidence(args: {
     decision,
     reason: status === "corroborated" ? "user-authored correction warrants autonomous reconsideration without direct lifecycle mutation" : "user-authored correction preserved; target attribution remains unknown",
   });
-  rebuildOutcomeEvidenceIndex(abrainHome);
-  return { correction: correction.eventId, ...(rejudge.ok && rejudge.eventId ? { rejudge: rejudge.eventId } : {}), status, ...(!rejudge.ok ? { error: rejudge.error ?? rejudge.status } : {}) };
+  const rebuilt = await rebuildOutcomeEvidenceIndexIsolated(abrainHome);
+  const error = !rejudge.ok
+    ? (rejudge.error ?? rejudge.status)
+    : !rebuilt.ok
+      ? (rebuilt.error ?? "index_rebuild_failed")
+      : undefined;
+  return {
+    correction: correction.eventId,
+    ...(rejudge.ok && rejudge.eventId ? { rejudge: rejudge.eventId } : {}),
+    status,
+    ...(error ? { error } : {}),
+  };
 }
 
 export async function recordProductionCommandOutcome(args: {
@@ -1219,13 +1629,18 @@ export async function recordProductionCommandOutcome(args: {
     decision: "defer_until_new_evidence",
     reason: "real independent command result recorded; same-turn exposure is not enough for memory attribution",
   });
-  rebuildOutcomeEvidenceIndex(abrainHome);
+  const rebuilt = await rebuildOutcomeEvidenceIndexIsolated(abrainHome);
+  const error = !rejudge.ok
+    ? (rejudge.error ?? rejudge.status)
+    : !rebuilt.ok
+      ? (rebuilt.error ?? "index_rebuild_failed")
+      : undefined;
   return {
     exposures: exposures.map((item) => item.eventId),
     outcome: outcome.eventId,
     ...(rejudge.ok && rejudge.eventId ? { rejudge: rejudge.eventId } : {}),
     attribution: "unknown",
-    ...(!rejudge.ok ? { error: rejudge.error ?? rejudge.status } : {}),
+    ...(error ? { error } : {}),
   };
 }
 
@@ -1348,6 +1763,17 @@ export async function appendAttributedIndependentOutcomeFixture(args: {
     sanitizerText: `fixture ${args.targetSlug}`,
   });
   const appended = await appendOutcomeEvidenceEvent(abrainHome, body);
-  if (appended.ok) rebuildOutcomeEvidenceIndex(abrainHome);
+  if (appended.ok) {
+    const rebuilt = await rebuildOutcomeEvidenceIndexIsolated(abrainHome);
+    if (!rebuilt.ok) {
+      // Keep append success semantics (fixture already durable in L1) but surface
+      // rebuild failure loudly through the existing optional error field.
+      const rebuildError = rebuilt.error ?? "index_rebuild_failed";
+      console.error(
+        `[outcome-evidence] isolated index rebuild failed after fixture append event_id=${appended.eventId ?? "unknown"}: ${rebuildError}`,
+      );
+      return { ...appended, error: rebuildError };
+    }
+  }
   return appended;
 }

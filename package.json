@@ -188,6 +188,8 @@
     "smoke:task-local-working-set": "node scripts/smoke-task-local-working-set.mjs",
     "smoke:outcome-classifier-enrich": "node scripts/smoke-outcome-classifier-enrich.mjs",
     "smoke:outcome-evidence": "node scripts/smoke-outcome-evidence.mjs",
+    "smoke:outcome-evidence-index-isolation": "node scripts/smoke-outcome-evidence-index-isolation.mjs",
+    "bench:outcome-evidence-index-isolation-production": "node scripts/bench-outcome-evidence-index-isolation-production.mjs",
     "smoke:canonical-path-foundation": "node scripts/smoke-canonical-path-foundation.mjs",
     "smoke:l1-schema-registry-faults": "node scripts/smoke-l1-schema-registry-faults.mjs",
     "smoke:canonical-git-runtime": "node scripts/smoke-canonical-git-runtime.mjs",
