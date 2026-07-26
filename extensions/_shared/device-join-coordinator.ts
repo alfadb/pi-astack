@@ -18,7 +18,8 @@ import {
   withCanonicalMutationBarrier,
 } from "./canonical-mutation-barrier";
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "./durable-write";
-import { decodeCanonicalGitPath, parseGitStatusPorcelainV1Z } from "./git-z-parser";
+import { fullIndexFingerprint } from "./git-exact-cohort";
+import { decodeCanonicalGitPath } from "./git-z-parser";
 import { scanWholeL1Validated, type WholeL1ScanResult } from "./l1-schema-registry";
 
 const L1_PREFIX = "l1/events/sha256/";
@@ -126,7 +127,7 @@ function localReadGitEnvironment(): NodeJS.ProcessEnv {
 }
 
 function gitEnvironmentForArgs(args: readonly string[]): NodeJS.ProcessEnv {
-  return ["status", "diff", "diff-tree", "rev-parse"].includes(args[0] ?? "")
+  return ["status", "diff", "diff-tree", "rev-parse", "ls-files", "check-ignore"].includes(args[0] ?? "")
     ? localReadGitEnvironment()
     : localGitEnvironment();
 }
@@ -596,23 +597,23 @@ async function clearJournal(repo: string): Promise<void> {
   }
 }
 
-async function sharedIndexTree(repo: string): Promise<string> {
-  const tree = (await runGit(repo, ["write-tree"], { timeoutMs: 30_000 })).trim();
-  if (!/^[0-9a-f]{40,64}$/.test(tree)) fail("DEVICE_JOIN_INDEX_INVALID", "shared index did not write a tree", { tree });
-  return tree;
-}
-
 async function expectedBlobBytes(repo: string, entry: DeviceJoinTreeEntry): Promise<Buffer> {
   if (entry.type !== "blob") fail("DEVICE_JOIN_MATERIALIZE_UNSUPPORTED", "changed gitlinks cannot be materialized", { entry });
   return readBlob(repo, entry.oid);
 }
 
 async function assertMaterializableDelta(repo: string, delta: readonly DeviceJoinJournalEntry[]): Promise<void> {
+  // Parents deleted by this delta (file→dir transitions) are removed before creates.
+  const deletedByDelta = new Set(delta.filter((item) => item.after === null).map((item) => item.path));
   for (const item of delta) {
     if (item.before?.mode === "160000" || item.after?.mode === "160000") {
       fail("DEVICE_JOIN_MATERIALIZE_UNSUPPORTED", "changed gitlinks must fail before journal publication", { path: item.path });
     }
     if (!item.after) continue;
+    // Pure pre-CAS check: an untracked file occupying a parent path would wedge
+    // materialize after HEAD advanced to M. Missing parents remain allowed;
+    // parents deleted by the same delta remain allowed (ordered delete-first).
+    await assertExistingParentsSafe(repo, item.path, { allowNonDirectoryParents: deletedByDelta });
     const bytes = await expectedBlobBytes(repo, item.after);
     if (item.after.mode === "120000" && (bytes.length === 0 || bytes.includes(0))) {
       fail("DEVICE_JOIN_SYMLINK_TARGET_UNSUPPORTED", "symlink target cannot be materialized by the host filesystem", { path: item.path });
@@ -782,7 +783,13 @@ async function inventoryRegisteredL2(repo: string): Promise<string[]> {
 
 async function pathIgnoredByCurrentWorktree(repo: string, trackedPath: string): Promise<boolean> {
   try {
-    await runGit(repo, ["check-ignore", "-q", "--no-index", "--", trackedPath], { timeoutMs: 5_000, literalPathspecs: false });
+    // check-ignore rejects --literal-pathspecs. --stdin -z takes pathnames
+    // literally so glob metacharacters cannot authorize a false-positive unlink.
+    await runGitBuffer(repo, ["check-ignore", "-q", "--no-index", "--stdin", "-z"], {
+      timeoutMs: 5_000,
+      literalPathspecs: false,
+      input: Buffer.from(`${trackedPath}\0`, "utf-8"),
+    });
     return true;
   } catch (error) {
     if ((error as { code?: unknown }).code === 1) return false;
@@ -790,13 +797,21 @@ async function pathIgnoredByCurrentWorktree(repo: string, trackedPath: string): 
   }
 }
 
-async function assertExistingParentsSafe(repo: string, trackedPath: string): Promise<void> {
+async function assertExistingParentsSafe(
+  repo: string,
+  trackedPath: string,
+  options: { allowNonDirectoryParents?: ReadonlySet<string> } = {},
+): Promise<void> {
   let current = repo;
+  let relative = "";
   for (const part of trackedPath.split("/").slice(0, -1)) {
     current = path.join(current, part);
+    relative = relative ? `${relative}/${part}` : part;
     const stat = await lstatOrNull(current);
     if (!stat) return;
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      // File→directory transitions delete the parent path in the same delta first.
+      if (options.allowNonDirectoryParents?.has(relative)) return;
       fail("DEVICE_JOIN_WORKTREE_PARENT_UNSAFE", "tracked path parent is not a real directory", { path: trackedPath, parent: current });
     }
   }
@@ -852,20 +867,97 @@ async function normalizeLegacyRegisteredL2(repo: string, removable: readonly str
   }
 }
 
-async function verifyChangedPathStates(repo: string, delta: readonly DeviceJoinJournalEntry[]): Promise<void> {
+async function verifyChangedPathStates(
+  repo: string,
+  delta: readonly DeviceJoinJournalEntry[],
+  options: { allowWorktreeThirdState?: ReadonlySet<string> } = {},
+): Promise<void> {
+  const indexEntries = await readSharedIndexEntries(repo);
   for (const item of delta) {
-    const before = await worktreeMatches(repo, item.path, item.before);
-    const after = await worktreeMatches(repo, item.path, item.after);
-    if (!before && !after) fail("DEVICE_JOIN_WORKTREE_THIRD_STATE", "journal path is neither the exact H preimage nor M postimage", { path: item.path });
+    if (!options.allowWorktreeThirdState?.has(item.path)) {
+      const before = await worktreeMatches(repo, item.path, item.before);
+      const after = await worktreeMatches(repo, item.path, item.after);
+      if (!before && !after) {
+        fail("DEVICE_JOIN_WORKTREE_THIRD_STATE", "journal path is neither the exact H preimage nor M postimage", { path: item.path });
+      }
+    }
+    const indexBefore = indexEntryMatches(indexEntries, item.path, item.before);
+    const indexAfter = indexEntryMatches(indexEntries, item.path, item.after);
+    if (!indexBefore && !indexAfter) {
+      fail("DEVICE_JOIN_INDEX_THIRD_STATE", "journal path index entry is neither the exact H preimage nor M postimage", { path: item.path });
+    }
   }
 }
 
-async function verifyUnchangedTrackedPaths(repo: string, before: DeviceJoinTreeMap, delta: readonly DeviceJoinJournalEntry[]): Promise<void> {
-  const changed = new Set(delta.map((item) => item.path));
-  for (const [trackedPath, entry] of before) {
-    if (!changed.has(trackedPath) && !(await worktreeMatches(repo, trackedPath, entry))) {
-      fail("DEVICE_JOIN_DIRTY_UNKNOWN", "unchanged tracked worktree path is not exact H before join", { path: trackedPath });
+type SharedIndexEntry = { mode: string; oid: string; stage: number } | "conflicted";
+
+async function readSharedIndexEntries(repo: string): Promise<Map<string, SharedIndexEntry>> {
+  const raw = await runGitBuffer(repo, ["ls-files", "-s", "-z"], { timeoutMs: 30_000 });
+  const entries = new Map<string, SharedIndexEntry>();
+  let offset = 0;
+  while (offset < raw.length) {
+    const end = raw.indexOf(0, offset);
+    if (end < 0) fail("DEVICE_JOIN_INDEX_INVALID", "shared index ls-files output is missing a NUL terminator");
+    const record = raw.subarray(offset, end);
+    offset = end + 1;
+    if (!record.length) continue;
+    const tab = record.indexOf(0x09);
+    if (tab <= 0) fail("DEVICE_JOIN_INDEX_INVALID", "shared index ls-files record has no path separator");
+    const meta = record.subarray(0, tab).toString("ascii").split(" ");
+    if (meta.length !== 3) fail("DEVICE_JOIN_INDEX_INVALID", "shared index ls-files meta is malformed");
+    const [mode, oid, stageText] = meta;
+    if (!mode || !oid || !/^[0-3]$/.test(stageText ?? "")) fail("DEVICE_JOIN_INDEX_INVALID", "shared index ls-files mode/oid/stage is invalid");
+    let trackedPath: string;
+    try { trackedPath = decodeCanonicalGitPath(record.subarray(tab + 1)); }
+    catch (error) { fail("DEVICE_JOIN_INDEX_INVALID", "shared index returned a noncanonical path", { error: String(error) }); }
+    if (entries.has(trackedPath)) entries.set(trackedPath, "conflicted");
+    else entries.set(trackedPath, { mode, oid, stage: Number(stageText) });
+  }
+  return entries;
+}
+
+function indexEntryMatches(entries: ReadonlyMap<string, SharedIndexEntry>, trackedPath: string, entry: DeviceJoinTreeEntry | null): boolean {
+  const current = entries.get(trackedPath);
+  if (!entry) return current === undefined;
+  return current !== undefined && current !== "conflicted" && current.stage === 0 && current.mode === entry.mode && current.oid === entry.oid;
+}
+
+async function zeroOidForRepo(repo: string, hint?: DeviceJoinTreeEntry | null): Promise<string> {
+  if (hint?.oid && /^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(hint.oid)) return "0".repeat(hint.oid.length);
+  const format = (await runGit(repo, ["rev-parse", "--show-object-format"], { timeoutMs: 5_000 })).trim();
+  if (format === "sha256") return "0".repeat(64);
+  if (format === "sha1") return "0".repeat(40);
+  fail("DEVICE_JOIN_OBJECT_FORMAT", "unsupported Git object format for index delete", { format });
+}
+
+async function convergeDeltaIndex(repo: string, delta: readonly DeviceJoinJournalEntry[]): Promise<void> {
+  if (!delta.length) return;
+  // Outside-delta shared-index fingerprint (stage-0 and multi-stage ordinary alike),
+  // same invariant as git-exact-cohort non-cohort preservation.
+  const deltaPaths = new Set(delta.map((item) => item.path));
+  const preOutsideFingerprint = await fullIndexFingerprint(repo, deltaPaths);
+  const records: Buffer[] = [];
+  for (const item of delta) {
+    if (item.after) {
+      records.push(Buffer.from(`${item.after.mode} ${item.after.type} ${item.after.oid}\t${item.path}\0`, "utf-8"));
+    } else {
+      const zeroOid = await zeroOidForRepo(repo, item.before);
+      records.push(Buffer.from(`0 ${zeroOid}\t${item.path}\0`, "utf-8"));
     }
+  }
+  await runGit(repo, ["update-index", "-z", "--index-info"], { input: Buffer.concat(records), timeoutMs: 30_000 });
+  const indexEntries = await readSharedIndexEntries(repo);
+  for (const item of delta) {
+    if (!indexEntryMatches(indexEntries, item.path, item.after)) {
+      fail("DEVICE_JOIN_VERIFY_INDEX", "delta index entry did not converge to the exact M postimage", { path: item.path });
+    }
+  }
+  const postOutsideFingerprint = await fullIndexFingerprint(repo, deltaPaths);
+  if (postOutsideFingerprint !== preOutsideFingerprint) {
+    fail("DEVICE_JOIN_OUTSIDE_DELTA_INDEX_MUTATED", "outside-delta shared index entries changed during delta convergence", {
+      pre: preOutsideFingerprint,
+      post: postOutsideFingerprint,
+    });
   }
 }
 
@@ -892,25 +984,48 @@ async function cleanupValidatedAtomicTemps(repo: string, delta: readonly DeviceJ
   }
 }
 
-async function verifyNoUnknownDirty(repo: string, delta: readonly DeviceJoinJournalEntry[]): Promise<void> {
-  const allowed = new Set(delta.map((item) => item.path));
-  const raw = await runGitBuffer(repo, ["status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules=none"]);
-  let records;
-  try { records = parseGitStatusPorcelainV1Z(raw); }
-  catch (error) { fail("DEVICE_JOIN_STATUS_INVALID", "git status returned malformed or noncanonical paths", { error: String(error) }); }
-  for (const record of records) {
-    for (const trackedPath of record.paths) {
-      if (!allowed.has(trackedPath)) {
-        fail("DEVICE_JOIN_DIRTY_UNKNOWN", "dirty path is outside the complete H to M journal delta", { path: trackedPath, status: record.status });
-      }
-    }
-  }
+async function verifyRegisteredL2Inventory(
+  repo: string,
+  before: DeviceJoinTreeMap,
+  after: DeviceJoinTreeMap,
+  allow: ReadonlySet<string> = new Set(),
+): Promise<void> {
+  const known = new Set([...before.keys(), ...after.keys()].filter(isRegisteredCanonicalL2Path));
+  const unknown = (await inventoryRegisteredL2(repo))
+    .filter((trackedPath) => !known.has(trackedPath) && !allow.has(trackedPath));
+  if (unknown.length) fail("DEVICE_JOIN_L2_UNKNOWN", "registered L2 contains an untracked or unjournaled path", { paths: unknown.slice(0, 20) });
 }
 
-async function verifyRegisteredL2Inventory(repo: string, before: DeviceJoinTreeMap, after: DeviceJoinTreeMap): Promise<void> {
-  const known = new Set([...before.keys(), ...after.keys()].filter(isRegisteredCanonicalL2Path));
-  const unknown = (await inventoryRegisteredL2(repo)).filter((trackedPath) => !known.has(trackedPath));
-  if (unknown.length) fail("DEVICE_JOIN_L2_UNKNOWN", "registered L2 contains an untracked or unjournaled path", { paths: unknown.slice(0, 20) });
+/**
+ * Outside the exact H→M journal delta, ordinary staged/untracked dirty is preserved.
+ * Canonical L1/L2 tracked or staged mutations outside the delta remain fail-closed:
+ * untracked valid L1 backlog may remain; unknown registered L2 is rejected elsewhere.
+ */
+async function verifyOutsideDeltaCanonicalSafety(
+  repo: string,
+  before: DeviceJoinTreeMap,
+  delta: readonly DeviceJoinJournalEntry[],
+): Promise<void> {
+  const changed = new Set(delta.map((item) => item.path));
+  const indexEntries = await readSharedIndexEntries(repo);
+  for (const [trackedPath, entry] of before) {
+    if (changed.has(trackedPath)) continue;
+    if (!isL1(trackedPath) && !isRegisteredCanonicalL2Path(trackedPath)) continue;
+    if (!indexEntryMatches(indexEntries, trackedPath, entry)) {
+      fail("DEVICE_JOIN_CANONICAL_DIRTY", "tracked/staged L1/L2 outside the journal delta differs from H in the shared index", { path: trackedPath });
+    }
+    if (!(await worktreeMatches(repo, trackedPath, entry))) {
+      fail("DEVICE_JOIN_CANONICAL_DIRTY", "tracked L1/L2 outside the journal delta differs from H in the worktree", { path: trackedPath });
+    }
+  }
+  for (const [trackedPath, current] of indexEntries) {
+    if (changed.has(trackedPath) || before.has(trackedPath)) continue;
+    if (!isL1(trackedPath) && !isRegisteredCanonicalL2Path(trackedPath)) continue;
+    if (current === "conflicted" || (typeof current === "object" && current.stage !== 0)) {
+      fail("DEVICE_JOIN_CANONICAL_DIRTY", "staged L1/L2 path outside the journal delta is conflicted or non-stage-0", { path: trackedPath });
+    }
+    fail("DEVICE_JOIN_CANONICAL_DIRTY", "staged L1/L2 path outside the journal delta is not present in H", { path: trackedPath });
+  }
 }
 
 async function materializeJournal(repo: string, journal: DeviceJoinJournal, options: DeviceJoinPublishOptions): Promise<void> {
@@ -920,8 +1035,11 @@ async function materializeJournal(repo: string, journal: DeviceJoinJournal, opti
   if (JSON.stringify(expectedDelta) !== JSON.stringify(journal.delta)) fail("DEVICE_JOIN_JOURNAL_DELTA_MISMATCH", "journal is not the complete exact H to M tracked delta");
   const candidateTree = (await runGit(repo, ["rev-parse", `${journal.candidate}^{tree}`])).trim();
   if (candidateTree !== journal.candidate_tree) fail("DEVICE_JOIN_JOURNAL_TREE_MISMATCH", "journal candidate tree differs from M");
+  // Physical legacy L2 normalize runs only after CAS / HEAD already equals M, so a
+  // stale CAS cannot leave tracked L2 leaves permanently missing without a journal.
+  const legacyL2 = await planLegacyRegisteredL2Normalization(repo, before, after, journal.delta);
+  await normalizeLegacyRegisteredL2(repo, legacyL2);
   await verifyChangedPathStates(repo, journal.delta);
-  await verifyNoUnknownDirty(repo, journal.delta);
   await verifyRegisteredL2Inventory(repo, before, after);
 
   const ordered = journal.delta.slice().sort((left, right) => {
@@ -949,7 +1067,7 @@ async function materializeJournal(repo: string, journal: DeviceJoinJournal, opti
     }
     await options.crashHook?.("path_materialized", { path: item.path });
   }
-  await runGit(repo, ["read-tree", journal.candidate], { timeoutMs: 30_000 });
+  await convergeDeltaIndex(repo, journal.delta);
   await options.crashHook?.("index_converged");
   await verifyPublishedState(repo, journal.candidate, after, journal.delta);
   await options.crashHook?.("verified");
@@ -962,23 +1080,35 @@ async function verifyPublishedState(
   delta: readonly DeviceJoinJournalEntry[] = [],
 ): Promise<void> {
   if (await resolveCommit(repo, "HEAD") !== candidate) fail("DEVICE_JOIN_VERIFY_HEAD", "HEAD is not M after publication");
-  const tree = (await runGit(repo, ["rev-parse", `${candidate}^{tree}`])).trim();
-  if (await sharedIndexTree(repo) !== tree) fail("DEVICE_JOIN_VERIFY_INDEX", "shared index write-tree is not the M tree");
-  for (const [trackedPath, entry] of expected) {
-    if (!(await worktreeMatches(repo, trackedPath, entry))) fail("DEVICE_JOIN_VERIFY_WORKTREE", "tracked worktree path differs from M", { path: trackedPath });
-  }
+  await validateCandidateRepositoryContract(repo, expected);
+  const indexEntries = await readSharedIndexEntries(repo);
   for (const item of delta) {
     if (!(await worktreeMatches(repo, item.path, item.after))) {
       fail("DEVICE_JOIN_VERIFY_WORKTREE", "journal path is not the exact M postimage", { path: item.path });
     }
+    if (!indexEntryMatches(indexEntries, item.path, item.after)) {
+      fail("DEVICE_JOIN_VERIFY_INDEX", "journal path index entry is not the exact M postimage", { path: item.path });
+    }
   }
-  const status = await runGitBuffer(repo, ["status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules=none"]);
-  if (status.length) fail("DEVICE_JOIN_VERIFY_DIRTY", "worktree/index are not clean after M materialization");
-  const l1Expected = new Map([...expected].filter(([trackedPath]) => isL1(trackedPath)));
-  const l2Expected = new Map([...expected].filter(([trackedPath]) => isRegisteredCanonicalL2Path(trackedPath)));
-  const actual = await readCompleteTreeMap(repo, candidate);
-  assertMapExact(l1Expected, new Map([...actual].filter(([trackedPath]) => isL1(trackedPath))), "DEVICE_JOIN_VERIFY_L1");
-  assertMapExact(l2Expected, new Map([...actual].filter(([trackedPath]) => isRegisteredCanonicalL2Path(trackedPath))), "DEVICE_JOIN_VERIFY_L2");
+  // Canonical L1/L2 are machine-owned: every M path must be exact in index and
+  // worktree. This is not a tautological tree-vs-tree compare against candidate.
+  for (const [trackedPath, entry] of expected) {
+    if (!isL1(trackedPath) && !isRegisteredCanonicalL2Path(trackedPath)) continue;
+    if (!indexEntryMatches(indexEntries, trackedPath, entry)) {
+      fail("DEVICE_JOIN_VERIFY_CANONICAL_INDEX", "canonical L1/L2 index entry is not the exact M postimage", { path: trackedPath });
+    }
+    if (!(await worktreeMatches(repo, trackedPath, entry))) {
+      fail("DEVICE_JOIN_VERIFY_CANONICAL_WORKTREE", "canonical L1/L2 worktree path is not the exact M postimage", { path: trackedPath });
+    }
+  }
+  for (const [trackedPath, current] of indexEntries) {
+    if (!isL1(trackedPath) && !isRegisteredCanonicalL2Path(trackedPath)) continue;
+    if (expected.has(trackedPath)) continue;
+    if (current === "conflicted" || (typeof current === "object" && current.stage !== 0)) {
+      fail("DEVICE_JOIN_VERIFY_CANONICAL_INDEX", "canonical L1/L2 index path outside M is conflicted or non-stage-0", { path: trackedPath });
+    }
+    fail("DEVICE_JOIN_VERIFY_CANONICAL_INDEX", "canonical L1/L2 index path is staged outside M", { path: trackedPath });
+  }
   await verifyRegisteredL2Inventory(repo, expected, expected);
 }
 
@@ -1080,12 +1210,14 @@ async function recoverDeviceJoinJournalUnderBarrier(repo: string, options: Devic
   if (JSON.stringify(treeDelta(before, candidate)) !== JSON.stringify(journal.delta)) fail("DEVICE_JOIN_JOURNAL_DELTA_MISMATCH", "journal delta does not bind complete H to M trees");
   await assertMaterializableDelta(repo, journal.delta);
   await cleanupValidatedAtomicTemps(repo, journal.delta);
-  await assertDirectoryReplacementInventory(repo, journal.delta);
-  const indexTree = await sharedIndexTree(repo);
-  const beforeTree = (await runGit(repo, ["rev-parse", `${journal.local_head}^{tree}`])).trim();
-  if (indexTree !== beforeTree && indexTree !== journal.candidate_tree) fail("DEVICE_JOIN_INDEX_THIRD_STATE", "shared index is neither H nor M during recovery", { indexTree });
-  await verifyChangedPathStates(repo, journal.delta);
-  await verifyNoUnknownDirty(repo, journal.delta);
+  // Plan-only: physical unlink is deferred to materialize after HEAD is M.
+  const legacyL2 = await planLegacyRegisteredL2Normalization(repo, before, candidate, journal.delta);
+  const legacyAllow = new Set(legacyL2);
+  await assertDirectoryReplacementInventory(repo, journal.delta, legacyL2);
+  await verifyChangedPathStates(repo, journal.delta, { allowWorktreeThirdState: legacyAllow });
+  await verifyOutsideDeltaCanonicalSafety(repo, before, journal.delta);
+  // Fail-closed before CAS so unknown L2 cannot advance HEAD then wedge recovery.
+  await verifyRegisteredL2Inventory(repo, before, candidate, legacyAllow);
   if (head === journal.local_head) {
     await runGit(repo, ["update-ref", journal.ref_name, journal.candidate, journal.local_head], { timeoutMs: 10_000 });
     await options.crashHook?.("cas_published");
@@ -1112,16 +1244,15 @@ export function publishPreparedDeviceJoin(prepared: PreparedDeviceJoin, options:
     assertMapExact(prepared.candidateMap, await readCompleteTreeMap(prepared.repo, prepared.candidate), "DEVICE_JOIN_PREPARED_DRIFT");
     await validateCandidateRepositoryContract(prepared.repo, prepared.candidateMap);
     const journal = journalForPrepared(prepared, before);
-    const beforeTree = (await runGit(prepared.repo, ["rev-parse", `${prepared.localHead}^{tree}`])).trim();
-    if (await sharedIndexTree(prepared.repo) !== beforeTree) fail("DEVICE_JOIN_INDEX_DIRTY", "shared index is not the exact H tree before join publication");
-    await verifyUnchangedTrackedPaths(prepared.repo, before, journal.delta);
     await assertMaterializableDelta(prepared.repo, journal.delta);
+    // Plan-only before CAS: physical normalize is deferred to materialize after
+    // HEAD is M so a lost CAS cannot leave tracked L2 permanently missing.
     const legacyL2 = await planLegacyRegisteredL2Normalization(prepared.repo, before, prepared.candidateMap, journal.delta);
-    await verifyNoUnknownDirty(prepared.repo, journal.delta);
+    const legacyAllow = new Set(legacyL2);
     await assertDirectoryReplacementInventory(prepared.repo, journal.delta, legacyL2);
-    await normalizeLegacyRegisteredL2(prepared.repo, legacyL2);
-    await verifyChangedPathStates(prepared.repo, journal.delta);
-    await verifyRegisteredL2Inventory(prepared.repo, before, prepared.candidateMap);
+    await verifyChangedPathStates(prepared.repo, journal.delta, { allowWorktreeThirdState: legacyAllow });
+    await verifyOutsideDeltaCanonicalSafety(prepared.repo, before, journal.delta);
+    await verifyRegisteredL2Inventory(prepared.repo, before, prepared.candidateMap, legacyAllow);
     await writeJournal(prepared.repo, journal);
     await options.crashHook?.("journal_written");
     try {
