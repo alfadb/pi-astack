@@ -148,6 +148,7 @@
     "smoke:abrain-legacy-hook-cleanup": "node scripts/smoke-abrain-legacy-hook-cleanup.mjs",
     "smoke:git-singleflight": "node scripts/smoke-git-singleflight.mjs",
     "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs",
+    "smoke:abrain-bind-status": "node scripts/smoke-abrain-bind-status.mjs",
     "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs",
     "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs",
     "docs:doctor": "node scripts/docs-doctor.mjs",

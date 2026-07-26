@@ -545,9 +545,19 @@ fs.writeFileSync(
 fs.copyFileSync(path.join(sharedTargetDir, "canonical-mutation-barrier.cjs"), path.join(sharedTargetDir, "canonical-mutation-barrier.js"));
 fs.writeFileSync(
   path.join(sharedTargetDir, "canonical-git-runtime.cjs"),
-  `exports.canonicalGitRuntimeEnabled = function () { return false; };\nexports.getCanonicalStartupPromise = async function () { return { startup: "ready" }; };\nexports.reportCanonicalStartupConsumer = function () {};\nexports.setCanonicalStartupReporter = function () {};\nexports.scheduleCanonicalStartupConsumer = async function (options) { await options.onReady({ startup: "ready" }); };\nexports.createProducedArtifactReceipt = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\nexports.getCanonicalGitRuntime = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\n`,
+  `exports.canonicalGitRuntimeEnabled = function () { return false; };\nexports.getCanonicalStartupPromise = async function () { return { startup: "ready" }; };\nexports.peekCanonicalRuntimeDiagnostics = function () { return { status: "none" }; };\nexports.reportCanonicalStartupConsumer = function () {};\nexports.setCanonicalStartupReporter = function () {};\nexports.scheduleCanonicalStartupConsumer = async function (options) { if (options && typeof options.onReady === "function") await options.onReady({ startup: "ready" }); };\nexports.createProducedArtifactReceipt = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\nexports.getCanonicalGitRuntime = async function () { throw new Error("canonical runtime disabled in backend smoke"); };\n`,
 );
 fs.copyFileSync(path.join(sharedTargetDir, "canonical-git-runtime.cjs"), path.join(sharedTargetDir, "canonical-git-runtime.js"));
+fs.writeFileSync(
+  path.join(sharedTargetDir, "durable-write.cjs"),
+  `exports.durableAtomicWriteFile = async function () {};\nexports.durableAtomicCreateFile = async function () { return "created"; };\n`,
+);
+fs.copyFileSync(path.join(sharedTargetDir, "durable-write.cjs"), path.join(sharedTargetDir, "durable-write.js"));
+fs.writeFileSync(
+  path.join(tmpDir, "bind-intent.cjs"),
+  `exports.applyAllPendingAbrainBindIntents = async function () { return { applied: 0, pending: 0, failed: 0, details: [] }; };\nexports.applyLocalMapOnlyBind = async function () { return { localPathAdded: false, localMapPath: "/tmp/local-map.json" }; };\nexports.intentFromPlan = function (plan) { return { itemId: "0".repeat(64), ...plan }; };\nexports.planAbrainBind = async function () { return { needsTrackedAbrainWrite: false, localMapOnly: true, projectId: "x", projectRoot: "/x", manifestPath: "/x/.abrain-project.json", registryPath: "/a/_project.json", abrainGitignorePath: "/a/.gitignore", manifestCreated: false, registryCreated: false, abrainGitignoreUpdated: false }; };\nexports.writeAbrainBindIntent = async function () { return { status: "created", itemId: "0".repeat(64), filePath: "/tmp/intent.json" }; };\n`,
+);
+fs.copyFileSync(path.join(tmpDir, "bind-intent.cjs"), path.join(tmpDir, "bind-intent.js"));
 fs.writeFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), `module.exports = { getCurrentAnchor: () => undefined, spreadAnchor: () => ({}) };\n`);
 fs.copyFileSync(path.join(sharedTargetDir, "causal-anchor.cjs"), path.join(sharedTargetDir, "causal-anchor.js"));
 fs.writeFileSync(
@@ -623,10 +633,12 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\/vault-authorize"\)/g, 'require("./vault-authorize.cjs")')
   .replace(/require\("\.\/rule-injector"\)/g, 'require("./rule-injector/index.cjs")')
+  .replace(/require\("\.\/bind-intent"\)/g, 'require("./bind-intent.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
   .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
   .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")')
+  .replace(/require\("\.\.\/_shared\/durable-write"\)/g, 'require("./_shared/durable-write.cjs")')
   .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

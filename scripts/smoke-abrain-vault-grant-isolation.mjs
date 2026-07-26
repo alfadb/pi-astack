@@ -128,6 +128,29 @@ fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = 
 fs.copyFileSync(path.join(sharedTarget, "pi-internals.cjs"), path.join(sharedTarget, "pi-internals.js"));
 fs.writeFileSync(path.join(sharedTarget, "llm-audit.cjs"), `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`);
 fs.copyFileSync(path.join(sharedTarget, "llm-audit.cjs"), path.join(sharedTarget, "llm-audit.js"));
+fs.writeFileSync(path.join(sharedTarget, "canonical-mutation-barrier.cjs"), "exports.withCanonicalMutationBarrier = async (_repo, operation) => operation(); exports.withoutCanonicalMutationBarrierContext = (operation) => operation();\n");
+fs.copyFileSync(path.join(sharedTarget, "canonical-mutation-barrier.cjs"), path.join(sharedTarget, "canonical-mutation-barrier.js"));
+fs.writeFileSync(path.join(sharedTarget, "durable-write.cjs"), "exports.durableAtomicWriteFile = async () => {}; exports.durableAtomicCreateFile = async () => 'created';\n");
+fs.copyFileSync(path.join(sharedTarget, "durable-write.cjs"), path.join(sharedTarget, "durable-write.js"));
+fs.writeFileSync(path.join(sharedTarget, "canonical-git-runtime.cjs"), `
+exports.canonicalGitRuntimeEnabled = () => false;
+exports.createProducedArtifactReceipt = async () => ({});
+exports.getCanonicalGitRuntime = async () => ({ awaitStartup: async () => ({ startup: 'ready' }), requestDrain: async () => ({ status: 'empty' }) });
+exports.getCanonicalStartupPromise = async () => ({ startup: 'ready' });
+exports.peekCanonicalRuntimeDiagnostics = () => ({ status: 'none' });
+exports.reportCanonicalStartupConsumer = () => {};
+exports.scheduleCanonicalStartupConsumer = async () => {};
+exports.setCanonicalStartupReporter = () => {};
+`);
+fs.copyFileSync(path.join(sharedTarget, "canonical-git-runtime.cjs"), path.join(sharedTarget, "canonical-git-runtime.js"));
+fs.writeFileSync(path.join(tmpDir, "bind-intent.cjs"), `
+exports.applyAllPendingAbrainBindIntents = async () => ({ applied: 0, pending: 0, failed: 0, details: [] });
+exports.applyLocalMapOnlyBind = async () => ({ localPathAdded: false, localMapPath: '/tmp/local-map.json' });
+exports.intentFromPlan = (plan) => ({ itemId: '0'.repeat(64), ...plan });
+exports.planAbrainBind = async () => ({ needsTrackedAbrainWrite: false, localMapOnly: true, projectId: 'x', projectRoot: '/x', manifestPath: '/x/.abrain-project.json', registryPath: '/a/_project.json', abrainGitignorePath: '/a/.gitignore', manifestCreated: false, registryCreated: false, abrainGitignoreUpdated: false });
+exports.writeAbrainBindIntent = async () => ({ status: 'created', itemId: '0'.repeat(64), filePath: '/tmp/intent.json' });
+`);
+fs.copyFileSync(path.join(tmpDir, "bind-intent.cjs"), path.join(tmpDir, "bind-intent.js"));
 fs.writeFileSync(path.join(tmpDir, "reconcile-gate.cjs"), transpile(path.join(repoRoot, "extensions/abrain/reconcile-gate.ts")));
 fs.copyFileSync(path.join(tmpDir, "reconcile-gate.cjs"), path.join(tmpDir, "reconcile-gate.js"));
 
@@ -169,9 +192,13 @@ fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = functi
     .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
     .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
     .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
+    .replace(/require\("\.\/bind-intent"\)/g, 'require("./bind-intent.cjs")')
     .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")')
     .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
     .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
+    .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
+    .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")')
+    .replace(/require\("\.\.\/_shared\/durable-write"\)/g, 'require("./_shared/durable-write.cjs")')
     .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
   fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 }
@@ -192,6 +219,15 @@ process.env.ABRAIN_ROOT = abrainHome;
 process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
 
 const indexModule = require(path.join(tmpDir, "index.cjs"));
+// Handler E2E audit rows require the local safety envelope (same gate as
+// production vault writers). This smoke does not run activate()/session_start.
+if (typeof indexModule.establishAbrainLocalSafetyPrerequisites !== "function") {
+  throw new Error("index.cjs missing establishAbrainLocalSafetyPrerequisites");
+}
+const localSafety = indexModule.establishAbrainLocalSafetyPrerequisites(abrainHome);
+if (!localSafety || localSafety.status !== "ready") {
+  throw new Error(`local safety not ready for vault grant isolation smoke: ${JSON.stringify(localSafety)}`);
+}
 
 console.log("abrain — vault authorization grant isolation E2E (batch A subgroup 2)");
 
