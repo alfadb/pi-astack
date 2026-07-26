@@ -49,7 +49,7 @@ Default **`false`**. Triple gate — all required: `executionOwner=daemon` **and
 
 `PI_ASTACK_SEDIMENT_WORKER_MODE=1` puts the sediment extension into worker-only registration:
 
-- Registers **only** `/sediment-worker-run`
+- Registers **only** worker commands: `/sediment-worker-run` + `/sediment-worker-maintenance` (health capability = commands registered; no free-text expansion)
 - Installs the **same** `runSedimentAgentEndPass` implementation used by ordinary `agent_end` / intake recovery（no duplicated writer）
 - **Does not** register or run: `session_start` / `before_agent_start` / `agent_start` / `agent_end` / `agent_settled` / `session_shutdown` ordinary sediment hooks
 - **Does not** start ordinary detached queue, intake recovery, timers, or footer
@@ -132,7 +132,7 @@ End-to-end worker self-budget — **does not** change foreground `agent_end` pas
 
 **Progress notify** schema `pi-astack/sediment-worker-progress/v1` via `ctx.ui.notify` (prefix `sediment-worker-progress:`):
 
-- Closed `stage` set **actually emitted**: claim / sidecar / checkpoint / pass / search / classifier / detached_join / receipt / auto_write_preflight / auto_write_extractor / auto_write_curator / auto_write_writer / auto_write_embedding / auto_write_publication
+- Closed `stage` set **actually emitted**: claim / sidecar / checkpoint / pass / search / classifier / detached_join / receipt / publication / auto_write_preflight / auto_write_extractor / auto_write_curator / auto_write_writer / auto_write_embedding / auto_write_publication
 - Closed `phase`: start / end / heartbeat / aborted
 - Optional low-cardinality `elapsed_bucket` / `pending_bucket` (closed bucket values only) / closed `lanes`
 - **No** identity, path, session, digest, content, or free text
@@ -195,7 +195,7 @@ Foreground (no worker opts) keeps original schedules unchanged. Docs describe th
 
 **Checkpoint / receipt deadline rules**:
 - On **every** deadline/abort/unreaped outcome path, first re-read the create-only **processed receipt**. If a valid receipt is durable → return settled `processed` / `already_processed` (**never** `deadline_after_checkpoint_advanced` / `pass_deadline_exceeded_unreaped` poison).
-- After success receipt, worker task does **not** drain knowledge publication in-task (no uncancelled `Promise.race`). Result/audit is observable as `publication_pending=true`; durable outbox + independent maintenance own publication.
+- After success receipt, worker task does **not** drain knowledge publication in-task (no uncancelled `Promise.race`). Result/audit stamps `publication_pending` from the production metadata-only existence probe (read failure fail-closes true); durable outbox + independent maintenance own publication.
 - On deadline/abort capture without receipt, re-read CP. **Only** when durable CP **covers tip** and no success receipt → `deadline_after_checkpoint_advanced` (retryable=false, poison).
 - **Partial** before→after CP advance (more-loop intermediate watermark, tip not covered) is **safe resume**: ordinary retryable deadline (`worker_budget_exhausted` / `stage_deadline` / …), **no poison**.
 - Entry path: if durable CP already covers current sidecar tip but receipt is absent → same closed `deadline_after_checkpoint_advanced` (only a valid success receipt may return `already_processed`).
@@ -247,7 +247,50 @@ Receipts and claims have **no GC** (known Stage0 bound).
 
 ### 2.8 Knowledge publication after worker success
 
-On settled processed success the worker writes create-only receipt and stamps `publication_pending=true`. It does **not** drain publication outbox in-task. Durable outbox + independent maintenance / ordinary session edges own publication. Worker cannot wait for foreground `session_start`.
+On settled processed / already_processed success the worker writes create-only receipt (when applicable) and stamps `publication_pending` from the production outbox **existence/metadata-only** `hasPending`/count API. It does not deserialize every pending item. Empty outbox → `false`; any durable pending filename → `true`. Probe failure **fail-closes to `true`** (never fake empty). Worker task does **not** drain publication outbox in-task. Durable outbox + independent maintenance own publication. Worker cannot wait for foreground `session_start`.
+
+### 2.8b Publication outbox maintenance command (daemon idle owner)
+
+Command `/sediment-worker-maintenance` — local publication-outbox maintenance under the **daemon idle owner**. **Not** formal ConsumerAck / authority / retention / delete.
+
+**Deploy order (hard constraint)**: publish worker extension first (understands maintenance command + `publication_pending` actual bool), then daemon/router that invokes it. Never claim healthy reuse of an old worker process that lacks the command.
+
+**Request** schema `pi-astack/sediment-worker-maintenance/v1` (JSON or base64url, ≤64KiB; strict unknown-field reject):
+
+| field | notes |
+|---|---|
+| `request_id` | 64 hex; daemon correlation only |
+| `budget_ms` | required; closed range **60_000 .. 900_000** |
+| `kind` | Stage0 admits **only** `publication_outbox` |
+
+**Forbidden identity**: no project / record / session / path / item id on the request. Settings + `ABRAIN_ROOT` follow worker mode.
+
+**Gate**: effective owner must be **daemon** (configured `executionOwner=daemon` **and** full triple gate). Incomplete gate / foreground → closed `effective_owner_not_daemon` (`retryable=false`, **no writes**). Although the request has no record identity, maintenance validates the same worker copy-store env and non-empty realpath owner allowlist as task RPC before reading or writing the outbox. Any security-env/config failure is zero-write.
+
+**Serialization**: the complete gate/count/drain body enters the same process-wide `withGlobalPassSerial` as terminal tasks, so publication maintenance cannot overlap a task pass. Serial wait is bounded by the maintenance soft deadline. Timeout while waiting means this invocation never entered its drain body: return retryable `pending` + `maintenance_worker_busy`, `restart_child=false`, before/after `unknown`; do not poison, restart, or kill the healthy serial owner. Task-run `global_serial_deadline` semantics are unchanged.
+
+**Body**: directly awaits production `drainKnowledgePublicationOutbox`, which returns the real `PublicationOutboxDrainResult`; it does not discard `status`, `processed`, `terminalFailed`, or `lastError`. The direct path performs a one-shot nonblocking canonical OFD probe **before** scheduling/reading a batch. Contention returns real `status=busy` immediately, without retrying against or consuming the maintenance budget. After acquisition, every candidate Knowledge item must resolve and validate its exact L1 event before selection. Missing L1 is held/not-ready (same pending item/event identity); other independent ready groups still drain, and the result closes with `lastError=publication_l1_pending`, `pending>0`, `terminalFailed=0`. After selection it checks worker `AbortSignal`/remaining budget at frozen-batch cutpoints and retains the existing fixed git subprocess timeouts. The foreground one-shot remains unchanged: canonical contention is represented as `completed` with retryable `lastError`. The outer worker fence remains authoritative for a drain started by this invocation that cannot be reaped. **Does not** run agent-end / other maintenance lanes; **does not** touch checkpoint / receipt / ledger / source.
+
+**Before/after pending**: production metadata-only count, without deserializing item content. Closed buckets: `unknown` / `0` / `1` / `2-4` / `5-9` / `10-49` / `50+`. Owner/security/poison failures and any count that was not successfully read are `unknown`, never invented `0`.
+
+**Status/result mapping** (closed, in precedence order):
+
+| condition | status | retryable | `error_code` |
+|---|---|---|---|
+| pending_before = 0 | `idle` | false | absent |
+| production drain `status=busy` | `pending` | true | `publication_drain_busy` |
+| `terminalFailed > 0` (even when pending_after = 0) | `failed` | false | `publication_terminal_failed` |
+| production `lastError=publication_l1_pending` | `pending` | true | `publication_l1_pending` |
+| other production `lastError` or drain throw | `failed` | true | `publication_drain_failed` |
+| after-count read fails | `failed` | true | `publication_outbox_count_failed` |
+| pending_after > 0 without the errors above | `pending` | true | `publication_remaining` |
+| pending_before > 0 and pending_after = 0 without failed/error | `drained` | false | absent |
+
+Soft budget expiry before drain leaves pending_before known and pending_after `unknown`. Cleanup unreaped after this invocation started a drain → `cancel_cleanup_unreaped` + poison + `restart_child=true`; `workPromise` always has a rejection observer even when cleanup reserve is zero, preventing late unhandled rejection.
+
+**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `error_code`, optional `elapsed_bucket`. **No** item id / path / URL / free-text error.
+
+**Progress**: reuses `pi-astack/sediment-worker-progress/v1` with stage `publication` (no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running.
 
 ### 2.9 Suggested worker argv
 
@@ -273,6 +316,7 @@ All flags are real Pi CLI flags（`pi --help`）. Settings must set `sediment.ex
 - Receipt/claim GC
 - Non-Linux OFD claim portability
 - Edge-protocol-shadow delete / retention watermark advance from capture receipt
+- Publication outbox retention / delete / formal ACK from maintenance result (local drain only; not authority)
 
 ## 4. Consequences
 

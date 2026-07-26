@@ -89,6 +89,8 @@ const writer = await jiti.import(path.join(root, "extensions/sediment/writer.ts"
 const settingsModule = await jiti.import(path.join(root, "extensions/sediment/settings.ts"));
 const knowledge = await jiti.import(path.join(root, "extensions/sediment/knowledge-evidence.ts"));
 const outbox = await jiti.import(path.join(root, "extensions/sediment/publication-outbox.ts"));
+const barrier = await jiti.import(path.join(root, "extensions/_shared/canonical-mutation-barrier.ts"));
+const workerBudget = await jiti.import(path.join(root, "extensions/_shared/worker-budget-context.ts"));
 const checkpoint = await jiti.import(path.join(root, "extensions/sediment/checkpoint.ts"));
 const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
 const settings = settingsModule.resolveSedimentSettings();
@@ -195,6 +197,92 @@ async function check(name, fn) {
 
 console.log("sediment phase-2 all-Knowledge mutation acceptance");
 console.log(`  tmp=${tmp}`);
+
+await check("acceptance fault injection orders outbox before idempotent L1 under one barrier", async () => {
+  const initialL1 = (await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length;
+  const initialPending = (await outbox.listPublicationOutboxPending(abrainHome)).length;
+  writer._setKnowledgeAcceptanceTestHooksForTests({
+    beforeOutboxWrite: () => {
+      assert(barrier.canonicalMutationBarrierHeld(abrainHome), "outbox write escaped canonical barrier");
+      throw new Error("fault_injected_outbox_write");
+    },
+  });
+  const outboxFailed = await writer.writeProjectEntry(
+    draft("fault-outbox"),
+    opts("fault-outbox-session", "fault:outbox", "2026-07-23T00:58:00.000Z"),
+  );
+  assert(outboxFailed.status === "rejected" && outboxFailed.reason === "publication_outbox_write_failed", `outbox failure result: ${JSON.stringify(outboxFailed)}`);
+  assert((await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length === initialL1, "outbox failure wrote L1");
+  assert((await outbox.listPublicationOutboxPending(abrainHome)).length === initialPending, "outbox failure left pending receipt");
+
+  writer._setKnowledgeAcceptanceTestHooksForTests({});
+  const missingTimestamp = await writer.writeProjectEntry(draft("fault-missing-time"), {
+    projectRoot,
+    abrainHome,
+    projectId,
+    settings,
+  });
+  assert(missingTimestamp.status === "rejected" && missingTimestamp.reason === "source_timestamp_unavailable", `create accepted writer wall clock as source chronology: ${JSON.stringify(missingTimestamp)}`);
+  assert((await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length === initialL1, "missing source timestamp wrote L1");
+  assert((await outbox.listPublicationOutboxPending(abrainHome)).length === initialPending, "missing source timestamp wrote outbox");
+
+  writer._setKnowledgeAcceptanceTestHooksForTests({
+    beforeL1Append: async () => {
+      assert(barrier.canonicalMutationBarrierHeld(abrainHome), "L1 append escaped canonical barrier");
+      const hidden = await barrier.withoutCanonicalMutationBarrierContext(() =>
+        writer.drainKnowledgePublicationOutbox(abrainHome, settings),
+      );
+      assert(hidden.status === "busy", `publisher observed pending before acceptance barrier release: ${JSON.stringify(hidden)}`);
+      throw new Error("fault_injected_l1_append");
+    },
+  });
+  const l1Failed = await writer.writeProjectEntry(
+    draft("fault-l1"),
+    opts("fault-l1-session", "fault:l1", "2026-07-23T00:59:00.000Z"),
+  );
+  assert(l1Failed.status === "rejected" && l1Failed.reason === "knowledge_evidence_append_failed", `L1 failure result: ${JSON.stringify(l1Failed)}`);
+  assert((await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length === initialL1, "faulted L1 append became durable");
+  const pendingAfterFailure = await outbox.listPublicationOutboxPending(abrainHome);
+  assert(pendingAfterFailure.length === initialPending + 1, "L1 failure did not retain pending outbox");
+  const orphanRow = pendingAfterFailure.find((row) => row.item.candidateKey === "fault:l1");
+  const pendingEventId = orphanRow?.item.eventId;
+  assert(pendingEventId && !fs.existsSync(knowledge.knowledgeEvidenceEventPath(abrainHome, pendingEventId)), "faulted L1 unexpectedly exists");
+
+  writer._setKnowledgeAcceptanceTestHooksForTests({});
+  const healthy = await Promise.all([
+    writer.writeProjectEntry(
+      draft("fault-l1-healthy-a"),
+      opts("fault-l1-healthy-a-session", "fault:l1:healthy:a", "2026-07-23T00:59:01.000Z"),
+    ),
+    writer.writeProjectEntry(
+      draft("fault-l1-healthy-b"),
+      opts("fault-l1-healthy-b-session", "fault:l1:healthy:b", "2026-07-23T00:59:02.000Z"),
+    ),
+  ]);
+  assertAccepted(healthy, "fault-l1-healthy");
+  const healthyRows = (await outbox.listPublicationOutboxPending(abrainHome))
+    .filter((row) => row.item.candidateKey.startsWith("fault:l1:healthy:"));
+  assert(healthyRows.length === 2, `healthy receipt count=${healthyRows.length}`);
+
+  const maintenanceBeforeRetry = await writer.scheduleKnowledgePublicationOutboxDrain(abrainHome, settings);
+  assert(maintenanceBeforeRetry.processed === 2 && maintenanceBeforeRetry.drained === 2, `healthy siblings did not drain: ${JSON.stringify(maintenanceBeforeRetry)}`);
+  assert(maintenanceBeforeRetry.terminalFailed === 0, `orphan was terminal-failed: ${JSON.stringify(maintenanceBeforeRetry)}`);
+  assert(maintenanceBeforeRetry.pending === initialPending + 1 && maintenanceBeforeRetry.lastError === "publication_l1_pending", `orphan held result not closed: ${JSON.stringify(maintenanceBeforeRetry)}`);
+  const heldRows = await outbox.listPublicationOutboxPending(abrainHome);
+  assert(heldRows.some((row) => row.itemId === orphanRow.itemId && row.item.eventId === pendingEventId), "orphan item/event identity did not remain pending");
+  assert(healthyRows.every((row) => fs.existsSync(path.join(outbox.publicationOutboxDoneDir(abrainHome), `${row.itemId}.json`))), "healthy siblings did not reach done");
+
+  const retried = await writer.writeProjectEntry(
+    draft("fault-l1"),
+    opts("fault-l1-session", "fault:l1", "2026-07-23T00:59:00.000Z"),
+  );
+  assertAccepted([retried], "fault-l1-retry");
+  assert(retried.knowledgeEvidenceEvent.append.eventId === pendingEventId, "retry changed deterministic event id");
+  assert((await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length === initialL1 + 3, "retry/healthy writes did not append exactly three L1 events");
+  const retryRows = (await outbox.listPublicationOutboxPending(abrainHome)).filter((row) => row.item.eventId === pendingEventId);
+  assert(retryRows.length === 1 && retryRows[0].itemId === orphanRow.itemId, `retry duplicated/changed outbox receipt: ${JSON.stringify(retryRows)}`);
+  writer._setKnowledgeAcceptanceTestHooksForTests({});
+});
 
 const seedSlugs = [
   "mut-update", "mut-delete", "mut-archive", "mut-supersede", "mut-reactivate",
@@ -313,20 +401,12 @@ const l2Root = path.join(abrainHome, "l2", "views", "knowledge");
 const headBefore = git(abrainHome, ["rev-parse", "HEAD"]).trim();
 const l2Before = treeFingerprint(l2Root);
 const l1BeforeCount = (await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length;
-const releaseFile = path.join(tmp, "release-ofd");
-const holder = spawn(process.execPath, [scriptFile, "--child=hold-ofd"], {
-  cwd: root,
-  env: { ...process.env, SMOKE_ABRAIN: abrainHome, SMOKE_RELEASE_FILE: releaseFile },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-const holderInfo = collectProcess(holder);
-await waitForOutput(holderInfo, /OFD_HELD/);
 
 const acceptedGroups = [];
 const acceptedIds = new Set();
 let raceEventIds = [];
 
-await check("update/delete/archive/supersede/reactivate accept while OFD is busy", async () => {
+await check("update/delete/archive/supersede/reactivate accept under canonical barrier", async () => {
   const update = await writer.updateProjectEntry("mut-update", {
     compiledTruth: "# Mut Update\n\nUpdated Knowledge payload accepted independently from publication.",
     sessionId: "session-update",
@@ -470,7 +550,7 @@ await check("all accepted operations advance independent checkpoint slots", asyn
   }
 });
 
-await check("OFD busy freezes mutable L2 and Git while L1/outbox grow", async () => {
+await check("accepted mutations defer mutable L2 and Git while L1/outbox grow", async () => {
   const nodes = await knowledge.collectAllKnowledgeEventNodes(abrainHome);
   assert(nodes.length === l1BeforeCount + acceptedIds.size, `unexpected L1 cardinality: before=${l1BeforeCount} accepted=${acceptedIds.size} now=${nodes.length}`);
   const pending = await outbox.listPublicationOutboxPending(abrainHome);
@@ -479,8 +559,64 @@ await check("OFD busy freezes mutable L2 and Git while L1/outbox grow", async ()
     assert(acceptedIds.has(row.item.eventId), `outbox references unknown event: ${row.item.eventId}`);
     assert(Array.isArray(row.item.artifactPaths) && row.item.artifactPaths.length === 0, "knowledge outbox copied artifact/payload material");
   }
-  assert(treeFingerprint(l2Root) === l2Before, "L2 changed while canonical OFD was busy");
-  assert(git(abrainHome, ["rev-parse", "HEAD"]).trim() === headBefore, "HEAD advanced while canonical OFD was busy");
+  assert(treeFingerprint(l2Root) === l2Before, "L2 changed during acceptance instead of publication");
+  assert(git(abrainHome, ["rev-parse", "HEAD"]).trim() === headBefore, "HEAD advanced during acceptance instead of publication");
+});
+
+const releaseFile = path.join(tmp, "release-ofd");
+const holder = spawn(process.execPath, [scriptFile, "--child=hold-ofd"], {
+  cwd: root,
+  env: { ...process.env, SMOKE_ABRAIN: abrainHome, SMOKE_RELEASE_FILE: releaseFile },
+  stdio: ["ignore", "pipe", "pipe"],
+});
+const holderInfo = collectProcess(holder);
+await waitForOutput(holderInfo, /OFD_HELD/);
+
+await check("accept returns canonical_busy under a real held OFD with zero L1/outbox/checkpoint mutation", async () => {
+  const l1Count = (await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length;
+  const pendingIds = (await outbox.listPublicationOutboxPending(abrainHome)).map((row) => row.itemId).sort();
+  const checkpointFile = checkpoint.checkpointPath(projectRoot);
+  const checkpointBytes = fs.existsSync(checkpointFile) ? fs.readFileSync(checkpointFile) : null;
+  const mutation = () => writer.updateProjectEntry("mut-update", {
+    compiledTruth: "# Mut Update\n\nThis mutation must remain unaccepted while another process owns canonical mutation.",
+    sessionId: "session-canonical-busy",
+    timelineNote: "canonical busy fixture",
+  }, opts("session-canonical-busy", "candidate:canonical-busy", "2026-07-23T02:00:09.000Z"));
+
+  const foregroundStarted = Date.now();
+  const rejected = await mutation();
+  const foregroundElapsed = Date.now() - foregroundStarted;
+  assert(rejected.status === "rejected" && rejected.reason === "canonical_busy", `foreground busy was not closed rejection: ${JSON.stringify(rejected)}`);
+  assert(foregroundElapsed < 2_000, `foreground canonical busy exceeded short bound: ${foregroundElapsed}ms`);
+  assert(!sediment._shouldAdvanceAfterResultsForTests([rejected]), "canonical_busy advanced checkpoint predicate");
+
+  const workerStarted = Date.now();
+  const workerRejected = await workerBudget.runWithWorkerBudget({
+    deadlineMs: workerStarted + 150,
+    now: Date.now,
+  }, mutation);
+  const workerElapsed = Date.now() - workerStarted;
+  assert(workerRejected.status === "rejected" && workerRejected.reason === "canonical_busy", `worker busy was not closed rejection: ${JSON.stringify(workerRejected)}`);
+  assert(workerElapsed < 750, `worker deadline did not clamp canonical wait: ${workerElapsed}ms`);
+  assert(!sediment._shouldAdvanceAfterResultsForTests([workerRejected]), "worker canonical_busy advanced checkpoint predicate");
+
+  assert((await knowledge.collectAllKnowledgeEventNodes(abrainHome)).length === l1Count, "held accept wrote L1");
+  assert(JSON.stringify((await outbox.listPublicationOutboxPending(abrainHome)).map((row) => row.itemId).sort()) === JSON.stringify(pendingIds), "held accept wrote outbox");
+  const checkpointAfter = fs.existsSync(checkpointFile) ? fs.readFileSync(checkpointFile) : null;
+  assert((checkpointBytes === null && checkpointAfter === null) || checkpointBytes?.equals(checkpointAfter), "held accept advanced checkpoint bytes");
+});
+
+await check("maintenance direct drain returns true busy immediately; foreground one-shot stays completed", async () => {
+  const directStarted = Date.now();
+  const direct = await writer.drainKnowledgePublicationOutbox(abrainHome, settings);
+  assert(direct.status === "busy", `direct drain did not return busy: ${JSON.stringify(direct)}`);
+  assert(Date.now() - directStarted < 250, "direct drain consumed retry budget while OFD busy");
+
+  const foregroundStarted = Date.now();
+  const foreground = await writer.scheduleKnowledgePublicationOutboxDrain(abrainHome, settings);
+  assert(foreground.status === "completed" && /canonical mutation barrier busy/i.test(foreground.lastError || ""), `foreground drain behavior changed: ${JSON.stringify(foreground)}`);
+  assert(Date.now() - foregroundStarted < 250, "foreground one-shot did not remain nonblocking");
+  assert((await outbox.listPublicationOutboxPending(abrainHome)).length === acceptedIds.size, "busy probes consumed pending work");
 });
 
 fs.writeFileSync(releaseFile, "release\n");

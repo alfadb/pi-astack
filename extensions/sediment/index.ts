@@ -186,13 +186,21 @@ import {
   writeSedimentIntakeRecoveryStatus,
   type SedimentIntakeRecord,
 } from "./intake";
-import { listPublicationOutboxPending } from "./publication-outbox";
-import { scheduleKnowledgePublicationOutboxDrain } from "./writer";
+import {
+  countPublicationOutboxPending,
+  hasPublicationOutboxPending,
+  listPublicationOutboxPending,
+} from "./publication-outbox";
+import {
+  drainKnowledgePublicationOutbox,
+  scheduleKnowledgePublicationOutboxDrain,
+} from "./writer";
 import {
   buildWorkerProgressEvent,
   emitWorkerProgress,
   isSedimentWorkerMode,
   registerSedimentWorkerCommand,
+  registerSedimentWorkerMaintenanceCommand,
   SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
   type SedimentWorkerPassOutcome,
   type SedimentWorkerProgressEvent,
@@ -781,15 +789,17 @@ function enqueueSedimentIntakeRecord(args: {
           }).catch(() => {});
           return;
         }
-        let passResult: void | { more: true } = undefined;
+        let passResult: SedimentWorkerPassOutcome = undefined;
         try {
           passResult = await sedimentAgentEndPassRunner(snapshot, {
             intakeWindowId: args.record.windowId,
             fromRecovery: args.fromRecovery,
           });
-          return passResult;
+          return passResult && "more" in passResult && passResult.more === true
+            ? passResult
+            : undefined;
         } finally {
-          if (!passResult || passResult.more !== true) {
+          if (!passResult || !("more" in passResult) || passResult.more !== true) {
             void triggerKnowledgePublicationOneShot(snapshot.sessionId, "completed");
           }
         }
@@ -7040,8 +7050,19 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       resolveExecutionOwner: () => resolveSedimentSettings().executionOwner,
       loadSessionCheckpoint: (projectRoot, sessionId) =>
         loadSessionCheckpointRaw(projectRoot, sessionId),
+      // Settled task results stamp publication_pending from actual outbox count.
+      countPublicationOutboxPending,
+      hasPublicationOutboxPending,
       // Publication is durable-outbox only; worker task does not drain in-task.
-      // Independent maintenance / session_start owns publication drain.
+      // Independent maintenance command owns publication drain.
+    });
+    registerSedimentWorkerMaintenanceCommand(pi, {
+      resolveAbrainHome: resolveAbrainHomeForSediment,
+      // Effective owner = daemon only when configured daemon + full triple gate.
+      resolveEffectiveExecutionOwner: () => resolveEffectiveExecutionOwner(),
+      drainKnowledgePublicationOutbox: (abrainHome) =>
+        drainKnowledgePublicationOutbox(abrainHome, resolveSedimentSettings()),
+      countPublicationOutboxPending,
     });
     return;
   }

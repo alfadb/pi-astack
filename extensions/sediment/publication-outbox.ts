@@ -1,9 +1,10 @@
 /**
  * Create-only publication outbox for accepted sediment results.
  *
- * Accepted durability boundary is create-only L1 (and/or this outbox item)
- * BEFORE Git/L2 publication. The outbox is NOT semantic truth: the accepted
- * knowledge/constraint/outcome result must eventually land in canonical L1.
+ * Event-first acceptance durably enqueues this outbox item before its
+ * deterministic idempotent L1 append, all under the canonical mutation
+ * barrier and before Git/L2 publication. The outbox is NOT semantic truth:
+ * accepted knowledge/constraint/outcome must eventually land in canonical L1.
  * This file only records a CAS work item so L2 projection + Git drain can
  * run asynchronously under the existing canonical runtime without rolling
  * back checkpoints or deleting L1 when canonical is busy.
@@ -18,6 +19,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "../_shared/durable-write";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined } from "../_shared/jcs";
+import { abrainSedimentAuditPath, formatLocalIsoTimestamp } from "../_shared/runtime";
 
 export const SEDIMENT_PUBLICATION_OUTBOX_SCHEMA = "sediment-publication-outbox/v2" as const;
 
@@ -196,6 +198,34 @@ export async function writePublicationOutboxItem(
   return { status: "collision", itemId: item.itemId, filePath, item };
 }
 
+/** Count durable pending directory entries without reading semantic item bodies. */
+export async function countPublicationOutboxPending(abrainHome: string): Promise<number> {
+  const dir = publicationOutboxPendingDir(abrainHome);
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
+  return names.filter((name) => /^[0-9a-f]{64}\.json$/.test(name)).length;
+}
+
+/** Existence-only pending probe; stops at the first valid directory entry. */
+export async function hasPublicationOutboxPending(abrainHome: string): Promise<boolean> {
+  const dir = publicationOutboxPendingDir(abrainHome);
+  try {
+    const handle = await fs.opendir(dir);
+    for await (const entry of handle) {
+      if (/^[0-9a-f]{64}\.json$/.test(entry.name)) return true;
+    }
+    return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
 export async function listPublicationOutboxPending(
   abrainHome: string,
 ): Promise<Array<{ itemId: string; filePath: string; item: PublicationOutboxItem; mtimeMs: number }>> {
@@ -249,10 +279,77 @@ export async function ackPublicationOutboxItem(
   }
 }
 
+const PUBLICATION_FAILURE_REASONS = new Set([
+  "knowledge_publication_validation_failed",
+  "unknown_publication_domain",
+]);
+
+function closedPublicationFailureReason(reason: string): string {
+  const code = reason.split(":", 1)[0]?.trim() ?? "";
+  return PUBLICATION_FAILURE_REASONS.has(code) ? code : "publication_terminal_failure";
+}
+
+async function appendPublicationFailureAudit(
+  abrainHome: string,
+  phase: "before_transition" | "after_transition",
+  reason: string,
+  item: PublicationOutboxItem,
+): Promise<void> {
+  const auditPath = abrainSedimentAuditPath(abrainHome);
+  const auditDir = path.dirname(auditPath);
+  await fs.mkdir(auditDir, { recursive: true, mode: 0o700 });
+  const row = {
+    timestamp: formatLocalIsoTimestamp(),
+    audit_version: 2,
+    pid: process.pid,
+    abrain_home: path.resolve(abrainHome),
+    lane: "publication",
+    operation: "publication_outbox_terminal_transition",
+    phase,
+    reason: closedPublicationFailureReason(reason),
+    item_identity: {
+      item_id: item.itemId,
+      domain: item.domain,
+      session_id: item.sessionId,
+      ...(item.windowId ? { window_id: item.windowId } : {}),
+      ...(item.eventId ? { event_id: item.eventId } : {}),
+      candidate_key: item.candidateKey,
+      item_operation: item.operation,
+      ...(item.slug ? { slug: item.slug } : {}),
+      ...(item.projectId ? { project_id: item.projectId } : {}),
+      ...(item.scope ? { scope: item.scope } : {}),
+      ...(item.batchId ? { batch_id: item.batchId } : {}),
+    },
+  };
+  const handle = await fs.open(auditPath, "a", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(row)}\n`, "utf-8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fsyncDirectory(auditDir);
+}
+
+async function appendPublicationFailureAuditClosed(
+  abrainHome: string,
+  phase: "before_transition" | "after_transition",
+  reason: string,
+  item: PublicationOutboxItem,
+): Promise<void> {
+  try {
+    await appendPublicationFailureAudit(abrainHome, phase, reason, item);
+  } catch {
+    // Do not include raw I/O error/path text: transition audit logging is closed.
+    console.error(`[sediment-writer] publication_failure_audit_failed phase=${phase} reason=audit_append_failed`);
+  }
+}
+
 /**
- * Move a permanently terminal publication item out of pending into failed/.
- * No attempt counters, backoff timers, or retry scheduling — the failure is
- * visible and stays failed until an operator/repair path intervenes.
+ * Atomically move a terminal item from pending/ to failed/ within one outbox
+ * filesystem. The failed path retains the immutable item bytes; its directory
+ * is the terminal status. Existing identical destination is idempotent, while
+ * any identity/content conflict fails closed and leaves pending untouched.
  */
 export async function failPublicationOutboxItem(
   abrainHome: string,
@@ -260,36 +357,61 @@ export async function failPublicationOutboxItem(
   reason: string,
 ): Promise<{ status: "failed" | "missing"; fromPath: string; toPath?: string }> {
   const fromPath = publicationOutboxPendingPath(abrainHome, itemId);
+  const pendingDir = path.dirname(fromPath);
   const failedDir = publicationOutboxFailedDir(abrainHome);
   await fs.mkdir(failedDir, { recursive: true, mode: 0o700 });
   const toPath = path.join(failedDir, `${itemId}.json`);
-  let item: PublicationOutboxItem | undefined;
-  try {
-    item = JSON.parse(await fs.readFile(fromPath, "utf-8")) as PublicationOutboxItem;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing", fromPath };
-  }
-  const payload = {
-    schema: SEDIMENT_PUBLICATION_OUTBOX_SCHEMA,
-    itemId,
-    status: "failed" as const,
-    reason: reason.slice(0, 500),
-    failedAtUtc: new Date().toISOString(),
-    item: item ?? null,
+
+  const readValidated = async (filePath: string): Promise<{ raw: Buffer; item: PublicationOutboxItem } | null> => {
+    let raw: Buffer;
+    try {
+      raw = await fs.readFile(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw err;
+    }
+    let parsed: PublicationOutboxItem | { item?: PublicationOutboxItem };
+    try {
+      parsed = JSON.parse(raw.toString("utf-8")) as PublicationOutboxItem | { item?: PublicationOutboxItem };
+    } catch {
+      throw new Error(`publication outbox terminal move found invalid JSON: ${filePath}`);
+    }
+    // Read-only compatibility for terminal receipts created by the former
+    // copy/unlink implementation; new transitions always rename the raw item.
+    const item = (parsed as { item?: PublicationOutboxItem }).item ?? parsed as PublicationOutboxItem;
+    if (
+      item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA
+      || item.itemId !== itemId
+      || computePublicationOutboxItemId(item) !== itemId
+    ) {
+      throw new Error(`publication outbox terminal move identity conflict: ${filePath}`);
+    }
+    return { raw, item };
   };
-  const raw = `${JSON.stringify(payload)}\n`;
-  try {
-    await durableAtomicWriteFile(toPath, raw, { mode: 0o600 });
-    await fs.unlink(fromPath).catch((err) => {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    });
-    await fsyncDirectory(failedDir).catch(() => undefined);
-    await fsyncDirectory(path.dirname(fromPath)).catch(() => undefined);
+
+  const source = await readValidated(fromPath);
+  const destination = await readValidated(toPath);
+  if (destination) {
+    if (source && canonicalizeJcs(source.item) !== canonicalizeJcs(destination.item)) {
+      throw new Error(`publication outbox failed destination conflict: ${itemId}`);
+    }
+    if (source) {
+      await appendPublicationFailureAuditClosed(abrainHome, "before_transition", reason, source.item);
+      await fs.unlink(fromPath);
+      await fsyncDirectory(failedDir);
+      await fsyncDirectory(pendingDir);
+      await appendPublicationFailureAuditClosed(abrainHome, "after_transition", reason, source.item);
+    }
     return { status: "failed", fromPath, toPath };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return { status: "missing", fromPath };
-    throw err;
   }
+  if (!source) return { status: "missing", fromPath };
+
+  await appendPublicationFailureAuditClosed(abrainHome, "before_transition", reason, source.item);
+  await fs.rename(fromPath, toPath);
+  await fsyncDirectory(failedDir);
+  await fsyncDirectory(pendingDir);
+  await appendPublicationFailureAuditClosed(abrainHome, "after_transition", reason, source.item);
+  return { status: "failed", fromPath, toPath };
 }
 
 /** Process-local single-flight publisher lock (not a global daemon). */
@@ -323,13 +445,18 @@ async function durablePublicationBatchCounts(
   pending: Awaited<ReturnType<typeof listPublicationOutboxPending>>,
 ): Promise<Map<string, number>> {
   const idsByBatch = new Map<string, Set<string>>();
-  const add = (item: PublicationOutboxItem | undefined) => {
-    if (!item?.batchId || !item.itemId) return;
+  const add = (item: PublicationOutboxItem | undefined, expectedItemId?: string) => {
+    if (!item?.batchId || !item.itemId || (expectedItemId && item.itemId !== expectedItemId)) return;
+    try {
+      if (item.schema !== SEDIMENT_PUBLICATION_OUTBOX_SCHEMA || computePublicationOutboxItemId(item) !== item.itemId) return;
+    } catch {
+      return;
+    }
     const ids = idsByBatch.get(item.batchId) ?? new Set<string>();
     ids.add(item.itemId);
     idsByBatch.set(item.batchId, ids);
   };
-  for (const row of pending) add(row.item);
+  for (const row of pending) add(row.item, row.itemId);
   const incomplete = pending.some((row) => row.item.batchId
     && (idsByBatch.get(row.item.batchId)?.size ?? 0) < (row.item.batchSize ?? Number.POSITIVE_INFINITY));
   if (!incomplete) {
@@ -342,7 +469,7 @@ async function durablePublicationBatchCounts(
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
       try {
         const parsed = JSON.parse(await fs.readFile(path.join(dir, name), "utf-8")) as PublicationOutboxItem | { item?: PublicationOutboxItem };
-        add((parsed as { item?: PublicationOutboxItem }).item ?? parsed as PublicationOutboxItem);
+        add((parsed as { item?: PublicationOutboxItem }).item ?? parsed as PublicationOutboxItem, name.slice(0, 64));
       } catch { /* corrupt terminal receipt remains visible but cannot satisfy a batch */ }
     }
   }
@@ -441,6 +568,7 @@ export async function schedulePublicationOutboxBatchDrain(
   let processed = 0;
   let drained = 0;
   let terminalFailed = 0;
+  state.lastError = undefined;
   const run = (async () => {
     try {
       const result = await handler();
@@ -513,6 +641,7 @@ export async function schedulePublicationOutboxDrain(
   let processed = 0;
   let drained = 0;
   let terminalFailed = 0;
+  state.lastError = undefined;
   const run = (async () => {
     try {
       const pending = await listPublicationOutboxPending(abrainHome);

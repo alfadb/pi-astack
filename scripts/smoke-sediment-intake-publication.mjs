@@ -443,7 +443,7 @@ await check("missing session source stays pending with source_unavailable", asyn
   assert(status.status === "source_unavailable", `source status not explicit: ${JSON.stringify(status)}`);
 });
 
-await check("real OFD busy allows two L1 accepts, freezes L2, then publisher converges L2/Git", async () => {
+await check("real OFD busy defers acceptance; release recovers both sessions and publication", async () => {
   const s1 = writeSession("busy-a", "busy-session-a", "Busy Session A Fact", {
     userId: "d0000001", tipId: "d0000002", userTimestamp: "2026-07-23T08:40:01.000Z", tipTimestamp: "2026-07-23T08:40:02.000Z",
   });
@@ -470,22 +470,27 @@ await check("real OFD busy allows two L1 accepts, freezes L2, then publisher con
   const holderInfo = collectProcess(holder);
   await waitForOutput(holderInfo, /OFD_HELD/, 15000);
 
-  const ra = child("recover", { SMOKE_SESSION: s1.file });
-  const rb = child("recover", { SMOKE_SESSION: s2.file });
-  const rai = collectProcess(ra);
-  const rbi = collectProcess(rb);
-  const [rar, rbr] = await Promise.all([rai.closed, rbi.closed]);
-  assert(rar.code === 0 && rbr.code === 0, `busy recoveries failed: ${rar.stderr}\n${rbr.stderr}`);
-  assert(knowledgeEventsForSlug("busy-session-a-fact").length === 1, "session A L1 was not accepted while OFD busy");
-  assert(knowledgeEventsForSlug("busy-session-b-fact").length === 1, "session B L1 was not accepted while OFD busy");
-  assert(checkpointSlot(s1.sessionId)?.lastProcessedEntryId === s1.tip.id, "session A checkpoint did not advance while OFD busy");
-  assert(checkpointSlot(s2.sessionId)?.lastProcessedEntryId === s2.tip.id, "session B checkpoint did not advance while OFD busy");
+  assert((await intake.listSedimentIntakePendingForSession(abrainHome, s1.sessionId)).length === 1, "session A intake did not remain pending while OFD busy");
+  assert((await intake.listSedimentIntakePendingForSession(abrainHome, s2.sessionId)).length === 1, "session B intake did not remain pending while OFD busy");
+  assert(knowledgeEventsForSlug("busy-session-a-fact").length === 0, "session A L1 escaped acceptance barrier");
+  assert(knowledgeEventsForSlug("busy-session-b-fact").length === 0, "session B L1 escaped acceptance barrier");
+  assert(!checkpointSlot(s1.sessionId) && !checkpointSlot(s2.sessionId), "checkpoint advanced before accepted durability");
   assert(treeFingerprint(l2Root) === l2Before, "L2 mutated outside the held canonical OFD");
   assert(git(abrainHome, ["rev-parse", "HEAD"]).trim() === headBefore, "Git advanced while canonical OFD was held");
 
   fs.writeFileSync(releaseFile, "release\n");
   const holderResult = await holderInfo.closed;
   assert(holderResult.code === 0, `holder release failed: ${holderResult.stderr}`);
+  const ra = child("recover", { SMOKE_SESSION: s1.file });
+  const rb = child("recover", { SMOKE_SESSION: s2.file });
+  const rai = collectProcess(ra);
+  const rbi = collectProcess(rb);
+  const [rar, rbr] = await Promise.all([rai.closed, rbi.closed]);
+  assert(rar.code === 0 && rbr.code === 0, `post-release recoveries failed: ${rar.stderr}\n${rbr.stderr}`);
+  assert(knowledgeEventsForSlug("busy-session-a-fact").length === 1, "session A L1 was not accepted after OFD release");
+  assert(knowledgeEventsForSlug("busy-session-b-fact").length === 1, "session B L1 was not accepted after OFD release");
+  assert(checkpointSlot(s1.sessionId)?.lastProcessedEntryId === s1.tip.id, "session A checkpoint did not advance after acceptance");
+  assert(checkpointSlot(s2.sessionId)?.lastProcessedEntryId === s2.tip.id, "session B checkpoint did not advance after acceptance");
   await runToClose("publisher", {}, 60000);
   assert(treeFingerprint(l2Root) !== l2Before, "publisher did not materialize L2 after OFD release");
   assert(git(abrainHome, ["rev-parse", "HEAD"]).trim() !== headBefore, "publisher did not converge Git after OFD release");
@@ -555,7 +560,108 @@ await check("unknown outbox domain is terminal failed, not silent ack", async ()
   const failedPath = path.join(outbox.publicationOutboxFailedDir(abrainHome), `${item.itemId}.json`);
   assert(fs.existsSync(failedPath), `unknown domain missing from failed/: ${failedPath}`);
   const failed = readJson(failedPath);
-  assert(failed.status === "failed" && /unknown_publication_domain:generic/.test(failed.reason || ""), `failed payload wrong: ${JSON.stringify(failed)}`);
+  assert(failed.itemId === item.itemId && failed.domain === "generic", `failed item bytes wrong: ${JSON.stringify(failed)}`);
+  const idempotent = await outbox.failPublicationOutboxItem(abrainHome, item.itemId, "same terminal classification");
+  assert(idempotent.status === "failed" && idempotent.toPath === failedPath, `failed destination was not idempotent: ${JSON.stringify(idempotent)}`);
+});
+
+await check("failed transition is atomic/idempotent/conflict-closed; batch counts dedupe item ids", async () => {
+  const isolated = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-outbox-terminal-"));
+  try {
+    assert(await outbox.hasPublicationOutboxPending(isolated) === false, "missing pending dir reported work");
+    const item = outbox.buildPublicationOutboxItem({
+      domain: "generic",
+      sessionId: "terminal-atomic-session",
+      artifactPaths: [],
+      candidateKey: "terminal-atomic-candidate",
+      operation: "create",
+    });
+    await outbox.writePublicationOutboxItem(isolated, item);
+    assert(await outbox.hasPublicationOutboxPending(isolated) === true, "opendir pending probe missed item");
+    const fromPath = outbox.publicationOutboxPendingPath(isolated, item.itemId);
+    const sourceBytes = fs.readFileSync(fromPath);
+    const moved = await outbox.failPublicationOutboxItem(isolated, item.itemId, "terminal fixture");
+    assert(moved.status === "failed" && moved.toPath, `atomic move failed: ${JSON.stringify(moved)}`);
+    assert(!fs.existsSync(fromPath) && fs.existsSync(moved.toPath), "terminal move left both pending and failed names");
+    assert(fs.readFileSync(moved.toPath).equals(sourceBytes), "terminal rename changed immutable item bytes");
+    const auditPath = path.join(isolated, ".state", "sediment", "audit.jsonl");
+    const auditRows = fs.readFileSync(auditPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    const transitionRows = auditRows.filter((row) => row.operation === "publication_outbox_terminal_transition");
+    assert(transitionRows.length === 2, `terminal transition audit count=${transitionRows.length}`);
+    assert(JSON.stringify(transitionRows.map((row) => row.phase)) === JSON.stringify(["before_transition", "after_transition"]), `terminal audit phases=${JSON.stringify(transitionRows)}`);
+    assert(transitionRows.every((row) => row.reason === "publication_terminal_failure" && typeof row.timestamp === "string"), "terminal audit reason/time not closed");
+    assert(transitionRows.every((row) => row.item_identity?.item_id === item.itemId && row.item_identity?.candidate_key === item.candidateKey), "terminal audit item identity missing");
+    const again = await outbox.failPublicationOutboxItem(isolated, item.itemId, "terminal fixture");
+    assert(again.status === "failed", `terminal retry was not idempotent: ${JSON.stringify(again)}`);
+    assert(fs.readFileSync(auditPath, "utf8").trim().split("\n").length === 2, "idempotent no-op appended transition audit");
+
+    const auditFailItem = outbox.buildPublicationOutboxItem({
+      domain: "generic",
+      sessionId: "terminal-audit-fail-session",
+      artifactPaths: [],
+      candidateKey: "terminal-audit-fail-candidate",
+      operation: "create",
+    });
+    await outbox.writePublicationOutboxItem(isolated, auditFailItem);
+    const auditFailPending = outbox.publicationOutboxPendingPath(isolated, auditFailItem.itemId);
+    const auditFailBytes = fs.readFileSync(auditFailPending);
+    fs.rmSync(auditPath, { force: true });
+    fs.mkdirSync(auditPath);
+    const closedLogs = [];
+    const priorConsoleError = console.error;
+    console.error = (message) => { closedLogs.push(String(message)); };
+    try {
+      const auditFailedMove = await outbox.failPublicationOutboxItem(isolated, auditFailItem.itemId, "terminal fixture");
+      assert(auditFailedMove.status === "failed" && auditFailedMove.toPath, "audit failure blocked terminal transition");
+      assert(!fs.existsSync(auditFailPending) && fs.readFileSync(auditFailedMove.toPath).equals(auditFailBytes), "audit failure changed/stranded immutable item");
+    } finally {
+      console.error = priorConsoleError;
+    }
+    assert(closedLogs.length === 2 && closedLogs.every((line) => /^\[sediment-writer\] publication_failure_audit_failed phase=(before|after)_transition reason=audit_append_failed$/.test(line)), `audit failure log was not closed: ${JSON.stringify(closedLogs)}`);
+
+    const conflict = outbox.buildPublicationOutboxItem({
+      domain: "generic",
+      sessionId: "terminal-conflict-session",
+      artifactPaths: [],
+      candidateKey: "terminal-conflict-candidate",
+      operation: "create",
+    });
+    await outbox.writePublicationOutboxItem(isolated, conflict);
+    const conflictPending = outbox.publicationOutboxPendingPath(isolated, conflict.itemId);
+    const conflictFailed = path.join(outbox.publicationOutboxFailedDir(isolated), `${conflict.itemId}.json`);
+    fs.writeFileSync(conflictFailed, `${JSON.stringify({ ...conflict, operation: "conflicting-operation" })}\n`);
+    let conflictThrew = false;
+    try {
+      await outbox.failPublicationOutboxItem(isolated, conflict.itemId, "must fail closed");
+    } catch {
+      conflictThrew = true;
+    }
+    assert(conflictThrew, "conflicting failed destination did not fail closed");
+    assert(fs.existsSync(conflictPending) && fs.existsSync(conflictFailed), "conflict path consumed pending or overwrote destination");
+
+    const batchHome = path.join(isolated, "batch-home");
+    const batchId = "d".repeat(64);
+    const batchA = outbox.buildPublicationOutboxItem({
+      domain: "generic", sessionId: "dedupe-batch", artifactPaths: [], candidateKey: "dedupe-a", operation: "merge",
+      batchId, batchSize: 2,
+    });
+    await outbox.writePublicationOutboxItem(batchHome, batchA);
+    for (const dir of [outbox.publicationOutboxDoneDir(batchHome), outbox.publicationOutboxFailedDir(batchHome)]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${batchA.itemId}.json`), `${JSON.stringify(batchA)}\n`);
+    }
+    const incomplete = await outbox.freezePublicationOutboxBatch(batchHome);
+    assert(incomplete.selected.length === 0, "duplicate durable copies inflated batch cardinality");
+    const batchB = outbox.buildPublicationOutboxItem({
+      domain: "generic", sessionId: "dedupe-batch", artifactPaths: [], candidateKey: "dedupe-b", operation: "merge",
+      batchId, batchSize: 2,
+    });
+    await outbox.writePublicationOutboxItem(batchHome, batchB);
+    const complete = await outbox.freezePublicationOutboxBatch(batchHome);
+    assert(new Set(complete.selected.map((row) => row.itemId)).size === 2, `unique item ids did not complete batch: ${JSON.stringify(complete.selected)}`);
+  } finally {
+    fs.rmSync(isolated, { recursive: true, force: true });
+  }
 });
 
 // ── Canonical-enabled exact-cohort publisher (no startup / no nested drain) ──

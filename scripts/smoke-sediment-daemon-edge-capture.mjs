@@ -835,6 +835,7 @@ await check("worker mode: zero capture / no lifecycle", async () => {
       assert(!pi.handlers.has(name), `worker must not register ${name}`);
     }
     assert(pi.commands.has("sediment-worker-run"), "worker command present");
+    assert(pi.commands.has("sediment-worker-maintenance"), "maintenance command present");
   } finally {
     if (prev === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
     else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
@@ -857,6 +858,7 @@ await check("normal foreground default regression: hooks register, no edge write
   assert(pi.handlers.has("session_start"), "normal session_start");
   assert(pi.commands.has("sediment"), "normal /sediment");
   assert(!pi.commands.has("sediment-worker-run"), "no worker cmd");
+  assert(!pi.commands.has("sediment-worker-maintenance"), "no maintenance cmd");
 });
 
 await check("writeEdgeTerminalWitness default semantics unchanged (no silent idempotent)", async () => {

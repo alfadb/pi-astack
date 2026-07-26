@@ -192,37 +192,47 @@ export function withCanonicalMutationBarrier<T>(
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
   if (canonicalMutationBarrierHeld(repo)) return operation();
-  // Daemon worker budget: clamp singleflight + barrier to remaining absolute deadline.
-  // Foreground paths never enter worker budget ALS → unchanged defaults.
+
+  // An explicit timeout covers both the process-local queue and OFD acquisition.
+  // Worker ALS may only shorten that total deadline.
   const budget = getWorkerBudgetContext();
-  if (budget) {
-    const now = budget.now ?? Date.now;
-    const remaining = Math.max(0, budget.deadlineMs - now());
-    const merged: CanonicalMutationBarrierOptions = {
-      ...options,
-      now,
-      deadlineMs: options.deadlineMs === undefined
-        ? budget.deadlineMs
-        : Math.min(options.deadlineMs, budget.deadlineMs),
-      timeoutMs: options.timeoutMs === undefined
-        ? remaining
-        : Math.min(options.timeoutMs, remaining),
-    };
+  const now = budget?.now ?? options.now ?? Date.now;
+  const startedAtMs = now();
+  const requestedDeadlineMs = options.deadlineMs ?? Number.POSITIVE_INFINITY;
+  const timeoutDeadlineMs = options.timeoutMs === undefined
+    ? Number.POSITIVE_INFINITY
+    : startedAtMs + Math.max(0, options.timeoutMs);
+  const budgetDeadlineMs = budget?.deadlineMs ?? Number.POSITIVE_INFINITY;
+  const deadlineMs = Math.min(requestedDeadlineMs, timeoutDeadlineMs, budgetDeadlineMs);
+  const deadlineBound = Number.isFinite(deadlineMs);
+  const merged: CanonicalMutationBarrierOptions = {
+    ...options,
+    now,
+    ...(deadlineBound ? {
+      deadlineMs,
+      timeoutMs: Math.max(0, Math.min(
+        options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        deadlineMs - startedAtMs,
+      )),
+    } : {}),
+  };
+
+  if (deadlineBound) {
     return gitSingleFlightWithDeadline(
       repo,
       () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged),
       {
-        deadlineMs: merged.deadlineMs ?? budget.deadlineMs,
+        deadlineMs,
         now,
         onExpired: (detail) => new CanonicalMutationBarrierError(
           "CANONICAL_MUTATION_BUSY",
-          "worker budget expired waiting for git singleflight",
+          "deadline expired waiting for git singleflight",
           { ...detail },
         ),
       },
     );
   }
-  return gitSingleFlight(repo, () => withCanonicalMutationBarrierInSingleFlight(repo, operation, options));
+  return gitSingleFlight(repo, () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged));
 }
 
 export function withoutCanonicalMutationBarrierContext<T>(operation: () => T): T {

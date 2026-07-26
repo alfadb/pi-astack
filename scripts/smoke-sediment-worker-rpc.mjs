@@ -141,6 +141,7 @@ await check("worker mode: zero lifecycle hooks + only worker command", async () 
       assert(!pi.handlers.has(name), `worker mode registered lifecycle hook ${name}`);
     }
     assert(pi.commands.has("sediment-worker-run"), "missing sediment-worker-run command");
+    assert(pi.commands.has("sediment-worker-maintenance"), "missing sediment-worker-maintenance command");
     assert(!pi.commands.has("sediment"), "ordinary /sediment must not register in worker mode");
   } finally {
     if (prev === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
@@ -163,6 +164,7 @@ await check("normal mode: lifecycle hooks still register (regression)", async ()
     assert(pi.handlers.has("agent_start"), "normal mode missing agent_start");
     assert(pi.commands.has("sediment"), "normal mode missing /sediment");
     assert(!pi.commands.has("sediment-worker-run"), "worker command must not register outside worker mode");
+    assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance command must not register outside worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
     writeSettings({ executionOwner: "daemon" });
@@ -187,12 +189,16 @@ await check("foreground daemon-owner: capture without enqueue", async () => {
     // only if we can; instead assert helper gate by importing queue stats after
     // a no-op (no agent_end fire with real intake in this unit).
     assert(!pi.commands.has("sediment-worker-run"), "worker cmd only in worker mode");
+    assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance cmd only in worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
   }
 });
 
 const worker = await jiti.import(path.join(root, "extensions/sediment/worker-rpc.ts"));
+const outbox = await jiti.import(path.join(root, "extensions/sediment/publication-outbox.ts"));
+const writer = await jiti.import(path.join(root, "extensions/sediment/writer.ts"));
+const sedimentSettings = await jiti.import(path.join(root, "extensions/sediment/settings.ts"));
 const edge = await jiti.import(path.join(root, "extensions/sediment/edge-protocol-shadow.ts"));
 const checkpoint = await jiti.import(path.join(root, "extensions/sediment/checkpoint.ts"));
 
@@ -467,7 +473,7 @@ await check("success receipt only when CP advanced + settled; idempotent", async
   assert(r1.settled === true, "r1 settled");
   assert(r1.retryable === false, "r1 not retryable");
   assert(deps._passCount() === 1, "pipeline once");
-  assert(r1.publication_pending === true, "publication_pending observable after receipt");
+  assert(r1.publication_pending === false, "empty outbox ⇒ publication_pending false");
   assert(drained === 0, "no in-task publication drain after receipt");
 
   const r2 = await worker.runSedimentWorkerTask(JSON.stringify({
@@ -476,6 +482,7 @@ await check("success receipt only when CP advanced + settled; idempotent", async
   }), deps);
   assert(r2.status === "already_processed", `r2 status=${r2.status}`);
   assert(r2.settled === true, "r2 settled");
+  assert(r2.publication_pending === false, "already_processed empty outbox ⇒ false");
   assert(deps._passCount() === 1, "pipeline must not re-run");
   assert(drained === 0, "no drain on already_processed either");
 });
@@ -2303,7 +2310,7 @@ await check("H1: durable receipt settles success without in-task publication dra
   assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
   assert(r.settled === true, "settled success");
   assert(r.retryable === false, "settled not retryable");
-  assert(r.publication_pending === true, "publication_pending observable");
+  assert(r.publication_pending === false, "empty outbox ⇒ publication_pending false");
   assert(r.restart_child !== true, "no restart_child");
   assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt durable");
   assert(worker.isWorkerProcessPoisoned() === false, "must not poison");
@@ -2312,7 +2319,8 @@ await check("H1: durable receipt settles success without in-task publication dra
 
 await check("H1: no in-task publication drain; receipt verifyCreated; deadline rechecks receipt (source)", async () => {
   const src = fs.readFileSync(path.join(root, "extensions/sediment/worker-rpc.ts"), "utf8");
-  assert(src.includes("publication_pending: true"), "result stamps publication_pending");
+  assert(src.includes("withPublicationPendingFlag") || src.includes("resolvePublicationPendingFlag"),
+    "result stamps publication_pending from actual outbox");
   assert(src.includes("Do NOT drain publication in-task"), "in-task drain removed");
   assert(!src.includes("drainBudgetMs"), "no drainBudgetMs race");
   assert(src.includes("verifyCreated: true"), "processed receipt verifyCreated=true");
@@ -2393,7 +2401,7 @@ await check("M4: advance then empty_window writes processed receipt (redrive-saf
   assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
   assert(r.settled === true, "settled after advance+empty_window");
   assert(r.retryable === false, "not retryable");
-  assert(r.publication_pending === true, "publication_pending");
+  assert(r.publication_pending === false, "empty outbox publication_pending false");
   assert(passN === 2, `pass iterations=${passN}`);
   assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt durable");
 
@@ -2412,6 +2420,7 @@ await check("M4: advance then empty_window writes processed receipt (redrive-saf
   });
   assert(r2.status === "already_processed", `redrive status=${r2.status}`);
   assert(r2.settled === true, "redrive settled");
+  assert(r2.publication_pending === false, "already_processed actual pending false");
 });
 
 await check("L5: poison root cause sticky across subsequent refuses", async () => {
@@ -2575,6 +2584,598 @@ await check("waitPrev signal-only has no poll timer (source)", async () => {
   // Signal-only path uses addEventListener abort, not schedule() for the no-deadline case.
   assert(/deadlineMs === undefined && opts\?\.signal/.test(src) || /deadlineMs === undefined && opts\.signal/.test(src),
     "signal-only branch condition");
+});
+
+// ─── Publication outbox maintenance + actual publication_pending ─────────────
+
+function resetWorkerPoisonState() {
+  worker._resetWorkerProcessPoisonForTests();
+  worker._resetGlobalPassSerialForTests();
+  worker._setWorkerFenceSliceMsForTests(undefined);
+}
+
+function maintenanceReq(overrides = {}) {
+  return {
+    schema: "pi-astack/sediment-worker-maintenance/v1",
+    request_id: hex64(`maint-${Math.random()}`),
+    budget_ms: 60_000,
+    kind: "publication_outbox",
+    ...overrides,
+  };
+}
+
+function completedDrain(overrides = {}) {
+  return {
+    status: "completed",
+    processed: 0,
+    drained: 0,
+    terminalFailed: 0,
+    pending: 0,
+    ...overrides,
+  };
+}
+
+async function seedPendingOutbox(count) {
+  const ids = [];
+  for (let i = 0; i < count; i += 1) {
+    const item = outbox.buildPublicationOutboxItem({
+      domain: "generic",
+      sessionId: `maint-seed-${i}`,
+      artifactPaths: [`l1/seed-${i}.json`],
+      candidateKey: `seed-cand-${i}-${Date.now()}`,
+      operation: "create",
+    });
+    const written = await outbox.writePublicationOutboxItem(abrainHome, item);
+    assert(written.status === "created" || written.status === "identical", `seed write ${i}`);
+    ids.push(item.itemId);
+  }
+  return ids;
+}
+
+async function clearPendingOutbox() {
+  const pending = await outbox.listPublicationOutboxPending(abrainHome);
+  for (const row of pending) {
+    try { fs.unlinkSync(row.filePath); } catch { /* ignore */ }
+  }
+}
+
+await check("publication_pending true/false from actual outbox; fail-closed true", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  const term = hex64("term-pub-pending-actual");
+  const messages = [{ role: "user", content: "pub-pending-actual" }];
+  const m = baseManifest({
+    request_id: hex64("req-pub-pending-actual"),
+    terminal_record_id: term,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+  const store = new Map();
+
+  const empty = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: tipId });
+    },
+    env: process.env,
+  });
+  assert(empty.status === "processed", `empty status=${empty.status}`);
+  assert(empty.publication_pending === false, "empty outbox false");
+
+  await seedPendingOutbox(1);
+  const again = await worker.runSedimentWorkerTask(JSON.stringify({
+    ...m,
+    request_id: hex64("req-pub-pending-actual-2"),
+  }), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async () => { throw new Error("must not re-run"); },
+    env: process.env,
+  });
+  assert(again.status === "already_processed", `again status=${again.status}`);
+  assert(again.publication_pending === true, "seeded outbox true on already_processed");
+
+  const failClosed = await worker.resolvePublicationPendingFlag(abrainHome, async () => {
+    throw new Error("count boom");
+  });
+  assert(failClosed === true, "read failure fail-closes to true");
+  await clearPendingOutbox();
+});
+
+await check("maintenance: empty idle; no drain write", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  let drainCalls = 0;
+  const r = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq()), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      drainCalls += 1;
+      return completedDrain();
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(r.status === "idle", `status=${r.status}`);
+  assert(r.retryable === false, "idle not retryable");
+  assert(r.restart_child === false, "no restart");
+  assert(r.pending_before_bucket === "0" && r.pending_after_bucket === "0", "buckets 0");
+  assert(drainCalls === 0, "idle must not drain");
+  assert(r.schema === "pi-astack/sediment-worker-maintenance-result/v1", "result schema");
+});
+
+await check("maintenance: production result maps remaining/busy/error; real adapter drains", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(2);
+  const countPending = () => outbox.countPublicationOutboxPending(abrainHome);
+
+  const remaining = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-remaining"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain({ processed: 2, pending: 2 }),
+    countPublicationOutboxPending: countPending,
+  });
+  assert(remaining.status === "pending" && remaining.retryable === true, `remaining=${JSON.stringify(remaining)}`);
+  assert(remaining.error_code === "publication_remaining", `remaining code=${remaining.error_code}`);
+  assert(remaining.pending_before_bucket === "2-4" && remaining.pending_after_bucket === "2-4", "remaining buckets");
+
+  const busy = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-busy"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => ({
+      status: "busy", processed: 0, drained: 0, terminalFailed: 0, pending: -1,
+    }),
+    countPublicationOutboxPending: countPending,
+  });
+  assert(busy.status === "pending" && busy.error_code === "publication_drain_busy", `busy=${JSON.stringify(busy)}`);
+
+  const errored = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-last-error"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain({
+      processed: 2,
+      pending: 2,
+      lastError: "canonical mutation barrier busy",
+    }),
+    countPublicationOutboxPending: countPending,
+  });
+  assert(errored.status === "failed" && errored.retryable === true, `lastError=${JSON.stringify(errored)}`);
+  assert(errored.error_code === "publication_drain_failed", `lastError code=${errored.error_code}`);
+
+  const l1Held = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-l1-held"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain({
+      processed: 1,
+      drained: 1,
+      pending: 1,
+      lastError: "publication_l1_pending",
+    }),
+    countPublicationOutboxPending: countPending,
+  });
+  assert(l1Held.status === "pending" && l1Held.retryable === true && l1Held.restart_child === false, `L1 held=${JSON.stringify(l1Held)}`);
+  assert(l1Held.error_code === "publication_l1_pending" && l1Held.pending_after_bucket === "2-4", `L1 held closure=${JSON.stringify(l1Held)}`);
+
+  let countReads = 0;
+  const afterCountFailed = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-after-count-failed"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain({ processed: 2, pending: 2 }),
+    countPublicationOutboxPending: async () => {
+      countReads += 1;
+      if (countReads === 1) return 2;
+      throw new Error("after count failed");
+    },
+  });
+  assert(afterCountFailed.status === "failed" && afterCountFailed.error_code === "publication_outbox_count_failed", `after count=${JSON.stringify(afterCountFailed)}`);
+  assert(afterCountFailed.pending_before_bucket === "2-4" && afterCountFailed.pending_after_bucket === "unknown", "after read failure is unknown");
+
+  const drained = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-real-drained"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: () => outbox.schedulePublicationOutboxDrain(abrainHome, async () => "done"),
+    countPublicationOutboxPending: countPending,
+  });
+  assert(drained.status === "drained", `real drained=${JSON.stringify(drained)}`);
+  assert(drained.pending_before_bucket === "2-4" && drained.pending_after_bucket === "0", "real drain buckets");
+  assert(drained.retryable === false, "real drain is terminal success");
+  await clearPendingOutbox();
+});
+
+await check("maintenance: real production drain terminal failure is never drained", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(1);
+  const result = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-production-terminal"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: () => writer.drainKnowledgePublicationOutbox(
+      abrainHome,
+      sedimentSettings.resolveSedimentSettings(),
+    ),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(result.status === "failed", `terminal status=${JSON.stringify(result)}`);
+  assert(result.retryable === false, "terminal publication failure is nonretryable");
+  assert(result.error_code === "publication_terminal_failed", `terminal code=${result.error_code}`);
+  assert(result.pending_before_bucket === "1" && result.pending_after_bucket === "0", "terminal after-zero remains failed");
+  await clearPendingOutbox();
+});
+
+await check("maintenance: config gate; deadline/restart unreaped", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(1);
+  let drainCalls = 0;
+  const cfg = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-cfg"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "foreground",
+    drainKnowledgePublicationOutbox: async () => { drainCalls += 1; },
+    countPublicationOutboxPending: async () => (await outbox.listPublicationOutboxPending(abrainHome)).length,
+  });
+  assert(cfg.status === "failed", `cfg status=${cfg.status}`);
+  assert(cfg.error_code === "effective_owner_not_daemon", `code=${cfg.error_code}`);
+  assert(cfg.retryable === false, "config not retry thrash");
+  assert(cfg.pending_before_bucket === "unknown" && cfg.pending_after_bucket === "unknown", "config failure count is unknown");
+  assert(drainCalls === 0, "config gate must not drain");
+  assert((await outbox.listPublicationOutboxPending(abrainHome)).length === 1, "no write on config fail");
+
+  const security = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-security-env"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      drainCalls += 1;
+      return completedDrain();
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+    env: {},
+  });
+  assert(security.status === "failed" && security.error_code === "copy_store_root_missing", `security=${JSON.stringify(security)}`);
+  assert(security.pending_before_bucket === "unknown" && security.pending_after_bucket === "unknown", "security failure count unknown");
+  assert(drainCalls === 0, "security env failure must be zero-write");
+
+  const countFailed = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-count-failed"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      drainCalls += 1;
+      return completedDrain();
+    },
+    countPublicationOutboxPending: async () => { throw new Error("count failed"); },
+  });
+  assert(countFailed.status === "failed" && countFailed.error_code === "publication_outbox_count_failed", `count=${JSON.stringify(countFailed)}`);
+  assert(countFailed.pending_before_bucket === "unknown" && countFailed.pending_after_bucket === "unknown", "count failure buckets unknown");
+  assert(drainCalls === 0, "before count failure must not drain");
+
+  // Budget unreaped hang → restart_child + poison.
+  resetWorkerPoisonState();
+  let t = 7_000_000;
+  worker._setWorkerFenceSliceMsForTests(5);
+  const hung = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-hang"),
+    budget_ms: 60_000,
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    clock: () => t,
+    drainKnowledgePublicationOutbox: async () => {
+      t = 7_000_000 + 60_000;
+      await new Promise(() => {});
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(hung.status === "failed", `hung status=${hung.status}`);
+  assert(hung.restart_child === true, "unreaped restart_child");
+  assert(hung.error_code === "cancel_cleanup_unreaped", `hung code=${hung.error_code}`);
+  assert(worker.isWorkerProcessPoisoned() === true, "unreaped poisons process");
+  const refused = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-poison-refuse"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain(),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(refused.error_code === "worker_process_poisoned" && refused.restart_child === true, `poison refuse=${JSON.stringify(refused)}`);
+  assert(refused.pending_before_bucket === "unknown" && refused.pending_after_bucket === "unknown", "poison refusal count unknown");
+  worker._setWorkerFenceSliceMsForTests(undefined);
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+});
+
+await check("maintenance: global serial wait timeout is retryable busy without poisoning healthy pass", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(1);
+  let releaseBlocker;
+  let markEntered;
+  const entered = new Promise((resolve) => { markEntered = resolve; });
+  const blocker = worker.withGlobalPassSerial(async () => {
+    markEntered();
+    await new Promise((resolve) => { releaseBlocker = resolve; });
+  });
+  await entered;
+  let drainCalls = 0;
+  const maintenance = worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-serial"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: () => {
+      drainCalls += 1;
+      return outbox.schedulePublicationOutboxDrain(abrainHome, async () => "done");
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert(drainCalls === 0, "maintenance ran concurrently with task serial owner");
+  releaseBlocker();
+  await blocker;
+  const serialized = await maintenance;
+  assert(serialized.status === "drained" && drainCalls === 1, `serialized=${JSON.stringify(serialized)}`);
+
+  await seedPendingOutbox(1);
+  let releaseDeadlineBlocker;
+  let deadlineBlockerEntered;
+  const deadlineEntered = new Promise((resolve) => { deadlineBlockerEntered = resolve; });
+  const deadlineBlocker = worker.withGlobalPassSerial(async () => {
+    deadlineBlockerEntered();
+    await new Promise((resolve) => { releaseDeadlineBlocker = resolve; });
+  });
+  await deadlineEntered;
+  let now = 9_000_000;
+  worker._setWorkerFenceSliceMsForTests(5);
+  const deadlineResultPromise = worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-serial-deadline"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain(),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+    clock: () => now,
+  });
+  now += 55_000;
+  const deadlineResult = await deadlineResultPromise;
+  assert(deadlineResult.status === "pending" && deadlineResult.error_code === "maintenance_worker_busy", `serial deadline=${JSON.stringify(deadlineResult)}`);
+  assert(deadlineResult.retryable === true && deadlineResult.restart_child === false, "serial wait busy must not restart child");
+  assert(deadlineResult.pending_before_bucket === "unknown" && deadlineResult.pending_after_bucket === "unknown", "serial wait busy count unknown");
+  assert(worker.isWorkerProcessPoisoned() === false, "maintenance serial wait poisoned healthy owner");
+  releaseDeadlineBlocker();
+  await deadlineBlocker;
+
+  const healthyReuse = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-after-serial-busy"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: () => outbox.schedulePublicationOutboxDrain(abrainHome, async () => "done"),
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+  assert(healthyReuse.status === "drained" && healthyReuse.restart_child === false, `healthy pass did not survive serial busy: ${JSON.stringify(healthyReuse)}`);
+  assert(worker.isWorkerProcessPoisoned() === false, "healthy reuse became poisoned");
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+});
+
+await check("maintenance: zero cleanup still observes late drain rejection", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(1);
+  let now = 10_000_000;
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  worker._setWorkerFenceSliceMsForTests(5);
+  try {
+    const result = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+      request_id: hex64("maint-zero-cleanup-reject"),
+    })), {
+      resolveAbrainHome: () => abrainHome,
+      resolveEffectiveExecutionOwner: () => "daemon",
+      drainKnowledgePublicationOutbox: async () => {
+        now += 60_000;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        throw new Error("late drain rejection");
+      },
+      countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+      clock: () => now,
+    });
+    assert(result.error_code === "cancel_cleanup_unreaped" && result.restart_child === true, `zero cleanup=${JSON.stringify(result)}`);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    assert(unhandled.length === 0, `late rejection became unhandled: ${String(unhandled[0])}`);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    resetWorkerPoisonState();
+    await clearPendingOutbox();
+  }
+});
+
+await check("maintenance: result/progress key whitelist + sensitive scan", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  const progressEvents = [];
+  const r = await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-whitelist"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => completedDrain(),
+    countPublicationOutboxPending: async () => 0,
+    onProgress: (ev) => progressEvents.push(ev),
+  });
+  assert(worker.sanitizeWorkerMaintenanceResult(r) !== null, "result whitelist ok");
+  const notify = worker.formatWorkerMaintenanceResultNotify(r);
+  assert(worker.maintenanceResultNotifyHasSensitiveContent(notify) === false, "no sensitive content");
+  assert(notify.startsWith("sediment-worker-maintenance-result:"), "prefix");
+
+  // Reject free-text / path / item id keys.
+  assert(worker.sanitizeWorkerMaintenanceResult({
+    ...r,
+    message: "boom",
+  }) === null, "unknown key rejected");
+  assert(worker.sanitizeWorkerMaintenanceResult({
+    ...r,
+    error_code: "has space",
+  }) === null, "free-text error_code rejected");
+  const evil = `sediment-worker-maintenance-result:${JSON.stringify({
+    ...r,
+    path: "/tmp/secret",
+  })}`;
+  assert(worker.maintenanceResultNotifyHasSensitiveContent(evil) === true, "path sensitive");
+
+  // Progress stage publication allowed (idle path may not emit; force via pending).
+  await seedPendingOutbox(1);
+  progressEvents.length = 0;
+  await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-progress"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 12));
+      const left = await outbox.listPublicationOutboxPending(abrainHome);
+      for (const row of left) fs.unlinkSync(row.filePath);
+      return completedDrain({ processed: left.length, drained: left.length, pending: 0 });
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+    onProgress: (ev) => progressEvents.push(ev),
+    heartbeatMs: 5,
+  });
+  assert(progressEvents.some((e) => e.stage === "publication"), "publication progress stage");
+  assert(progressEvents.some((e) => e.stage === "publication" && e.phase === "heartbeat"), "publication heartbeat while running");
+  for (const ev of progressEvents) {
+    const n = worker.formatWorkerProgressNotify(ev);
+    assert(worker.progressNotifyHasSensitiveContent(n) === false, "progress no sensitive");
+  }
+  await clearPendingOutbox();
+});
+
+await check("maintenance: no CP/receipt/source change; buckets closed; unknown field reject", async () => {
+  resetWorkerPoisonState();
+  await clearPendingOutbox();
+  await seedPendingOutbox(1);
+  const cpBefore = fs.existsSync(path.join(projectRoot, ".pi-astack")) ?
+    fs.readdirSync(path.join(projectRoot, ".pi-astack"), { recursive: true }).length : 0;
+  const receiptDir = worker.sedimentWorkerReceiptsDir(abrainHome);
+  const receiptsBefore = fs.existsSync(receiptDir) ? fs.readdirSync(receiptDir).length : 0;
+  const sourceDir = path.join(abrainHome, ".state", "sediment", "edge-protocol-shadow");
+  const sourceBefore = fs.existsSync(sourceDir)
+    ? fs.readdirSync(sourceDir, { recursive: true }).length
+    : 0;
+
+  await worker.runSedimentWorkerMaintenance(JSON.stringify(maintenanceReq({
+    request_id: hex64("maint-no-side"),
+  })), {
+    resolveAbrainHome: () => abrainHome,
+    resolveEffectiveExecutionOwner: () => "daemon",
+    drainKnowledgePublicationOutbox: async () => {
+      const left = await outbox.listPublicationOutboxPending(abrainHome);
+      for (const row of left) fs.unlinkSync(row.filePath);
+      return completedDrain({ processed: left.length, drained: left.length, pending: 0 });
+    },
+    countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
+  });
+
+  const receiptsAfter = fs.existsSync(receiptDir) ? fs.readdirSync(receiptDir).length : 0;
+  const sourceAfter = fs.existsSync(sourceDir)
+    ? fs.readdirSync(sourceDir, { recursive: true }).length
+    : 0;
+  const cpAfter = fs.existsSync(path.join(projectRoot, ".pi-astack")) ?
+    fs.readdirSync(path.join(projectRoot, ".pi-astack"), { recursive: true }).length : 0;
+  assert(receiptsAfter === receiptsBefore, "maintenance must not write receipts");
+  assert(sourceAfter === sourceBefore, "maintenance must not touch edge source");
+  assert(cpAfter === cpBefore, "maintenance must not change project checkpoint tree");
+
+  assert(worker.bucketOutboxPendingCount(null) === "unknown", "bucket unknown");
+  assert(worker.bucketOutboxPendingCount(Number.NaN) === "unknown", "bucket non-finite unknown");
+  assert(worker.bucketOutboxPendingCount(0) === "0", "bucket 0");
+  assert(worker.bucketOutboxPendingCount(1) === "1", "bucket 1");
+  assert(worker.bucketOutboxPendingCount(3) === "2-4", "bucket 2-4");
+  assert(worker.bucketOutboxPendingCount(7) === "5-9", "bucket 5-9");
+  assert(worker.bucketOutboxPendingCount(20) === "10-49", "bucket 10-49");
+  assert(worker.bucketOutboxPendingCount(50) === "50+", "bucket 50+");
+
+  let threw = false;
+  try {
+    worker.validateSedimentWorkerMaintenanceRequest({
+      ...maintenanceReq(),
+      session_id: "nope",
+    });
+  } catch (e) {
+    threw = e.code === "unknown_field";
+  }
+  assert(threw, "identity field rejected");
+
+  threw = false;
+  try {
+    worker.validateSedimentWorkerMaintenanceRequest({
+      ...maintenanceReq(),
+      budget_ms: 30_000,
+    });
+  } catch (e) {
+    threw = e.code === "budget_ms_out_of_range";
+  }
+  assert(threw, "budget min 60s");
+
+  threw = false;
+  try {
+    worker.validateSedimentWorkerMaintenanceRequest({
+      ...maintenanceReq(),
+      budget_ms: 901_000,
+    });
+  } catch (e) {
+    threw = e.code === "budget_ms_out_of_range";
+  }
+  assert(threw, "budget max 900s");
+
+  await clearPendingOutbox();
+});
+
+await check("foreground unchanged: no maintenance registration outside worker mode", async () => {
+  const prev = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  writeSettings({ executionOwner: "foreground" });
+  try {
+    const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+    assert(pi.handlers.has("agent_end"), "foreground agent_end remains");
+    assert(!pi.commands.has("sediment-worker-maintenance"), "no maintenance outside worker");
+    assert(!pi.commands.has("sediment-worker-run"), "no worker-run outside worker");
+  } finally {
+    if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
+    writeSettings({ executionOwner: "daemon" });
+  }
 });
 
 console.log(`\n${passed} checks passed`);

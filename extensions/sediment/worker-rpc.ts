@@ -32,6 +32,11 @@ import {
   type EdgeC6Identity,
   type EdgeLeafTip,
 } from "./edge-protocol-shadow";
+import {
+  hasPublicationOutboxPending,
+  type PublicationOutboxDrainResult,
+} from "./publication-outbox";
+import { runWithWorkerBudget } from "../_shared/worker-budget-context";
 
 export const SEDIMENT_WORKER_MODE_ENV = "PI_ASTACK_SEDIMENT_WORKER_MODE" as const;
 export const SEDIMENT_WORKER_COPY_STORE_ROOT_ENV = "PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT" as const;
@@ -43,6 +48,15 @@ export const SEDIMENT_WORKER_PROGRESS_SCHEMA = "pi-astack/sediment-worker-progre
 export const SEDIMENT_WORKER_COMMAND_NAME = "sediment-worker-run" as const;
 export const SEDIMENT_WORKER_RESULT_NOTIFY_PREFIX = "sediment-worker-result:" as const;
 export const SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX = "sediment-worker-progress:" as const;
+
+/** Local publication-outbox maintenance (daemon idle owner; not formal ACK). */
+export const SEDIMENT_WORKER_MAINTENANCE_SCHEMA = "pi-astack/sediment-worker-maintenance/v1" as const;
+export const SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA = "pi-astack/sediment-worker-maintenance-result/v1" as const;
+export const SEDIMENT_WORKER_MAINTENANCE_COMMAND_NAME = "sediment-worker-maintenance" as const;
+export const SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX = "sediment-worker-maintenance-result:" as const;
+/** Maintenance budget closed range: 60s .. 900s. */
+export const SEDIMENT_WORKER_MAINTENANCE_BUDGET_MIN_MS = 60_000;
+export const SEDIMENT_WORKER_MAINTENANCE_BUDGET_MAX_MS = 900_000;
 
 /** Hard cap for source sidecar regular files (matches daemon copy-store bound). */
 export const SEDIMENT_WORKER_SIDECAR_MAX_BYTES = 8 * 1024 * 1024;
@@ -93,6 +107,7 @@ export const SEDIMENT_WORKER_PROGRESS_STAGES = [
   "classifier",
   "detached_join",
   "receipt",
+  "publication",
   "auto_write_preflight",
   "auto_write_extractor",
   "auto_write_curator",
@@ -337,9 +352,16 @@ export interface SedimentWorkerCommandDeps {
   /**
    * @deprecated Worker tasks no longer drain publication in-task (durable outbox
    * + independent maintenance only). Kept optional for call-site compatibility;
-   * ignored by the handler after success receipt.
+   * ignored by the handler after success receipt. Maintenance command uses its own deps.
    */
   drainKnowledgePublicationOutbox?: (abrainHome: string) => Promise<void> | void;
+  /**
+   * Read-only pending publication-outbox metadata count (no item-body reads).
+   * Settled task results stamp publication_pending from this; read failure fail-closes to true.
+   */
+  countPublicationOutboxPending?: (abrainHome: string) => Promise<number>;
+  /** Production existence-only probe; preferred for task result booleans. */
+  hasPublicationOutboxPending?: (abrainHome: string) => Promise<boolean>;
   /** Optional model registry from the worker process (usually undefined). */
   modelRegistry?: unknown;
   now?: () => Date;
@@ -1261,6 +1283,40 @@ function resultFromProcessedReceipt(receipt: WorkerReceipt, requestId: string): 
   };
 }
 
+/**
+ * Read-only publication-outbox pending probe for settled task results.
+ * Fail closed to true on read error (never fake empty). Closed audit only — no free text.
+ */
+export async function resolvePublicationPendingFlag(
+  abrainHome: string,
+  countFn?: (abrainHome: string) => Promise<number>,
+  hasPendingFn?: (abrainHome: string) => Promise<boolean>,
+): Promise<boolean> {
+  try {
+    if (hasPendingFn) return (await hasPendingFn(abrainHome)) === true;
+    if (!countFn) return await hasPublicationOutboxPending(abrainHome);
+    const n = await countFn(abrainHome);
+    if (!Number.isFinite(n) || n < 0) return true;
+    return Math.floor(n) > 0;
+  } catch {
+    // Fail closed: cannot claim publication empty when outbox is unreadable.
+    return true;
+  }
+}
+
+async function withPublicationPendingFlag(
+  result: SedimentWorkerResult,
+  abrainHome: string,
+  countFn?: (abrainHome: string) => Promise<number>,
+  hasPendingFn?: (abrainHome: string) => Promise<boolean>,
+): Promise<SedimentWorkerResult> {
+  if (result.status !== "processed" && result.status !== "already_processed") {
+    return result;
+  }
+  const publication_pending = await resolvePublicationPendingFlag(abrainHome, countFn, hasPendingFn);
+  return { ...result, publication_pending };
+}
+
 function failResult(
   ids: { request_id: string; terminal_record_id: string },
   code: string,
@@ -1717,7 +1773,14 @@ export async function runSedimentWorkerTask(
     try {
       throwIfWorkerDeadline({ signal: ac.signal, deadlineMs: softDeadlineMs, now: clock });
       const existing = await readProcessedReceipt(abrainHome, manifest.terminal_record_id);
-      if (existing) return resultFromProcessedReceipt(existing, manifest.request_id);
+      if (existing) {
+        return await withPublicationPendingFlag(
+          resultFromProcessedReceipt(existing, manifest.request_id),
+          abrainHome,
+          deps.countPublicationOutboxPending,
+          deps.hasPublicationOutboxPending,
+        );
+      }
     } catch (err) {
       if (err instanceof WorkerDeadlineError) {
         // Plain budget before claim: settled immediately, CP not advanced → no poison.
@@ -1754,7 +1817,12 @@ export async function runSedimentWorkerTask(
           const again = await readProcessedReceipt(abrainHome, manifest.terminal_record_id);
           if (again) {
             progress("claim", "end");
-            return resultFromProcessedReceipt(again, manifest.request_id);
+            return await withPublicationPendingFlag(
+              resultFromProcessedReceipt(again, manifest.request_id),
+              abrainHome,
+              deps.countPublicationOutboxPending,
+              deps.hasPublicationOutboxPending,
+            );
           }
         } catch (err) {
           if (err instanceof WorkerDeadlineError) {
@@ -1986,10 +2054,12 @@ export async function runSedimentWorkerTask(
                   const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
                   if (raced) {
                     progress("receipt", "end");
-                    return {
-                      ...resultFromProcessedReceipt(raced, manifest!.request_id),
-                      publication_pending: true,
-                    };
+                    return await withPublicationPendingFlag(
+                      resultFromProcessedReceipt(raced, manifest!.request_id),
+                      abrainHome,
+                      deps.countPublicationOutboxPending,
+                      deps.hasPublicationOutboxPending,
+                    );
                   }
                 } catch {
                   /* fall through */
@@ -2001,10 +2071,12 @@ export async function runSedimentWorkerTask(
                   const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
                   if (raced) {
                     progress("receipt", "end");
-                    return {
-                      ...resultFromProcessedReceipt(raced, manifest!.request_id),
-                      publication_pending: true,
-                    };
+                    return await withPublicationPendingFlag(
+                      resultFromProcessedReceipt(raced, manifest!.request_id),
+                      abrainHome,
+                      deps.countPublicationOutboxPending,
+                      deps.hasPublicationOutboxPending,
+                    );
                   }
                 } catch {
                   return failResult(ids, "receipt_corrupt_or_collision", { retryable: false, pass_iterations: iterations });
@@ -2013,9 +2085,9 @@ export async function runSedimentWorkerTask(
 
               // Success receipt is durable. Do NOT drain publication in-task
               // (no uncancelled Promise.race). Durable outbox + independent
-              // maintenance own publication; result is observable as pending.
+              // maintenance own publication; stamp actual pending bool.
               progress("receipt", "end");
-              return {
+              return await withPublicationPendingFlag({
                 schema: SEDIMENT_WORKER_RESULT_SCHEMA,
                 request_id: manifest!.request_id,
                 terminal_record_id: manifest!.terminal_record_id,
@@ -2025,8 +2097,7 @@ export async function runSedimentWorkerTask(
                 memory_decisions: 0,
                 memory_writes: 0,
                 pass_iterations: iterations,
-                publication_pending: true,
-              };
+              }, abrainHome, deps.countPublicationOutboxPending, deps.hasPublicationOutboxPending);
             }
 
             // more-iteration budget exhausted with more still true: retryable non-final, no receipt.
@@ -2100,7 +2171,12 @@ export async function runSedimentWorkerTask(
           try {
             const existing = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
             if (existing) {
-              return resultFromProcessedReceipt(existing, ids.request_id);
+              return await withPublicationPendingFlag(
+                resultFromProcessedReceipt(existing, ids.request_id),
+                abrainHome,
+                deps.countPublicationOutboxPending,
+                deps.hasPublicationOutboxPending,
+              );
             }
           } catch {
             /* corrupt receipt still fail-closed below if coversTip */
@@ -2109,7 +2185,14 @@ export async function runSedimentWorkerTask(
           if (fsSync.existsSync(sedimentWorkerReceiptPath(abrainHome, ids.terminal_record_id))) {
             try {
               const raced = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
-              if (raced) return resultFromProcessedReceipt(raced, ids.request_id);
+              if (raced) {
+                return await withPublicationPendingFlag(
+                  resultFromProcessedReceipt(raced, ids.request_id),
+                  abrainHome,
+                  deps.countPublicationOutboxPending,
+                  deps.hasPublicationOutboxPending,
+                );
+              }
             } catch {
               /* fall through to coversTip diagnostic */
             }
@@ -2234,7 +2317,7 @@ export function registerSedimentWorkerCommand(
         handler: (args: string, ctx: {
           ui?: { notify?(message: string, type?: string): void };
           modelRegistry?: unknown;
-        }) => Promise<void> | void;
+        }) => Promise<void>;
       },
     ) => void;
   },
@@ -2301,6 +2384,719 @@ export function registerSedimentWorkerCommand(
         notify(formatWorkerResultNotify(result), type);
       } catch {
         /* RPC notify failure after execution: daemon may still see command response */
+      }
+    },
+  });
+}
+
+// ─── Publication outbox maintenance RPC ───────────────────────────────────────
+
+const MAINTENANCE_REQUEST_KEYS = new Set(["schema", "request_id", "budget_ms", "kind"]);
+const MAINTENANCE_RESULT_KEYS = new Set([
+  "schema",
+  "request_id",
+  "status",
+  "retryable",
+  "restart_child",
+  "pending_before_bucket",
+  "pending_after_bucket",
+  "error_code",
+  "elapsed_bucket",
+]);
+
+/** Closed outbox pending count buckets for maintenance result (not progress pending). */
+export const SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS = ["unknown", "0", "1", "2-4", "5-9", "10-49", "50+"] as const;
+export type SedimentWorkerOutboxPendingBucket = (typeof SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS)[number];
+const OUTBOX_PENDING_BUCKET_SET = new Set<string>(SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS);
+
+export type SedimentWorkerMaintenanceStatus = "idle" | "drained" | "pending" | "failed";
+const MAINTENANCE_STATUS_SET = new Set<string>(["idle", "drained", "pending", "failed"]);
+
+export interface SedimentWorkerMaintenanceRequest {
+  schema: typeof SEDIMENT_WORKER_MAINTENANCE_SCHEMA;
+  request_id: string;
+  budget_ms: number;
+  kind: "publication_outbox";
+}
+
+export interface SedimentWorkerMaintenanceResult {
+  schema: typeof SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA;
+  request_id: string;
+  status: SedimentWorkerMaintenanceStatus;
+  retryable: boolean;
+  restart_child: boolean;
+  pending_before_bucket: SedimentWorkerOutboxPendingBucket;
+  pending_after_bucket: SedimentWorkerOutboxPendingBucket;
+  error_code?: string;
+  elapsed_bucket?: number;
+}
+
+export interface SedimentWorkerMaintenanceDeps {
+  resolveAbrainHome: () => string;
+  /**
+   * Effective owner must be daemon (configured daemon + full triple gate).
+   * Incomplete gate / foreground → closed config error, no writes.
+   */
+  resolveEffectiveExecutionOwner: () => "foreground" | "daemon";
+  /** Production direct drain; must resolve the complete structured drain result. */
+  drainKnowledgePublicationOutbox: (abrainHome: string) => Promise<PublicationOutboxDrainResult>;
+  /** Production metadata-only pending count; must not deserialize item bodies. */
+  countPublicationOutboxPending: (abrainHome: string) => Promise<number>;
+  onProgress?: (event: SedimentWorkerProgressEvent) => void;
+  clock?: () => number;
+  env?: NodeJS.ProcessEnv;
+  /** Test-only heartbeat interval override; production is exactly 5 seconds. */
+  heartbeatMs?: number;
+}
+
+export function bucketOutboxPendingCount(n: number | null | undefined): SedimentWorkerOutboxPendingBucket {
+  if (n === null || n === undefined || !Number.isFinite(n) || n < 0) return "unknown";
+  const c = Math.floor(n);
+  if (c <= 0) return "0";
+  if (c === 1) return "1";
+  if (c <= 4) return "2-4";
+  if (c <= 9) return "5-9";
+  if (c <= 49) return "10-49";
+  return "50+";
+}
+
+export function parseWorkerMaintenanceBudgetMs(raw: unknown): number {
+  const n = parseSafeIntegerField(raw, "budget_ms");
+  if (n < SEDIMENT_WORKER_MAINTENANCE_BUDGET_MIN_MS || n > SEDIMENT_WORKER_MAINTENANCE_BUDGET_MAX_MS) {
+    throw new WorkerValidationError(
+      "budget_ms_out_of_range",
+      `budget_ms must be in [${SEDIMENT_WORKER_MAINTENANCE_BUDGET_MIN_MS}..${SEDIMENT_WORKER_MAINTENANCE_BUDGET_MAX_MS}]`,
+    );
+  }
+  return n;
+}
+
+export function validateSedimentWorkerMaintenanceRequest(raw: unknown): SedimentWorkerMaintenanceRequest {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new WorkerValidationError("manifest_not_object", "maintenance request must be object");
+  }
+  const m = raw as Record<string, unknown>;
+  rejectUnknownKeys(m, MAINTENANCE_REQUEST_KEYS, "unknown_field", "maintenance");
+  if (m.schema !== SEDIMENT_WORKER_MAINTENANCE_SCHEMA) {
+    throw new WorkerValidationError("schema_mismatch", "unsupported maintenance schema");
+  }
+  if (typeof m.request_id !== "string" || !HEX64_RE.test(m.request_id)) {
+    throw new WorkerValidationError("invalid_request_id", "request_id must be 64 lowercase hex");
+  }
+  if (m.kind !== "publication_outbox") {
+    throw new WorkerValidationError("kind_rejected", "only publication_outbox maintenance is admitted");
+  }
+  const budget_ms = parseWorkerMaintenanceBudgetMs(m.budget_ms);
+  return {
+    schema: SEDIMENT_WORKER_MAINTENANCE_SCHEMA,
+    request_id: m.request_id,
+    budget_ms,
+    kind: "publication_outbox",
+  };
+}
+
+export function parseSedimentWorkerMaintenanceArgs(args: string): SedimentWorkerMaintenanceRequest {
+  const trimmed = (args ?? "").trim();
+  if (!trimmed) throw new WorkerValidationError("empty_args", "maintenance args required");
+  if (trimmed.includes("\n") || trimmed.includes("\r")) {
+    throw new WorkerValidationError("multiline_args", "maintenance must be single-line");
+  }
+  if (Buffer.byteLength(trimmed, "utf8") > SEDIMENT_WORKER_ARGS_MAX_BYTES) {
+    throw new WorkerValidationError("args_too_large", "maintenance args exceed 64KiB");
+  }
+  let text: string;
+  if (trimmed.startsWith("{")) {
+    text = trimmed;
+  } else {
+    const b64 = trimmed.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(b64 + pad, "base64");
+    } catch {
+      throw new WorkerValidationError("args_not_base64url", "maintenance is not valid base64url JSON");
+    }
+    if (buf.byteLength === 0) throw new WorkerValidationError("args_not_base64url", "empty base64url payload");
+    if (buf.byteLength > SEDIMENT_WORKER_ARGS_MAX_BYTES) {
+      throw new WorkerValidationError("args_too_large", "decoded maintenance exceeds 64KiB");
+    }
+    text = buf.toString("utf8");
+    if (!text.startsWith("{")) {
+      throw new WorkerValidationError("args_not_json", "decoded maintenance is not JSON object");
+    }
+  }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new WorkerValidationError("args_not_json", "maintenance JSON parse failed");
+  }
+  return validateSedimentWorkerMaintenanceRequest(raw);
+}
+
+function buildMaintenanceResult(args: {
+  request_id: string;
+  status: SedimentWorkerMaintenanceStatus;
+  retryable: boolean;
+  restart_child: boolean;
+  pending_before: number | null;
+  pending_after: number | null;
+  error_code?: string;
+  startedAtMs?: number;
+  nowMs?: number;
+}): SedimentWorkerMaintenanceResult {
+  const result: SedimentWorkerMaintenanceResult = {
+    schema: SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA,
+    request_id: args.request_id,
+    status: args.status,
+    retryable: args.retryable,
+    restart_child: args.restart_child,
+    pending_before_bucket: bucketOutboxPendingCount(args.pending_before),
+    pending_after_bucket: bucketOutboxPendingCount(args.pending_after),
+  };
+  if (args.error_code) result.error_code = args.error_code;
+  if (args.startedAtMs !== undefined && args.nowMs !== undefined) {
+    result.elapsed_bucket = bucketElapsedSeconds(args.nowMs - args.startedAtMs);
+  }
+  return result;
+}
+
+/** Whitelist-sanitize maintenance result (drop unknown keys / free text). */
+export function sanitizeWorkerMaintenanceResult(raw: unknown): SedimentWorkerMaintenanceResult | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  for (const key of Object.keys(o)) {
+    if (!MAINTENANCE_RESULT_KEYS.has(key)) return null;
+  }
+  if (o.schema !== SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA) return null;
+  if (typeof o.request_id !== "string" || !HEX64_RE.test(o.request_id)) return null;
+  if (typeof o.status !== "string" || !MAINTENANCE_STATUS_SET.has(o.status)) return null;
+  if (typeof o.retryable !== "boolean") return null;
+  if (typeof o.restart_child !== "boolean") return null;
+  if (typeof o.pending_before_bucket !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o.pending_before_bucket)) return null;
+  if (typeof o.pending_after_bucket !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o.pending_after_bucket)) return null;
+  if (o.error_code !== undefined && (typeof o.error_code !== "string" || !o.error_code || /[\s\/\\]/.test(o.error_code))) {
+    return null;
+  }
+  if (o.elapsed_bucket !== undefined) {
+    if (typeof o.elapsed_bucket !== "number" || !Number.isSafeInteger(o.elapsed_bucket) || !ELAPSED_BUCKET_SET.has(o.elapsed_bucket)) {
+      return null;
+    }
+  }
+  const result: SedimentWorkerMaintenanceResult = {
+    schema: SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA,
+    request_id: o.request_id,
+    status: o.status as SedimentWorkerMaintenanceStatus,
+    retryable: o.retryable,
+    restart_child: o.restart_child,
+    pending_before_bucket: o.pending_before_bucket as SedimentWorkerOutboxPendingBucket,
+    pending_after_bucket: o.pending_after_bucket as SedimentWorkerOutboxPendingBucket,
+  };
+  if (typeof o.error_code === "string") result.error_code = o.error_code;
+  if (typeof o.elapsed_bucket === "number") result.elapsed_bucket = o.elapsed_bucket;
+  return result;
+}
+
+export function formatWorkerMaintenanceResultNotify(result: SedimentWorkerMaintenanceResult): string {
+  const clean = sanitizeWorkerMaintenanceResult(result);
+  if (!clean) throw new WorkerValidationError("maintenance_result_invalid", "maintenance result failed whitelist");
+  return `${SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX}${JSON.stringify(clean)}`;
+}
+
+export function tryParseWorkerMaintenanceResultNotify(message: string): SedimentWorkerMaintenanceResult | null {
+  if (!message.startsWith(SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX)) return null;
+  try {
+    return sanitizeWorkerMaintenanceResult(
+      JSON.parse(message.slice(SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX.length)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Sensitive-content scan for maintenance result notify (no identity / free text). */
+export function maintenanceResultNotifyHasSensitiveContent(message: string): boolean {
+  if (!message.startsWith(SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX)) return true;
+  const body = message.slice(SEDIMENT_WORKER_MAINTENANCE_RESULT_NOTIFY_PREFIX.length);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return true;
+  }
+  if (sanitizeWorkerMaintenanceResult(parsed) === null) return true;
+  if (/"(session_id|terminal_record_id|owner_project_root|owner_key|sidecar_path|content_id|path|message|error|text|item_id|url)"\s*:/.test(body)) {
+    return true;
+  }
+  if (/(?:^|[^a-zA-Z0-9_-])(?:\/home\/|\/tmp\/|\/var\/|\/Users\/|[A-Za-z]:\\)/.test(body)) {
+    return true;
+  }
+  // request_id is required hex64 identity-correlation for daemon; allow only that closed field.
+  // Reject other 64-hex blobs outside request_id value by checking non-request_id hex.
+  const withoutRequestId = body.replace(/"request_id"\s*:\s*"[0-9a-f]{64}"/g, "\"request_id\":\"\"");
+  if (/[0-9a-f]{64}/i.test(withoutRequestId)) return true;
+  return false;
+}
+
+async function safeCountPublicationPending(
+  abrainHome: string,
+  countFn: (abrainHome: string) => Promise<number>,
+): Promise<{ ok: true; count: number } | { ok: false }> {
+  try {
+    const n = await countFn(abrainHome);
+    if (!Number.isFinite(n) || n < 0) return { ok: false };
+    return { ok: true, count: Math.floor(n) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+function normalizePublicationDrainResult(raw: unknown): PublicationOutboxDrainResult {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("publication drain returned no structured result");
+  }
+  const value = raw as Record<string, unknown>;
+  if (value.status !== "busy" && value.status !== "completed") {
+    throw new Error("publication drain returned invalid status");
+  }
+  const integer = (field: string, min: number): number => {
+    const n = value[field];
+    if (typeof n !== "number" || !Number.isSafeInteger(n) || n < min) {
+      throw new Error(`publication drain returned invalid ${field}`);
+    }
+    return n;
+  };
+  const result: PublicationOutboxDrainResult = {
+    status: value.status,
+    processed: integer("processed", 0),
+    drained: integer("drained", 0),
+    terminalFailed: integer("terminalFailed", 0),
+    pending: integer("pending", -1),
+  };
+  if (value.lastError !== undefined) {
+    if (typeof value.lastError !== "string" || value.lastError.length === 0) {
+      throw new Error("publication drain returned invalid lastError");
+    }
+    result.lastError = value.lastError;
+  }
+  return result;
+}
+
+/**
+ * Local publication-outbox maintenance under daemon effective owner + worker
+ * security env gates. It shares the task pass serial and calls only the direct
+ * production drain; no checkpoint / receipt / ledger / source work is admitted.
+ */
+export async function runSedimentWorkerMaintenance(
+  argsRaw: string,
+  deps: SedimentWorkerMaintenanceDeps,
+): Promise<SedimentWorkerMaintenanceResult> {
+  const clock = deps.clock ?? Date.now;
+  const startedAtMs = clock();
+  let request: SedimentWorkerMaintenanceRequest;
+  try {
+    request = parseSedimentWorkerMaintenanceArgs(argsRaw);
+  } catch (err) {
+    const code = err instanceof WorkerValidationError ? err.code : "manifest_invalid";
+    return buildMaintenanceResult({
+      request_id: "0".repeat(64),
+      status: "failed",
+      retryable: false,
+      restart_child: false,
+      pending_before: null,
+      pending_after: null,
+      error_code: code,
+      startedAtMs,
+      nowMs: clock(),
+    });
+  }
+
+  const requestId = request.request_id;
+  const finish = (args: {
+    status: SedimentWorkerMaintenanceStatus;
+    retryable: boolean;
+    restart_child: boolean;
+    pending_before: number | null;
+    pending_after: number | null;
+    error_code?: string;
+  }): SedimentWorkerMaintenanceResult => buildMaintenanceResult({
+    request_id: requestId,
+    ...args,
+    startedAtMs,
+    nowMs: clock(),
+  });
+
+  if (workerProcessPoisoned) {
+    return finish({
+      status: "failed",
+      retryable: true,
+      restart_child: true,
+      pending_before: null,
+      pending_after: null,
+      error_code: SEDIMENT_WORKER_PROCESS_POISONED_CODE,
+    });
+  }
+
+  const absoluteDeadlineMs = startedAtMs + request.budget_ms;
+  const softDeadlineMs = computeWorkerSoftDeadlineMs({ startedAtMs, budgetMs: request.budget_ms });
+  const ac = new AbortController();
+  const progress = (phase: SedimentWorkerProgressPhase) => {
+    emitWorkerProgress(deps.onProgress, buildWorkerProgressEvent({
+      stage: "publication",
+      phase,
+      startedAtMs,
+      nowMs: clock(),
+    }));
+  };
+
+  progress("start");
+  const heartbeat = setInterval(() => progress("heartbeat"), deps.heartbeatMs ?? 5_000);
+  heartbeat.unref?.();
+
+  const runExclusive = async (): Promise<SedimentWorkerMaintenanceResult> => {
+    try {
+      if (deps.resolveEffectiveExecutionOwner() !== "daemon") {
+        return finish({
+          status: "failed",
+          retryable: false,
+          restart_child: false,
+          pending_before: null,
+          pending_after: null,
+          error_code: "effective_owner_not_daemon",
+        });
+      }
+      // Maintenance carries no record identity, but it must still pass the same
+      // worker copy-store + non-empty realpath owner allowlist validation.
+      resolveWorkerSecurityEnv(deps.env ?? process.env);
+    } catch (err) {
+      const code = err instanceof WorkerValidationError ? err.code : "worker_security_gate_failed";
+      return finish({
+        status: "failed",
+        retryable: false,
+        restart_child: false,
+        pending_before: null,
+        pending_after: null,
+        error_code: code,
+      });
+    }
+
+    let abrainHome: string;
+    try {
+      abrainHome = path.resolve(deps.resolveAbrainHome());
+    } catch {
+      return finish({
+        status: "failed",
+        retryable: false,
+        restart_child: false,
+        pending_before: null,
+        pending_after: null,
+        error_code: "worker_configuration_invalid",
+      });
+    }
+
+    const beforeProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+    if (!beforeProbe.ok) {
+      return finish({
+        status: "failed",
+        retryable: true,
+        restart_child: false,
+        pending_before: null,
+        pending_after: null,
+        error_code: "publication_outbox_count_failed",
+      });
+    }
+    const pendingBefore = beforeProbe.count;
+    if (pendingBefore === 0) {
+      return finish({
+        status: "idle",
+        retryable: false,
+        restart_child: false,
+        pending_before: 0,
+        pending_after: 0,
+      });
+    }
+    if (softDeadlineMs <= clock()) {
+      if (!ac.signal.aborted) ac.abort();
+      return finish({
+        status: "pending",
+        retryable: true,
+        restart_child: false,
+        pending_before: pendingBefore,
+        pending_after: null,
+        error_code: "worker_budget_exhausted",
+      });
+    }
+
+    let drainSettled = false;
+    const workPromise = runWithWorkerBudget(
+      { deadlineMs: softDeadlineMs, signal: ac.signal, now: clock },
+      async (): Promise<PublicationOutboxDrainResult> => {
+        try {
+          throwIfWorkerDeadline({
+            signal: ac.signal,
+            deadlineMs: softDeadlineMs,
+            now: clock,
+            code: "worker_budget_exhausted",
+          });
+          return normalizePublicationDrainResult(await deps.drainKnowledgePublicationOutbox(abrainHome));
+        } finally {
+          drainSettled = true;
+        }
+      },
+    );
+    // Keep a rejection observer even when deadline cleanup has zero milliseconds.
+    void workPromise.catch(() => undefined);
+
+    const fenceStop = new AbortController();
+    activeDeadlineFenceCount += 1;
+    const deadlineFence = (async (): Promise<never> => {
+      try {
+        for (;;) {
+          if (fenceStop.signal.aborted) throw FENCE_STOPPED;
+          const remaining = softDeadlineMs - clock();
+          if (remaining <= 0 || ac.signal.aborted) {
+            if (!ac.signal.aborted) ac.abort();
+            throw new WorkerDeadlineError("worker_budget_exhausted", "publication soft deadline elapsed");
+          }
+          await sleepMs(Math.min(currentFenceSliceMs(), Math.max(1, remaining)), fenceStop.signal);
+        }
+      } finally {
+        activeDeadlineFenceCount = Math.max(0, activeDeadlineFenceCount - 1);
+      }
+    })();
+
+    const stopDeadlineFence = async (): Promise<void> => {
+      if (!fenceStop.signal.aborted) fenceStop.abort();
+      try { await deadlineFence; } catch { /* settle fence frame */ }
+    };
+
+    const classifyDrain = async (drain: PublicationOutboxDrainResult): Promise<SedimentWorkerMaintenanceResult> => {
+      const afterProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+      const pendingAfter = afterProbe.ok ? afterProbe.count : null;
+      if (drain.status === "busy") {
+        return finish({
+          status: "pending",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          error_code: "publication_drain_busy",
+        });
+      }
+      if (drain.terminalFailed > 0) {
+        return finish({
+          status: "failed",
+          retryable: false,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          error_code: "publication_terminal_failed",
+        });
+      }
+      if (drain.lastError === "publication_l1_pending") {
+        return finish({
+          status: "pending",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          error_code: "publication_l1_pending",
+        });
+      }
+      if (drain.lastError !== undefined) {
+        return finish({
+          status: "failed",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          error_code: "publication_drain_failed",
+        });
+      }
+      if (!afterProbe.ok) {
+        return finish({
+          status: "failed",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: null,
+          error_code: "publication_outbox_count_failed",
+        });
+      }
+      if (pendingAfter! > 0) {
+        return finish({
+          status: "pending",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: pendingAfter,
+          error_code: "publication_remaining",
+        });
+      }
+      return finish({
+        status: "drained",
+        retryable: false,
+        restart_child: false,
+        pending_before: pendingBefore,
+        pending_after: 0,
+      });
+    };
+
+    const classifyThrow = async (): Promise<SedimentWorkerMaintenanceResult> => {
+      const afterProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
+      return finish({
+        status: "failed",
+        retryable: true,
+        restart_child: false,
+        pending_before: pendingBefore,
+        pending_after: afterProbe.ok ? afterProbe.count : null,
+        error_code: "publication_drain_failed",
+      });
+    };
+
+    try {
+      try {
+        return await classifyDrain(await Promise.race([workPromise, deadlineFence]));
+      } catch (err) {
+        if (err instanceof WorkerDeadlineError) {
+          if (!ac.signal.aborted) ac.abort();
+          const cleanupMs = Math.max(0, Math.min(
+            SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
+            absoluteDeadlineMs - clock(),
+          ));
+          if (!drainSettled && cleanupMs > 0) {
+            await Promise.race([
+              workPromise.then(() => undefined, () => undefined),
+              sleepMs(cleanupMs),
+            ]);
+          }
+          if (!drainSettled) {
+            poisonIfSerialOrUnreaped("cancel_cleanup_unreaped");
+            return finish({
+              status: "failed",
+              retryable: true,
+              restart_child: true,
+              pending_before: pendingBefore,
+              pending_after: null,
+              error_code: "cancel_cleanup_unreaped",
+            });
+          }
+          try {
+            return await classifyDrain(await workPromise);
+          } catch {
+            return await classifyThrow();
+          }
+        }
+        return await classifyThrow();
+      }
+    } finally {
+      await stopDeadlineFence();
+    }
+  };
+
+  try {
+    const result = await withGlobalPassSerial(runExclusive, {
+      signal: ac.signal,
+      deadlineMs: softDeadlineMs,
+      now: clock,
+    });
+    progress(result.status === "failed" ? "aborted" : "end");
+    return result;
+  } catch (err) {
+    if (!ac.signal.aborted) ac.abort();
+    const code = err instanceof WorkerDeadlineError ? err.code : "worker_internal_error";
+    progress("aborted");
+    if (code === "global_serial_deadline") {
+      // This maintenance invocation never entered runExclusive, so it owns no
+      // drain to reap and must not poison or kill the healthy serial owner.
+      return finish({
+        status: "pending",
+        retryable: true,
+        restart_child: false,
+        pending_before: null,
+        pending_after: null,
+        error_code: "maintenance_worker_busy",
+      });
+    }
+    return finish({
+      status: "failed",
+      retryable: true,
+      restart_child: false,
+      pending_before: null,
+      pending_after: null,
+      error_code: code,
+    });
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+export function registerSedimentWorkerMaintenanceCommand(
+  pi: {
+    registerCommand?: (
+      name: string,
+      options: {
+        description?: string;
+        handler: (args: string, ctx: {
+          ui?: { notify?(message: string, type?: string): void };
+        }) => Promise<void>;
+      },
+    ) => void;
+  },
+  deps: SedimentWorkerMaintenanceDeps,
+): void {
+  if (typeof pi.registerCommand !== "function") return;
+  pi.registerCommand(SEDIMENT_WORKER_MAINTENANCE_COMMAND_NAME, {
+    description:
+      "Daemon Stage0 sediment worker maintenance: drain publication outbox within budget (JSON or base64url). No agent turn.",
+    async handler(args, ctx) {
+      const notify = ctx.ui?.notify?.bind(ctx.ui);
+      if (typeof notify !== "function") {
+        return;
+      }
+
+      const onProgress = (event: SedimentWorkerProgressEvent) => {
+        try {
+          notify(formatWorkerProgressNotify(event), "info");
+        } catch {
+          /* progress notify failure must never fail the task */
+        }
+      };
+
+      let result: SedimentWorkerMaintenanceResult;
+      try {
+        result = await runSedimentWorkerMaintenance(args, {
+          ...deps,
+          onProgress: deps.onProgress ?? onProgress,
+        });
+      } catch (err) {
+        let requestId = "0".repeat(64);
+        try {
+          requestId = parseSedimentWorkerMaintenanceArgs(args).request_id;
+        } catch { /* keep zeros */ }
+        const code = err instanceof WorkerDeadlineError
+          ? err.code
+          : err instanceof WorkerValidationError
+            ? err.code
+            : "worker_internal_error";
+        if (isPoisonRestartCode(code)) poisonIfSerialOrUnreaped(code);
+        result = buildMaintenanceResult({
+          request_id: requestId,
+          status: "failed",
+          retryable: true,
+          restart_child: isPoisonRestartCode(code),
+          pending_before: null,
+          pending_after: null,
+          error_code: code,
+        });
+      }
+
+      const clean = sanitizeWorkerMaintenanceResult(result) ?? result;
+      const type = clean.status === "failed" ? "error" : clean.status === "pending" ? "warning" : "info";
+      try {
+        notify(formatWorkerMaintenanceResultNotify(clean), type);
+      } catch {
+        /* RPC notify failure after execution */
       }
     },
   });

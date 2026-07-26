@@ -160,6 +160,13 @@ export interface AppendKnowledgeEvidenceForWriteResult {
   publicationDeferred?: boolean;
 }
 
+/** Deterministic event identity resolved before either outbox or L1 mutation. */
+export interface PreparedKnowledgeEvidenceForWrite {
+  body: KnowledgeEvidenceEventBodyV1;
+  eventId: string;
+  replay?: AppendKnowledgeEvidenceEventResult;
+}
+
 export function sha256Hex(input: string): string {
   return crypto.createHash("sha256").update(input, "utf-8").digest("hex");
 }
@@ -1155,12 +1162,32 @@ async function findKnowledgeEvidenceReplay(
   };
 }
 
-export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<AppendKnowledgeEvidenceForWriteResult> {
-  if (!args.settings.knowledgeEvidenceEventWriter.enabled) return { append: { ok: false, status: "write_failed", error: "knowledge_event_writer_disabled" } };
+export async function prepareKnowledgeEvidenceForWrite(
+  args: AppendKnowledgeEvidenceForWriteOptions,
+): Promise<PreparedKnowledgeEvidenceForWrite> {
+  if (!args.settings.knowledgeEvidenceEventWriter.enabled) {
+    throw new Error("knowledge_event_writer_disabled");
+  }
   const proposedBody = await buildKnowledgeEvidenceBodyForWrite(args);
   const replay = await findKnowledgeEvidenceReplay(args.abrainHome, proposedBody);
-  const append = replay ?? await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body: proposedBody });
-  const body = append.envelope?.body ?? proposedBody;
+  const body = replay?.envelope?.body ?? proposedBody;
+  const eventId = replay?.eventId ?? knowledgeEvidenceBodyHash(body);
+  if (!eventId || knowledgeEvidenceBodyHash(body) !== eventId) {
+    throw new Error("prepared knowledge evidence event identity mismatch");
+  }
+  return { body, eventId, ...(replay ? { replay } : {}) };
+}
+
+export async function appendPreparedKnowledgeEvidenceForWrite(
+  args: AppendKnowledgeEvidenceForWriteOptions,
+  prepared: PreparedKnowledgeEvidenceForWrite,
+): Promise<AppendKnowledgeEvidenceForWriteResult> {
+  if (knowledgeEvidenceBodyHash(prepared.body) !== prepared.eventId) {
+    throw new Error("prepared knowledge evidence event identity mismatch");
+  }
+  const append = prepared.replay
+    ?? await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body: prepared.body });
+  const body = append.envelope?.body ?? prepared.body;
   const wantProject = append.ok && append.envelope && args.projectEvent !== false && args.settings.knowledgeProjector.projectOnWrite;
   if (wantProject && args.deferPublication === true) {
     // Accepted durability stops at create-only L1 (+ caller's outbox). Do not
@@ -1171,6 +1198,12 @@ export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvide
     ? await projectKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, envelope: append.envelope, settings: args.settings })
     : undefined;
   return { body, append, ...(projection ? { projection } : {}) };
+}
+
+export async function appendKnowledgeEvidenceForWrite(args: AppendKnowledgeEvidenceForWriteOptions): Promise<AppendKnowledgeEvidenceForWriteResult> {
+  if (!args.settings.knowledgeEvidenceEventWriter.enabled) return { append: { ok: false, status: "write_failed", error: "knowledge_event_writer_disabled" } };
+  const prepared = await prepareKnowledgeEvidenceForWrite(args);
+  return appendPreparedKnowledgeEvidenceForWrite(args, prepared);
 }
 
 /** Recursively list *.md projection files under root with mtime+size (stat),
