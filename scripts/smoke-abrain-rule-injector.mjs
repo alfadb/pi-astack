@@ -44,6 +44,16 @@ try {
     const source = fs.readFileSync(path.join(repoRoot, "extensions/abrain/rule-injector/index.ts"), "utf8");
     assert(!source.includes("proposition-lifecycle-freshness-d3-v2-session-start-control"), "D3 runtime control import remains");
     assert(!source.includes("selectD3V2SessionStartSession") && !source.includes("decideD3V2SessionStartControl"), "D3 runtime symbol remains");
+    for (const rel of [
+      "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start.ts",
+      "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.ts",
+      "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs",
+      "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
+      "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control.ts",
+      "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-runtime-audit.ts",
+    ]) {
+      assert(!fs.existsSync(path.join(repoRoot, rel)), `retired D3-v2 runtime module still present: ${rel}`);
+    }
     const start = source.indexOf('maybePi.on("session_start"');
     const end = source.indexOf('if (typeof maybePi.registerCommand', start);
     assert(start >= 0 && end > start, "production lifecycle hook block missing");

@@ -433,16 +433,31 @@ await check("transition machine schema has stable unique IDs and exact canonical
   assert(p2b.current.includes("D3-PUB") && p2b.current.includes("policy-stable-view-runtime-flip"), "ADR0040 P2b completion lost the later Policy runtime-flip boundary");
   assert(proposition["proposition.adr0040-policy-stable-view-runtime-flip"] === "completed/authorized", "ADR0040 Policy stable-view runtime flip status/auth mismatch");
   const policyFlip = register.transitions.find((entry) => entry.id === "proposition.adr0040-policy-stable-view-runtime-flip");
-  assert(policyFlip.current.includes("D3-v2") && policyFlip.current.includes("does NOT authorize"), "Policy runtime flip lost residual-block boundary");
-  for (const phase of ["p3-d3-v2-session-start", "p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
+  assert(policyFlip.current.includes("stable-view") || policyFlip.current.includes("Policy"), "Policy runtime flip lost sole-authority boundary");
+  assert(proposition["proposition.adr0040-p3-d3-v2-session-start"] === "completed/not_authorized", "ADR0040 D3-v2 session_start retirement status/auth mismatch");
+  for (const phase of ["p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
     assert(proposition[`proposition.adr0040-${phase}`] === "blocked/separate_authorization_required", `ADR0040 ${phase} status/auth mismatch`);
   }
   const d3v2 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-d3-v2-session-start");
-  assert(d3v2 && d3v2.phase_status === "blocked" && d3v2.authorization_status === "separate_authorization_required", "ADR0040 D3-v2 session_start must remain blocked/separate_authorization_required");
-  // Loader does not expose free-form summary; machine JSON next_action/current still load.
-  assert(d3v2.current && /execution-ready|session_start|Policy stable-view/.test(d3v2.current), "ADR0040 D3-v2 session_start current lost blocked/Policy-boundary");
+  assert(d3v2 && d3v2.phase_status === "completed" && d3v2.authorization_status === "not_authorized", "ADR0040 D3-v2 session_start must be completed/not_authorized retired");
+  assert(d3v2.human_section === "已收口", "ADR0040 D3-v2 session_start must move to 已收口");
+  assert(/never production-authorized|retired|superseded|stable-view/i.test(d3v2.current), "ADR0040 D3-v2 session_start current lost retired/superseded boundary");
+  assert(/immutable|non-rerunnable|read-only|D3-PUB/i.test(d3v2.current + " " + d3v2.next_action), "ADR0040 D3-v2 session_start lost evidence/D3-PUB retention boundary");
   const residualP3 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-runtime-read-flips");
   assert(residualP3.current.includes("policy-stable-view-runtime-flip") && residualP3.current.includes("blocked"), "residual P3 lost Policy-completed vs residual-blocked split");
+  assert(!/D3-v2 session_start adapter path remains blocked/i.test(residualP3.current), "residual P3 still treats retired D3-v2 as an active blocked consumer");
+  // Runtime code for the retired D3-v2 session_start path must be absent; Policy stable-view is sole authority.
+  for (const rel of [
+    "extensions/_shared/proposition-lifecycle-freshness-d3-v2-session-start.ts",
+    "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
+    "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-runtime-audit.ts",
+    "scripts/smoke-proposition-lifecycle-freshness-d3-v2-session-start.mjs",
+    "scripts/operate-proposition-lifecycle-freshness-d3-v2-session-start-r4.mjs",
+    "scripts/operate-proposition-lifecycle-freshness-d3-v2-session-start-r4.2.mjs",
+  ]) {
+    assert(!fs.existsSync(path.join(repoRoot, rel)), `retired D3-v2 runtime path still present: ${rel}`);
+  }
+  assert(fs.existsSync(path.join(repoRoot, "extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts")), "stable-view reader missing");
   for (const entry of register.transitions) {
     for (const field of ["entered", "review_by", "exit", "evidence", "owner", "consumer", "renewal_count", "risk_class"]) {
       assert(Object.hasOwn(entry, field), `${entry.id} missing ${field}`);

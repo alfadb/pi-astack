@@ -182,15 +182,12 @@ function transpileExtensions(outRoot) {
       throw new Error(`Strict parse of ${path.relative(repoRoot, srcPath)} failed: ${err && err.stack ? err.stack : err}`);
     }
     writeFile(outPath, transpiled.outputText);
-    // Keep the staged rule-injector import closure loadable. Shared D3-v2
-    // modules are already included by the staged `_shared` tree; disabled
-    // fixture paths never append either runtime audit.
+    // Keep the staged rule-injector import closure loadable for stable-view
+    // production authority only. D3-v2 session-start runtime modules are retired.
     for (const leaf of [
       "dualread-audit.ts",
       "proposition-policy-stable-view-reader.ts",
       "proposition-policy-stable-view-runtime-audit.ts",
-      "proposition-lifecycle-freshness-d3-v2-runtime-audit.ts",
-      "proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
     ]) {
       const leafSrcPath = path.join(extRoot, "abrain", "rule-injector", leaf);
       const leafOutPath = path.join(outRoot, "abrain", "rule-injector", leaf.replace(/\.ts$/, ".js"));
