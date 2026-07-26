@@ -56,7 +56,9 @@ Storage
 |---|---|
 | 当前状态 | `docs/current-state.md` |
 | memory | `docs/architecture/memory.md` |
-| sediment | `docs/architecture/sediment.md` |
+| sediment（当前本地实现） | `docs/architecture/sediment.md` |
+| central sediment edge 合同（capture-only protocol shadow 默认关；Stage A/B/C 未实施） | `docs/architecture/central-sediment-edge.md` + [ADR 0044](../adr/0044-central-sediment-edge-authority.md) |
+| Stage A daemon worker 机制（非并列 primary） | [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md) |
 | abrain | `docs/architecture/abrain.md` |
 | vault | `docs/architecture/vault.md` |
 | directory/runtime paths | `docs/directory-layout.md` |

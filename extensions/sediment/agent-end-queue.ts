@@ -153,7 +153,9 @@ async function runKey(state: QueueState, key: string): Promise<void> {
   }
 }
 
-/** Synchronous enqueue; the awaited pi handler only performs durable intake IO. */
+/** Synchronous enqueue; the awaited pi handler only performs durable intake IO.
+ *  Detached work is scheduled on the next macrotask so agent_end does not run
+ *  tryClaim / restore / semantic on the same stack after the durable write. */
 export function enqueueDetachedAgentEnd(job: DetachedAgentEndQueueJob): void {
   const state = queueState();
   state.stats.enqueued += 1;
@@ -167,7 +169,7 @@ export function enqueueDetachedAgentEnd(job: DetachedAgentEndQueueJob): void {
     state.slots.set(job.key, { latest: job, version: 1, active: false });
     enqueueWake(state, job.key);
   }
-  pump(state);
+  setImmediate(() => pump(state));
 }
 
 export function waitForDetachedAgentEndQueueIdle(): Promise<void> {

@@ -361,7 +361,10 @@ export async function writeSedimentIntakeRecord(
   await fs.mkdir(pendingDir, { recursive: true, mode: 0o700 });
   const filePath = sedimentIntakePendingPath(abrainHome, record.windowId);
   const raw = `${JSON.stringify(record)}\n`;
-  const createStatus = await durableAtomicCreateFile(filePath, raw, { mode: 0o600 });
+  // verifyCreated=false: link(temp,target) shares the already-fsynced temp inode
+  // (same proof as edge source/journal). EEXIST identical/collision still fsyncs
+  // the parent directory and byte-compares the existing file.
+  const createStatus = await durableAtomicCreateFile(filePath, raw, { mode: 0o600, verifyCreated: false });
   if (createStatus !== "collision") {
     return { status: createStatus, windowId: record.windowId, filePath, record, durationMs: Date.now() - started };
   }

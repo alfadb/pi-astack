@@ -1,0 +1,204 @@
+{
+  "title": "ADR 0044 Pi-side capture-only edge protocol shadow — production acceptance archive (v3)",
+  "mode": "production_acceptance_evidence",
+  "archive_note": "Structured archive of a real main-session `npm run dossier:edge-protocol-shadow-production` stdout. No raw paths. Homologous with current layered ADR0044 capture-only + ADR0045 daemon worker implementation.",
+  "method": "production_edge_full_handler_real_session_multiturn_v3",
+  "version": "edge-protocol-shadow-production-dossier/v3",
+  "generated_at_utc": "2026-07-26T10:49:50.473Z",
+  "git": {
+    "short_hash": "4ce3aab",
+    "worktree_dirty": true
+  },
+  "implementation_source_digest": {
+    "algorithm": "sha256",
+    "digest": "7949c2e4b40b42ddde2f5d8561ce729c21a999a02e1cbddd31186c88503bd870",
+    "file_count": 10
+  },
+  "protocol": "capture-only protocol shadow",
+  "acceptance_scope": "awaited_agent_end_and_agent_settled_handlers",
+  "acceptance_scope_note": "Measures real sediment agent_end (local intake durable write + edge source/candidate) and agent_settled witness. Both are hard p99 gates. session_start runs real edge layout init (reported separately; not a <100ms gate). Stage A still incomplete. Evidence archive is main-session responsibility.",
+  "stage_a_complete": false,
+  "chain_reconstruction": "pi_jsonl_latest_terminal_assistant_leaf_id_parentId_main_chain_multiturn",
+  "terminal_assistant_definition": "assistant && stopReason !== 'toolUse' (stop/length/error/aborted/missing)",
+  "input": {
+    "sessions_root_category": "pi_session_jsonl",
+    "session_files_considered": 721,
+    "distinct_sessions": 32,
+    "total_terminal_assistant_turns_collected": 103,
+    "min_turns_required": 100,
+    "target_sessions": 10,
+    "rounds": 3,
+    "p99_target_ms": 100,
+    "abrain_home_category": "abrain_state"
+  },
+  "result": "accepted",
+  "component_diagnostic_note": "Component-only capture timings are not acceptance criteria; full handler path is.",
+  "rounds": [
+    {
+      "round": 1,
+      "turns": 100,
+      "distinct_sessions": 32,
+      "agent_end_ms": {
+        "count": 100,
+        "p50": 21.46,
+        "p95": 39.637,
+        "p99": 59.865,
+        "max": 63.314
+      },
+      "witness_ms": {
+        "count": 100,
+        "p50": 9.835,
+        "p95": 13.19,
+        "p99": 14.565,
+        "max": 19.652
+      },
+      "session_start_ms": {
+        "count": 32,
+        "p50": 189.583,
+        "p95": 315.759,
+        "p99": 317.67,
+        "max": 317.67
+      },
+      "turns_ok": 100,
+      "turns_failed": 0,
+      "pin_only": 0,
+      "agent_end_p99_ok": true,
+      "witness_p99_ok": true,
+      "integrity_ok": true
+    },
+    {
+      "round": 2,
+      "turns": 100,
+      "distinct_sessions": 32,
+      "agent_end_ms": {
+        "count": 100,
+        "p50": 21.814,
+        "p95": 38.512,
+        "p99": 57.708,
+        "max": 62.422
+      },
+      "witness_ms": {
+        "count": 100,
+        "p50": 10.405,
+        "p95": 14.038,
+        "p99": 19.295,
+        "max": 36.825
+      },
+      "session_start_ms": {
+        "count": 32,
+        "p50": 490.524,
+        "p95": 772.919,
+        "p99": 909.751,
+        "max": 909.751
+      },
+      "turns_ok": 100,
+      "turns_failed": 0,
+      "pin_only": 0,
+      "agent_end_p99_ok": true,
+      "witness_p99_ok": true,
+      "integrity_ok": true
+    },
+    {
+      "round": 3,
+      "turns": 100,
+      "distinct_sessions": 32,
+      "agent_end_ms": {
+        "count": 100,
+        "p50": 21.1,
+        "p95": 42.653,
+        "p99": 52.69,
+        "max": 57.703
+      },
+      "witness_ms": {
+        "count": 100,
+        "p50": 9.681,
+        "p95": 12.821,
+        "p99": 14.962,
+        "max": 18.624
+      },
+      "session_start_ms": {
+        "count": 32,
+        "p50": 783.607,
+        "p95": 962.18,
+        "p99": 1057.704,
+        "max": 1057.704
+      },
+      "turns_ok": 100,
+      "turns_failed": 0,
+      "pin_only": 0,
+      "agent_end_p99_ok": true,
+      "witness_p99_ok": true,
+      "integrity_ok": true
+    }
+  ],
+  "aggregate": {
+    "agent_end": {
+      "count": 300,
+      "p50": 21.595,
+      "p95": 39.903,
+      "p99": 57.708,
+      "max": 63.314,
+      "p99_target_ms": 100,
+      "p99_meets_target": true,
+      "all_rounds_ok": true
+    },
+    "witness_settled": {
+      "count": 300,
+      "p50": 9.97,
+      "p95": 13.592,
+      "p99": 18.624,
+      "max": 36.825,
+      "p99_target_ms": 100,
+      "p99_meets_target": true,
+      "all_rounds_ok": true
+    },
+    "session_start_layout_init": {
+      "count": 96,
+      "p50": 490.524,
+      "p95": 853.973,
+      "p99": 1057.704,
+      "max": 1057.704,
+      "note": "real edge layout init; reported only; not a <100ms hard gate"
+    },
+    "total_handler_samples": 300,
+    "distinct_sessions": 32,
+    "turns_per_round_target": 100,
+    "journal_max_seq": 20
+  },
+  "payload_bytes": {
+    "samples": 300,
+    "min": 519,
+    "p50": 103846,
+    "p95": 801752,
+    "p99": 1198647,
+    "max": 1332369,
+    "total": 72350163
+  },
+  "integrity": {
+    "complete": true,
+    "turns_checked": 300,
+    "turns_failed": 0,
+    "checks_total": 4200,
+    "checks_failed": 0,
+    "failure_codes": {},
+    "no_pin_only": true
+  },
+  "capabilities": {
+    "authority": "protocol_shadow",
+    "local_primary_authority": "existing_sediment_intake",
+    "session_transaction": false,
+    "launch_broker": false,
+    "terminal_seal": false,
+    "link_open_close": false,
+    "stage_a_complete": false
+  },
+  "deferred": [
+    "session_transaction",
+    "launch_broker",
+    "terminal_seal",
+    "link_open_close",
+    "stage_a"
+  ],
+  "pi_side_slice_production_acceptance": "passed",
+  "accepted_at_utc": "2026-07-26T10:51:05.515Z"
+}

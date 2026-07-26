@@ -4,12 +4,13 @@ status: accepted
 date: 2026-07-25
 ---
 
-# ADR 0045 — Sediment worker-safe RPC command（Stage0）
+# ADR 0045 — Sediment worker-safe RPC command（Stage A 机制）
 
-- **Status**: Accepted（Stage0 implementation surface for daemon-hosted headless worker）
+- **Status**: Accepted（Stage A daemon-owned short-lived worker RPC migration surface）
 - **Date**: 2026-07-25
-- **Relates-to**: [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0027](./0027-coupled-stigmergic-dual-loop-agent-system.md) C6, edge-protocol-shadow capture-only slice（`extensions/sediment/edge-protocol-shadow.ts`）, pi-router central-memory Stage A bridge plan
+- **Relates-to**: [ADR 0044](./0044-central-sediment-edge-authority.md)（**目标** authority/edge contract；本 ADR 是 Stage A 机制，不是并列 primary）, [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0027](./0027-coupled-stigmergic-dual-loop-agent-system.md) C6, edge-protocol-shadow capture-only slice（`extensions/sediment/edge-protocol-shadow.ts`）, pi-router central-memory Stage A bridge plan
 - **Implementation**: `extensions/sediment/worker-rpc.ts` + worker-mode branch in `extensions/sediment/index.ts` + `sediment.executionOwner`
+- **Hierarchy**: A0 完成前 local sediment intake/queue/publication 仍是唯一 semantic primary；本 ADR 的 worker RPC 与 continuous edge producer **不得**升为第二 primary。capture-only protocol shadow 见 ADR 0044。
 
 ## 1. Context
 
