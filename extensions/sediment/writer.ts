@@ -2224,6 +2224,13 @@ async function maybePushAbrainAsync(abrainHome: string, sha: string | null): Pro
   // After each successful sediment commit, trigger best-effort device delivery.
   // Push execution failures are audited by git-sync itself; trigger/load failures
   // are audited here so cross-device stalls remain visible.
+  // M2/M3: under worker budget ALS, do NOT start free-floating push — durable
+  // publication is already local; short-lived worker must not inherit expired
+  // budget into detached network work or be pinned by it.
+  try {
+    const { getWorkerBudgetContext } = await import("../_shared/worker-budget-context");
+    if (getWorkerBudgetContext()) return;
+  } catch { /* foreground path if import fails */ }
   if (sha
     && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
     && process.env.PI_ABRAIN_DISABLED !== "1") {

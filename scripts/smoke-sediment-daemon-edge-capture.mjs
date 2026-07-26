@@ -648,7 +648,7 @@ await check("agent_end handler path: await complete, pending delta 0, unique own
   assert(journal.some((r) => r.record_type === "terminal_witness"), "witness present");
 });
 
-async function runAgentEndPendingEdgeProbe(label, settingsExtra, sessionId) {
+async function runAgentEndCaptureMatrix(label, settingsExtra, sessionId) {
   writeSettings(settingsExtra);
   const jitiX = createJiti(import.meta.url + `#${label}-${Date.now()}`, { interopDefault: true });
   const sediment = await jitiX.import(path.join(root, "extensions/sediment/index.ts"));
@@ -673,54 +673,101 @@ async function runAgentEndPendingEdgeProbe(label, settingsExtra, sessionId) {
   }
   const pendingAfter = countPending();
   const edgeAfter = countEdgeRecords(sessionId).records;
-  assert(
-    pendingAfter === pendingBefore,
-    `${label}: pending delta must be 0 (${pendingBefore}→${pendingAfter})`,
-  );
-  assert(
-    edgeAfter === edgeBefore,
-    `${label}: edge records must stay 0-delta (${edgeBefore}→${edgeAfter})`,
-  );
-  assert(sediment._isDaemonEdgeShadowCaptureEnabledForTests() === false, `${label}: triple gate must be off`);
+  const tripleOpen = sediment._isDaemonEdgeShadowCaptureEnabledForTests() === true;
+  return {
+    sediment,
+    pendingDelta: pendingAfter - pendingBefore,
+    edgeDelta: edgeAfter - edgeBefore,
+    tripleOpen,
+  };
 }
 
-await check("daemon-only (no continuous producer flags): agent_end pending delta=0 + edge=0", async () => {
-  await runAgentEndPendingEdgeProbe(
-    "daemon-only",
-    {
-      executionOwner: "daemon",
-      daemonWorker: { edgeShadowCaptureEnabled: false },
-      edgeProtocolShadow: { enabled: false },
-      autoLlmWriteEnabled: false,
-    },
-    "sess-daemon-only-no-flags",
-  );
+await check("capture matrix: daemon incomplete gate uses safe fallback, no dual-write", async () => {
+  // 1) daemon-only, sediment.enabled (default true) → durable intake fallback, no edge, no enqueue side-effects beyond write.
+  {
+    const r = await runAgentEndCaptureMatrix(
+      "daemon-only-intake-fallback",
+      {
+        executionOwner: "daemon",
+        enabled: true,
+        daemonWorker: { edgeShadowCaptureEnabled: false },
+        edgeProtocolShadow: { enabled: false },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-daemon-only-intake-fallback",
+    );
+    assert(r.tripleOpen === false, "triple gate off");
+    assert(r.edgeDelta === 0, `daemon-only must not write edge (delta=${r.edgeDelta})`);
+    assert(r.pendingDelta === 1, `daemon-only intake fallback pending delta=1 got=${r.pendingDelta}`);
+  }
+  // 2) daemon + edgeProtocolShadow only → capture-only edge fallback, no intake dual-write.
+  {
+    const r = await runAgentEndCaptureMatrix(
+      "daemon-edge-fallback",
+      {
+        executionOwner: "daemon",
+        enabled: true,
+        daemonWorker: { edgeShadowCaptureEnabled: false },
+        edgeProtocolShadow: { enabled: true },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-daemon-edge-fallback",
+    );
+    assert(r.tripleOpen === false, "triple gate still off without capture flag");
+    assert(r.edgeDelta >= 1, `edge fallback must write edge records (delta=${r.edgeDelta})`);
+    assert(r.pendingDelta === 0, `edge fallback must not dual-write intake (pending=${r.pendingDelta})`);
+  }
+  // 3) daemon + capture flag without edge substrate → intake fallback (edge substrate missing).
+  {
+    const r = await runAgentEndCaptureMatrix(
+      "daemon-capture-flag-no-edge",
+      {
+        executionOwner: "daemon",
+        enabled: true,
+        daemonWorker: { edgeShadowCaptureEnabled: true },
+        edgeProtocolShadow: { enabled: false },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-daemon-capture-flag-no-edge",
+    );
+    assert(r.tripleOpen === false, "triple incomplete");
+    assert(r.edgeDelta === 0, "no edge substrate → no edge write");
+    assert(r.pendingDelta === 1, `intake fallback pending=1 got=${r.pendingDelta}`);
+  }
+  // 4) both capture paths disabled + sediment disabled → pure diagnostic skip (no dual-write).
+  {
+    const r = await runAgentEndCaptureMatrix(
+      "daemon-fully-disabled",
+      {
+        executionOwner: "daemon",
+        enabled: false,
+        daemonWorker: { edgeShadowCaptureEnabled: false },
+        edgeProtocolShadow: { enabled: false },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-daemon-fully-disabled",
+    );
+    assert(r.tripleOpen === false, "triple off");
+    assert(r.edgeDelta === 0, "disabled: no edge");
+    assert(r.pendingDelta === 0, "disabled: no intake");
+  }
 });
 
-await check("daemon + edge flag missing edgeProtocolShadow: pending delta=0 + edge=0", async () => {
-  await runAgentEndPendingEdgeProbe(
-    "missing-edge-protocol",
+await check("capture matrix: full triple gate is edge-only (no intake dual-write)", async () => {
+  const r = await runAgentEndCaptureMatrix(
+    "daemon-triple-full",
     {
       executionOwner: "daemon",
+      enabled: true,
       daemonWorker: { edgeShadowCaptureEnabled: true },
-      edgeProtocolShadow: { enabled: false },
-      autoLlmWriteEnabled: false,
-    },
-    "sess-daemon-missing-edge-protocol",
-  );
-});
-
-await check("daemon + edgeProtocolShadow missing capture flag: pending delta=0 + edge=0", async () => {
-  await runAgentEndPendingEdgeProbe(
-    "missing-capture-flag",
-    {
-      executionOwner: "daemon",
-      daemonWorker: { edgeShadowCaptureEnabled: false },
       edgeProtocolShadow: { enabled: true },
       autoLlmWriteEnabled: false,
     },
-    "sess-daemon-missing-capture-flag",
+    "sess-daemon-triple-full-matrix",
   );
+  assert(r.tripleOpen === true, "triple gate open");
+  assert(r.edgeDelta >= 1, `full gate edge delta>=1 got=${r.edgeDelta}`);
+  assert(r.pendingDelta === 0, `full gate must not dual-write intake (pending=${r.pendingDelta})`);
 });
 
 await check("resolveDaemonEdgeOwnerRoot realpath double-fail throws (never returns raw)", async () => {
@@ -1040,7 +1087,7 @@ await check("strict tsc on producer surface including index.ts", async () => {
     .filter((line) => /extensions\/sediment\/index\.ts\(/.test(line));
   // Producer surface symbols must not appear in error text.
   const producerHits = indexErrors.filter((line) =>
-    /maybeCaptureDaemonEdgeProtocolShadow|resolveDaemonEdgeOwnerRoot|isDaemonEdgeShadowCaptureEnabled|resolveHealthyTerminalAssistant|maybeInitAndRecoverDaemonEdgeShadow|EDGE_ACCEPTED_TERMINAL|captureEdgeProtocolTerminalPair|recoverEdgeProtocolMissingWitnessesForOwner|daemon_capture_disabled|daemon_edge_owner_root_realpath_failed/.test(line),
+    /maybeCaptureDaemonEdgeProtocolShadow|resolveDaemonEdgeOwnerRoot|isDaemonEdgeShadowCaptureEnabled|resolveHealthyTerminalAssistant|maybeInitAndRecoverDaemonEdgeShadow|EDGE_ACCEPTED_TERMINAL|captureEdgeProtocolTerminalPair|recoverEdgeProtocolMissingWitnessesForOwner|daemon_capture_disabled|daemon_capture_fallback_edge|daemon_capture_fallback_intake|daemon_edge_owner_root_realpath_failed/.test(line),
   );
   if (producerHits.length > 0) {
     throw new Error(`tsc producer errors in index.ts:\n${producerHits.join("\n")}`);

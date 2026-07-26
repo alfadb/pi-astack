@@ -2265,5 +2265,208 @@ await check("more-loop partial CP then settled stage_deadline is retryable no po
   assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
 });
 
+await check("H1: durable receipt on unreaped deadline → settled success, no poison", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-receipt-unreaped");
+  const messages = [{ role: "user", content: "receipt-unreaped" }];
+  const m = baseManifest({
+    request_id: hex64("req-receipt-unreaped"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages,
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const branch = worker.syntheticBranchFromMessages(messages, m.leaf_tip);
+  const tipId = branch[branch.length - 1].id;
+
+  let t = 3_000_000;
+  const store = new Map();
+  let drainCalls = 0;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => t,
+    loadSessionCheckpoint: async (_r, sid) => store.get(sid) ?? {},
+    drainKnowledgePublicationOutbox: async () => {
+      drainCalls += 1;
+      // Hang after receipt would be written — publication must not unbounded-block.
+      t = 3_000_000 + 60_000;
+      await new Promise(() => {});
+    },
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, { lastProcessedEntryId: tipId });
+    },
+    env: process.env,
+  });
+  // Receipt is durable before drain hang; deadline outcome must settle success.
+  assert(
+    r.status === "processed" || r.status === "already_processed",
+    `status=${r.status} code=${r.error_code}`,
+  );
+  assert(r.settled === true, "settled success when receipt durable");
+  assert(r.retryable === false, "settled not retryable");
+  assert(r.error_code !== "deadline_after_checkpoint_advanced", "must not fatal coversTip poison");
+  assert(r.error_code !== "pass_deadline_exceeded_unreaped", "must not unreaped poison with receipt");
+  assert(r.restart_child !== true, "no restart_child when receipt durable");
+  assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt durable");
+  assert(worker.isWorkerProcessPoisoned() === false, "must not poison after durable receipt");
+  assert(drainCalls === 1, "drain attempted once under budget race");
+});
+
+await check("H1: publication drain is budget-bounded (source contract)", async () => {
+  const src = fs.readFileSync(path.join(root, "extensions/sediment/worker-rpc.ts"), "utf8");
+  assert(src.includes("drainBudgetMs"), "drain budget clamp present");
+  assert(src.includes("absoluteDeadlineMs - clock()"), "hard remaining used for drain");
+  assert(src.includes("readProcessedReceipt(abrainHome, ids.terminal_record_id)"), "deadline outcome checks receipt");
+});
+
+await check("M4: deterministic no_progress codes are non-retryable", async () => {
+  resetWorkerBudgetTestState();
+  for (const code of ["project_not_bound", "settings_disabled", "empty_window", "ephemeral_session"]) {
+    const term = hex64(`term-det-${code}`);
+    const m = baseManifest({
+      request_id: hex64(`req-det-${code}`),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: code }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => ({}),
+      runAgentEndPass: async () => ({ no_progress: true, code, retryable: false }),
+      env: process.env,
+    });
+    assert(r.status === "failed", `${code}: status=${r.status}`);
+    assert(r.error_code === code, `${code}: error_code=${r.error_code}`);
+    assert(r.retryable === false, `${code}: must not be auto-retryable`);
+    assert(r.settled === false, `${code}: not settled`);
+    assert(r.restart_child !== true, `${code}: no poison restart`);
+    assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), `${code}: no receipt`);
+  }
+  assert(worker.isDeterministicNoProgressCode("project_not_bound") === true, "classifier export");
+  assert(worker.isDeterministicNoProgressCode("no_progress") === false, "plain no_progress not deterministic");
+});
+
+await check("L5: poison root cause sticky across subsequent refuses", async () => {
+  resetWorkerBudgetTestState();
+  // Direct poison via never-resolving pass → pass_deadline_exceeded_unreaped.
+  const termA = hex64("term-poison-sticky-a");
+  const mA = baseManifest({
+    request_id: hex64("req-poison-sticky-a"),
+    terminal_record_id: termA,
+    budget_ms: 60_000,
+  });
+  const placedA = placeSidecar({
+    sessionId: mA.session_id,
+    terminalRecordId: termA,
+    messages: [{ role: "user", content: "poison-a" }],
+  });
+  mA.sidecar_path = placedA.sidecarPath;
+  mA.content_id = placedA.contentId;
+  let tA = 4_000_000;
+  const rA = await worker.runSedimentWorkerTask(JSON.stringify(mA), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => tA,
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      tA = 4_000_000 + 60_000;
+      await new Promise(() => {});
+    },
+    env: process.env,
+  });
+  assert(worker.isWorkerProcessPoisoned() === true, "must be poisoned after unreaped hang");
+  const firstReason = worker.workerProcessPoisonReasonForTests();
+  assert(
+    firstReason === "pass_deadline_exceeded_unreaped"
+      || firstReason === "deadline_after_checkpoint_advanced"
+      || firstReason === "global_serial_deadline",
+    `first poison reason=${firstReason} rA=${rA.error_code}`,
+  );
+  assert(firstReason !== "worker_process_poisoned", "root cause must not be the refuse code");
+
+  // Subsequent refuses must not overwrite root cause.
+  for (const seed of ["b", "c"]) {
+    const term = hex64(`term-poison-sticky-${seed}`);
+    const m = baseManifest({
+      request_id: hex64(`req-poison-sticky-${seed}`),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: `poison-${seed}` }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => ({}),
+      runAgentEndPass: async () => {},
+      env: process.env,
+    });
+    assert(r.error_code === "worker_process_poisoned", `${seed} code=${r.error_code}`);
+    assert(
+      worker.workerProcessPoisonReasonForTests() === firstReason,
+      `poison reason overwritten: first=${firstReason} now=${worker.workerProcessPoisonReasonForTests()}`,
+    );
+  }
+});
+
+await check("H2: worker budget ALS clamps canonical startup (source + unit)", async () => {
+  resetWorkerBudgetTestState();
+  const budgetMod = await jiti.import(path.join(root, "extensions/_shared/worker-budget-context.ts"));
+  const runtimeSrc = fs.readFileSync(path.join(root, "extensions/_shared/canonical-git-runtime.ts"), "utf8");
+  assert(runtimeSrc.includes("clampStartupBudgetToWorker"), "startup clamps to worker budget");
+  assert(runtimeSrc.includes("workerBudgetStartupDeferredDiag"), "cooperative deferred under worker budget");
+  assert(typeof budgetMod.clampStartupBudgetToWorker === "function", "clamp helper export");
+  assert(typeof budgetMod.runOutsideWorkerBudget === "function", "runOutsideWorkerBudget export");
+
+  // Unit: clamp returns remaining under ALS; outside ALS unchanged.
+  assert(budgetMod.clampStartupBudgetToWorker(3_600_000) === 3_600_000, "outside ALS unchanged");
+  const clamped = await budgetMod.runWithWorkerBudget(
+    { deadlineMs: Date.now() + 1_500, now: () => Date.now() },
+    () => budgetMod.clampStartupBudgetToWorker(3_600_000),
+  );
+  assert(clamped <= 1_500 && clamped >= 0, `clamped=${clamped}`);
+
+  // getCanonicalStartupPromise under expired worker budget returns deferred immediately.
+  const runtime = await jiti.import(path.join(root, "extensions/_shared/canonical-git-runtime.ts"));
+  const diag = await budgetMod.runWithWorkerBudget(
+    { deadlineMs: Date.now() - 1, now: () => Date.now() },
+    () => runtime.getCanonicalStartupPromise({ abrainHome }),
+  );
+  assert(diag.startup === "deferred", `startup=${diag.startup}`);
+  assert(diag.deferredReason === "STARTUP_BUDGET_EXHAUSTED" || /STARTUP_BUDGET_EXHAUSTED/.test(String(diag.blockedReason || "")),
+    `deferred reason=${diag.deferredReason} blocked=${diag.blockedReason}`);
+  assert(diag.retryable === true, "deferred retryable for later generation");
+});
+
+await check("M2/M3: free-floating worker work exits budget / is suppressed (source)", async () => {
+  const indexSrc = fs.readFileSync(path.join(root, "extensions/sediment/index.ts"), "utf8");
+  const writerSrc = fs.readFileSync(path.join(root, "extensions/sediment/writer.ts"), "utf8");
+  const autoSrc = fs.readFileSync(path.join(root, "extensions/sediment/constraint-compiler/auto-refresh.ts"), "utf8");
+  assert(indexSrc.includes("taskScopedAutoWrite"), "taskScopedAutoWrite present");
+  assert(indexSrc.includes("free-floating republish"), "republish suppressed under worker");
+  assert(indexSrc.includes("free-floating"), "free-floating worker work gated");
+  assert(writerSrc.includes("free-floating push"), "writer push suppressed under worker budget");
+  assert(autoSrc.includes("unref"), "auto-refresh timer unref");
+  assert(autoSrc.includes("runOutsideWorkerBudget"), "auto-refresh exits budget ALS");
+});
+
 console.log(`\n${passed} checks passed`);
 console.log(`tmp=${tmp}`);

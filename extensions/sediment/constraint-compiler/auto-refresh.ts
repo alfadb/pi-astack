@@ -925,29 +925,61 @@ async function runOnceUnlocked(trigger: ConstraintShadowAutoRefreshTrigger, opti
 }
 
 function armScheduledRun(trigger: ConstraintShadowAutoRefreshTrigger, delayMs: number): void {
-  state.timer = setTimeout(() => {
-    state.timer = undefined;
-    const queued = state.pending;
-    if (!queued) return;
-    const live = resolveLiveAutoRefreshTrigger(queued);
-    if (!live.enabled) return;
-    const next = live.trigger;
-    state.pending = undefined;
-    if (state.inFlight) {
-      state.pending = mergePendingTrigger(state.pending, next);
-      void state.inFlight.finally(() => {
-        const pending = state.pending;
-        if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
-      });
+  // M2/M3: fire the timer outside any inherited worker-budget ALS, and unref so
+  // a short-lived worker process is not pinned by debounce/cooldown (≤60s).
+  // The callback re-enters without budget store so barrier/LLM paths use defaults.
+  const arm = () => {
+    state.timer = setTimeout(() => {
+      state.timer = undefined;
+      const runBody = () => {
+        const queued = state.pending;
+        if (!queued) return;
+        const live = resolveLiveAutoRefreshTrigger(queued);
+        if (!live.enabled) return;
+        const next = live.trigger;
+        state.pending = undefined;
+        if (state.inFlight) {
+          state.pending = mergePendingTrigger(state.pending, next);
+          void state.inFlight.finally(() => {
+            const pending = state.pending;
+            if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
+          });
+          return;
+        }
+        state.inFlight = runOnce(next, { compilerRunnerForTests: state.compilerRunnerForTests }).finally(() => {
+          state.inFlight = undefined;
+          const pending = state.pending;
+          if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
+        });
+        state.inFlight.catch(() => undefined);
+      };
+      try {
+        // Lazy require to avoid cycle; exit ALS so expired worker deadline cannot
+        // permanently poison this lane in a long-lived process.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const budget = require("../../_shared/worker-budget-context") as {
+          runOutsideWorkerBudget?: <T>(fn: () => T) => T;
+        };
+        if (typeof budget.runOutsideWorkerBudget === "function") {
+          budget.runOutsideWorkerBudget(runBody);
+          return;
+        }
+      } catch { /* fall through */ }
+      runBody();
+    }, delayMs);
+    (state.timer as { unref?: () => void }).unref?.();
+  };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const budget = require("../../_shared/worker-budget-context") as {
+      runOutsideWorkerBudget?: <T>(fn: () => T) => T;
+    };
+    if (typeof budget.runOutsideWorkerBudget === "function") {
+      budget.runOutsideWorkerBudget(arm);
       return;
     }
-    state.inFlight = runOnce(next, { compilerRunnerForTests: state.compilerRunnerForTests }).finally(() => {
-      state.inFlight = undefined;
-      const pending = state.pending;
-      if (pending) void scheduleConstraintShadowAutoRefresh(pending).catch(() => undefined);
-    });
-    state.inFlight.catch(() => undefined);
-  }, delayMs);
+  } catch { /* fall through */ }
+  arm();
 }
 
 export async function scheduleConstraintShadowAutoRefresh(trigger: ConstraintShadowAutoRefreshTrigger): Promise<{ scheduled: boolean; reason: string }> {

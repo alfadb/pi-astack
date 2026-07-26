@@ -194,6 +194,7 @@ import {
   isSedimentWorkerMode,
   registerSedimentWorkerCommand,
   SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
+  type SedimentWorkerPassOutcome,
   type SedimentWorkerProgressEvent,
   type SedimentWorkerProgressStage,
   type SedimentWorkerTrackedLane,
@@ -683,7 +684,7 @@ type SedimentAgentEndPassRunner = (
     onProgress?: (event: SedimentWorkerProgressEvent) => void;
     now?: () => number;
   },
-) => Promise<void | { more: true }>;
+) => Promise<SedimentWorkerPassOutcome>;
 let sedimentAgentEndPassRunner: SedimentAgentEndPassRunner | undefined;
 
 function anchorFromIntake(record: SedimentIntakeRecord): ReturnType<typeof getCurrentAnchor> {
@@ -1072,9 +1073,25 @@ async function maybeCaptureDaemonEdgeProtocolShadow(args: {
   event: { messages?: ReadonlyArray<AgentEndMessageSnapshot> };
   /** Capture coordinates from live SessionManager + anchor (not intake persistence). */
   record: SedimentIntakeRecord;
+  /**
+   * Capture-gap safe fallback: allow capture-only when edge substrate is on
+   * even if edgeShadowCaptureEnabled is incomplete (still requires
+   * executionOwner=daemon + edgeProtocolShadow.enabled; never worker mode).
+   */
+  forceCaptureOnly?: boolean;
 }): Promise<void> {
   const settings = resolveSedimentSettings();
-  if (!isDaemonEdgeShadowCaptureEnabled(settings)) return;
+  if (args.forceCaptureOnly) {
+    if (
+      settings.executionOwner !== "daemon"
+      || settings.edgeProtocolShadow.enabled !== true
+      || isSedimentWorkerMode()
+    ) {
+      return;
+    }
+  } else if (!isDaemonEdgeShadowCaptureEnabled(settings)) {
+    return;
+  }
 
   const { record, event } = args;
   const cwd = record.cwd;
@@ -4010,7 +4027,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               },
             };
           };
-          const runPassBodyInner = async (): Promise<void | { more: true }> => {
+          const runPassBodyInner = async (): Promise<SedimentWorkerPassOutcome> => {
           // Each claimed pass gets a fresh drain budget so ready-pending
           // continuation can keep walking the frozen snapshot tip.
           if (snapshot.sessionId) {
@@ -4075,7 +4092,12 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // Worker runtime re-clamps model timeouts to remaining budget each pass.
       // Foreground: resolveSedimentSettings defaults unchanged (e.g. 1200s).
       const settings = clampSettingsForWorker(resolveSedimentSettings());
-      if (!settings.enabled) return;
+      // M4: deterministic no-progress — not auto-retryable under worker RPC.
+      if (!settings.enabled) {
+        return taskScoped
+          ? { no_progress: true as const, code: "settings_disabled" as const, retryable: false }
+          : undefined;
+      }
 
       // All values below come from the plain enqueue-time snapshot. No
       // session-bound ctx/UI object survives into this detached pass.
@@ -4123,7 +4145,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpoint_advanced: false,
           stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
         });
-        return;
+        return taskScoped
+          ? { no_progress: true as const, code: "ephemeral_session" as const, retryable: false }
+          : undefined;
       }
 
       // Skip sediment when the agent loop ended unhealthy (LLM error or
@@ -4172,7 +4196,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         // INV-INVISIBILITY means no user management burden, not misleading
         // health reporting.
         applySedimentStatus(setStatus, sessionId, "failed", `project_not_bound:${binding.reason}`);
-        return;
+        return taskScoped
+          ? { no_progress: true as const, code: "project_not_bound" as const, retryable: false }
+          : undefined;
       }
       // From this point on, all checkpoint/audit/writer paths must use the
       // bound project root, not the launch subdirectory. Otherwise starting
@@ -4921,7 +4947,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           "completed",
           window.skipReason ?? "no new entries",
         );
-        return;
+        // M4: empty/no-new-entries is deterministic under worker task scope.
+        return taskScoped
+          ? { no_progress: true as const, code: "empty_window" as const, retryable: false }
+          : undefined;
       }
 
       const shortWindowClassifierOnly = window.skipReason === "window_too_small";
@@ -6976,7 +7005,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
           // ALS-scoped checkpoint slot for daemon worker (inherits into detached work).
           // Foreground leaves checkpointSessionId unset → no ALS store → provenance id.
-          const runPassBody = async (): Promise<void | { more: true }> => {
+          const runPassBody = async (): Promise<SedimentWorkerPassOutcome> => {
             if (snapshot.checkpointSessionId) {
               return await runWithCheckpointSessionIdOverride(
                 snapshot.checkpointSessionId,
@@ -7063,8 +7092,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const edgeEnabled = agentEndSettings.edgeProtocolShadow.enabled === true;
       const sedimentEnabled = agentEndSettings.enabled === true;
 
-      // ADR 0045 daemon path: never ordinary intake; continuous pair only when
-      // triple gate fully open. Capture failure is NOT knowledge ack.
+      // ADR 0045 daemon path: never ordinary enqueue/pass. Continuous pair when
+      // triple gate fully open. Incomplete gate uses explicit safe fallback so
+      // the turn is not silently dropped (capture gap). Capture is NOT knowledge ack.
       if (agentEndSettings.executionOwner === "daemon") {
         const liveSessionId = readSessionId(liveCtx.sessionManager);
         bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
@@ -7076,6 +7106,56 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         const { record } = capture;
         if (isDaemonEdgeShadowCaptureEnabled(agentEndSettings)) {
           await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
+          return;
+        }
+        // Incomplete triple gate — safe fallback (no dual-write with full gate):
+        // 1) edgeProtocolShadow.enabled → capture-only edge (daemon-consumable)
+        // 2) else sediment.enabled → durable local intake WITHOUT enqueue/pass
+        // 3) else diagnostic skip (nothing consumable)
+        if (agentEndSettings.edgeProtocolShadow.enabled === true) {
+          await maybeCaptureDaemonEdgeProtocolShadow({ event, record, forceCaptureOnly: true });
+          emitEdgeShadowAggregateOnce("daemon_capture_fallback_edge");
+          void appendAudit(record.cwd, {
+            operation: "skip",
+            lane: "system",
+            reason: "daemon_capture_fallback_edge",
+            session_id: record.sessionId,
+            checkpoint_advanced: false,
+            background_async: false,
+          }).catch(() => {});
+          return;
+        }
+        if (agentEndSettings.enabled === true) {
+          try {
+            const abrainHome = resolveAbrainHomeForSediment();
+            const written = await writeSedimentIntakeRecord(abrainHome, record);
+            if (written.status === "collision") {
+              throw new Error(`intake identity collision: ${written.windowId}`);
+            }
+            // Durable semantic primary only — do NOT enqueue/pass under daemon ownership.
+            void appendAudit(record.cwd, {
+              operation: "skip",
+              lane: "system",
+              reason: "daemon_capture_fallback_intake",
+              session_id: record.sessionId,
+              intake_window_id: record.windowId,
+              intake_status: written.status,
+              intake_write_ms: written.durationMs,
+              checkpoint_advanced: false,
+              background_async: false,
+            }).catch(() => {});
+          } catch (err) {
+            const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
+            void appendAudit(record.cwd, {
+              operation: "skip",
+              lane: "system",
+              reason: "daemon_capture_fallback_intake_failed",
+              session_id: record.sessionId,
+              error,
+              checkpoint_advanced: false,
+              background_async: false,
+            }).catch(() => {});
+          }
           return;
         }
         emitEdgeShadowAggregateOnce("daemon_capture_disabled");
@@ -7250,10 +7330,21 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         };
       },
     ) => {
-      if (resolveSedimentSettings().edgeProtocolShadow.enabled !== true) return;
-      // Daemon continuous pair already wrote witness under triple gate — do not
-      // append a second witness (public writeEdgeTerminalWitness is multi-append).
-      if (isDaemonEdgeShadowCaptureEnabled()) return;
+      const settledSettings = resolveSedimentSettings();
+      if (settledSettings.edgeProtocolShadow.enabled !== true) return;
+      // Daemon continuous pair (full triple gate OR capture-gap edge fallback)
+      // already owns witness under agent_end — do not append a second witness
+      // (public writeEdgeTerminalWitness is multi-append).
+      if (
+        isDaemonEdgeShadowCaptureEnabled(settledSettings)
+        || (
+          settledSettings.executionOwner === "daemon"
+          && settledSettings.edgeProtocolShadow.enabled === true
+          && !isSedimentWorkerMode()
+        )
+      ) {
+        return;
+      }
       if (isSubAgentBoundaryUntrusted()) return;
       if (isSubAgentSession(liveCtx)) return;
       const sessionId = readSessionId(liveCtx.sessionManager);
@@ -7782,6 +7873,9 @@ async function tryAutoWriteLane(args: {
   const autoWriteOnProgress = args.onProgress;
   const autoWriteDeadlineMs = args.deadlineMs;
   const autoWriteNow = args.now ?? Date.now;
+  // Worker task scope: durable markers/outbox only — no free-floating
+  // auto-refresh / republish / push (M2/M3).
+  const taskScopedAutoWrite = autoWriteDeadlineMs !== undefined || args.signal !== undefined;
   const autoWriteBound = {
     signal: args.signal,
     deadlineMs: autoWriteDeadlineMs,
@@ -7949,16 +8043,20 @@ async function tryAutoWriteLane(args: {
             constraintEvidenceEvent.append.eventId ?? null,
           );
           if (!constraintPublicationDurability.durable) {
-            constraintAutoRefreshSchedule = await scheduleConstraintShadowAutoRefresh({
-              abrainHome,
-              cwd,
-              activeProjectId: projectId,
-              knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
-              settings,
-              modelRegistry: args.modelRegistry,
-              reason: "constraint_evidence_event_appended",
-              sourceEventId: constraintEvidenceEvent.append.eventId,
-            });
+            // M2/M3: worker task scope keeps durable CE only — no free-floating
+            // auto-refresh timer that would inherit expired budget ALS.
+            if (!taskScopedAutoWrite) {
+              constraintAutoRefreshSchedule = await scheduleConstraintShadowAutoRefresh({
+                abrainHome,
+                cwd,
+                activeProjectId: projectId,
+                knownProjectIds: Array.from(new Set([...(projectId ? [projectId] : []), ...listAbrainProjects(abrainHome)])).sort(),
+                settings,
+                modelRegistry: args.modelRegistry,
+                reason: "constraint_evidence_event_appended",
+                sourceEventId: constraintEvidenceEvent.append.eventId,
+              });
+            }
           }
         } else {
           constraintEvidenceAppendError = constraintEvidenceEvent.append.status;
@@ -8259,6 +8357,11 @@ async function tryAutoWriteLane(args: {
 
           let forceRepublishScheduled = false;
           try {
+            // M2/M3: worker task scope retains durable pending marker only —
+            // do not start free-floating republish (can spawn ≤300s child).
+            if (taskScopedAutoWrite) {
+              forceRepublishScheduled = false;
+            } else {
             const runtimeMaxReadBytes = resolveRuleInjectorSettings()
               .propositionPolicyStableViewInjection.maxReadBytes;
             const scheduled = schedulePropositionPolicyStableViewSourceChangeRepublish({
@@ -8309,6 +8412,7 @@ async function tryAutoWriteLane(args: {
                 pending_marker_retained: true,
               }).catch(() => {});
             });
+            } // end !taskScopedAutoWrite republish
           } catch (error) {
             // Sync schedule failure: capture stays (marker durable); session_start retries.
             console.error(
@@ -8720,7 +8824,6 @@ async function tryAutoWriteLane(args: {
   const writeStart = Date.now();
   const results: WriteProjectEntryResult[] = [];
   const curatorAudits: CuratorAudit[] = [];
-  const taskScopedAutoWrite = autoWriteDeadlineMs !== undefined || args.signal !== undefined;
   for (const [i, draft] of compliantDrafts.entries()) {
     // Assert remaining before constructing candidate promise / clamp / curator.
     // Expired → ordinary stage_deadline; do not start new candidate work.
@@ -9146,7 +9249,7 @@ export function _isCurrentCandidateDeferredReasonForTests(reason: string | undef
 export async function _runSedimentAgentEndPassForTests(
   snapshot: SedimentAgentEndSnapshotForTests,
   opts?: Parameters<SedimentAgentEndPassRunner>[1],
-): Promise<void | { more: true }> {
+): Promise<SedimentWorkerPassOutcome> {
   if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
     throw new Error("_runSedimentAgentEndPassForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
   }

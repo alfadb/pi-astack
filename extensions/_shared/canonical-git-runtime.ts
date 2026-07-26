@@ -62,6 +62,10 @@ import {
   writeLastKnownReadyFingerprint,
 } from "./l1-validated-scan-cache";
 import { sha256Hex } from "./jcs";
+import {
+  clampStartupBudgetToWorker,
+  getWorkerBudgetContext,
+} from "./worker-budget-context";
 
 const execFileAsync = promisify(execFile);
 const GLOBAL_KEY = Symbol.for("pi-astack/canonical-git-runtime/v1");
@@ -1922,10 +1926,18 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     const now = this.options.startupMonotonicNow ?? monotonicNowMs;
     const sleep = this.options.startupRetrySleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
     const random = this.options.startupRetryRandom ?? Math.random;
-    const busyBudgetMs = Math.max(0, this.options.startupBusyBudgetMs ?? DEFAULT_STARTUP_BUSY_BUDGET_MS);
+    // H2: under daemon worker budget ALS, clamp cold-start busy budget to the
+    // remaining soft deadline (never inherit the 60m default into a short-lived
+    // worker task). Outside ALS, configured/default budgets are unchanged.
+    // Cooperative deferred on exhaustion — does not hard-kill in-flight mutation.
+    const configuredBusyBudgetMs = Math.max(0, this.options.startupBusyBudgetMs ?? DEFAULT_STARTUP_BUSY_BUDGET_MS);
+    const workerBudget = getWorkerBudgetContext();
+    const clockForBudget = workerBudget?.now ?? now;
+    const busyBudgetMs = clampStartupBudgetToWorker(configuredBusyBudgetMs, clockForBudget());
     const busyInitialBackoffMs = Math.max(1, this.options.startupBusyInitialBackoffMs ?? DEFAULT_STARTUP_BUSY_INITIAL_BACKOFF_MS);
     const busyMaxBackoffMs = Math.max(busyInitialBackoffMs, this.options.startupBusyMaxBackoffMs ?? DEFAULT_STARTUP_BUSY_MAX_BACKOFF_MS);
     const busyStarted = now();
+    // When worker remaining is 0, deadline == started → first cutpoint defers.
     const busyDeadline = busyStarted + busyBudgetMs;
     let driftAttempt = 0;
     let busyRetry = 0;
@@ -2856,9 +2868,52 @@ function getCanonicalStartupAttempt(options: CanonicalGitRuntimeOptions): {
 }
 
 /** Return the one process-global in-flight/successful startup promise for this
- * runtime. Rejections are evicted so a repaired repo can retry in-process. */
+ * runtime. Rejections are evicted so a repaired repo can retry in-process.
+ * Under worker budget ALS: race remaining soft deadline so a cold scan cannot
+ * pin the short-lived worker for the 60m default (H2). Exhaustion yields a
+ * cooperative deferred diagnostic; same-process later generations can retry.
+ * Does not hard-kill in-flight mutation. */
 export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions): Promise<CanonicalRuntimeDiagnostics> {
-  return getCanonicalStartupAttempt(options).promise;
+  const attempt = getCanonicalStartupAttempt(options);
+  const budget = getWorkerBudgetContext();
+  if (!budget) return attempt.promise;
+  const now = budget.now ?? Date.now;
+  const rem = Math.max(0, budget.deadlineMs - now());
+  if (rem <= 0) {
+    return Promise.resolve(workerBudgetStartupDeferredDiag(options, 0));
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<CanonicalRuntimeDiagnostics>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(workerBudgetStartupDeferredDiag(options, rem));
+    }, rem);
+    (timer as { unref?: () => void }).unref?.();
+  });
+  return Promise.race([attempt.promise, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+function workerBudgetStartupDeferredDiag(
+  options: CanonicalGitRuntimeOptions,
+  observedBudgetMs: number,
+): CanonicalRuntimeDiagnostics {
+  const repo = path.resolve(options.abrainHome);
+  const settings = resolveCanonicalGitRuntimeSettings(options.settingsPath);
+  return Object.freeze({
+    apiVersion: API_VERSION,
+    repo,
+    settings,
+    startupGeneration: 0,
+    startup: "deferred" as const,
+    retryable: true as const,
+    deferredReason: "STARTUP_BUDGET_EXHAUSTED" as const,
+    blockedReason:
+      `STARTUP_BUDGET_EXHAUSTED: worker budget deferred startup after ${Math.floor(observedBudgetMs)}ms; retry requires an external lifecycle trigger`,
+    loadedProvenance: Object.freeze([] as CanonicalRuntimeDiagnostics["loadedProvenance"]),
+    implementationFingerprint: peekGlobalState()?.implementationFingerprint ?? "worker-budget-deferred",
+    tail: Object.freeze([] as CanonicalRuntimeDiagnostics["tail"]),
+  });
 }
 
 /** Refresh the current session's reporter without retaining it in a pending task. */

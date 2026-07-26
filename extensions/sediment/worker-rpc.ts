@@ -290,13 +290,39 @@ export interface SedimentWorkerPassSnapshot {
   readonly boundaryUntrusted: boolean;
 }
 
+/** Closed deterministic no-progress codes (not auto-retryable; no success receipt). */
+export const SEDIMENT_WORKER_DETERMINISTIC_NO_PROGRESS_CODES = [
+  "project_not_bound",
+  "settings_disabled",
+  "empty_window",
+  "ephemeral_session",
+] as const;
+export type SedimentWorkerDeterministicNoProgressCode =
+  (typeof SEDIMENT_WORKER_DETERMINISTIC_NO_PROGRESS_CODES)[number];
+const DETERMINISTIC_NO_PROGRESS_SET = new Set<string>(SEDIMENT_WORKER_DETERMINISTIC_NO_PROGRESS_CODES);
+
+export function isDeterministicNoProgressCode(code: string | undefined): boolean {
+  return typeof code === "string" && DETERMINISTIC_NO_PROGRESS_SET.has(code);
+}
+
+/** Pass outcome: void / more / explicit no-progress classification. */
+export type SedimentWorkerPassOutcome =
+  | void
+  | { more: true }
+  | {
+      no_progress: true;
+      code: SedimentWorkerDeterministicNoProgressCode | "no_progress";
+      /** Default: deterministic codes → false; plain no_progress → true. */
+      retryable?: boolean;
+    };
+
 export type SedimentWorkerPassRunner = (
   snapshot: SedimentWorkerPassSnapshot,
   opts?: {
     intakeWindowId?: string;
     fromRecovery?: boolean;
   } & SedimentWorkerPassRuntimeOpts,
-) => Promise<void | { more: true }>;
+) => Promise<SedimentWorkerPassOutcome>;
 
 export interface SedimentWorkerCommandDeps {
   runAgentEndPass: SedimentWorkerPassRunner;
@@ -1320,6 +1346,9 @@ export function activeDeadlineFenceCountForTests(): number {
 }
 
 function markWorkerProcessPoisoned(reason: string): void {
+  // L5: first poison reason is sticky — subsequent refuse paths must not
+  // overwrite root cause (e.g. worker_process_poisoned on each reject).
+  if (workerProcessPoisoned) return;
   workerProcessPoisoned = true;
   workerProcessPoisonReason = reason;
 }
@@ -1767,7 +1796,7 @@ export async function runSedimentWorkerTask(
               }
               progress("checkpoint", "end");
 
-              let passResult: void | { more: true };
+              let passResult: SedimentWorkerPassOutcome;
               try {
                 passResult = await deps.runAgentEndPass(snapshot, {
                   fromRecovery: false,
@@ -1825,7 +1854,26 @@ export async function runSedimentWorkerTask(
                 anyAdvanced = true;
                 lastKnownAdvanced = true;
               }
-              lastMore = !!(passResult && typeof passResult === "object" && passResult.more === true);
+              // Explicit pass classification (M4): deterministic vs retryable no_progress.
+              if (
+                passResult
+                && typeof passResult === "object"
+                && (passResult as { no_progress?: unknown }).no_progress === true
+              ) {
+                const classified = passResult as {
+                  no_progress: true;
+                  code: string;
+                  retryable?: boolean;
+                };
+                const code = typeof classified.code === "string" && classified.code
+                  ? classified.code
+                  : "no_progress";
+                const retryable = classified.retryable
+                  ?? (isDeterministicNoProgressCode(code) ? false : true);
+                progress("pass", "end");
+                return failResult(ids, code, { retryable, pass_iterations: iterations });
+              }
+              lastMore = !!(passResult && typeof passResult === "object" && (passResult as { more?: unknown }).more === true);
               progress("pass", "end");
 
               if (lastMore) {
@@ -1839,8 +1887,9 @@ export async function runSedimentWorkerTask(
 
               // more=false terminal for this task attempt.
               if (!anyAdvanced && !advanced) {
-                // Soft skip / project_not_bound / settings disabled / empty window:
-                // void return is NOT processed. No success receipt.
+                // Void return without classification remains retryable no_progress
+                // (transient / unknown soft skip). Deterministic codes must be
+                // surfaced explicitly by the pass (M4).
                 return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
               }
 
@@ -1902,9 +1951,20 @@ export async function runSedimentWorkerTask(
                 }
               }
 
-              // Success: trigger knowledge publication outbox one-shot (cannot wait session_start).
+              // Success receipt is durable. Publication drain is best-effort under
+              // remaining hard budget only — never unbounded (H1). Skip when no
+              // reserve remains; durable outbox stays for a later drain edge.
               try {
-                await deps.drainKnowledgePublicationOutbox?.(abrainHome);
+                if (deps.drainKnowledgePublicationOutbox) {
+                  const drainRem = Math.max(0, absoluteDeadlineMs - clock());
+                  if (drainRem > 0 && !ac.signal.aborted) {
+                    const drainBudgetMs = Math.min(SEDIMENT_WORKER_CLEANUP_RESERVE_MS, drainRem);
+                    await Promise.race([
+                      Promise.resolve(deps.drainKnowledgePublicationOutbox(abrainHome)),
+                      sleepMs(drainBudgetMs, ac.signal).then(() => undefined),
+                    ]);
+                  }
+                }
               } catch {
                 // Publication drain is best-effort after settled success; durable
                 // outbox remains for a later drain edge.
@@ -1983,6 +2043,8 @@ export async function runSedimentWorkerTask(
         };
 
         // Re-read CP after abort/deadline.
+        // H1: durable processed receipt always wins → settled success (never
+        // deadline_after_checkpoint_advanced / pass_unreaped poison).
         // ONLY coversTip + no receipt → deadline_after_checkpoint_advanced fatal.
         // Partial before→after CP advance is safe resume: ordinary retryable
         // deadline, no poison (more-loop partial watermark).
@@ -1990,6 +2052,23 @@ export async function runSedimentWorkerTask(
         const resolveDeadlineOutcome = async (
           fallbackCode: SedimentWorkerDeadlineErrorCode,
         ): Promise<SedimentWorkerResult> => {
+          try {
+            const existing = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
+            if (existing) {
+              return resultFromProcessedReceipt(existing, ids.request_id);
+            }
+          } catch {
+            /* corrupt receipt still fail-closed below if coversTip */
+          }
+          // Fast path: receipt file present even if re-read races (create-only).
+          if (fsSync.existsSync(sedimentWorkerReceiptPath(abrainHome, ids.terminal_record_id))) {
+            try {
+              const raced = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
+              if (raced) return resultFromProcessedReceipt(raced, ids.request_id);
+            } catch {
+              /* fall through to coversTip diagnostic */
+            }
+          }
           let coversTip = false;
           try {
             const after = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
@@ -2054,7 +2133,9 @@ export async function runSedimentWorkerTask(
               }
               if (!passSettled) {
                 // Background pass still running — do NOT detach serial (hung gate stays).
-                // Poison process; daemon must kill-and-wait before redrive. OFD released in finally.
+                // H1: if create-only receipt already durable, return settled success
+                // (never pass_unreaped / deadline_after_checkpoint_advanced poison).
+                // Otherwise poison process; daemon must kill-and-wait before redrive.
                 return await resolveDeadlineOutcome("pass_deadline_exceeded_unreaped");
               }
               // Settled during cleanup window — plain codes must not poison when CP not advanced.

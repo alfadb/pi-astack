@@ -119,9 +119,23 @@ export async function appendTier1ConstraintEvidenceEvent(
       }
       if (drained.status === "index_converged" && drained.commit
         && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1" && process.env.PI_ABRAIN_DISABLED !== "1") {
-        void withoutCanonicalMutationBarrierContext(() => import("../../abrain/git-sync")
-          .then((gitSync) => gitSync.pushAsync({ abrainHome: options.abrainHome }))
-          .catch(() => undefined));
+        // M2/M3: exit both barrier and worker-budget ALS so detached push never
+        // inherits a settled/expired worker deadline or pins short-lived workers.
+        void withoutCanonicalMutationBarrierContext(() => {
+          void import("../../_shared/worker-budget-context")
+            .then(({ runOutsideWorkerBudget }) => {
+              runOutsideWorkerBudget(() => {
+                void import("../../abrain/git-sync")
+                  .then((gitSync) => gitSync.pushAsync({ abrainHome: options.abrainHome }))
+                  .catch(() => undefined);
+              });
+            })
+            .catch(() => {
+              void import("../../abrain/git-sync")
+                .then((gitSync) => gitSync.pushAsync({ abrainHome: options.abrainHome }))
+                .catch(() => undefined);
+            });
+        });
       }
     }
     return { body, append, ...state };

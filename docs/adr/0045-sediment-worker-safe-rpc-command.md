@@ -190,11 +190,19 @@ Foreground (no worker opts) keeps original schedules unchanged. Docs describe th
 | `receipt_write_failed` | create-only receipt write failed/timed out under hard reserve after more=false main-chain success | true | **false** |
 
 **Checkpoint / receipt deadline rules**:
-- On deadline/abort capture, re-read CP. **Only** when durable CP **covers tip** and no success receipt → `deadline_after_checkpoint_advanced` (retryable=false, poison).
+- On **every** deadline/abort/unreaped outcome path, first re-read the create-only **processed receipt**. If a valid receipt is durable → return settled `processed` / `already_processed` (**never** `deadline_after_checkpoint_advanced` / `pass_deadline_exceeded_unreaped` poison). Publication outbox drain after receipt is **budget-bounded** (≤ cleanup reserve / remaining hard deadline) or best-effort skipped; it must not pin the task unboundedly.
+- On deadline/abort capture without receipt, re-read CP. **Only** when durable CP **covers tip** and no success receipt → `deadline_after_checkpoint_advanced` (retryable=false, poison).
 - **Partial** before→after CP advance (more-loop intermediate watermark, tip not covered) is **safe resume**: ordinary retryable deadline (`worker_budget_exhausted` / `stage_deadline` / …), **no poison**.
 - Entry path: if durable CP already covers current sidecar tip but receipt is absent → same closed `deadline_after_checkpoint_advanced` (only a valid success receipt may return `already_processed`).
 - After `more=false` and main chain really advanced: even if **soft** deadline has elapsed, use the reserved **hard** deadline (≤5s cleanup reserve) to attempt create-only receipt — **do not soft-fence before receipt write**. Success → `processed`; failure/timeout → `receipt_write_failed` (retryable).
 - more-loop re-checks remaining budget each iteration (cannot open 16 full budgets).
+- Canonical startup under worker budget ALS clamps `startupBusyBudgetMs` to remaining soft deadline and may cooperative-defer (`STARTUP_BUDGET_EXHAUSTED`); same-process later generations can retry. Does **not** hard-kill in-flight mutation. CE/writer share the process runtime singleton.
+
+**`no_progress` classification (M4)**:
+- Pass may return `{ no_progress: true, code, retryable? }` for explicit skips.
+- **Deterministic non-retryable** closed codes: `project_not_bound`, `settings_disabled`, `empty_window`, `ephemeral_session` (`retryable=false`, no receipt, no poison). Daemon attempt policy: do **not** auto-redrive these; surface for operator/config fix. Stage0 has no automatic attempt cap beyond this classification — daemon **must not** treat them as ordinary retryable deadline.
+- Unclassified void / soft no-progress remains `no_progress` with `retryable=true` (transient).
+- Process poison reason is sticky (first root cause wins; subsequent `worker_process_poisoned` refuses do not overwrite).
 
 **Honest Stage0 bounds**
 
@@ -211,7 +219,8 @@ Foreground (no worker opts) keeps original schedules unchanged. Docs describe th
 
 `more=true` continues **inside the worker** (hard budget 16). Budget exhaust ⇒ retryable non-final, **no** success receipt.
 
-Soft skip / `project_not_bound` / settings disabled / no progress / void return ⇒ `status=failed`, `settled=false`, `retryable=true`, **no** success receipt. Void is never treated as processed.
+Soft skip / void return ⇒ `status=failed`, `settled=false`, `retryable=true`, **no** success receipt. Void is never treated as processed.
+Deterministic skips (`project_not_bound` / `settings_disabled` / `empty_window` / `ephemeral_session`) ⇒ `status=failed`, `settled=false`, **`retryable=false`**, **no** success receipt (see M4 classification above).
 
 Receipt schema `pi-astack/sediment-worker-receipt/v1` under:
 

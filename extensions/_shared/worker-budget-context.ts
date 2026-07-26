@@ -21,8 +21,28 @@ export function runWithWorkerBudget<T>(ctx: WorkerBudgetContext, fn: () => T): T
   return workerBudgetALS.run(ctx, fn);
 }
 
+/**
+ * Run fn outside any worker budget ALS store.
+ * Detached timers / free-floating promises must use this so a settled worker
+ * task cannot leave a permanently-expired budget context on later work.
+ */
+export function runOutsideWorkerBudget<T>(fn: () => T): T {
+  return workerBudgetALS.exit(fn);
+}
+
 export function getWorkerBudgetContext(): WorkerBudgetContext | undefined {
   return workerBudgetALS.getStore();
+}
+
+/**
+ * Clamp a configured startup/busy budget to remaining worker soft deadline.
+ * Outside worker budget ALS: returns configured value unchanged.
+ * When remaining is 0, returns 0 so callers can cooperative-defer immediately.
+ */
+export function clampStartupBudgetToWorker(configuredMs: number, now: number = Date.now()): number {
+  const remaining = remainingWorkerBudgetMs(now);
+  if (remaining === undefined) return configuredMs;
+  return Math.max(0, Math.min(configuredMs, remaining));
 }
 
 /** Remaining ms under worker budget, or undefined when not in worker budget scope. */
