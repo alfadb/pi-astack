@@ -214,6 +214,11 @@ function assertAbrainLocalWriteSafety(abrainHome = ABRAIN_HOME): void {
   }
 }
 
+/** Vault slash domain: local safety only — never awaits Path A canonical startup. */
+function assertVaultLocalSafety(abrainHome = ABRAIN_HOME): void {
+  assertAbrainLocalWriteSafety(abrainHome);
+}
+
 async function awaitAbrainCanonicalWriteBarrier(abrainHome = ABRAIN_HOME): Promise<void> {
   assertAbrainLocalWriteSafety(abrainHome);
   if (!canonicalGitRuntimeEnabled()) return;
@@ -2379,7 +2384,7 @@ export default function activate(pi: ExtensionAPI): void {
             handleStatus(ctx.ui);
             return;
           case "init":
-            await awaitAbrainCanonicalWriteBarrier();
+            assertVaultLocalSafety();
             await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
             return;
           default:
@@ -2702,7 +2707,7 @@ function renderListing(scope: VaultScope): string {
 }
 
 async function handleSecret(args: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
-  assertAbrainLocalWriteSafety();
+  assertVaultLocalSafety();
   // Pre-flight: vault must be initialized
   const backend = readBackendFile(ABRAIN_HOME);
   if (!backend) {
@@ -2748,7 +2753,6 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
-      await awaitAbrainCanonicalWriteBarrier();
       const result = await writeSecret({
         abrainHome: ABRAIN_HOME,
         scope: resolved.scope,
@@ -2829,7 +2833,6 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
-      await awaitAbrainCanonicalWriteBarrier();
       const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
       const label = scopeReadableLabel(resolved.scope);
       // Round 7 P0 (gpt-5.5): forget outcome is tri-state. "absent" is a

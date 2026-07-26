@@ -26,6 +26,26 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 
 ## 2. Human slash command groups
 
+### Slash command execution domains
+
+Slash commands may share the `~/.abrain` filesystem root, but **sharing paths does not imply sharing Path A canonical L1/L2 startup**. Each group has its own wait policy:
+
+| Group | Domain | Canonical startup wait |
+|---|---|---|
+| `/abrain` | Abrain control | In canonical mode, `/abrain bind` and `/abrain sync` await Path A ready (`awaitAbrainCanonicalReady`) before any mutation. `/abrain status` and `/abrain audit` are read-only / diagnostic and do not wait. |
+| `/secret` | Vault | **No** canonical wait. Writes (`set` / `forget`) and reads (`list`) use vault local-safety only (layout + state gitignore). Strict project binding still gates project scope. |
+| `/vault` | Vault | **No** canonical wait. `/vault init` uses vault local-safety only; `/vault status` is immediate local read. |
+| `/rule` | Rule diagnostics | No canonical wait; inspection / explain / reload against rule substrate. |
+| `/memory` | Memory maintenance | No canonical write-barrier wait; migrate/lint/doctor operate on bound project + derived artifacts. |
+| `/sediment` | Sediment diagnostics | No canonical wait; status/dedupe maintenance (ordinary writes land on `agent_end`). |
+| `/goal` | Goal tracking | No canonical wait; local goal state. |
+| `/workflow` | Workflow control | No canonical wait; workflow runtime / env gates. |
+| `/compaction-tuner` | Compaction control | No canonical wait; reads `pi-astack-settings.json#compactionTuner`. |
+| `/curator-reload` | Model curator | No canonical wait; re-applies curated model routing. |
+| `/history-compact` / `/history-status` | Input history | No canonical wait; local prompt-history maintenance. |
+
+Vault encrypted artifacts and metadata still follow the existing **user-manual git commit** policy; these commands do not auto-commit vault ciphertext into an outbox.
+
 ### `/abrain`
 
 ```text
@@ -72,6 +92,8 @@ Sediment writing normally happens on `agent_end`; these commands are diagnostics
 /secret list [--global|--project=<id>|--all-projects]
 /secret forget [--global|--project=<id>] <key>
 ```
+
+Execution domain is **Vault**, not Path A convergence: `/vault init`, `/secret set`, and `/secret forget` depend on abrain local safety, vault lock, backend/keypair, atomic write, audit, and (for project scope) strict project binding. They **do not** await canonical L1/L2 startup. `/vault status` and `/secret list` remain immediate local reads under the same local-safety envelope. Post-write git commit of vault ciphertext remains a user-owned manual step (no auto-commit / outbox).
 
 `/vault init` defaults to `--backend=abrain-age-key` ([ADR 0019](../adr/0019-abrain-self-managed-vault-identity.md)): abrain self-managed age keypair, identity gitignored, no reuse of `~/.ssh/id_*`. Explicit `--backend=ssh-key | gpg-file | passphrase-only` selects a Tier 3 legacy backend and produces a stderr warning about cross-device transport burden (or, for `passphrase-only`, the unimplemented reader tty pass-through).
 

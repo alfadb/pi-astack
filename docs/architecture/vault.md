@@ -71,6 +71,20 @@ Why this ordering: previous v1.4 chain prioritized ssh-key for containers. Multi
 /secret forget [--global|--project=<id>] <key>
 ```
 
+### Execution flow vs canonical L1/L2 startup
+
+Vault commands live in a **Vault execution domain** that is decoupled from Path A canonical L1/L2 startup:
+
+| Command | Runtime dependencies | Canonical startup |
+|---|---|---|
+| `/vault init` | local safety (layout + `.state/` gitignore), backend/keypair install, vault lock, atomic write, audit | **bypassed** |
+| `/secret set` / `/secret forget` | local safety, vault unlock/backend identity, strict project binding for project scope, vault lock, atomic write, audit | **bypassed** |
+| `/vault status` / `/secret list` | immediate local metadata reads under the local-safety envelope | **not waited** |
+
+Sharing the `~/.abrain` path with memory/sediment/canonical writers does **not** mean vault writes join the same startup barrier. `/abrain` control publication/sync paths await whole-repo Path A readiness when they mutate; vault does not join that barrier and does not split its protocol.
+
+After a successful vault write, encrypted artifacts / metadata still follow the existing policy: **the user manually `git commit` (and optional sync)**. There is no vault auto-commit outbox and no change to gitignore rules. Safety invariants (no plaintext in LLM context without authorization, identity secret gitignored, fail-closed decrypt, audit on read/write paths) are unchanged.
+
 ### LLM tool
 
 ```text

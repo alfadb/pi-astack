@@ -275,6 +275,123 @@ check("__resetBootActiveProjectForTests round-trips an active project value", ()
   if (indexModule.getBootActiveProject() !== null) throw new Error("reset to null failed");
 });
 
+// Vault execution-domain AST: slash writes use local safety only, never Path A
+// canonical startup barriers (awaitAbrainCanonicalWriteBarrier etc.).
+check("vault slash execution domain uses local safety only (AST)", () => {
+  const srcPath = path.join(repoRoot, "extensions/abrain/index.ts");
+  const src = fs.readFileSync(srcPath, "utf-8");
+  const sf = ts.createSourceFile(srcPath, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+  function textOf(node) {
+    return src.slice(node.getStart(sf), node.getEnd());
+  }
+
+  function findFunction(name) {
+    let found = null;
+    function visit(node) {
+      if (found) return;
+      if (
+        (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isMethodDeclaration(node))
+        && node.name && ts.isIdentifier(node.name) && node.name.text === name
+      ) {
+        found = node;
+        return;
+      }
+      if (ts.isVariableStatement(node)) {
+        for (const decl of node.declarationList.declarations) {
+          if (
+            ts.isIdentifier(decl.name) && decl.name.text === name
+            && decl.initializer
+            && (ts.isFunctionExpression(decl.initializer) || ts.isArrowFunction(decl.initializer))
+          ) {
+            found = decl.initializer;
+            return;
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    return found;
+  }
+
+  function findRegisterCommandHandler(commandName) {
+    let found = null;
+    function visit(node) {
+      if (found) return;
+      if (
+        ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && node.expression.name.text === "registerCommand"
+        && node.arguments.length >= 2
+        && ts.isStringLiteral(node.arguments[0])
+        && node.arguments[0].text === commandName
+        && ts.isObjectLiteralExpression(node.arguments[1])
+      ) {
+        for (const prop of node.arguments[1].properties) {
+          if (
+            ts.isPropertyAssignment(prop)
+            && ts.isIdentifier(prop.name)
+            && prop.name.text === "handler"
+          ) {
+            found = prop.initializer;
+            return;
+          }
+          if (
+            ts.isMethodDeclaration(prop)
+            && prop.name && ts.isIdentifier(prop.name)
+            && prop.name.text === "handler"
+          ) {
+            found = prop;
+            return;
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(sf);
+    return found;
+  }
+
+  const forbidden = [
+    "awaitAbrainCanonicalWriteBarrier",
+    "getCanonicalStartupPromise",
+    "withCanonicalMutationBarrier",
+  ];
+
+  function assertNoCanonical(label, node) {
+    if (!node) throw new Error(`${label}: not found`);
+    const body = textOf(node);
+    for (const name of forbidden) {
+      if (body.includes(name)) throw new Error(`${label}: must not reference ${name}`);
+    }
+  }
+
+  const localGuard = findFunction("assertVaultLocalSafety");
+  if (!localGuard) throw new Error("assertVaultLocalSafety not found");
+  const guardText = textOf(localGuard);
+  if (!guardText.includes("assertAbrainLocalWriteSafety")) {
+    throw new Error("assertVaultLocalSafety must call assertAbrainLocalWriteSafety");
+  }
+  assertNoCanonical("assertVaultLocalSafety", localGuard);
+
+  const handleSecret = findFunction("handleSecret");
+  if (!handleSecret) throw new Error("handleSecret not found");
+  const secretText = textOf(handleSecret);
+  if (!secretText.includes("assertVaultLocalSafety")) {
+    throw new Error("handleSecret must call assertVaultLocalSafety");
+  }
+  assertNoCanonical("handleSecret", handleSecret);
+
+  const vaultHandler = findRegisterCommandHandler("vault");
+  if (!vaultHandler) throw new Error('registerCommand("vault") handler not found');
+  const vaultText = textOf(vaultHandler);
+  if (!vaultText.includes("assertVaultLocalSafety")) {
+    throw new Error("vault handler must call assertVaultLocalSafety");
+  }
+  assertNoCanonical('registerCommand("vault") handler', vaultHandler);
+});
+
 await Promise.all(pendingChecks);
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
