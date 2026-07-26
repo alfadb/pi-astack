@@ -434,17 +434,31 @@ await check("transition machine schema has stable unique IDs and exact canonical
   assert(proposition["proposition.adr0040-policy-stable-view-runtime-flip"] === "completed/authorized", "ADR0040 Policy stable-view runtime flip status/auth mismatch");
   const policyFlip = register.transitions.find((entry) => entry.id === "proposition.adr0040-policy-stable-view-runtime-flip");
   assert(policyFlip.current.includes("stable-view") || policyFlip.current.includes("Policy"), "Policy runtime flip lost sole-authority boundary");
-  assert(proposition["proposition.adr0040-p3-d3-v2-session-start"] === "completed/not_authorized", "ADR0040 D3-v2 session_start retirement status/auth mismatch");
   for (const phase of ["p3-runtime-read-flips", "p4-legacy-authority-retirement"]) {
     assert(proposition[`proposition.adr0040-${phase}`] === "blocked/separate_authorization_required", `ADR0040 ${phase} status/auth mismatch`);
   }
+  const residualP3 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-runtime-read-flips");
+  assert(residualP3.current.includes("policy-stable-view-runtime-flip") && residualP3.current.includes("blocked"), "residual P3 lost Policy-completed vs residual-blocked split");
+  for (const entry of register.transitions) {
+    for (const field of ["entered", "review_by", "exit", "evidence", "owner", "consumer", "renewal_count", "risk_class"]) {
+      assert(Object.hasOwn(entry, field), `${entry.id} missing ${field}`);
+    }
+  }
+});
+
+// Independent of RM-LIFECYCLE-002 / machine-schema check above: D3-v2 retirement must still execute if that check aborts early.
+await check("ADR0040 D3-v2 session_start retirement is completed/not_authorized and runtime-absent", () => {
+  const register = transition.loadTransitionRegister();
+  const proposition = Object.fromEntries(register.transitions
+    .filter((entry) => entry.partition === "proposition")
+    .map((entry) => [entry.id, `${entry.phase_status}/${entry.authorization_status}`]));
+  assert(proposition["proposition.adr0040-p3-d3-v2-session-start"] === "completed/not_authorized", "ADR0040 D3-v2 session_start retirement status/auth mismatch");
   const d3v2 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-d3-v2-session-start");
   assert(d3v2 && d3v2.phase_status === "completed" && d3v2.authorization_status === "not_authorized", "ADR0040 D3-v2 session_start must be completed/not_authorized retired");
   assert(d3v2.human_section === "已收口", "ADR0040 D3-v2 session_start must move to 已收口");
   assert(/never production-authorized|retired|superseded|stable-view/i.test(d3v2.current), "ADR0040 D3-v2 session_start current lost retired/superseded boundary");
   assert(/immutable|non-rerunnable|read-only|D3-PUB/i.test(d3v2.current + " " + d3v2.next_action), "ADR0040 D3-v2 session_start lost evidence/D3-PUB retention boundary");
   const residualP3 = register.transitions.find((entry) => entry.id === "proposition.adr0040-p3-runtime-read-flips");
-  assert(residualP3.current.includes("policy-stable-view-runtime-flip") && residualP3.current.includes("blocked"), "residual P3 lost Policy-completed vs residual-blocked split");
   assert(!/D3-v2 session_start adapter path remains blocked/i.test(residualP3.current), "residual P3 still treats retired D3-v2 as an active blocked consumer");
   // Runtime code for the retired D3-v2 session_start path must be absent; Policy stable-view is sole authority.
   for (const rel of [
@@ -458,11 +472,6 @@ await check("transition machine schema has stable unique IDs and exact canonical
     assert(!fs.existsSync(path.join(repoRoot, rel)), `retired D3-v2 runtime path still present: ${rel}`);
   }
   assert(fs.existsSync(path.join(repoRoot, "extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts")), "stable-view reader missing");
-  for (const entry of register.transitions) {
-    for (const field of ["entered", "review_by", "exit", "evidence", "owner", "consumer", "renewal_count", "risk_class"]) {
-      assert(Object.hasOwn(entry, field), `${entry.id} missing ${field}`);
-    }
-  }
 });
 
 await check("transition validator rejects duplicate IDs and authorization drift", async () => {
