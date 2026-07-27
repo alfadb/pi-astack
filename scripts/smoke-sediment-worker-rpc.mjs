@@ -2669,6 +2669,190 @@ await check("post-pass CP load fail → checkpoint_state_unknown_after_pass nonr
   resetWorkerBudgetTestState();
 });
 
+await check("pipeline_threw + CP reread fail → checkpoint_state_unknown_after_pass; receipt race wins", async () => {
+  resetWorkerBudgetTestState();
+  {
+    const term = hex64("term-pipeline-throw-cp-unknown");
+    const m = baseManifest({
+      request_id: hex64("req-pipeline-throw-cp-unknown"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: "pipeline-cp-unknown" }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    let loads = 0;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => {
+        loads += 1;
+        // 1: beforePassCp, 2: before iteration pass; helper CP reread throws.
+        if (loads >= 3) throw new Error("cp unreadable after pipeline throw");
+        return {};
+      },
+      runAgentEndPass: async () => {
+        throw new Error("post-pass audit boom");
+      },
+      env: process.env,
+    });
+    assert(
+      r.error_code === "checkpoint_state_unknown_after_pass",
+      `pipeline+cp-unknown code=${r.error_code}`,
+    );
+    assert(r.retryable === false, "pipeline+cp-unknown nonretryable");
+    assert(r.restart_child === true, "pipeline+cp-unknown restart_child");
+    assert(worker.isWorkerProcessPoisoned() === true, "pipeline+cp-unknown poison");
+    assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  }
+  // Receipt race: pass writes receipt then throws; helper prefers success even if CP unreadable.
+  resetWorkerBudgetTestState();
+  {
+    const term = hex64("term-pipeline-throw-cp-unknown-receipt");
+    const m = baseManifest({
+      request_id: hex64("req-pipeline-throw-cp-unknown-receipt"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: "pipeline-cp-unknown-receipt" }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    let loads = 0;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => {
+        loads += 1;
+        if (loads >= 3) throw new Error("cp unreadable after pipeline throw");
+        return {};
+      },
+      runAgentEndPass: async () => {
+        const receiptDir = path.dirname(worker.sedimentWorkerReceiptPath(abrainHome, term));
+        fs.mkdirSync(receiptDir, { recursive: true });
+        fs.writeFileSync(worker.sedimentWorkerReceiptPath(abrainHome, term), JSON.stringify({
+          schema: "pi-astack/sediment-worker-receipt/v1",
+          terminal_record_id: term,
+          request_id: m.request_id,
+          status: "processed",
+          settled: true,
+          memory_decisions: 0,
+          memory_writes: 0,
+          created_at: new Date().toISOString(),
+        }));
+        throw new Error("post-pass audit boom");
+      },
+      env: process.env,
+    });
+    assert(r.status === "processed" || r.status === "already_processed", `receipt race status=${r.status}`);
+    assert(r.settled === true, "receipt wins over pipeline+cp-unknown");
+    assert(r.error_code === undefined || r.error_code === null || r.error_code === "", `no error when receipt wins, got=${r.error_code}`);
+    assert(worker.isWorkerProcessPoisoned() === false, "receipt race must not poison");
+  }
+  resetWorkerBudgetTestState();
+});
+
+await check("stage_deadline + CP reread fail → checkpoint_state_unknown_after_pass; receipt race wins", async () => {
+  resetWorkerBudgetTestState();
+  {
+    const term = hex64("term-stage-deadline-cp-unknown");
+    const m = baseManifest({
+      request_id: hex64("req-stage-deadline-cp-unknown"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: "stage-dl-cp-unknown" }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    let loads = 0;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => {
+        loads += 1;
+        // 1: beforePassCp, 2: before iteration pass; helper CP reread throws.
+        if (loads >= 3) throw new Error("cp unreadable after stage_deadline");
+        return {};
+      },
+      runAgentEndPass: async () => {
+        const err = new Error("stage_deadline");
+        err.code = "stage_deadline";
+        throw err;
+      },
+      env: process.env,
+    });
+    assert(
+      r.error_code === "checkpoint_state_unknown_after_pass",
+      `stage_deadline+cp-unknown code=${r.error_code}`,
+    );
+    assert(r.retryable === false, "stage_deadline+cp-unknown nonretryable");
+    assert(r.restart_child === true, "stage_deadline+cp-unknown restart_child");
+    assert(worker.isWorkerProcessPoisoned() === true, "stage_deadline+cp-unknown poison");
+    assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  }
+  // Receipt race: pass writes receipt then stage_deadline; helper prefers success over unknown CP.
+  resetWorkerBudgetTestState();
+  {
+    const term = hex64("term-stage-deadline-cp-unknown-receipt");
+    const m = baseManifest({
+      request_id: hex64("req-stage-deadline-cp-unknown-receipt"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: "stage-dl-cp-unknown-receipt" }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    let loads = 0;
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async () => {
+        loads += 1;
+        if (loads >= 3) throw new Error("cp unreadable after stage_deadline");
+        return {};
+      },
+      runAgentEndPass: async () => {
+        const receiptDir = path.dirname(worker.sedimentWorkerReceiptPath(abrainHome, term));
+        fs.mkdirSync(receiptDir, { recursive: true });
+        fs.writeFileSync(worker.sedimentWorkerReceiptPath(abrainHome, term), JSON.stringify({
+          schema: "pi-astack/sediment-worker-receipt/v1",
+          terminal_record_id: term,
+          request_id: m.request_id,
+          status: "processed",
+          settled: true,
+          memory_decisions: 0,
+          memory_writes: 0,
+          created_at: new Date().toISOString(),
+        }));
+        const err = new Error("stage_deadline");
+        err.code = "stage_deadline";
+        throw err;
+      },
+      env: process.env,
+    });
+    assert(r.status === "processed" || r.status === "already_processed", `receipt race status=${r.status}`);
+    assert(r.settled === true, "receipt wins over stage_deadline+cp-unknown");
+    assert(r.error_code === undefined || r.error_code === null || r.error_code === "", `no error when receipt wins, got=${r.error_code}`);
+    assert(worker.isWorkerProcessPoisoned() === false, "receipt race must not poison");
+  }
+  resetWorkerBudgetTestState();
+});
+
 await check("deadline fence preserves receipt_write_failed first cause", async () => {
   resetWorkerBudgetTestState();
   const term = hex64("term-deadline-receipt-first-cause");

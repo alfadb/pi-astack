@@ -1776,14 +1776,12 @@ async function resolveRetryableWithReceiptCpInvariant(args: {
       });
     }
   } catch {
-    // Cannot re-read CP: if this attempt already advanced, treat as fatal invariant
-    // (do not authorize retry when durable progress is known).
-    if (anyAdvanced) {
-      return failCpAdvancedNoReceipt(ids, {
-        ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
-      });
-    }
-    /* CP load failed without proven advance: fall through to original code */
+    // Post-pass CP re-read failed: cannot prove/disprove advance after pass work
+    // began — fail closed regardless of anyAdvanced. (Pre-pass / claim CP load
+    // failures keep their own retryable classification outside this helper.)
+    return failCheckpointStateUnknownAfterPass(ids, {
+      ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
+    });
   }
   // Poison closed-set codes still poison when CP did not cover tip (unreaped/serial).
   if (isPoisonRestartCode(code) || isWorkerDeadlineErrorCode(code)) {
