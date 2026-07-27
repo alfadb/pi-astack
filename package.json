@@ -309,7 +309,8 @@
     "dossier:adr0039-l1-rebuild-canary": "node scripts/dossier-adr0039-l1-rebuild-canary.mjs --abrain ~/.abrain",
     "gate:adr0039-flip-coverage": "node scripts/adr0039-flip-coverage-gate.mjs --abrain ~/.abrain",
     "smoke:sediment-extractor-budget": "node scripts/smoke-sediment-extractor-budget.mjs",
-    "dossier:sediment-extractor-budget-production-readonly": "node scripts/dossier-sediment-extractor-budget-production-readonly.mjs"
+    "dossier:sediment-extractor-budget-production-readonly": "node scripts/dossier-sediment-extractor-budget-production-readonly.mjs",
+    "recover:edge-unreferenced-sources": "node scripts/recover-edge-unreferenced-sources.mjs"
   },
   "pi": {
     "extensions": [

@@ -1183,33 +1183,42 @@ async function maybeCaptureDaemonEdgeProtocolShadow(args: {
       leafTip,
     });
     if (pair.status === "complete") {
+      if (pair.c6_collision) {
+        emitEdgeShadowAggregateOnce("edge_shadow_c6_collision");
+      }
       auditDaemonEdgeShadowCapture({
         cwd,
-        result: "complete",
+        result: pair.c6_collision ? "complete_c6_collision" : "complete",
         pairStatus: pair.status,
         candidateReused: pair.candidate_reused === true,
         witnessReused: pair.witness_reused === true,
+        ...(pair.c6_collision ? { skipCode: "c6_collision" } : {}),
       });
       return;
     }
     if (pair.status === "candidate_only") {
       // Candidate kept; session_start recovery / next retry fills witness.
       emitEdgeShadowAggregateOnce("edge_shadow_candidate_only");
+      if (pair.c6_collision) {
+        emitEdgeShadowAggregateOnce("edge_shadow_c6_collision");
+      }
       auditDaemonEdgeShadowCapture({
         cwd,
         result: "candidate_only",
         pairStatus: pair.status,
         candidateReused: pair.candidate_reused === true,
+        ...(pair.c6_collision ? { skipCode: "c6_collision" } : {}),
       });
       return;
     }
     if (pair.status === "conflict") {
-      emitEdgeShadowAggregateOnce("edge_shadow_c6_content_conflict");
+      const code = pair.error_code ?? "terminal_identity_content_conflict";
+      emitEdgeShadowAggregateOnce(`edge_shadow_${code}`);
       auditDaemonEdgeShadowCapture({
         cwd,
         result: "failed",
         pairStatus: pair.status,
-        skipCode: pair.error_code ?? "c6_content_conflict",
+        skipCode: code,
       });
       return;
     }

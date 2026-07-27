@@ -63,6 +63,8 @@ Link 字段最小集：`owner_session_epoch` / `executor_epoch` / `launch_token`
 **C6 causal identity** = `(session_id, turn_id, subturn, sub_agent_label, parent)`：因果语义与问责；跨层不漂移。`turn_id`/`subturn` 只由真实因果事件推进。  
 **`run_generation`** = 同一因果工作在 seal / late launch / restart / fence 上的执行代际。**绝不能**复用字段、改写或冒充 `turn_id`/`subturn`。二者分离，禁止混用。
 
+**Pair admission（capture-only protocol shadow）**：durable key = `(session_id, terminal leaf message id)`（真实 `leaf_tip.id`）。C6 完整保留 attribution 但不作唯一 admission。不同 leaf 同 C6 → 独立 pair + `c6_collision` diagnostic；同 leaf 同 digest 幂等；同 leaf 不同 digest → `terminal_identity_content_conflict`。旧 journal 不可改写；index 可从 `leaf_tip`/content 推导 legacy leaf。未引用 source 仅 operator `recover-edge-unreferenced-sources`（默认 dry-run，`--execute` 写 candidate+witness；不 auto session_start；不写 job/ACK）。
+
 ## 6. Source 与降级
 
 - source：`pending | ready | dead`；candidate source 可提前上传并单独 durable；**source receipt ACK ≠ job**；dead → `source_dead` / 无 job。
@@ -95,6 +97,8 @@ Link 字段最小集：`owner_session_epoch` / `executor_epoch` / `launch_token`
 ### 8.1 自动化
 
 - `npm run smoke:edge-protocol-shadow`（真并发跨进程 seq、candidate-vs-witness 竞态、toJsonSafe cycle/shared、sanitizeSessionId pure-dot、真实 extension wiring 隔离进程含 session_start layout init / default-off 零产物 / 同 session 多 turn seq+leaf+witness、durable-write verifyCreated、intake verifyCreated=false identical/collision、strict tsc、source fault injection、跨进程重启仅凭 record filenames 连续 seq、断言无 writer-state、`initializeEdgeProtocolShadowSession` 幂等）
+- `npm run smoke:sediment-daemon-edge-capture`（continuous pair：terminal-leaf admission、同 leaf content conflict、同 C6 不同 leaf + `c6_collision`、A→B→A reuse、unreferenced source dry-run/execute/redrive、producer_seq、strict tsc）
+- `npm run recover:edge-unreferenced-sources -- --abrain-home <path> [--owner-project-root <path>] [--session-id <id>] [--limit N] [--execute]`（operator only；默认 dry-run；`--execute` 写 candidate+witness；不改 source；不写 job/ACK；不在 session_start 自动跑）
 - `npm run dossier:edge-protocol-shadow-production`（**v3 full-handler 真实 session 多 turn** 验收：真实 extension `session_start` layout init + `agent_end` + `agent_settled`；真实 Pi JSONL 主链多 turn，边界=**terminal assistant**（`stopReason !== 'toolUse'`）；≥100 terminal turns × 3 轮；`agent_end` 与 witness 各自每轮+aggregate p99&lt;100ms；session_start metrics 单独报告非 gate；同 session 多 turn integrity hard fail（exact current intake + longitudinal seq）；不足/超标均 `not_accepted`，禁止 fixture；stdout 纯脱敏 JSON）。权威归档见 [edge protocol shadow production acceptance v3](../evidence/2026-07-24-edge-protocol-shadow-production-acceptance.json)（已通过：26×100×3、4200/4200、aggregate end/witness p99 均 &lt;100ms；默认 off / capture-only / 非 cutover；Stage A/B/C 未完成；local intake 唯一 primary）
 
 ## 9. 相关文档

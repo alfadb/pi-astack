@@ -7,7 +7,9 @@
  *  - daemon + edgeProtocolShadow + flag + healthy terminal → 2 records + exact sidecar
  *  - error/abort/toolUse/empty skip
  *  - same-turn retry idempotent (no duplicate candidate)
- *  - c6_content_conflict fail closed
+ *  - terminal_identity_content_conflict fail closed (same leaf, different content)
+ *  - different leaves with same C6 admit independently (c6_collision diagnostic)
+ *  - A→B→A leaf reuse; legacy leaf derivation; unreferenced source dry-run/execute
  *  - hard 8MiB size bound (exact / +1 byte, no partial)
  *  - staging temps not under journal/records; residual compatible with scanner layout
  *  - cross-process concurrent pair → 1 candidate + 1 witness
@@ -360,7 +362,7 @@ await check("error/abort/toolUse/empty skip: no new records", async () => {
   assert(records === 0, `unhealthy must not write, got ${records}`);
 });
 
-await check("same-turn retry idempotent + conflict + partial witness recovery + old session", async () => {
+await check("same-leaf retry idempotent + content conflict + partial witness recovery + old session", async () => {
   writeSettings(daemonEdgeSettings());
   const sessionId = "sess-idem";
   const messages = [
@@ -394,7 +396,7 @@ await check("same-turn retry idempotent + conflict + partial witness recovery + 
   assert(second.witness_reused === true, "witness must be reused");
   assert(countEdgeRecords(sessionId).records === 2, "idempotent retry must not add records");
 
-  // Same C6 different content → conflict, no append.
+  // Same leaf different content → conflict, no append.
   const conflict = await edge.captureEdgeProtocolTerminalPair({
     abrainHome,
     ownerProjectRoot: ownerRootReal,
@@ -407,7 +409,7 @@ await check("same-turn retry idempotent + conflict + partial witness recovery + 
     leafTip,
   });
   assert(conflict.status === "conflict", `expected conflict got ${conflict.status}`);
-  assert(conflict.error_code === "c6_content_conflict", `code=${conflict.error_code}`);
+  assert(conflict.error_code === "terminal_identity_content_conflict", `code=${conflict.error_code}`);
   assert(countEdgeRecords(sessionId).records === 2, "conflict must not append");
 
   // Partial failure: candidate only on a NEW session, then owner-wide recovery.
@@ -440,6 +442,127 @@ await check("same-turn retry idempotent + conflict + partial witness recovery + 
     ownerProjectRoot: ownerRootReal,
   });
   assert(recovered2.recovered === 0, "recovery idempotent");
+});
+
+await check("restart turn0 different leaves + A→B→A + c6_collision + legacy leaf + unref recovery", async () => {
+  writeSettings(daemonEdgeSettings());
+  const sessionId = "sess-leaf-admit";
+  const c6Turn0 = { session_id: sessionId, turn_id: 0 };
+  const leafA = { id: "leaf-A", parentId: null, type: "message", timestampUtc: "2026-07-25T13:00:00.000Z" };
+  const leafB = { id: "leaf-B", parentId: "leaf-A", type: "message", timestampUtc: "2026-07-25T13:00:01.000Z" };
+  const msgA = [
+    { role: "user", content: [{ type: "text", text: "a-user" }] },
+    { role: "assistant", content: [{ type: "text", text: "a-asst" }], stopReason: "stop" },
+  ];
+  const msgB = [
+    { role: "user", content: [{ type: "text", text: "b-user" }] },
+    { role: "assistant", content: [{ type: "text", text: "b-asst" }], stopReason: "stop" },
+  ];
+  const msgA2 = [
+    { role: "user", content: [{ type: "text", text: "a2-user" }] },
+    { role: "assistant", content: [{ type: "text", text: "a2-asst" }], stopReason: "stop" },
+  ];
+
+  // Restart turn0 with different leaves → both succeed (same C6).
+  const a1 = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId, messages: msgA, c6: c6Turn0, leafTip: leafA,
+  });
+  assert(a1.status === "complete", `leafA ${a1.status} ${a1.error_code || ""}`);
+  assert(a1.c6_collision !== true, "first leaf no collision");
+  const b1 = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId, messages: msgB, c6: c6Turn0, leafTip: leafB,
+  });
+  assert(b1.status === "complete", `leafB ${b1.status} ${b1.error_code || ""}`);
+  assert(b1.c6_collision === true, "same C6 different leaf must report c6_collision");
+  assert(countEdgeRecords(sessionId).records === 4, "two independent pairs");
+
+  // A→B→A: returning to leaf A with same content reuses; different content on A conflicts.
+  const aReuse = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId, messages: msgA, c6: c6Turn0, leafTip: leafA,
+  });
+  assert(aReuse.status === "complete" && aReuse.candidate_reused === true, "A→B→A reuse");
+  assert(countEdgeRecords(sessionId).records === 4, "A reuse no append");
+  const aConflict = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId, messages: msgA2, c6: c6Turn0, leafTip: leafA,
+  });
+  assert(aConflict.status === "conflict", "same leaf different content conflict");
+  assert(aConflict.error_code === "terminal_identity_content_conflict", aConflict.error_code);
+
+  // Legacy leaf identity derivation from content when leaf_tip absent.
+  const legacyLeaf = edge.resolveTerminalLeafId({ payloadDigest: "a".repeat(64) });
+  assert(legacyLeaf === `legacy_content:${"a".repeat(64)}`, `legacy leaf ${legacyLeaf}`);
+  assert(edge.resolveTerminalLeafId({ leafTip: { id: "x", parentId: null, type: "message" } }) === "x", "prefer tip");
+
+  // Unreferenced source: write source-only then operator dry-run / execute / redrive.
+  const sessionId3 = "sess-unref";
+  const unrefMessages = [
+    { role: "user", content: [{ type: "text", text: "unref-user" }] },
+    { role: "assistant", content: [{ type: "text", text: "unref-asst" }], stopReason: "stop" },
+  ];
+  // Force orphan via create source through pair that conflicts on same leaf first...
+  // Simpler: write candidate-less source by capturing candidate then deleting journal records is forbidden.
+  // Use admit path: create source via captureEdgeProtocolCandidate then we need unreferenced =
+  // source without candidate. captureEdgeProtocolCandidate always writes candidate.
+  // Create orphan by pair conflict (source written, candidate rejected):
+  const leafU = { id: "leaf-u", parentId: null, type: "message", timestampUtc: "2026-07-25T13:10:00.000Z" };
+  const ok = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessionId3,
+    messages: unrefMessages, c6: { session_id: sessionId3, turn_id: 1 }, leafTip: leafU,
+  });
+  assert(ok.status === "complete", `seed pair ${ok.status}`);
+  const orphanMessages = [
+    { role: "user", content: [{ type: "text", text: "orphan-user" }] },
+    { role: "assistant", content: [{ type: "text", text: "orphan-asst" }], stopReason: "stop" },
+  ];
+  const orphanConflict = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessionId3,
+    messages: orphanMessages, c6: { session_id: sessionId3, turn_id: 1 }, leafTip: leafU,
+  });
+  assert(orphanConflict.status === "conflict", "orphan via leaf content conflict");
+  const sessionRoot3 = edge.edgeSessionRoot(abrainHome, ownerRootReal, sessionId3);
+  const sourcesBefore = fs.readdirSync(edge.edgeSourcesDir(sessionRoot3)).filter((n) => n.endsWith(".json"));
+  assert(sourcesBefore.length === 2, `expected 2 sources got ${sourcesBefore.length}`);
+  const recordsBefore = countEdgeRecords(sessionId3).records;
+  assert(recordsBefore === 2, "only first pair in journal");
+
+  const dry = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome,
+    ownerProjectRoot: ownerRootReal,
+    sessionId: sessionId3,
+  });
+  assert(dry.status === "ready" && dry.mode === "dry_run", `dry ${dry.status}/${dry.mode}`);
+  assert(dry.eligible >= 1, `dry eligible=${dry.eligible}`);
+  assert(dry.recovered === 0, "dry-run must not recover");
+  assert(countEdgeRecords(sessionId3).records === recordsBefore, "dry-run no journal write");
+
+  const exec1 = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome,
+    ownerProjectRoot: ownerRootReal,
+    sessionId: sessionId3,
+    execute: true,
+  });
+  assert(exec1.status === "ready" && exec1.mode === "execute", `exec ${exec1.status}`);
+  assert(exec1.recovered >= 1, `recovered=${exec1.recovered}`);
+  assert(countEdgeRecords(sessionId3).records === recordsBefore + 2, "recovered pair appended");
+
+  const exec2 = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome,
+    ownerProjectRoot: ownerRootReal,
+    sessionId: sessionId3,
+    execute: true,
+  });
+  assert(exec2.recovered === 0, "redrive adds 0");
+  assert(exec2.eligible === 0 || exec2.reused >= 0, "redrive idle or reuse");
+  assert(countEdgeRecords(sessionId3).records === recordsBefore + 2, "redrive no new records");
+
+  // All sources referenced after recovery.
+  const journal = await edge.listEdgeJournalRecords(sessionRoot3);
+  const refs = new Set(
+    journal.filter((r) => r.record_type === "candidate_capture").map((r) => r.source_ref?.content_id).filter(Boolean),
+  );
+  for (const s of fs.readdirSync(edge.edgeSourcesDir(sessionRoot3)).filter((n) => n.endsWith(".json"))) {
+    assert(refs.has(s.slice(0, 64)), `source still unreferenced: ${s.slice(0, 12)}`);
+  }
 });
 
 await check("hard size contract: exact bound ok, +1 byte no partial candidate", async () => {

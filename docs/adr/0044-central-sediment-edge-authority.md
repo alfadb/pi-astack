@@ -119,6 +119,16 @@ last-close 触发 seal；pending materialize 必须可在崩溃后按 journal �
 - seal 后 late/new launch **必须**新 `run_generation`；是否产生新 `turn_id`/`subturn` **只由真实因果事件决定**，不得由执行重试/重启决定。
 - 审计与 memory join 必须以 C6 问责、以 `run_generation` 隔离执行代际；二者不得混用。
 
+### 6.5 Pair admission identity（capture-only protocol shadow）
+
+- **Durable pair admission key** = `(session_id, terminal leaf message id)`，leaf id 从真实 SessionManager / terminal descriptor（`leaf_tip.id`）读取；**不是** C6。
+- C6 **完整保留**在 candidate / witness 上作 attribution / 审计，**不作**唯一 admission。
+- 不同 leaf 即使 C6 相同 → 写独立 candidate+witness，并记录 `c6_collision` diagnostic（不 fail closed）。
+- 同 leaf 同 content digest → 幂等 reuse。
+- 同 leaf 不同 content digest → fail closed `terminal_identity_content_conflict`（不 append）。
+- Immutable journal：不得改写旧 records；scan/index 可从 candidate `leaf_tip` 或 content digest 推导 legacy leaf identity；旧记录无新字段仍可 dedupe。
+- Source-only 不可见：冲突/失败须有显式 audit；journal 未引用 sources 仅由 **operator** `recover-edge-unreferenced-sources` 恢复（默认 dry-run，`--execute` 才写；限定 abrain/owner/session + limit；同 writer lock + monotonic `producer_seq`；只写 candidate+witness，不创建 semantic job/ACK、不改 source bytes；**不**在 `session_start` 自动回放）。
+
 ## 7. Source 状态与 edge redrive
 
 Source 状态机最小集合：`pending | ready | dead`。
