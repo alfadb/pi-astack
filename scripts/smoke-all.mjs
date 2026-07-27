@@ -60,7 +60,6 @@ const timeoutArg = args.find((a) => a.startsWith("--timeout="));
 const offlineTimeoutSec = timeoutArg ? Number(timeoutArg.split("=")[1]) : 120;
 const liveTimeoutSec = Math.max(offlineTimeoutSec, 300);
 const OFFLINE_TIMEOUT_MINIMUMS = new Map([
-  ["proposition-lifecycle-freshness-d3-wf", 360],
   // Production-derived startup children themselves hard-timeout at ≤300s each
   // (see smoke-recovery-u-star-production-readonly.mjs). The whole smoke still
   // needs headroom for two startups + classification + tamper clones (~7–8 min

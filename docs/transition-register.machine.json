@@ -589,7 +589,7 @@
       "authorization_status": "authorized",
       "entered": "2026-07-13",
       "review_by": "2026-08-04",
-      "current": "Real policy append, D3 shadow, D3-WF sandbox replay, and D3-PUB generation-0 publication completed under separate exact authorizations as the compile/parity substrate. The historical D3 selection pointer remains a published artifact, but production session_start rule authority later flipped under the separate completed entry `proposition.adr0040-policy-stable-view-runtime-flip` (2026-07-20 full flip + 2026-07-21 auto recovery). The historical D3-v2 session_start adapter path is retired/superseded under `proposition.adr0040-p3-d3-v2-session-start`. On 2026-07-27 the permanently failed D3-PUB pre-publication surface (preview/transcript/bootstrap/execute/pre-pub smoke aliases) was deleted; production-core and post-publication smoke remain, production D3-PUB v2 stays read-only, and historical evidence/notes keep original bytes. Residual non-Policy P3 consumers stay blocked.",
+      "current": "Real policy append, D3 shadow, D3-WF sandbox replay, and D3-PUB generation-0 publication completed under separate exact authorizations as the compile/parity substrate. The historical D3 selection pointer remains a published artifact, but production session_start rule authority later flipped under the separate completed entry `proposition.adr0040-policy-stable-view-runtime-flip` (2026-07-20 full flip + 2026-07-21 auto recovery). The historical D3-v2 session_start adapter path is retired/superseded under `proposition.adr0040-p3-d3-v2-session-start`. On 2026-07-27 the permanently failed D3-PUB pre-publication surface (preview/transcript/bootstrap/execute/pre-pub smoke aliases) was deleted; the same day the D3-WF test-only sandbox surface (sandbox-writer/control-v2/v3 + d3-wf smoke/preview that copied production L1) was also deleted. production-core, post-publication smoke, and D3 shadow remain; production D3-PUB v2 stays read-only; historical evidence/notes keep original bytes. Residual non-Policy P3 consumers stay blocked.",
       "exit": [
         "DONE: real policy proposition event 1c8cc5d23110f44affb574598e65027ac350373b86c651c4ed1354ad171685a6 completed from S2 recovery to clean S4 with ratification and terminal post dossier",
         "DONE: D3 shadow dual-pointer control plane and real production read-only preview completed without production mutation",
@@ -616,7 +616,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Keep P2b substrate evidence immutable and D3-PUB pre-publication surface retired. Policy stable-view runtime flip is tracked under its own completed ID; D3-v2 session_start is retired/superseded; residual P3/canonical read flips remain separately blocked. Do not restore pre-publication D3-PUB scripts or re-run supersession against the published selection."
+      "next_action": "Keep P2b substrate evidence immutable and keep D3-PUB pre-publication surface plus D3-WF sandbox surface retired. Policy stable-view runtime flip is tracked under its own completed ID; D3-v2 session_start is retired/superseded; residual P3/canonical read flips remain separately blocked. Do not restore pre-publication D3-PUB or D3-WF scripts, reintroduce production-L1-copy sandbox replay, or re-run supersession against the published selection."
     },
     {
       "id": "proposition.adr0040-policy-stable-view-runtime-flip",

@@ -5,7 +5,23 @@ import * as path from "node:path";
 import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 import { scanWholeL1Validated } from "./l1-schema-registry";
 import { acquireRetainedDirectoryOfdLock, type RetainedDirectoryOfdLock } from "./retained-directory-ofd-lock";
-import type { PropositionLifecycleV3Build } from "./proposition-lifecycle-freshness-v3";
+/** Minimal V3 build shape retained after D3-WF sandbox surface retirement. */
+export interface PropositionLifecycleV3Build {
+  p2a: {
+    source_bundle_v2: {
+      bytes: Readonly<Record<string, string>>;
+      manifest: Readonly<Record<string, unknown>>;
+    };
+  };
+  stable: {
+    artifacts: Readonly<Record<string, string>>;
+    source_bundle_v2: {
+      bytes: Readonly<Record<string, string>>;
+      bundle_hash: string;
+      manifest: Readonly<Record<string, unknown>>;
+    };
+  };
+}
 
 /** Minimal dossier identity retained after D3-PUB pre-publication surface retirement. */
 export interface D3PubDossierIdentity {
