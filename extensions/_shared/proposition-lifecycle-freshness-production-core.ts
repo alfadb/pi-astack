@@ -6,7 +6,23 @@ import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 import { scanWholeL1Validated } from "./l1-schema-registry";
 import { acquireRetainedDirectoryOfdLock, type RetainedDirectoryOfdLock } from "./retained-directory-ofd-lock";
 import type { PropositionLifecycleV3Build } from "./proposition-lifecycle-freshness-v3";
-import type { D3PubAuthorizationCoordinate, D3PubDossierIdentity } from "./proposition-lifecycle-freshness-production-transcript";
+
+/** Minimal dossier identity retained after D3-PUB pre-publication surface retirement. */
+export interface D3PubDossierIdentity {
+  session_id: string;
+  dossier_relative_path: string;
+  dossier_raw_sha256: string;
+  dossier_self_hash: string;
+}
+
+/** Minimal authorization coordinate retained for production-core binding checks. */
+export interface D3PubAuthorizationCoordinate extends Record<string, unknown> {
+  session_id: string;
+  dossier_raw_sha256: string;
+  dossier_self_hash: string;
+  explicit_revocation_absent: boolean;
+  coordinate_hash: string;
+}
 
 export const D3_PUB_HARD_ABRAIN = "/home/worker/.abrain" as const;
 export const D3_PUB_HARD_FAMILY_ROOT = "/home/worker/.abrain/.state/sediment/proposition-lifecycle-freshness" as const;

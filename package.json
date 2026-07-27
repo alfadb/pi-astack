@@ -244,7 +244,6 @@
     "smoke:proposition-tier1-policy-bridge": "node scripts/smoke-proposition-tier1-policy-bridge.mjs",
     "smoke:proposition-lifecycle-freshness-shadow": "node scripts/smoke-proposition-lifecycle-freshness-shadow.mjs",
     "smoke:proposition-lifecycle-freshness-d3-wf": "node scripts/smoke-proposition-lifecycle-freshness-d3-wf.mjs",
-    "smoke:proposition-lifecycle-freshness-d3-pub": "node scripts/smoke-proposition-lifecycle-freshness-d3-pub.mjs",
     "smoke:proposition-lifecycle-freshness-d3-pub-post-publication": "node scripts/smoke-proposition-lifecycle-freshness-d3-pub-post-publication.mjs",
     "smoke:adr0039-l3-autosync": "node scripts/smoke-adr0039-l3-autosync.mjs",
     "smoke:knowledge-evidence-durable-write": "node scripts/smoke-knowledge-evidence-durable-write.mjs",

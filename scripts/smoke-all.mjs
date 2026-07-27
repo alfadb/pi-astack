@@ -49,7 +49,6 @@ const LIVE = new Set([
 // invalid after their immutable production target or source successor exists.
 // Keep their direct registry aliases for explicit runs against that prestate.
 const PRE_PUBLICATION_ONLY = new Set([
-  "proposition-lifecycle-freshness-d3-pub",
   "proposition-policy-push-publication-p2a21",
   "proposition-policy-push-live-publication-p2a22",
 ]);

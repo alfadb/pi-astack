@@ -23,7 +23,7 @@ For the default smoke gate, run the package alias instead of expanding it manual
 npm run smoke:all
 ```
 
-`smoke:proposition-lifecycle-freshness-d3-pub` remains registered for historical pre-publication reproducibility but is intentionally excluded from `smoke:all`. D3-v2 session_start runtime and adapter smokes are retired (modules deleted); historical D3-v2 evidence is retained immutable/non-rerunnable and is not a current runtime gate. D3 has no production rule-injection call edge or runtime authority. P2a.2.1 (`smoke:proposition-policy-push-publication-p2a21`) and P2a.2.2 (`smoke:proposition-policy-push-live-publication-p2a22`) are also historical phase-bound checks and must not be interpreted as current runtime gates.
+D3-PUB pre-publication surface (preview/transcript/bootstrap/execute/pre-pub smoke) is retired; only `smoke:proposition-lifecycle-freshness-d3-pub-post-publication` remains as the published-closure read-only gate. D3-v2 session_start runtime and adapter smokes are retired (modules deleted); historical D3-v2 and D3-PUB evidence is retained immutable/non-rerunnable and is not a current runtime gate. D3 has no production rule-injection call edge or runtime authority. P2a.2.1 (`smoke:proposition-policy-push-publication-p2a21`) and P2a.2.2 (`smoke:proposition-policy-push-live-publication-p2a22`) remain registered for historical pre-publication reproducibility but are intentionally excluded from `smoke:all` and must not be interpreted as current runtime gates.
 
 The ADR0040 production full-flip gate is:
 
