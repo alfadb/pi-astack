@@ -9,7 +9,7 @@ date: 2026-07-25
 - **Status**: Accepted（Stage A daemon-owned short-lived worker RPC migration surface）
 - **Date**: 2026-07-25
 - **Relates-to**: [ADR 0044](./0044-central-sediment-edge-authority.md)（**目标** authority/edge contract；本 ADR 是 Stage A 机制，不是并列 primary）, [ADR 0024](./0024-second-brain-from-natural-conversation.md), [ADR 0027](./0027-coupled-stigmergic-dual-loop-agent-system.md) C6, edge-protocol-shadow capture-only slice（`extensions/sediment/edge-protocol-shadow.ts`）, pi-router central-memory Stage A bridge plan
-- **Implementation**: `extensions/sediment/worker-rpc.ts` + worker-mode branch in `extensions/sediment/index.ts` + `sediment.executionOwner`
+- **Implementation**: `extensions/sediment/worker-rpc.ts` + `extensions/sediment/local-executor-authority.ts` + worker/foreground branches in `extensions/sediment/index.ts` + `sediment.executionOwner`
 - **Hierarchy**: A0 完成前 local sediment intake/queue/publication 仍是唯一 semantic primary；本 ADR 的 worker RPC 与 continuous edge producer **不得**升为第二 primary。capture-only protocol shadow 见 ADR 0044。
 
 ## 1. Context
@@ -27,6 +27,7 @@ Default **`foreground`** — ordinary Pi extension owns enqueue + recovery + nor
 - **Full triple gate** (`executionOwner=daemon` **and** `edgeProtocolShadow.enabled` **and** `daemonWorker.edgeShadowCaptureEnabled`): effective owner = **daemon**. Ordinary Pi extension does **not** write ordinary intake / enqueue / recovery / normal pass; `agent_end` captures healthy terminals into edge shadow only. Headless worker (`PI_ASTACK_SEDIMENT_WORKER_MODE=1`) is the sole pass executor.
 - **Incomplete triple gate**: effective owner **degrades to foreground** for the whole process so local intake still has a consumer (enqueue/recovery/pass). Audit/diagnostic `daemon_effective_owner_foreground`. **No** force edge capture without full triple gate; **no** durable intake without consumer.
 - Worker start still **requires** configured `executionOwner=daemon` else returns `execution_owner_not_daemon` (prevents dual-executor races when properly gated).
+- LSEA worker-first overlay: when the canonical ABRAIN authority store is strict `held|draining` or corrupt/unreadable, ordinary Pi is capture-only regardless of the legacy effective-owner fallback. A strict `free+none` record with the physical lock observed free, or a completely missing authority store, retains legacy behavior for this rollout slice. Full details: [Local Sediment Executor Authority worker-first admission](../architecture/local-sediment-executor-authority.md).
 
 ### 2.1b Continuous edge-protocol-shadow producer (`sediment.daemonWorker.edgeShadowCaptureEnabled`)
 
@@ -49,7 +50,7 @@ Default **`false`**. Triple gate — all required: `executionOwner=daemon` **and
 
 `PI_ASTACK_SEDIMENT_WORKER_MODE=1` puts the sediment extension into worker-only registration:
 
-- Registers **only** worker commands: `/sediment-worker-run` + `/sediment-worker-maintenance` (health capability = commands registered; no free-text expansion)
+- Registers **only** worker commands: `/sediment-worker-capabilities` + `/sediment-worker-run` + `/sediment-worker-maintenance`. The capabilities command declares exactly `local_executor_authority_process_lifetime_v1` and performs no settings, filesystem, or semantic work.
 - Installs the **same** `runSedimentAgentEndPass` implementation used by ordinary `agent_end` / intake recovery（no duplicated writer）
 - **Does not** register or run: `session_start` / `before_agent_start` / `agent_start` / `agent_end` / `agent_settled` / `session_shutdown` ordinary sediment hooks
 - **Does not** start ordinary detached queue, intake recovery, timers, or footer
@@ -93,6 +94,10 @@ Required fields:
 | `leaf_tip` | optional tip pin for type/timestamp only |
 | `candidate_ref` | optional; when present all of `record_id`/`producer_seq`/`payload_digest`/`run_generation` required; `payload_digest` must equal `content_id` |
 | `budget_ms` | optional wall budget ms; absent → 600_000; closed range 60_000..3_600_000 (see §2.6b) |
+| `local_executor_epoch` | paired LSEA field; canonical nonzero u64 decimal string; required once authority store exists |
+| `local_executor_holder_nonce` | paired LSEA field; 64 lowercase hex; required once authority store exists |
+
+The two LSEA fields must be both absent or both present. Both absent is accepted only while the authority directory is completely absent; once the directory exists, missing/partial fields fail closed.
 
 **Forbidden**: raw transcript on argv beyond path reference; logging/stdout of raw body, paths in result, session/content/digest in result.
 
@@ -267,10 +272,12 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 | `kind` | Stage0 admits **only** `publication_outbox` |
 | `repair_policy` | optional closed `none\|legacy_world_project_stamp`; absent defaults to `none` |
 | `repair_limit` | optional integer `0\|1`; absent defaults to `0`; non-`none` policy requires exactly `1`; `none` with `1` is invalid |
+| `local_executor_epoch` | paired LSEA field; canonical nonzero u64 decimal string; required once authority store exists |
+| `local_executor_holder_nonce` | paired LSEA field; 64 lowercase hex; required once authority store exists |
 
 **Forbidden identity**: no project / record / session / path / item id on the request. Settings + `ABRAIN_ROOT` follow worker mode. Normal daemon calls omit repair fields and therefore perform zero repair.
 
-**Gate**: effective owner must be **daemon** (configured `executionOwner=daemon` **and** full triple gate). Incomplete gate / foreground → closed `effective_owner_not_daemon` (`retryable=false`, **no writes**). Although the request has no record identity, maintenance validates the same worker copy-store env and non-empty realpath owner allowlist as task RPC before reading or writing the outbox. Any security-env/config failure is zero-write.
+**Gate**: effective owner must be **daemon** (configured `executionOwner=daemon` **and** full triple gate, or an active strict authority posture that makes ordinary Pi capture-only). Incomplete legacy gate / foreground → closed `effective_owner_not_daemon` (`retryable=false`, **no writes**). Although the request has no record identity, maintenance validates the same worker copy-store env and non-empty realpath owner allowlist as task RPC, then performs one LSEA admission, before reading or writing the outbox. Any security-env/config/authority failure is durable semantic zero-delta. Progress/heartbeat and process-local serial scheduling may already have occurred; the contract does not claim zero in-process activity.
 
 **Serialization**: the complete gate/count/drain body enters the same process-wide `withGlobalPassSerial` as terminal tasks, so publication maintenance cannot overlap a task pass. Serial wait is bounded by the maintenance soft deadline. Timeout while waiting means this invocation never entered its drain body: return retryable `pending` + `maintenance_worker_busy`, `restart_child=false`, before/after `unknown`; do not poison, restart, or kill the healthy serial owner. Task-run `global_serial_deadline` semantics are unchanged.
 
@@ -306,6 +313,18 @@ Soft budget expiry before drain leaves pending_before known and pending_after `u
 
 **Progress**: reuses `pi-astack/sediment-worker-progress/v1` with stage `publication` (no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running.
 
+### 2.8c LSEA worker-first minimum admission (2026-07-27)
+
+The worker declares `local_executor_authority_process_lifetime_v1` through `/sediment-worker-capabilities`. Task and maintenance each perform one read-only strict authority admission before durable semantic work. The admission validates the canonical ABRAIN store, strict record, expected daemon holder, manifest epoch/nonce, and physical lock observation. It rereads the record around lock observation and rejects changed bytes **or changed opened-file identity**, closing byte-restored read-lock-read ABA.
+
+Rollout pairing is strict: authority directory absent + both manifest fields absent is the only legacy case. Store absent with fields, store present without fields, partial/noncanonical fields, malformed record, or unprovable lock all return `local_executor_authority_unavailable`. A valid but free/draining/wrong-kind/unlocked authority returns `local_executor_authority_revoked`; a valid held daemon generation with mismatched expectation returns `local_executor_authority_stale`. A legacy `.state` symlink/non-directory/unreadable intermediate fails closed intentionally; only a clean absent path retains compatibility.
+
+Rejected task entry occurs before receipt/checkpoint/L1/outbox/Git/audit mutation; rejected maintenance occurs before count/drain/repair. Every authority closed result has `retryable=true` and `restart_child=false`. The new daemon must map all three codes to one global pause, roll back/no-count the current ledger attempt, and retain the backlog; it must not burn item retries or deadletter permanent corruption one record at a time. There are no B1-B8 authority barriers. Once admitted, process-lifetime safety belongs to the daemon's long-held physical lock and OS containment; already-admitted effects retain existing transaction/idempotency semantics.
+
+Worker-first rollout is `new worker while store absent` → capability proof → old daemon stopped/reaped → authority-aware daemon may create store. An old daemon must never encounter the store; absent-store legacy compatibility is not permission to run old and new daemons concurrently.
+
+Linux observes pinned `/usr/bin/flock -xn` on the exact retained lock file. Windows first rejects lstat-visible symlink/reparse and non-regular lock paths, then treats only current-Node `EBUSY` as the deny-all sharing violation. `EACCES`/`EPERM` are ACL/unavailable, never held; a successful identity-matched read-only open means free. Native Windows Job/ACL/containment acceptance remains pi-router-owned. Other Unix platforms fail closed without a native observer. Contract and verification: [worker-first admission architecture](../architecture/local-sediment-executor-authority.md), `npm run smoke:lsea-worker-admission`.
+
 ### 2.9 Suggested worker argv
 
 ```bash
@@ -323,8 +342,8 @@ All flags are real Pi CLI flags（`pi --help`）. Settings must set `sediment.ex
 ## 3. Non-goals（Stage0）
 
 - Formal ConsumerAck / required-consumer retention
-- Authority cutover / central primary
-- Daemon lifecycle supervisor（owned by pi-router）
+- Authority store creation/mutation, epoch allocation, holder acquisition/handoff, or central primary cutover
+- Daemon lifecycle, process-tree containment, spawn gate, and supervisor（owned by pi-router）
 - Recursive edge shadow from worker
 - Memory decision/write counter telemetry completeness（reported 0 until pipeline surfaces counts）
 - Receipt/claim GC
@@ -336,5 +355,5 @@ All flags are real Pi CLI flags（`pi --help`）. Settings must set `sediment.ex
 
 - Daemon can hand terminal witness work to a headless worker without blocking interactive Pi
 - Single writer implementation remains `runSedimentAgentEndPass` / existing extractor→curator→writer
-- Dual-executor races prevented by `executionOwner` + worker gate
+- Worker-first rollout adds strict single-entry LSEA admission without duplicating B1-B8 write barriers; full dual-executor exclusion still depends on pi-router's long-held lock and process containment
 - Stage0 is a migration bridge surface only; full Stage A/B/C remain open

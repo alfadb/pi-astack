@@ -201,6 +201,7 @@ import {
   buildWorkerProgressEvent,
   emitWorkerProgress,
   isSedimentWorkerMode,
+  registerSedimentWorkerCapabilitiesCommand,
   registerSedimentWorkerCommand,
   registerSedimentWorkerMaintenanceCommand,
   SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
@@ -209,6 +210,10 @@ import {
   type SedimentWorkerProgressStage,
   type SedimentWorkerTrackedLane,
 } from "./worker-rpc";
+import {
+  classifyForegroundLocalExecutorPosture,
+  type ForegroundLocalExecutorPosture,
+} from "./local-executor-authority";
 import {
   effectiveCheckpointSessionId,
   runWithCheckpointSessionIdOverride,
@@ -1073,7 +1078,15 @@ function isDaemonTripleGateComplete(settings?: SedimentSettings): boolean {
  * an incomplete edge producer). Full triple gate → daemon (edge capture; worker
  * evaluates). Never bypasses triple gate for edge capture.
  */
+function resolveForegroundAuthorityPosture(): ForegroundLocalExecutorPosture {
+  return classifyForegroundLocalExecutorPosture(resolveAbrainHomeForSediment());
+}
+
 function resolveEffectiveExecutionOwner(settings?: SedimentSettings): "foreground" | "daemon" {
+  // Once a strict store is active/draining/corrupt, ordinary Pi remains a
+  // capture surface only. A strict free store or a missing store keeps the
+  // worker-first rollout's legacy behavior.
+  if (resolveForegroundAuthorityPosture() === "capture_only") return "daemon";
   const s = settings ?? resolveSedimentSettings();
   if (s.executionOwner !== "daemon") return "foreground";
   if (!isDaemonTripleGateComplete(s)) return "foreground";
@@ -3753,11 +3766,17 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       if (isSubAgentSession(ctx)) return;
 
       const settings = resolveSedimentSettings();
+      // Full legacy disable: zero publication/policy/recovery/authority IO.
+      // Edge triple gate must not reopen this path — edge has its own session_start.
+      // Authority capture recovery below only runs when sediment is enabled.
       if (!settings.enabled) return;
 
-      const abrainHome = resolveAbrainHomeForSediment();
+      // Strict held/draining/corrupt store: keep edge layout + candidate-only
+      // witness recovery, then return before intake/publication/policy startup.
+      const authorityCaptureOnly = resolveForegroundAuthorityPosture() === "capture_only";
       const sessionId = readSessionId(ctx.sessionManager);
       const cwd = path.resolve(ctx.cwd || process.cwd());
+      const abrainHome = resolveAbrainHomeForSediment();
       const rootInfo = normalizeProjectRoot(cwd, { abrainHome });
       const binding = resolveActiveProject(cwd, { abrainHome });
       // Physical checkout root owns evaluation. Prefer strict bind root when
@@ -3821,6 +3840,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         // surface later only from this root's evaluation.
         applySedimentStatus(setStatus, sessionId, "idle");
       }
+
+      // An active/draining/corrupt strict authority store leaves ordinary Pi
+      // capture-only. Edge layout/capture remains available through its own
+      // hooks, but recovery, publication, and startup semantic work stop here.
+      if (authorityCaptureOnly) return;
 
       // Durable intake recovery is independent of canonical startup. Pending
       // windows must evaluate even while Git/canonical is busy; publication
@@ -7146,6 +7170,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
   sedimentAgentEndPassRunner = runSedimentAgentEndPass;
 
   if (sedimentWorkerMode) {
+    // Capability probe is registration-only and reads/writes no sediment state.
+    registerSedimentWorkerCapabilitiesCommand(pi);
     registerSedimentWorkerCommand(pi, {
       runAgentEndPass: runSedimentAgentEndPass,
       resolveAbrainHome: resolveAbrainHomeForSediment,
@@ -7223,14 +7249,20 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const edgeEnabled = agentEndSettings.edgeProtocolShadow.enabled === true;
       const sedimentEnabled = agentEndSettings.enabled === true;
 
+      // Fully disabled: no owner/git/authority/filesystem I/O beyond settings gate.
+      // Must precede authority posture observation and effective-owner resolution.
+      if (!sedimentEnabled && !edgeEnabled) return;
+
       // ADR 0045 effective owner:
       // - Full triple gate → daemon path: edge capture only, never ordinary intake/enqueue.
       // - Configured daemon + incomplete triple gate → fail-safe degrade to foreground
       //   effective owner (local intake still has consumer). Audit/diagnostic. No orphan,
       //   no dual semantic primary, never bypass triple gate for edge capture.
+      const authorityCaptureOnly = resolveForegroundAuthorityPosture() === "capture_only";
       const effectiveOwner = resolveEffectiveExecutionOwner(agentEndSettings);
       if (
-        agentEndSettings.executionOwner === "daemon"
+        !authorityCaptureOnly
+        && agentEndSettings.executionOwner === "daemon"
         && effectiveOwner === "foreground"
       ) {
         const liveSessionId = readSessionId(liveCtx.sessionManager);
@@ -7247,7 +7279,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           background_async: false,
         }).catch(() => {});
         // Fall through to ordinary foreground intake→enqueue path below.
-      } else if (effectiveOwner === "daemon") {
+      } else if (effectiveOwner === "daemon" && isDaemonTripleGateComplete(agentEndSettings)) {
         const liveSessionId = readSessionId(liveCtx.sessionManager);
         bindForegroundSedimentReporter(liveCtx.ui, liveSessionId, {
           bumpEpoch: currentForegroundSessionId() !== liveSessionId,
@@ -7259,9 +7291,6 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         await maybeCaptureDaemonEdgeProtocolShadow({ event, record });
         return;
       }
-
-      // default-off both paths: no owner/git/filesystem I/O beyond settings gate.
-      if (!sedimentEnabled && !edgeEnabled) return;
 
       // Freeze args/C6 only when at least one capture path is enabled.
       const liveSessionId = readSessionId(liveCtx.sessionManager);
@@ -7366,12 +7395,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 checkpoint_advanced: false,
                 background_async: false,
               }).catch(() => {});
-              enqueueSedimentIntakeRecord({
-                record: written.record,
-                modelRegistry: capture.modelRegistry,
-                fromRecovery: false,
-                reason: "agent_end",
-              });
+              // LSEA capture-only still durably captures foreground intake, but
+              // daemon ownership forbids starting the foreground semantic queue.
+              if (!authorityCaptureOnly) {
+                enqueueSedimentIntakeRecord({
+                  record: written.record,
+                  modelRegistry: capture.modelRegistry,
+                  fromRecovery: false,
+                  reason: "agent_end",
+                });
+              }
             } catch (err) {
               const error = sanitizeAuditText(err instanceof Error ? err.message : String(err), 200);
               console.error(`[sediment] intake write failed; window not enqueued: ${error}`);
@@ -9470,6 +9503,13 @@ export function _resolveEffectiveExecutionOwnerForTests(): "foreground" | "daemo
     throw new Error("_resolveEffectiveExecutionOwnerForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
   }
   return resolveEffectiveExecutionOwner();
+}
+
+export function _resolveForegroundAuthorityPostureForTests(): ForegroundLocalExecutorPosture {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_resolveForegroundAuthorityPostureForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return resolveForegroundAuthorityPosture();
 }
 
 export function _isDaemonTripleGateCompleteForTests(): boolean {

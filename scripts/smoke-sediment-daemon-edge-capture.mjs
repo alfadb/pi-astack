@@ -825,6 +825,7 @@ async function runAgentEndCaptureMatrix(label, settingsExtra, sessionId) {
   const ctx = makeCtx(sessionId, leaf);
   const pendingBefore = countPending();
   const edgeBefore = countEdgeRecords(sessionId).records;
+  const queueBefore = sediment._detachedAgentEndQueueStatsForTests().enqueued;
   for (const h of pi.handlers.get("session_start") ?? []) {
     await h({}, ctx);
   }
@@ -840,11 +841,13 @@ async function runAgentEndCaptureMatrix(label, settingsExtra, sessionId) {
   }
   const pendingAfter = countPending();
   const edgeAfter = countEdgeRecords(sessionId).records;
+  const queueAfter = sediment._detachedAgentEndQueueStatsForTests().enqueued;
   const tripleOpen = sediment._isDaemonEdgeShadowCaptureEnabledForTests() === true;
   return {
     sediment,
     pendingDelta: pendingAfter - pendingBefore,
     edgeDelta: edgeAfter - edgeBefore,
+    queueDelta: queueAfter - queueBefore,
     tripleOpen,
   };
 }
@@ -945,6 +948,142 @@ await check("capture matrix: full triple gate is edge-only (no intake dual-write
   assert(r.pendingDelta === 0, `full gate must not dual-write intake (pending=${r.pendingDelta})`);
 });
 
+await check("LSEA capture-only session_start preserves edge recovery and blocks foreground semantic work", async () => {
+  const recoverySessionId = "sess-lsea-startup-candidate-only";
+  const recoveryCandidate = await edge.captureEdgeProtocolCandidate({
+    abrainHome,
+    ownerProjectRoot: ownerRootReal,
+    sessionId: recoverySessionId,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "startup recovery user" }] },
+      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "startup recovery assistant" }] },
+    ],
+    c6: { session_id: recoverySessionId, turn_id: 1 },
+    leafTip: { id: "leaf-lsea-startup-recovery", parentId: null, type: "message" },
+  });
+  assert(recoveryCandidate.status === "captured", `recovery seed=${recoveryCandidate.status}`);
+  assert(countEdgeRecords(recoverySessionId).records === 1, "candidate-only recovery seed");
+
+  const disabledRecoverySessionId = "sess-lsea-disabled-no-recovery";
+  const disabledRecoverySeed = await edge.captureEdgeProtocolCandidate({
+    abrainHome,
+    ownerProjectRoot: ownerRootReal,
+    sessionId: disabledRecoverySessionId,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "disabled recovery user" }] },
+      { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "disabled recovery assistant" }] },
+    ],
+    c6: { session_id: disabledRecoverySessionId, turn_id: 1 },
+    leafTip: { id: "leaf-lsea-disabled-recovery", parentId: null, type: "message" },
+  });
+  assert(disabledRecoverySeed.status === "captured", `disabled recovery seed=${disabledRecoverySeed.status}`);
+  assert(countEdgeRecords(disabledRecoverySessionId).records === 1, "disabled recovery seed remains candidate-only");
+
+  const lseaDir = path.join(abrainHome, ".state", "sediment", "local-executor-authority");
+  fs.mkdirSync(lseaDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(lseaDir, "authority.lock"), "", { mode: 0o600 });
+  fs.writeFileSync(path.join(lseaDir, "authority.json"), "{}\n", { mode: 0o600 });
+  try {
+    // Regression: settings.enabled=false is full legacy disable even with edge
+    // triple gate open. Main session_start must not reopen authority recovery
+    // or publication/policy startup because of the edge gate.
+    const disabledTriple = await runAgentEndCaptureMatrix(
+      "lsea-enabled-false-triple",
+      {
+        executionOwner: "daemon",
+        enabled: false,
+        daemonWorker: { edgeShadowCaptureEnabled: true },
+        edgeProtocolShadow: { enabled: true },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-lsea-enabled-false-triple",
+    );
+    assert(disabledTriple.edgeDelta === 2, `enabled=false still does agent_end edge pair, delta=${disabledTriple.edgeDelta}`);
+    assert(disabledTriple.pendingDelta === 0, "enabled=false must not write ordinary intake");
+    assert(disabledTriple.queueDelta === 0, "enabled=false must not enqueue foreground pass");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert(countEdgeRecords(disabledRecoverySessionId).records === 1,
+      "enabled=false session_start must not run authority capture recovery");
+
+    // Authority capture recovery only when sediment is enabled under
+    // daemon/capture-only (strict store) — not when sediment is disabled.
+    const paired = await runAgentEndCaptureMatrix(
+      "lsea-corrupt-triple-pair",
+      {
+        executionOwner: "daemon",
+        enabled: true,
+        daemonWorker: { edgeShadowCaptureEnabled: true },
+        edgeProtocolShadow: { enabled: true },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-lsea-corrupt-triple-pair",
+    );
+    assert(paired.sediment._resolveForegroundAuthorityPostureForTests() === "capture_only", "corrupt strict store posture");
+    assert(paired.edgeDelta === 2, `full-triple capture-only must write candidate+witness, delta=${paired.edgeDelta}`);
+    assert(paired.pendingDelta === 0, "full-triple capture-only must not write ordinary intake");
+    assert(paired.queueDelta === 0, "capture-only session_start/agent_end must not enqueue foreground pass");
+
+    const recoveryDeadline = Date.now() + 5_000;
+    while (countEdgeRecords(recoverySessionId).records !== 2 && Date.now() < recoveryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const recoveredRows = readRecords(countEdgeRecords(recoverySessionId).sessionRoot);
+    assert(recoveredRows.length === 2, "enabled capture-only session_start must retain candidate-only recovery");
+    assert(recoveredRows[0].record_type === "candidate_capture" && recoveredRows[1].record_type === "terminal_witness",
+      "capture-only recovery must complete candidate+witness");
+
+    const foreground = await runAgentEndCaptureMatrix(
+      "lsea-corrupt-foreground-intake",
+      {
+        executionOwner: "foreground",
+        enabled: true,
+        daemonWorker: { edgeShadowCaptureEnabled: false },
+        edgeProtocolShadow: { enabled: false },
+        autoLlmWriteEnabled: false,
+      },
+      "sess-lsea-corrupt-foreground-intake",
+    );
+    assert(foreground.sediment._resolveEffectiveExecutionOwnerForTests() === "daemon", "capture-only blocks foreground execution");
+    assert(foreground.edgeDelta === 0, "foreground capture-only with edge off writes no edge");
+    assert(foreground.pendingDelta === 1, `foreground capture-only retains durable intake, delta=${foreground.pendingDelta}`);
+    assert(foreground.queueDelta === 0, "foreground capture-only intake must not enter semantic queue");
+
+    const source = fs.readFileSync(path.join(root, "extensions/sediment/index.ts"), "utf8");
+    const sessionStartEnabledGate = source.indexOf("// Full legacy disable: zero publication/policy/recovery/authority IO.");
+    const sessionStartDisabledReturn = source.indexOf("if (!settings.enabled) return;", sessionStartEnabledGate);
+    const sessionStart = source.indexOf("const authorityCaptureOnly = resolveForegroundAuthorityPosture() === \"capture_only\";", sessionStartDisabledReturn);
+    const edgeRecovery = source.indexOf("void maybeInitAndRecoverDaemonEdgeShadow({", sessionStart);
+    const earlyReturn = source.indexOf("if (authorityCaptureOnly) return;", edgeRecovery);
+    const intakeRecovery = source.indexOf("await schedulePendingIntakeRecovery({", earlyReturn);
+    const publication = source.indexOf("void triggerKnowledgePublicationOneShot(sessionId, \"idle\");", earlyReturn);
+    const policyRecovery = source.indexOf("void schedulePropositionPolicyStableViewRecovery({", earlyReturn);
+    assert(
+      sessionStartEnabledGate >= 0
+        && sessionStartDisabledReturn > sessionStartEnabledGate
+        && sessionStart > sessionStartDisabledReturn
+        && edgeRecovery > sessionStart
+        && earlyReturn > edgeRecovery,
+      "enabled=false returns before authority; capture-only keeps edge recovery before semantic return",
+    );
+    assert(intakeRecovery > earlyReturn && publication > earlyReturn && policyRecovery > earlyReturn,
+      "capture-only return moved after foreground semantic startup work");
+
+    // agent_end: fully disabled sediment+edge returns before any authority IO.
+    const agentEndGate = source.indexOf("// Fully disabled: no owner/git/authority/filesystem I/O beyond settings gate.");
+    const agentEndBothDisabled = source.indexOf("if (!sedimentEnabled && !edgeEnabled) return;", agentEndGate);
+    const agentEndAuthority = source.indexOf(
+      "const authorityCaptureOnly = resolveForegroundAuthorityPosture() === \"capture_only\";",
+      agentEndBothDisabled,
+    );
+    assert(
+      agentEndGate >= 0 && agentEndBothDisabled > agentEndGate && agentEndAuthority > agentEndBothDisabled,
+      "agent_end both-disabled return must precede authority posture IO",
+    );
+  } finally {
+    fs.rmSync(lseaDir, { recursive: true, force: true });
+  }
+});
+
 await check("resolveDaemonEdgeOwnerRoot realpath double-fail throws (never returns raw)", async () => {
   writeSettings(daemonEdgeSettings());
   const jitiR = createJiti(import.meta.url + `#realpath-fail-${Date.now()}`, { interopDefault: true });
@@ -1003,6 +1142,7 @@ await check("worker mode: zero capture / no lifecycle", async () => {
     }
     assert(pi.commands.has("sediment-worker-run"), "worker command present");
     assert(pi.commands.has("sediment-worker-maintenance"), "maintenance command present");
+    assert(pi.commands.has("sediment-worker-capabilities"), "capabilities command present");
   } finally {
     if (prev === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
     else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
@@ -1026,6 +1166,7 @@ await check("normal foreground default regression: hooks register, no edge write
   assert(pi.commands.has("sediment"), "normal /sediment");
   assert(!pi.commands.has("sediment-worker-run"), "no worker cmd");
   assert(!pi.commands.has("sediment-worker-maintenance"), "no maintenance cmd");
+  assert(!pi.commands.has("sediment-worker-capabilities"), "no capabilities cmd");
 });
 
 await check("writeEdgeTerminalWitness default semantics unchanged (no silent idempotent)", async () => {

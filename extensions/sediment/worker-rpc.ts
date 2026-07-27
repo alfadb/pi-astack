@@ -7,7 +7,8 @@
  *   PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS — JSON array of realpath owner roots
  * Command: /sediment-worker-run <json|base64url-json>
  *
- * Not a formal ConsumerAck / authority / retention path. Daemon owns lifecycle.
+ * Not a formal ConsumerAck / authority owner / retention path. LSEA admission is
+ * read-only; the daemon owns the long-held lock, containment, and lifecycle.
  * Reuses the existing agent_end pass body (extractor/curator/writer) against
  * source-session sidecar messages + owner project root — never the worker
  * command session itself. Does not register ordinary lifecycle hooks.
@@ -44,6 +45,13 @@ import {
   type PublicationOutboxDrainResult,
 } from "./publication-outbox";
 import { runWithWorkerBudget } from "../_shared/worker-budget-context";
+import {
+  admitLocalExecutorAuthority,
+  isLocalExecutorAuthorityErrorCode,
+  LOCAL_EXECUTOR_AUTHORITY_CAPABILITY,
+  LocalExecutorAuthorityAdmissionError,
+  validateLocalExecutorAuthorityManifestExpectation,
+} from "./local-executor-authority";
 
 export const SEDIMENT_WORKER_MODE_ENV = "PI_ASTACK_SEDIMENT_WORKER_MODE" as const;
 export const SEDIMENT_WORKER_COPY_STORE_ROOT_ENV = "PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT" as const;
@@ -56,7 +64,12 @@ export const SEDIMENT_WORKER_COMMAND_NAME = "sediment-worker-run" as const;
 export const SEDIMENT_WORKER_RESULT_NOTIFY_PREFIX = "sediment-worker-result:" as const;
 export const SEDIMENT_WORKER_PROGRESS_NOTIFY_PREFIX = "sediment-worker-progress:" as const;
 
-/** Local publication-outbox maintenance (daemon idle owner; not formal ACK). */
+/** Zero-semantic-side-effect worker-first rollout capability probe. */
+export const SEDIMENT_WORKER_CAPABILITIES_SCHEMA = "pi-astack/sediment-worker-capabilities/v1" as const;
+export const SEDIMENT_WORKER_CAPABILITIES_COMMAND_NAME = "sediment-worker-capabilities" as const;
+export const SEDIMENT_WORKER_CAPABILITIES_NOTIFY_PREFIX = "sediment-worker-capabilities:" as const;
+
+/** Local publication-outbox maintenance (daemon idle owner; not formal ACK/authority owner). */
 export const SEDIMENT_WORKER_MAINTENANCE_SCHEMA = "pi-astack/sediment-worker-maintenance/v1" as const;
 export const SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA = "pi-astack/sediment-worker-maintenance-result/v1" as const;
 export const SEDIMENT_WORKER_MAINTENANCE_COMMAND_NAME = "sediment-worker-maintenance" as const;
@@ -98,6 +111,8 @@ const MANIFEST_TOP_KEYS = new Set([
   "leaf_tip",
   "candidate_ref",
   "budget_ms",
+  "local_executor_epoch",
+  "local_executor_holder_nonce",
 ]);
 
 /**
@@ -256,6 +271,9 @@ export interface SedimentWorkerTaskManifest {
    * Worker self-returns within budget (5s return reserve); does not rely on daemon kill.
    */
   budget_ms: number;
+  /** Paired LSEA rollout fields. Both absent is legacy only while the store is absent. */
+  local_executor_epoch?: string;
+  local_executor_holder_nonce?: string;
 }
 
 export interface SedimentWorkerResult {
@@ -848,6 +866,18 @@ export function validateSedimentWorkerManifest(raw: unknown): SedimentWorkerTask
   };
 
   const budget_ms = parseWorkerBudgetMs(m.budget_ms);
+  let authorityExpectation: ReturnType<typeof validateLocalExecutorAuthorityManifestExpectation>;
+  try {
+    authorityExpectation = validateLocalExecutorAuthorityManifestExpectation({
+      local_executor_epoch: m.local_executor_epoch as string | undefined,
+      local_executor_holder_nonce: m.local_executor_holder_nonce as string | undefined,
+    });
+  } catch (error) {
+    const code = error instanceof LocalExecutorAuthorityAdmissionError
+      ? error.code
+      : "local_executor_authority_unavailable";
+    throw new WorkerValidationError(code, code);
+  }
 
   return {
     schema: SEDIMENT_WORKER_TASK_SCHEMA,
@@ -861,6 +891,7 @@ export function validateSedimentWorkerManifest(raw: unknown): SedimentWorkerTask
     task_kind: "terminal_witness",
     c6,
     budget_ms,
+    ...authorityExpectation,
     ...(leafTip ? { leaf_tip: leafTip } : {}),
     ...(candidateRef ? { candidate_ref: candidateRef } : {}),
   };
@@ -1848,10 +1879,14 @@ export async function runSedimentWorkerTask(
   } catch (err) {
     const code = err instanceof WorkerValidationError ? err.code : "manifest_invalid";
     // Manifest failures cannot trust ids; zeros only — not business settled.
+    const authorityClosed = isLocalExecutorAuthorityErrorCode(code);
     return failResult(
       { request_id: "0".repeat(64), terminal_record_id: "0".repeat(64) },
       code,
-      { retryable: false },
+      {
+        retryable: authorityClosed,
+        ...(authorityClosed ? { restart_child: false } : {}),
+      },
     );
   }
 
@@ -1887,6 +1922,21 @@ export async function runSedimentWorkerTask(
     };
 
     const abrainHome = path.resolve(deps.resolveAbrainHome());
+    try {
+      admitLocalExecutorAuthority({
+        abrainHome,
+        expectation: {
+          local_executor_epoch: manifest.local_executor_epoch,
+          local_executor_holder_nonce: manifest.local_executor_holder_nonce,
+        },
+        expectedHolderKind: "daemon",
+      });
+    } catch (error) {
+      const code = error instanceof LocalExecutorAuthorityAdmissionError
+        ? error.code
+        : "local_executor_authority_unavailable";
+      return failResult(ids, code, { retryable: true, restart_child: false });
+    }
     const budgetMs = manifest.budget_ms;
     const absoluteDeadlineMs = startedAtMs + budgetMs;
     const softDeadlineMs = computeWorkerSoftDeadlineMs({ startedAtMs, budgetMs });
@@ -2693,10 +2743,77 @@ export function registerSedimentWorkerCommand(
   });
 }
 
+// ─── Worker-first rollout capability RPC ─────────────────────────────────────
+
+export interface SedimentWorkerCapabilitiesResult {
+  schema: typeof SEDIMENT_WORKER_CAPABILITIES_SCHEMA;
+  capabilities: readonly [typeof LOCAL_EXECUTOR_AUTHORITY_CAPABILITY];
+}
+
+export function sedimentWorkerCapabilities(): SedimentWorkerCapabilitiesResult {
+  return Object.freeze({
+    schema: SEDIMENT_WORKER_CAPABILITIES_SCHEMA,
+    capabilities: Object.freeze([LOCAL_EXECUTOR_AUTHORITY_CAPABILITY] as const),
+  });
+}
+
+export function sanitizeSedimentWorkerCapabilities(raw: unknown): SedimentWorkerCapabilitiesResult | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const value = raw as Record<string, unknown>;
+  if (Object.keys(value).length !== 2
+    || value.schema !== SEDIMENT_WORKER_CAPABILITIES_SCHEMA
+    || !Array.isArray(value.capabilities)
+    || value.capabilities.length !== 1
+    || value.capabilities[0] !== LOCAL_EXECUTOR_AUTHORITY_CAPABILITY) return null;
+  return sedimentWorkerCapabilities();
+}
+
+export function formatSedimentWorkerCapabilitiesNotify(result = sedimentWorkerCapabilities()): string {
+  const clean = sanitizeSedimentWorkerCapabilities(result);
+  if (!clean) throw new WorkerValidationError("capabilities_invalid", "capabilities result invalid");
+  return `${SEDIMENT_WORKER_CAPABILITIES_NOTIFY_PREFIX}${JSON.stringify(clean)}`;
+}
+
+export function tryParseSedimentWorkerCapabilitiesNotify(message: string): SedimentWorkerCapabilitiesResult | null {
+  if (!message.startsWith(SEDIMENT_WORKER_CAPABILITIES_NOTIFY_PREFIX)) return null;
+  try {
+    return sanitizeSedimentWorkerCapabilities(
+      JSON.parse(message.slice(SEDIMENT_WORKER_CAPABILITIES_NOTIFY_PREFIX.length)),
+    );
+  } catch {
+    return null;
+  }
+}
+
+export function registerSedimentWorkerCapabilitiesCommand(pi: {
+  registerCommand?: (
+    name: string,
+    options: {
+      description?: string;
+      handler: (args: string, ctx: { ui?: { notify?(message: string, type?: string): void } }) => Promise<void>;
+    },
+  ) => void;
+}): void {
+  if (typeof pi.registerCommand !== "function") return;
+  pi.registerCommand(SEDIMENT_WORKER_CAPABILITIES_COMMAND_NAME, {
+    description: "Report closed sediment worker rollout capabilities. No semantic side effects.",
+    async handler(_args, ctx) {
+      const notify = ctx.ui?.notify?.bind(ctx.ui);
+      if (typeof notify !== "function") return;
+      try {
+        notify(formatSedimentWorkerCapabilitiesNotify(), "info");
+      } catch {
+        /* capability notify is best-effort and never starts semantic work */
+      }
+    },
+  });
+}
+
 // ─── Publication outbox maintenance RPC ───────────────────────────────────────
 
 const MAINTENANCE_REQUEST_KEYS = new Set([
   "schema", "request_id", "budget_ms", "kind", "repair_policy", "repair_limit",
+  "local_executor_epoch", "local_executor_holder_nonce",
 ]);
 const MAINTENANCE_RESULT_KEYS = new Set([
   "schema",
@@ -2743,6 +2860,9 @@ export interface SedimentWorkerMaintenanceRequest {
   repair_policy?: SedimentWorkerMaintenanceRepairPolicy;
   /** Optional on wire; absent is 0. */
   repair_limit?: 0 | 1;
+  /** Paired LSEA rollout fields. Both absent is legacy only while the store is absent. */
+  local_executor_epoch?: string;
+  local_executor_holder_nonce?: string;
 }
 
 export interface SedimentWorkerMaintenanceResult {
@@ -2851,11 +2971,24 @@ export function validateSedimentWorkerMaintenanceRequest(raw: unknown): Sediment
   if (repairPolicy === "none" && repairLimit !== 0) {
     throw new WorkerValidationError("repair_limit_without_policy", "repair_limit=1 requires a non-none repair policy");
   }
+  let authorityExpectation: ReturnType<typeof validateLocalExecutorAuthorityManifestExpectation>;
+  try {
+    authorityExpectation = validateLocalExecutorAuthorityManifestExpectation({
+      local_executor_epoch: m.local_executor_epoch as string | undefined,
+      local_executor_holder_nonce: m.local_executor_holder_nonce as string | undefined,
+    });
+  } catch (error) {
+    const code = error instanceof LocalExecutorAuthorityAdmissionError
+      ? error.code
+      : "local_executor_authority_unavailable";
+    throw new WorkerValidationError(code, code);
+  }
   return {
     schema: SEDIMENT_WORKER_MAINTENANCE_SCHEMA,
     request_id: m.request_id,
     budget_ms,
     kind: "publication_outbox",
+    ...authorityExpectation,
     ...(m.repair_policy !== undefined ? { repair_policy: repairPolicy as SedimentWorkerMaintenanceRepairPolicy } : {}),
     ...(m.repair_limit !== undefined ? { repair_limit: repairLimit } : {}),
   };
@@ -3112,7 +3245,7 @@ export async function runSedimentWorkerMaintenance(
     return buildMaintenanceResult({
       request_id: "0".repeat(64),
       status: "failed",
-      retryable: false,
+      retryable: isLocalExecutorAuthorityErrorCode(code),
       restart_child: false,
       pending_before: null,
       pending_after: null,
@@ -3209,6 +3342,30 @@ export async function runSedimentWorkerMaintenance(
         pending_before: null,
         pending_after: null,
         error_code: "worker_configuration_invalid",
+      });
+    }
+
+    try {
+      admitLocalExecutorAuthority({
+        abrainHome,
+        expectation: {
+          local_executor_epoch: request.local_executor_epoch,
+          local_executor_holder_nonce: request.local_executor_holder_nonce,
+        },
+        expectedHolderKind: "daemon",
+      });
+    } catch (error) {
+      const code = error instanceof LocalExecutorAuthorityAdmissionError
+        ? error.code
+        : "local_executor_authority_unavailable";
+      return finish({
+        status: "failed",
+        retryable: true,
+        restart_child: false,
+        pending_before: null,
+        pending_after: null,
+        failed: null,
+        error_code: code,
       });
     }
 

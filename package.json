@@ -199,6 +199,7 @@
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
     "smoke:sediment-worker-rpc": "node scripts/smoke-sediment-worker-rpc.mjs",
+    "smoke:lsea-worker-admission": "node scripts/smoke-lsea-worker-admission.mjs",
     "smoke:publication-legacy-repair": "node scripts/smoke-publication-legacy-repair.mjs",
     "smoke:sediment-daemon-edge-capture": "node scripts/smoke-sediment-daemon-edge-capture.mjs",
     "smoke:edge-protocol-shadow": "node scripts/smoke-edge-protocol-shadow.mjs",

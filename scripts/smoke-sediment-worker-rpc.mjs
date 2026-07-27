@@ -3,7 +3,7 @@
  * Stage0 sediment worker-safe RPC smoke (post Critical/High review fix).
  *
  * Covers:
- *  - worker mode: zero lifecycle hooks + only worker command
+ *  - worker mode: zero lifecycle hooks + task/maintenance/capabilities commands
  *  - normal mode lifecycle hooks still register (regression)
  *  - foreground daemon-owner: capture ok, no enqueue
  *  - manifest unknown fields / content_id required / integer strictness
@@ -121,7 +121,7 @@ function fakePi() {
 
 console.log("sediment worker-safe RPC Stage0 (post-review)");
 
-await check("worker mode: zero lifecycle hooks + only worker command", async () => {
+await check("worker mode: zero lifecycle hooks + closed worker commands", async () => {
   const prev = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
   process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1";
   try {
@@ -142,6 +142,7 @@ await check("worker mode: zero lifecycle hooks + only worker command", async () 
     }
     assert(pi.commands.has("sediment-worker-run"), "missing sediment-worker-run command");
     assert(pi.commands.has("sediment-worker-maintenance"), "missing sediment-worker-maintenance command");
+    assert(pi.commands.has("sediment-worker-capabilities"), "missing sediment-worker-capabilities command");
     assert(!pi.commands.has("sediment"), "ordinary /sediment must not register in worker mode");
   } finally {
     if (prev === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
@@ -165,6 +166,7 @@ await check("normal mode: lifecycle hooks still register (regression)", async ()
     assert(pi.commands.has("sediment"), "normal mode missing /sediment");
     assert(!pi.commands.has("sediment-worker-run"), "worker command must not register outside worker mode");
     assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance command must not register outside worker mode");
+    assert(!pi.commands.has("sediment-worker-capabilities"), "capabilities command must not register outside worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
     writeSettings({ executionOwner: "daemon" });
@@ -190,6 +192,7 @@ await check("foreground daemon-owner: capture without enqueue", async () => {
     // a no-op (no agent_end fire with real intake in this unit).
     assert(!pi.commands.has("sediment-worker-run"), "worker cmd only in worker mode");
     assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance cmd only in worker mode");
+    assert(!pi.commands.has("sediment-worker-capabilities"), "capabilities cmd only in worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
   }
@@ -4163,6 +4166,7 @@ await check("foreground unchanged: no maintenance registration outside worker mo
     assert(pi.handlers.has("agent_end"), "foreground agent_end remains");
     assert(!pi.commands.has("sediment-worker-maintenance"), "no maintenance outside worker");
     assert(!pi.commands.has("sediment-worker-run"), "no worker-run outside worker");
+    assert(!pi.commands.has("sediment-worker-capabilities"), "no capabilities outside worker");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
     writeSettings({ executionOwner: "daemon" });

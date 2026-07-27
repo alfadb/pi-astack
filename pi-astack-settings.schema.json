@@ -810,7 +810,7 @@
           "type": "string",
           "enum": ["foreground", "daemon"],
           "default": "foreground",
-          "description": "ADR 0045 Stage0 single-executor ownership. foreground (default): ordinary Pi extension owns enqueue + recovery + normal sediment pass/timer; worker mode refuses. daemon: ordinary extension keeps agent_end/settled capture (intake + edge shadow) but does not enqueue, schedule recovery, or run the normal sediment pass; headless worker (PI_ASTACK_SEDIMENT_WORKER_MODE=1) is the sole pass executor. Prevents dual-executor races. Not a formal ACK/authority switch."
+          "description": "ADR 0045 legacy single-executor setting. foreground (default): ordinary Pi owns enqueue/recovery/pass; daemon with the full edge triple gate makes ordinary Pi capture-only and the headless worker the executor. LSEA overlay is authoritative once observed: held/draining/corrupt strict store keeps durable intake/edge witness capture but blocks foreground semantic enqueue/recovery/replay/policy/publication/writer regardless of this setting; strict free+unlocked or cleanly missing store retains legacy behavior for worker-first rollout. Full exclusion still depends on pi-router lock + process containment; this is not formal ACK/central authority."
         },
 
         "daemonWorker": {
