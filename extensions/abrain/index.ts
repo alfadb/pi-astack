@@ -54,7 +54,7 @@ import {
   ensureAbrainStateGitignored,
   ensureBrainLayout,
 } from "./brain-layout";
-import activateRuleInjector, { setRuleInjectorSelfHealScheduler, type RuleInjectorSelfHealTrigger } from "./rule-injector";
+import activateRuleInjector from "./rule-injector";
 import {
   pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
   formatSyncStatus, type AbrainSyncStatus, type GitSyncEvent, type GitSyncNotifyType,
@@ -1623,56 +1623,13 @@ export default function activate(pi: ExtensionAPI): void {
   // and surface results via pi's TUI instead of raw stderr. See the
   // comment block on runStartupAutoSync above for rationale.
 
-  // ADR 0023-R5: read-only rules injection. Loaded from abrain so it shares
-  // the same PI_ABRAIN_DISABLED sub-pi boundary and strict project binding.
-  // This registers /rule diagnostic pull commands but no rule write/veto UI.
-  //
-  // Compiled-view repair bridge: when the rule-injector detects a broken
-  // compiled view, it calls the constraint shadow auto-refresh scheduler. The
-  // modelRegistry is captured lazily from session_start (not available at
-  // activation time).
+  // ADR 0023-R5 / ADR0040: Policy stable-view rule injection. Loaded from
+  // abrain so it shares the same PI_ABRAIN_DISABLED sub-pi boundary and
+  // strict project binding. Registers /rule diagnostic pull commands only.
+  // modelRegistry/cwd are captured lazily from session_start for startup
+  // device sync (not available at activation time).
   let capturedModelRegistry: unknown = undefined;
   let capturedCwd: string = process.cwd();
-  let pendingSelfHealTrigger: RuleInjectorSelfHealTrigger | undefined;
-  let selfHealTimer: ReturnType<typeof setTimeout> | undefined;
-  let canonicalBarrierReady = !canonicalModeEnabled;
-  const queueSelfHealFlush = (): void => {
-    if (!canonicalBarrierReady || selfHealTimer) return;
-    selfHealTimer = setTimeout(() => {
-      selfHealTimer = undefined;
-      const next = pendingSelfHealTrigger;
-      if (!next) return;
-      if (!isUsableModelRegistry(capturedModelRegistry)) return;
-      pendingSelfHealTrigger = undefined;
-      try {
-        const settings = defaultResolveSedimentSettings();
-        if (!settings.constraintShadowCompiler?.enabled || !settings.constraintShadowCompiler?.autoRefresh?.enabled) return;
-        const abrainHome = next.abrainHome;
-        const activeProjectId = next.activeProjectId;
-        const knownProjectIds = Array.from(new Set([
-          ...(activeProjectId ? [activeProjectId] : []),
-          ...listAbrainProjects(abrainHome),
-        ])).sort();
-        defaultScheduleConstraintShadowAutoRefresh({
-          abrainHome,
-          cwd: next.cwd || capturedCwd,
-          activeProjectId,
-          knownProjectIds,
-          settings,
-          modelRegistry: capturedModelRegistry,
-          reason: next.reason,
-          sourceEventId: undefined,
-        });
-      } catch {
-        // Compiled-view refresh is best-effort; startup and rule injection continue.
-      }
-    }, 0);
-    (selfHealTimer as unknown as { unref?: () => void }).unref?.();
-  };
-  setRuleInjectorSelfHealScheduler((trigger: RuleInjectorSelfHealTrigger) => {
-    pendingSelfHealTrigger = trigger;
-    queueSelfHealFlush();
-  });
   activateRuleInjector(pi);
 
   const registry = pi as unknown as CommandRegistry;
@@ -1716,7 +1673,6 @@ export default function activate(pi: ExtensionAPI): void {
             errorMessage: (error) => `abrain canonical startup continuation threw: ${error instanceof Error ? error.message : String(error)}`,
             onReady: async () => {
               if (getAbrainLocalSafetyStatus(ABRAIN_HOME).status !== "ready") return;
-              canonicalBarrierReady = true;
               initializeAbrainRuntimeAfterBarrier();
               // Apply durable bind intents under the existing barrier/receipt
               // authority. Never auto-drains production backlog or pushes.
@@ -1732,13 +1688,11 @@ export default function activate(pi: ExtensionAPI): void {
               } catch (error) {
                 console.error(`[abrain] bind intent apply on ready failed: ${error instanceof Error ? error.message : String(error)}`);
               }
-              queueSelfHealFlush();
               // Device delivery remains advisory and follows full Path A proof.
               runStartupAutoSync({ modelRegistry: capturedModelRegistry, cwd: capturedCwd });
             },
           });
         } else if (currentSafety.status === "ready") {
-          queueSelfHealFlush();
           runStartupAutoSync({ modelRegistry: capturedModelRegistry, cwd: capturedCwd });
         }
       } catch (err) {

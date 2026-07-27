@@ -186,10 +186,6 @@ function stageRuleInjector(outRoot) {
   getCurrentAnchor: () => ({ session_id: ${JSON.stringify(sessionId)}, turn_id: 7 }),
   spreadAnchor: (anchor) => ({ ...anchor, device_id: "fixture-device" }),
 };\n`);
-  writeFile(path.join(outRoot, "abrain", "rule-injector", "dualread-audit.js"), `module.exports = {
-  resolveRuleInjectorDualReadAuditSettings: () => ({ enabled: false, maxReadBytes: 1000000, staleAfterMs: 86400000 }),
-  runRuleInjectorDualReadAudit: () => { throw new Error("production hook reached dual-read"); },
-};\n`);
   for (const [source, target] of files) writeFile(path.join(outRoot, target), transpile(source));
 }
 
@@ -385,6 +381,7 @@ try {
     const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8"));
     const rule = schema.properties.ruleInjector.properties;
     assert(!Object.hasOwn(rule, "compiledViewInjection"), "compiled runtime config remains in schema");
+    assert(!Object.hasOwn(rule, "dualReadAudit"), "dual-read audit config remains in schema");
     assert(!Object.hasOwn(rule, "propositionLifecycleFreshnessD3V2SessionStartInjection"), "D3 runtime config remains in schema");
     const stable = rule.propositionPolicyStableViewInjection.properties;
     assert(JSON.stringify(Object.keys(stable).sort()) === JSON.stringify(["_comment", "maxReadBytes"]), `stable settings keys=${Object.keys(stable)}`);

@@ -62,11 +62,12 @@ const schema = JSON.parse(source("pi-astack-settings.schema.json"));
 const resolved = jiti(path.join(repoRoot, "extensions/sediment/settings.ts")).resolveSedimentSettings();
 const autoRefresh = jiti(path.join(repoRoot, "extensions/sediment/constraint-compiler/auto-refresh.ts"));
 
-await check("live dual-read audit and automatic shadow refresh are disabled", () => {
-  assert(live.ruleInjector?.dualReadAudit?.enabled === false, "live ruleInjector.dualReadAudit.enabled must be false");
+await check("live automatic shadow refresh is disabled and dual-read audit is retired", () => {
+  // dualReadAudit may still linger in production settings as an orphan key; source/schema must not load it.
   assert(live.sediment?.constraintShadowCompiler?.autoRefresh?.enabled === false, "live constraint shadow autoRefresh must be false");
   assert(resolved.constraintShadowCompiler.enabled === true, "manual compiler capability was disabled");
   assert(resolved.constraintShadowCompiler.autoRefresh.enabled === false, "resolved live autoRefresh is not false");
+  assert(!fs.existsSync(path.join(repoRoot, "extensions/abrain/rule-injector/dualread-audit.ts")), "dualread-audit.ts still present");
 });
 
 await check("Policy stable-view, Constraint events, and Constraint L2 projection remain configured", () => {
@@ -79,24 +80,28 @@ await check("Policy stable-view, Constraint events, and Constraint L2 projection
 await check("schema documents one automatic kill switch without removing manual capability", () => {
   const compiler = schema.properties.sediment.properties.constraintShadowCompiler;
   const auto = compiler.properties.autoRefresh;
-  const dual = schema.properties.ruleInjector.properties.dualReadAudit;
   assert(compiler.properties._comment?.type === "string", "constraint compiler operator comment is not schema-valid");
   assert(compiler.properties.enabled.default === false, "compiler default must stay opt-in");
   assert(auto.properties.enabled.default === false, "autoRefresh schema default must stay false");
   assert(auto.properties.enabled.description.includes("every automatic shadow compile trigger"), "autoRefresh kill-switch scope is undocumented");
-  assert(auto.description.includes("startup Git sync") && auto.description.includes("compiled-view repair"), "automatic trigger inventory is incomplete");
-  assert(dual.properties.enabled.default === false && dual.description.includes("production session hook does not execute"), "dual-read offline-only schema contract drifted");
+  assert(auto.description.includes("startup Git sync"), "automatic trigger inventory is incomplete");
+  assert(!schema.properties.ruleInjector.properties.dualReadAudit, "dualReadAudit must be removed from schema");
+  assert(!schema.properties.ruleInjector.properties.compiledViewInjection, "compiledViewInjection must be removed from schema");
 });
 
 await check("production rule hook cannot reach dual-read or Constraint compiled-view helpers", () => {
   const injector = source("extensions/abrain/rule-injector/index.ts");
-  const hooks = sourceSlice(injector, 'maybePi.on("session_start"', 'if (typeof maybePi.registerCommand');
   for (const forbidden of [
-    "runRuleInjectorDualReadAudit(",
-    "readCompiledRuleInjectionForRuntime(",
-    "decideRuntimeRuleInjection(",
-    "scheduleSelfHeal(",
-  ]) assert(!hooks.includes(forbidden), `production rule hook reaches ${forbidden}`);
+    "runRuleInjectorDualReadAudit",
+    "readCompiledRuleInjectionForRuntime",
+    "decideRuntimeRuleInjection",
+    "scheduleSelfHeal",
+    "setRuleInjectorSelfHealScheduler",
+    "composeRuleInjection",
+    "compiledViewInjection",
+    "dualReadAudit",
+  ]) assert(!injector.includes(forbidden), `retired helper remains: ${forbidden}`);
+  const hooks = sourceSlice(injector, 'maybePi.on("session_start"', 'if (typeof maybePi.registerCommand');
   assert(hooks.includes("readPropositionPolicyStableViewForRuntime("), "Policy stable-view is not the production rule source");
 });
 
@@ -112,9 +117,8 @@ await check("every retained automatic scheduler path is gated before compiler wo
   const gitSync = sourceSlice(abrain, "export async function maybeScheduleConstraintShadowAutoRefreshAfterStartupGitSync", "const releaseSessionGrants");
   assert(gitSync.indexOf("if (!compiler?.autoRefresh?.enabled)") >= 0, "startup Git sync autoRefresh gate missing");
   assert(gitSync.indexOf("if (!compiler?.autoRefresh?.enabled)") < gitSync.indexOf("return await schedule({"), "startup Git sync schedules before gate");
-  const selfHeal = sourceSlice(abrain, "const queueSelfHealFlush", "setRuleInjectorSelfHealScheduler");
-  assert(selfHeal.indexOf("!settings.constraintShadowCompiler?.autoRefresh?.enabled") >= 0, "compiled-view repair autoRefresh gate missing");
-  assert(selfHeal.indexOf("!settings.constraintShadowCompiler?.autoRefresh?.enabled") < selfHeal.indexOf("defaultScheduleConstraintShadowAutoRefresh({"), "compiled-view repair schedules before gate");
+  assert(!abrain.includes("setRuleInjectorSelfHealScheduler"), "compiled-view self-heal bridge still present");
+  assert(!abrain.includes("queueSelfHealFlush"), "compiled-view self-heal flush still present");
 
   const sediment = source("extensions/sediment/index.ts");
   assert(!sediment.includes("runConstraintShadowCompiler("), "sediment production extension directly invokes the compiler");
@@ -168,16 +172,15 @@ await check("live startup resume and liveness paths cannot schedule a compile", 
   fs.rmSync(abrainHome, { recursive: true, force: true });
 });
 
-await check("manual compiler, dossier, dual-read audit, and migration substrate remain available", () => {
+await check("manual compiler, dossier, and migration substrate remain available", () => {
   const pkg = JSON.parse(source("package.json"));
   const dossier = source("scripts/dossier-constraint-shadow-report.mjs");
   const runner = source("extensions/sediment/constraint-compiler/shadow-runner.ts");
-  const audit = source("extensions/abrain/rule-injector/dualread-audit.ts");
   const scheduler = source("extensions/sediment/constraint-compiler/auto-refresh.ts");
   assert(pkg.scripts["dossier:constraint-shadow-report"] === "node scripts/dossier-constraint-shadow-report.mjs", "manual dossier command missing");
   assert(dossier.includes("runConstraintShadowCompiler({") && dossier.includes("if (!WRITE)"), "manual dossier compiler path missing");
   assert(runner.includes("export async function runConstraintShadowCompiler"), "manual compiler export missing");
-  assert(audit.includes("export function runRuleInjectorDualReadAudit"), "dual-read audit implementation was removed");
+  assert(!fs.existsSync(path.join(repoRoot, "extensions/abrain/rule-injector/dualread-audit.ts")), "dual-read audit source must be retired");
   assert(scheduler.includes("export async function scheduleConstraintShadowAutoRefresh") && scheduler.includes("export async function resumeConstraintShadowAutoRefreshAtStartup"), "future migration substrate was removed");
 
   const dryRun = spawnSync(process.execPath, [path.join(repoRoot, "scripts/dossier-constraint-shadow-report.mjs")], {

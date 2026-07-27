@@ -29,8 +29,7 @@ for (const d of ["rules/always", "rules/listed"]) fs.mkdirSync(path.join(tmp, d)
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const ri = await jiti.import(`${repoRoot}/extensions/abrain/rule-injector/index.ts`);
 const { refreshRulesFooterRealtime, resolveRuleInjectorSettings } = ri;
-const baseSettings = resolveRuleInjectorSettings();
-const settings = { ...baseSettings, compiledViewInjection: { ...baseSettings.compiledViewInjection, enabled: false } };
+const settings = resolveRuleInjectorSettings();
 const cwd = path.join(tmp, "proj");
 fs.mkdirSync(cwd, { recursive: true });
 
@@ -79,7 +78,7 @@ fs.writeFileSync(path.join(tmp, "rules/always/legacy-fossil.md"), legacyRule, "u
 
 captured = undefined;
 refreshRulesFooterRealtime(cwd, settings);
-assert(captured === "🧠 rules: legacy 2 always, 0 listed", `after write -> live count (incl. legacy-frontmatter fossil), got ${JSON.stringify(captured)}`);
+assert(captured === "🧠 rules: neighbor 2 always, 0 listed", `after write -> live count (incl. legacy-frontmatter fossil), got ${JSON.stringify(captured)}`);
 
 // 3. no captured setter -> no throw (best-effort guard)
 delete globalThis.__abrainRules_setFooter;

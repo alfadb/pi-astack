@@ -51,22 +51,32 @@ try {
       "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-control.ts",
       "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-session-start-r42-runtime-control.ts",
       "extensions/abrain/rule-injector/proposition-lifecycle-freshness-d3-v2-runtime-audit.ts",
+      "extensions/abrain/rule-injector/dualread-audit.ts",
     ]) {
-      assert(!fs.existsSync(path.join(repoRoot, rel)), `retired D3-v2 runtime module still present: ${rel}`);
+      assert(!fs.existsSync(path.join(repoRoot, rel)), `retired runtime module still present: ${rel}`);
     }
+    for (const forbidden of [
+      "readCompiledRuleInjectionForRuntime",
+      "decideRuntimeRuleInjection",
+      "composeRuleInjection",
+      "composeRuleSection",
+      "runRuleInjectorDualReadAudit",
+      "setRuleInjectorSelfHealScheduler",
+      "scheduleSelfHeal",
+      "compiledViewInjection",
+      "dualReadAudit",
+      "liveCanary",
+      "legacy_fallback",
+      "compiled_injected",
+    ]) assert(!source.includes(forbidden), `retired symbol remains in source: ${forbidden}`);
     const start = source.indexOf('maybePi.on("session_start"');
     const end = source.indexOf('if (typeof maybePi.registerCommand', start);
     assert(start >= 0 && end > start, "production lifecycle hook block missing");
     const hooks = source.slice(start, end);
     for (const forbidden of [
       "scanRules(",
-      "readCompiledRuleInjectionForRuntime(",
-      "decideRuntimeRuleInjection(",
-      "composeRuleInjection(",
-      "runRuleInjectorDualReadAudit(",
       "propositionLifecycleFreshness",
       "normal_path_fallback",
-      "legacy_fallback",
     ]) assert(!hooks.includes(forbidden), `production hook reaches ${forbidden}`);
     assert(hooks.includes("readPropositionPolicyStableViewForRuntime("), "stable-view reader is absent from production hook");
     assert(hooks.includes("policy_stable_view_rejected"), "loud zero terminal decision is absent");
@@ -122,7 +132,7 @@ try {
     assert(!ephemeral.selected && ephemeral.reason === "ephemeral_session", `ephemeral=${JSON.stringify(ephemeral)}`);
   });
 
-  check("legacy rule scanner remains diagnostic-only historical code", () => {
+  check("legacy rule scanner remains diagnostic-only readonly neighbor", () => {
     const abrain = path.join(tmpRoot, "diagnostic-abrain");
     writeFile(path.join(abrain, "rules", "always", "historical.md"), [
       "---",
@@ -142,15 +152,21 @@ try {
       resolveProject: () => ({ activeProject: null, reason: "fixture_unbound", cwd: tmpRoot }),
     });
     assert(cache.globalAlways.length === 1, "historical diagnostic scanner no longer reads its retained code");
-    assert(injector.composeRuleInjection(cache).includes("Historical Diagnostic"), "historical diagnostic renderer drifted");
+    assert(cache.globalAlways[0].title === "Historical Diagnostic", "diagnostic title drifted");
+    assert(cache.globalAlways[0].catalogText.includes("Historical Diagnostic"), "diagnostic catalog text drifted");
+    assert(typeof injector.composeRuleInjection !== "function", "composeRuleInjection must be deleted");
   });
 
-  check("schema exposes only stable-view infrastructure limits for production rule authority", () => {
+  check("schema exposes only maxCatalog* + stable-view for production rule authority", () => {
     const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "pi-astack-settings.schema.json"), "utf8"));
     const properties = schema.properties.ruleInjector.properties;
     assert(!properties.enabled, "rule authority enabled switch remains reachable");
     assert(!properties.compiledViewInjection, "compiled runtime config remains reachable");
+    assert(!properties.dualReadAudit, "dual-read audit config remains reachable");
     assert(!properties.propositionLifecycleFreshnessD3V2SessionStartInjection, "D3 runtime config remains reachable");
+    assert(JSON.stringify(Object.keys(properties).sort())
+      === JSON.stringify(["_comment", "maxCatalogSummaryChars", "maxCatalogTriggerChars", "propositionPolicyStableViewInjection"]),
+      `ruleInjector schema keys drifted: ${Object.keys(properties)}`);
     assert(JSON.stringify(Object.keys(properties.propositionPolicyStableViewInjection.properties).sort())
       === JSON.stringify(["_comment", "maxReadBytes"]), "stable-view selector/auth gate remains");
   });

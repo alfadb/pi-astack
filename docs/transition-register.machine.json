@@ -182,21 +182,23 @@
       "id": "constraint.dual-read-flip",
       "partition": "constraint",
       "title": "Constraint 双读 flip",
-      "human_section": "滞留需推进",
+      "human_section": "已收口",
       "register_class": "active",
-      "phase_status": "blocked_on_evidence",
-      "authorization_status": "separate_authorization_required",
+      "phase_status": "completed",
+      "authorization_status": "not_authorized",
       "entered": "2026-07-08",
-      "review_by": "2026-08-04",
-      "current": "Historical dual-read / compiler evidence gates remain noted, but production session rule authority has moved to ADR0040 Policy stable-view. This face no longer controls live session injection; residual dual-read/compiler retirement still needs explicit disposition without implying constraint-shadow is current rule authority.",
+      "review_by": "2026-07-27",
+      "current": "completed / not_authorized retired/superseded (2026-07-27 S0). Constraint dual-read flip never became production session rule authority; Policy stable-view supersedes compiled-view/legacy injection. Compiled-view injection helpers, liveCanary, self-heal scheduler, and dual-read audit module deleted from rule-injector. Historical compiler/dual-read evidence remains immutable and non-rerunnable as cold residual.",
       "exit": [
-        "重跑 compile 成功并确认第 29 条 evidence 已投影",
-        "明确记录 flip/retirement 授权、回滚条件与 R 轮边界"
+        "DONE: compiled/dual-read/self-heal injection path deleted from production code",
+        "DONE: Policy stable-view is sole session rule authority",
+        "BOUNDARY: residual constraint L2/compiler offline tooling is not a flip surface"
       ],
       "evidence": [
-        "constraint dual-read audit",
-        "shadow compiler metrics",
-        "2026-07-08 cross-source audit"
+        "constraint dual-read audit historical rows",
+        "shadow compiler metrics historical",
+        "ADR0040 Policy stable-view runtime flip",
+        "2026-07-27 S0 compiled rule injection retirement"
       ],
       "owner": "constraint-pipeline",
       "consumer": [
@@ -205,7 +207,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Disposition residual dual-read/compiler artifacts only; do not treat this face as session rule authority or as undoing the Policy stable-view flip."
+      "next_action": "Keep retired/superseded. Do not restore compiled-view injection, dual-read runtime, or treat constraint-shadow as session rule authority. Residual projection/audit alignment stays under other blocked residual faces if needed."
     },
     {
       "id": "proposition.adr0040-p0a",
@@ -953,20 +955,24 @@
       "id": "constraint.dual-read-audit-retirement",
       "partition": "constraint",
       "title": "dual-read audit 关闭",
-      "human_section": "滞留需推进",
+      "human_section": "已收口",
       "register_class": "active",
-      "phase_status": "blocked_on_prerequisite",
-      "authorization_status": "not_applicable",
+      "phase_status": "completed",
+      "authorization_status": "authorized",
       "entered": "2026-07-08",
-      "review_by": "2026-07-24",
-      "current": "dual-read audit 仍作为过渡监控面存在。",
+      "review_by": "2026-07-27",
+      "current": "completed / authorized (2026-07-27 S0). dual-read audit source module `extensions/abrain/rule-injector/dualread-audit.ts` deleted; schema key `ruleInjector.dualReadAudit` removed; production rule authority remains Policy stable-view only. Historical dual-read audit.jsonl rows and evidence notes keep original bytes and remain offline cold audit only. constraint-shadow compiler + manual auto-refresh substrate retained but not session rule authority.",
       "exit": [
-        "constraint legacy retirement 完成",
-        "不存在新的 undispositioned delta"
+        "DONE: dualread-audit.ts deleted and unreachable from production hooks",
+        "DONE: schema dualReadAudit removed; settings load ignores residual orphan key",
+        "DONE: stable-view is sole production session rule authority"
       ],
       "evidence": [
-        "dual-read audit",
-        "constraint retirement gate"
+        "extensions/abrain/rule-injector/index.ts (no dual-read/compiled/self-heal)",
+        "pi-astack-settings.schema.json ruleInjector",
+        "smoke:abrain-rule-injector",
+        "smoke:constraint-shadow-manual-only",
+        "proposition.adr0040-policy-stable-view-runtime-flip"
       ],
       "owner": "constraint-runtime",
       "consumer": [
@@ -974,7 +980,7 @@
       ],
       "renewal_count": 0,
       "risk_class": "medium",
-      "next_action": "绑定到 constraint legacy retirement 完成后关闭。"
+      "next_action": "Keep retired. Do not restore dual-read audit runtime/module/schema. Historical audit.jsonl and notes remain immutable cold evidence; constraint-shadow compiler stays manual/offline only."
     },
     {
       "id": "lifecycle.convergence-rm-002",

@@ -1080,7 +1080,7 @@
 
     "ruleInjector": {
       "type": "object",
-      "description": "ADR0040 production rule injection. Every persisted main session reads only the content-addressed proposition policy stable-view latest; subagents and ephemeral sessions receive no rule injection. Legacy rule/compiled/D3 helpers are retained only as offline historical diagnostics and are unreachable from the production hook.",
+      "description": "ADR0040 production rule injection. Every persisted main session reads only the content-addressed proposition policy stable-view latest; subagents and ephemeral sessions receive no rule injection. Compiled-view injection, dual-read audit, and self-heal scheduling are retired; on-disk rules/ remain a readonly diagnostic neighbor for /rule only.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -1096,32 +1096,6 @@
           "default": 160,
           "minimum": 40,
           "description": "Historical offline catalog diagnostic formatting limit; it is not a production selection or authority gate."
-        },
-        "dualReadAudit": {
-          "type": "object",
-          "default": { "enabled": false },
-          "description": "Historical offline dual-read diagnostic configuration. The production session hook does not execute this path.",
-          "additionalProperties": false,
-          "properties": {
-            "_comment": { "type": "string" },
-            "enabled": {
-              "type": "boolean",
-              "default": false,
-              "description": "Default-off switch for explicit offline diagnostic runs. It has no production hook call edge and cannot affect rule authority."
-            },
-            "maxReadBytes": {
-              "type": "number",
-              "default": 1000000,
-              "minimum": 1000,
-              "description": "Maximum bytes read per shadow artifact JSON file during an explicit offline diagnostic run."
-            },
-            "staleAfterMs": {
-              "type": "number",
-              "default": 86400000,
-              "minimum": 0,
-              "description": "Shadow decision file age threshold for marking the dual-read audit row stale. Staleness is diagnostic only and never changes injection."
-            }
-          }
         },
         "propositionPolicyStableViewInjection": {
           "type": "object",

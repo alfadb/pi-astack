@@ -1,11 +1,10 @@
 /**
- * ADR 0023-R5 read-path: session-start rule injection.
+ * ADR 0023-R5 / ADR0040 read-path: session-start rule injection.
  *
- * This module intentionally implements ONLY the ADR 0024-compatible read
- * path: scan existing rules/ entries and inject them into the main-session
- * system prompt.  It does not write rules, promote rules, ask for veto, or
- * expose a lifecycle-management UI.  State visibility (/rule list/explain)
- * is diagnostic pull; no user decision is required.
+ * Production authority is the content-addressed Policy stable-view only.
+ * Legacy rules/ on disk remain a readonly diagnostic neighbor for /rule
+ * list|explain|reload and footer counts. Compiled-view, dual-read audit,
+ * and self-heal scheduling are retired and unreachable.
  */
 
 import * as crypto from "node:crypto";
@@ -30,11 +29,6 @@ import {
 } from "../../memory/parser";
 import { slugify } from "../../memory/utils";
 import {
-  resolveRuleInjectorDualReadAuditSettings,
-  runRuleInjectorDualReadAudit,
-  type RuleInjectorDualReadAuditSettings,
-} from "./dualread-audit";
-import {
   readPropositionPolicyStableViewForRuntime,
   resolvePropositionPolicyStableViewInjectionSettings,
   selectPropositionPolicyStableViewSession,
@@ -54,27 +48,9 @@ export type RuleScope = "global" | "project";
 
 type NotifyType = "info" | "warning" | "error";
 
-export interface RuleInjectorCompiledViewLiveCanarySettings {
-  enabled: boolean;
-  sessionIds: string[];
-}
-
-export interface RuleInjectorCompiledViewInjectionSettings {
-  enabled: boolean;
-  fallbackToLegacyOnError: boolean;
-  requireFresh: boolean;
-  staleAfterMs: number;
-  maxReadBytes: number;
-  minCoverageRatio: number;
-  liveCanary: RuleInjectorCompiledViewLiveCanarySettings;
-}
-
 export interface RuleInjectorSettings {
-  enabled: boolean;
   maxCatalogSummaryChars: number;
   maxCatalogTriggerChars: number;
-  dualReadAudit: RuleInjectorDualReadAuditSettings;
-  compiledViewInjection: RuleInjectorCompiledViewInjectionSettings;
   propositionPolicyStableViewInjection: PropositionPolicyStableViewInjectionSettings;
 }
 
@@ -132,27 +108,9 @@ export const BEGIN_ABRAIN_RULES = "<!-- BEGIN_ABRAIN_RULES";
 export const END_ABRAIN_RULES = "<!-- END_ABRAIN_RULES -->";
 export const RULE_STATUS_KEY = FOOTER_STATUS_KEYS.abrainRules;
 
-const DEFAULT_COMPILED_VIEW_LIVE_CANARY: RuleInjectorCompiledViewLiveCanarySettings = {
-  enabled: false,
-  sessionIds: [],
-};
-
-const DEFAULT_COMPILED_VIEW_INJECTION: RuleInjectorCompiledViewInjectionSettings = {
-  enabled: false,
-  fallbackToLegacyOnError: true,
-  requireFresh: true,
-  staleAfterMs: 24 * 60 * 60 * 1_000,
-  maxReadBytes: 1_000_000,
-  minCoverageRatio: 1,
-  liveCanary: DEFAULT_COMPILED_VIEW_LIVE_CANARY,
-};
-
 const DEFAULT_SETTINGS: RuleInjectorSettings = {
-  enabled: true,
   maxCatalogSummaryChars: 220,
   maxCatalogTriggerChars: 160,
-  dualReadAudit: resolveRuleInjectorDualReadAuditSettings(undefined),
-  compiledViewInjection: DEFAULT_COMPILED_VIEW_INJECTION,
   propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(undefined),
 };
 
@@ -167,53 +125,6 @@ interface PolicyFooterState {
 // after before_agent_start has chosen the actual injected source.
 let policyFooterState: PolicyFooterState | null = null;
 
-// ── Self-heal: async constraint shadow recompile when compiled view is unavailable ──
-// Set by abrain/index.ts at activation time (dependency injection bridge).
-// The rule-injector itself has no modelRegistry; the abrain entry point wires it.
-export interface RuleInjectorSelfHealTrigger {
-  abrainHome: string;
-  cwd: string;
-  activeProjectId?: string;
-  reason: string;
-}
-
-export type RuleInjectorSelfHealScheduler = (trigger: RuleInjectorSelfHealTrigger) => void;
-
-let scheduleSelfHeal: RuleInjectorSelfHealScheduler | undefined;
-let selfHealLastScheduledMs = 0;
-const SELF_HEAL_MIN_INTERVAL_MS = 5 * 60 * 1000; // 5 min cooldown per process
-
-export function setRuleInjectorSelfHealScheduler(scheduler: RuleInjectorSelfHealScheduler | undefined): void {
-  scheduleSelfHeal = scheduler;
-  selfHealLastScheduledMs = 0;
-}
-
-function maybeScheduleSelfHeal(args: {
-  abrainHome: string;
-  cwd: string;
-  activeProjectId?: string;
-  compiledViewEnabled: boolean;
-  compiledOk: boolean;
-  reason: string;
-}): void {
-  if (!scheduleSelfHeal) return;
-  if (!args.compiledViewEnabled) return;
-  if (args.compiledOk) return;
-  const now = Date.now();
-  if (now - selfHealLastScheduledMs < SELF_HEAL_MIN_INTERVAL_MS) return;
-  selfHealLastScheduledMs = now;
-  try {
-    scheduleSelfHeal({
-      abrainHome: args.abrainHome,
-      cwd: args.cwd,
-      activeProjectId: args.activeProjectId,
-      reason: `compiled_view_unavailable:${args.reason}`,
-    });
-  } catch {
-    // Self-heal scheduling is best-effort and must never break rule injection.
-  }
-}
-
 function loadPiStackSettings(): Record<string, unknown> {
   try {
     return JSON.parse(fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
@@ -224,16 +135,6 @@ function loadPiStackSettings(): Record<string, unknown> {
     console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
     return {};
   }
-}
-
-function asBoolean(value: unknown, fallback: boolean): boolean {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    const s = value.toLowerCase();
-    if (["true", "1", "yes", "on"].includes(s)) return true;
-    if (["false", "0", "no", "off"].includes(s)) return false;
-  }
-  return fallback;
 }
 
 function asNumber(value: unknown, fallback: number): number {
@@ -249,47 +150,22 @@ function asObject(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function asStringArray(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    .map((item) => item.trim());
-}
-
-function resolveCompiledViewLiveCanarySettings(value: unknown): RuleInjectorCompiledViewLiveCanarySettings {
-  const cfg = asObject(value);
-  return {
-    enabled: asBoolean(cfg.enabled, DEFAULT_COMPILED_VIEW_LIVE_CANARY.enabled),
-    sessionIds: asStringArray(cfg.sessionIds),
-  };
-}
-
-function resolveCompiledViewInjectionSettings(value: unknown): RuleInjectorCompiledViewInjectionSettings {
-  const cfg = asObject(value);
-  return {
-    enabled: asBoolean(cfg.enabled, DEFAULT_COMPILED_VIEW_INJECTION.enabled),
-    fallbackToLegacyOnError: asBoolean(cfg.fallbackToLegacyOnError, DEFAULT_COMPILED_VIEW_INJECTION.fallbackToLegacyOnError),
-    requireFresh: asBoolean(cfg.requireFresh, DEFAULT_COMPILED_VIEW_INJECTION.requireFresh),
-    staleAfterMs: Math.max(0, Math.floor(asNumber(cfg.staleAfterMs, DEFAULT_COMPILED_VIEW_INJECTION.staleAfterMs))),
-    maxReadBytes: Math.max(1_000, Math.floor(asNumber(cfg.maxReadBytes, DEFAULT_COMPILED_VIEW_INJECTION.maxReadBytes))),
-    minCoverageRatio: Math.max(0, Math.min(1, asNumber(cfg.minCoverageRatio, DEFAULT_COMPILED_VIEW_INJECTION.minCoverageRatio))),
-    liveCanary: resolveCompiledViewLiveCanarySettings(cfg.liveCanary),
-  };
-}
-
 export function resolveRuleInjectorSettings(): RuleInjectorSettings {
   const root = loadPiStackSettings();
   const cfg = asObject(root.ruleInjector);
   return {
-    enabled: asBoolean(cfg.enabled, DEFAULT_SETTINGS.enabled),
     maxCatalogSummaryChars: Math.max(80, Math.floor(asNumber(cfg.maxCatalogSummaryChars, DEFAULT_SETTINGS.maxCatalogSummaryChars))),
     maxCatalogTriggerChars: Math.max(40, Math.floor(asNumber(cfg.maxCatalogTriggerChars, DEFAULT_SETTINGS.maxCatalogTriggerChars))),
-    dualReadAudit: resolveRuleInjectorDualReadAuditSettings(cfg.dualReadAudit),
-    // Historical compiled/D3 settings are intentionally ignored by the
-    // production injector. The helper surface remains for offline diagnostics.
-    compiledViewInjection: DEFAULT_COMPILED_VIEW_INJECTION,
     propositionPolicyStableViewInjection: resolvePropositionPolicyStableViewInjectionSettings(cfg.propositionPolicyStableViewInjection),
   };
+}
+
+/** Diagnostic-only settings surface for /rule. No compiled-view mutation. */
+export function resolveRuntimeRuleInjectorSettings(
+  settings: RuleInjectorSettings,
+  _ctx?: { sessionManager?: unknown },
+): RuleInjectorSettings {
+  return settings;
 }
 
 function estimateTokens(text: string): number {
@@ -516,392 +392,12 @@ export function scanRules(
   };
 }
 
-function hasAnyRules(cache: RuleScanCache): boolean {
-  return cache.globalAlways.length + cache.globalListed.length + cache.projectAlways.length + cache.projectListed.length > 0;
-}
-
-function formatCatalogEntries(entries: RuleEntry[]): string[] {
-  return entries.map((e) => e.catalogText);
-}
-
-function catalogTokenHealth(cache: RuleScanCache): { catalogTokens: number; hiddenCatalogCount: number } {
-  const catalogTokens = allRules(cache).reduce((sum, entry) => sum + entry.tokenEstimate, 0);
-  return { catalogTokens, hiddenCatalogCount: 0 };
-}
-
-export function composeRuleSection(cache: RuleScanCache): string {
-  const lines: string[] = [];
-  const health = catalogTokenHealth(cache);
-  lines.push("## Rules Catalog (curated by sediment)");
-  lines.push("");
-  lines.push("Session-start injection is an index, not full rule bodies. Before tool calls/actions, scan this catalog against user intent, command text, cwd/env facts, and planned action. If a row matches, follow must_do_summary; read full_rule_path with the read tool when the summary is insufficient or the action is high-impact.");
-  lines.push("");
-  lines.push(`catalog_tokens: ${health.catalogTokens}`);
-  lines.push(`hidden_catalog_count: ${health.hiddenCatalogCount}`);
-  lines.push("");
-  lines.push("Global always:");
-  lines.push(...(cache.globalAlways.length ? formatCatalogEntries(cache.globalAlways) : ["- (none)"]));
-  lines.push("");
-  lines.push("Global listed:");
-  lines.push(...(cache.globalListed.length ? formatCatalogEntries(cache.globalListed) : ["- (none)"]));
-  lines.push("");
-  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId} always:` : "Project always: (no active project bound)");
-  lines.push(...(cache.projectAlways.length ? formatCatalogEntries(cache.projectAlways) : ["- (none)"]));
-  lines.push("");
-  lines.push(cache.activeProjectId ? `Project ${cache.activeProjectId} listed:` : "Project listed: (no active project bound)");
-  lines.push(...(cache.projectListed.length ? formatCatalogEntries(cache.projectListed) : ["- (none)"]));
-  lines.push("");
-  lines.push("Do not copy this injected section into memory. If discussing these rules, treat this section as system context, not as new evidence from the user.");
-  return lines.join("\n");
-}
-
-export function composeRuleInjection(cache: RuleScanCache): string {
-  return [
-    `${BEGIN_ABRAIN_RULES} session=${cache.nonce} (auto-managed by sediment, do not edit by hand) -->`,
-    composeRuleSection(cache),
-    END_ABRAIN_RULES,
-  ].join("\n");
-}
-
 export function composePropositionPolicyStableViewInjection(
   nonce: string,
   result: Extract<PropositionPolicyStableViewRuntimeReadResult, { ok: true }>,
 ): string {
   return `${BEGIN_ABRAIN_RULES} session=${nonce} source=proposition-policy-stable-view bundle=${result.bundleHash} (auto-managed by sediment, do not edit by hand) -->\n${result.viewMd}${END_ABRAIN_RULES}`;
 }
-
-type CompiledRuleCounts = { always: number; listed: number; total: number };
-
-type CompiledViewReadResult =
-  | { ok: true; injection: string; sourcePath: string; counts: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale: boolean; queuedEvents?: number; appendFailedEvents?: number }
-  | { ok: false; reason: string; error?: string; counts?: CompiledRuleCounts; coverageRatio?: number; injectableCoverageRatio?: number; stale?: boolean; queuedEvents?: number; appendFailedEvents?: number };
-
-interface LiveCanaryRuntimeState {
-  active: boolean;
-  sessionId?: string;
-  optInSource?: string;
-}
-
-type RuntimeRuleInjectionDecision = "compiled_injected" | "fail_closed_drop" | "legacy_fallback";
-
-interface RuntimeRuleInjectionResult {
-  injection?: string;
-  decision: RuntimeRuleInjectionDecision;
-  compiled: CompiledViewReadResult;
-  settings: RuleInjectorSettings;
-  liveCanary: LiveCanaryRuntimeState;
-}
-
-function pathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function readPersistedSessionId(sm: unknown): string | undefined {
-  const manager = sm as { getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null } | undefined;
-  if (!manager || typeof manager.getSessionId !== "function") return undefined;
-  if (typeof manager.getSessionFile !== "function") return undefined;
-  try {
-    const file = manager.getSessionFile();
-    if (!file || typeof file !== "string") return undefined;
-  } catch {
-    return undefined;
-  }
-  try {
-    const id = manager.getSessionId();
-    if (typeof id !== "string") return undefined;
-    const trimmed = id.trim();
-    return trimmed ? trimmed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function resolveRuntimeRuleInjectorSettings(
-  settings: RuleInjectorSettings,
-  ctx: { sessionManager?: unknown } | undefined,
-): { settings: RuleInjectorSettings; liveCanary: LiveCanaryRuntimeState } {
-  const liveCanary = settings.compiledViewInjection.liveCanary;
-  const sessionId = liveCanary.enabled ? readPersistedSessionId(ctx?.sessionManager) : undefined;
-  const active = !!sessionId && liveCanary.sessionIds.includes(sessionId);
-  if (!active) return { settings, liveCanary: { active: false, sessionId } };
-  return {
-    settings: {
-      ...settings,
-      compiledViewInjection: {
-        ...settings.compiledViewInjection,
-        enabled: true,
-        fallbackToLegacyOnError: false,
-      },
-    },
-    liveCanary: {
-      active: true,
-      sessionId,
-      optInSource: "ruleInjector.compiledViewInjection.liveCanary.sessionIds",
-    },
-  };
-}
-
-function readJsonFileBounded(file: string, maxReadBytes: number): unknown {
-  const stat = fs.statSync(file);
-  if (!stat.isFile()) throw new Error(`${path.basename(file)} is not a file`);
-  if (stat.size > maxReadBytes) throw new Error(`${path.basename(file)} exceeds maxReadBytes`);
-  return JSON.parse(fs.readFileSync(file, "utf-8"));
-}
-
-function boundedTextFile(file: string, maxReadBytes: number): string {
-  const stat = fs.statSync(file);
-  if (!stat.isFile()) throw new Error(`${path.basename(file)} is not a file`);
-  if (stat.size > maxReadBytes) throw new Error(`${path.basename(file)} exceeds maxReadBytes`);
-  return fs.readFileSync(file, "utf-8");
-}
-
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function numberField(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function coverageSummaryFrom(value: unknown): {
-  coverageRatio?: number;
-  injectableCoverageRatio?: number;
-  queuedEvents?: number;
-  appendFailedEvents?: number;
-  oldestQueuedAgeMs?: number;
-} {
-  const root = objectRecord(value);
-  const summary = objectRecord(root?.summary);
-  const coverageRatio = numberField(summary?.coverageRatio);
-  const injectableCoverageRatio = numberField(summary?.injectableCoverageRatio);
-  const queuedEvents = numberField(summary?.queuedEvents);
-  const appendFailedEvents = numberField(summary?.appendFailedEvents);
-  const oldestQueuedAgeMs = numberField(summary?.oldestQueuedAgeMs);
-  return {
-    ...(coverageRatio === undefined ? {} : { coverageRatio }),
-    ...(injectableCoverageRatio === undefined ? {} : { injectableCoverageRatio }),
-    ...(queuedEvents === undefined ? {} : { queuedEvents }),
-    ...(appendFailedEvents === undefined ? {} : { appendFailedEvents }),
-    ...(oldestQueuedAgeMs === undefined ? {} : { oldestQueuedAgeMs }),
-  };
-}
-
-function compiledViewHasStalePendingEvidence(input: {
-  coverage: ReturnType<typeof coverageSummaryFrom>;
-  compiledAgeMs: number;
-  staleAfterMs: number;
-}): boolean {
-  const pendingEvents = (input.coverage.queuedEvents ?? 0) + (input.coverage.appendFailedEvents ?? 0);
-  if (pendingEvents <= 0) return false;
-  const pendingAgeMs = input.coverage.oldestQueuedAgeMs ?? input.compiledAgeMs;
-  return pendingAgeMs > input.staleAfterMs;
-}
-
-function compiledRuleCountsFromDecision(value: unknown, activeProjectId: string | undefined): CompiledRuleCounts {
-  const root = objectRecord(value);
-  const constraints = Array.isArray(root?.constraints) ? root.constraints : [];
-  const counts: CompiledRuleCounts = { always: 0, listed: 0, total: 0 };
-  for (const item of constraints) {
-    const constraint = objectRecord(item);
-    const scope = objectRecord(constraint?.scope);
-    const scopeKind = scope?.kind;
-    const projectId = typeof scope?.projectId === "string" ? scope.projectId : undefined;
-    const inRuntimeScope = scopeKind === "global" || (scopeKind === "project" && !!activeProjectId && projectId === activeProjectId);
-    if (!inRuntimeScope) continue;
-    const injectMode = constraint?.injectMode === "listed" ? "listed" : "always";
-    counts[injectMode] += 1;
-    counts.total += 1;
-  }
-  return counts;
-}
-
-// ADR0039 L3: the runtime compiled-view contains ALL scopes (Global plus every
-// project's section). Injecting it raw leaks other projects' project-scoped
-// rules into the active session. Keep Global / Conflicts / Not-memory sections,
-// but drop "## Project <id> ..." sections whose <id> is not the active project
-// (and drop ALL project sections when no project is bound). Section boundaries
-// are "## " headings; "### " constraint subsections never start a new section.
-export function filterCompiledViewByActiveProject(markdown: string, activeProjectId: string | undefined): string {
-  const kept: string[] = [];
-  let dropping = false;
-  for (const line of markdown.split("\n")) {
-    if (line.startsWith("## ")) {
-      const projectHeading = /^##\s+Project\s+(\S+)\s/.exec(line);
-      dropping = projectHeading ? (!activeProjectId || projectHeading[1] !== activeProjectId) : false;
-    }
-    if (!dropping) kept.push(line);
-  }
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd();
-}
-
-/** @deprecated Historical offline diagnostic helper; unreachable from production lifecycle hooks. */
-export function readCompiledRuleInjectionForRuntime(args: {
-  abrainHome: string;
-  nonce: string;
-  settings: RuleInjectorCompiledViewInjectionSettings;
-  activeProjectId?: string;
-  nowMs?: number;
-}): CompiledViewReadResult {
-  if (!args.settings.enabled) return { ok: false, reason: "disabled" };
-  const abrainHome = path.resolve(args.abrainHome.replace(/^~(?=$|\/)/, os.homedir()));
-  const latestDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "latest");
-  const compiledViewPath = path.join(latestDir, "compiled-view.md");
-  const decisionPath = path.join(latestDir, "decision.json");
-  const coveragePath = path.join(latestDir, "event-coverage.json");
-  try {
-    const decision = objectRecord(readJsonFileBounded(decisionPath, args.settings.maxReadBytes));
-    if (decision?.schemaVersion !== "constraint-shadow-decision/v1") return { ok: false, reason: "invalid_decision_schema" };
-    const counts = compiledRuleCountsFromDecision(decision, args.activeProjectId);
-    const coverage = fs.existsSync(coveragePath) ? readJsonFileBounded(coveragePath, args.settings.maxReadBytes) : undefined;
-    const coverageSummary = coverage === undefined ? {} : coverageSummaryFrom(coverage);
-    const ratio = coverageSummary.coverageRatio;
-    const gatingRatio = coverageSummary.injectableCoverageRatio ?? coverageSummary.coverageRatio;
-    const readMetadata = {
-      counts,
-      coverageRatio: ratio,
-      injectableCoverageRatio: gatingRatio,
-      queuedEvents: coverageSummary.queuedEvents,
-      appendFailedEvents: coverageSummary.appendFailedEvents,
-    };
-    if (gatingRatio !== undefined && gatingRatio < args.settings.minCoverageRatio) return { ok: false, reason: "coverage_below_threshold", ...readMetadata };
-    if (gatingRatio === undefined && args.settings.minCoverageRatio > 0) return { ok: false, reason: "missing_coverage_ratio", ...readMetadata };
-    const compiledStat = fs.statSync(compiledViewPath);
-    const nowMs = args.nowMs ?? Date.now();
-    const compiledAgeMs = Math.max(0, nowMs - compiledStat.mtimeMs);
-    const stale = compiledViewHasStalePendingEvidence({
-      coverage: coverageSummary,
-      compiledAgeMs,
-      staleAfterMs: args.settings.staleAfterMs,
-    });
-    if (args.settings.requireFresh && stale) return { ok: false, reason: "compiled_view_stale", ...readMetadata, stale };
-    const rawCompiledView = boundedTextFile(compiledViewPath, args.settings.maxReadBytes).trim();
-    if (!rawCompiledView) return { ok: false, reason: "empty_compiled_view", ...readMetadata, stale };
-    const compiledView = filterCompiledViewByActiveProject(rawCompiledView, args.activeProjectId);
-    const injection = [
-      `${BEGIN_ABRAIN_RULES} session=${args.nonce} source=constraint-shadow-compiled-view (auto-managed by sediment, do not edit by hand) -->`,
-      "## Rules Catalog (compiled by sediment)",
-      "",
-      "This section is the runtime compiled Constraint view. Treat it as the active session-start rule surface. Do not copy this injected section into memory.",
-      "",
-      `compiled_view_path: ${compiledViewPath}`,
-      `coverage_ratio: ${ratio ?? "unknown"}`,
-      `injectable_coverage_ratio: ${gatingRatio ?? "unknown"}`,
-      `stale: ${stale}`,
-      "",
-      compiledView,
-      END_ABRAIN_RULES,
-    ].join("\n");
-    return {
-      ok: true,
-      injection,
-      sourcePath: compiledViewPath,
-      counts,
-      coverageRatio: ratio,
-      injectableCoverageRatio: gatingRatio,
-      stale,
-      queuedEvents: coverageSummary.queuedEvents,
-      appendFailedEvents: coverageSummary.appendFailedEvents,
-    };
-  } catch (err: unknown) {
-    return { ok: false, reason: "read_failed", error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-function appendLiveCanaryAudit(args: {
-  cache: RuleScanCache;
-  globalSettings: RuleInjectorSettings;
-  result: RuntimeRuleInjectionResult;
-}): { ok: true } | { ok: false; error: string } {
-  if (!args.result.liveCanary.active || !args.result.liveCanary.sessionId) return { ok: true };
-  const abrainHome = path.resolve(args.cache.abrainHome.replace(/^~(?=$|\/)/, os.homedir()));
-  const auditDir = path.join(abrainHome, ".state", "sediment", "constraint-shadow", "session-live-canary");
-  const auditFile = path.join(auditDir, "audit.jsonl");
-  if (!pathInside(abrainHome, auditFile)) return { ok: false, error: "audit_path_escape" };
-  const compiled = args.result.compiled;
-  const row = {
-    schemaVersion: "rule-injector-session-live-canary-audit/v1",
-    observedAtUtc: new Date().toISOString(),
-    cwd: args.cache.cwd,
-    activeProjectId: args.cache.activeProjectId ?? null,
-    sessionId: args.result.liveCanary.sessionId,
-    optInSource: args.result.liveCanary.optInSource ?? null,
-    globalFallbackToLegacyOnError: args.globalSettings.compiledViewInjection.fallbackToLegacyOnError,
-    effectiveFallbackToLegacyOnError: args.result.settings.compiledViewInjection.fallbackToLegacyOnError,
-    decision: args.result.decision,
-    compiledStatus: compiled.ok ? "ok" : "failed",
-    reason: compiled.ok === false ? compiled.reason : null,
-    compiledError: compiled.ok === false ? compiled.error ?? null : null,
-    coverageRatio: compiled.coverageRatio ?? null,
-    injectableCoverageRatio: compiled.injectableCoverageRatio ?? null,
-    stale: compiled.stale ?? null,
-    queuedEvents: compiled.queuedEvents ?? null,
-    appendFailedEvents: compiled.appendFailedEvents ?? null,
-    compiledCounts: compiled.counts ?? { always: 0, listed: 0, total: 0 },
-  };
-  try {
-    fs.mkdirSync(auditDir, { recursive: true, mode: 0o700 });
-    if (!pathInside(abrainHome, auditFile)) return { ok: false, error: "audit_path_escape" };
-    fs.appendFileSync(auditFile, `${JSON.stringify(row)}\n`, { encoding: "utf-8", mode: 0o600 });
-    try { fs.chmodSync(auditFile, 0o600); } catch { /* best-effort */ }
-    return { ok: true };
-  } catch (err: unknown) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-}
-
-/** @deprecated Historical compiled/legacy comparison helper; unreachable from production lifecycle hooks. */
-export function decideRuntimeRuleInjection(args: {
-  cache: RuleScanCache;
-  globalSettings: RuleInjectorSettings;
-  runtimeSettings: RuleInjectorSettings;
-  liveCanary: LiveCanaryRuntimeState;
-}): RuntimeRuleInjectionResult {
-  const compiled = readCompiledRuleInjectionForRuntime({
-    abrainHome: args.cache.abrainHome,
-    nonce: args.cache.nonce,
-    settings: args.runtimeSettings.compiledViewInjection,
-    activeProjectId: args.cache.activeProjectId,
-  });
-  // Self-heal: when compiled view is enabled but unavailable, schedule an async
-  // constraint shadow recompile (debounced per-process, non-blocking).
-  maybeScheduleSelfHeal({
-    abrainHome: args.cache.abrainHome,
-    cwd: args.cache.cwd,
-    activeProjectId: args.cache.activeProjectId,
-    compiledViewEnabled: args.runtimeSettings.compiledViewInjection.enabled,
-    compiledOk: compiled.ok,
-    reason: compiled.ok === false ? compiled.reason : "ok",
-  });
-  let result: RuntimeRuleInjectionResult;
-  if (compiled.ok) {
-    result = {
-      injection: compiled.injection,
-      decision: "compiled_injected",
-      compiled,
-      settings: args.runtimeSettings,
-      liveCanary: args.liveCanary,
-    };
-  } else if (args.runtimeSettings.compiledViewInjection.enabled && !args.runtimeSettings.compiledViewInjection.fallbackToLegacyOnError) {
-    result = {
-      decision: "fail_closed_drop",
-      compiled,
-      settings: args.runtimeSettings,
-      liveCanary: args.liveCanary,
-    };
-  } else {
-    result = {
-      injection: composeRuleInjection(args.cache),
-      decision: "legacy_fallback",
-      compiled,
-      settings: args.runtimeSettings,
-      liveCanary: args.liveCanary,
-    };
-  }
-  appendLiveCanaryAudit({ cache: args.cache, globalSettings: args.globalSettings, result });
-  return result;
-}
-
 
 export function stripAllManagedRuleInjections(text: string): string {
   let sanitized = text.replace(
@@ -939,38 +435,20 @@ function ruleCounts(cache: RuleScanCache): { always: number; listed: number; tot
   return { always, listed, total: always + listed };
 }
 
-function legacyFooterText(cache: RuleScanCache | null): string {
-  if (!cache || !hasAnyRules(cache)) return "🧠 rules: none";
+function hasAnyRules(cache: RuleScanCache): boolean {
+  return cache.globalAlways.length + cache.globalListed.length + cache.projectAlways.length + cache.projectListed.length > 0;
+}
+
+/** Readonly-neighbor footer: on-disk rules/ counts only. Not injection authority. */
+function neighborFooterText(cache: RuleScanCache | null, detail?: string): string {
+  if (!cache || !hasAnyRules(cache)) {
+    const base = "🧠 rules: none";
+    return detail ? `${base} (${detail})` : base;
+  }
   const counts = ruleCounts(cache);
   const warn = cache.warnings.some((w) => w.level === "warning" || w.level === "error");
-  return `${warn ? "⚠️" : "🧠"} rules: legacy ${counts.always} always, ${counts.listed} listed`;
-}
-
-function compiledFooterText(
-  compiled: Extract<CompiledViewReadResult, { ok: true }>,
-  detail?: string,
-): string {
-  const effectiveRatio = compiled.injectableCoverageRatio ?? compiled.coverageRatio;
-  const effectiveCoverage = effectiveRatio === undefined ? "unknown" : `${Math.round(effectiveRatio * 100)}%`;
-  const strictCoverage = compiled.coverageRatio !== undefined && compiled.injectableCoverageRatio !== undefined && compiled.coverageRatio !== compiled.injectableCoverageRatio
-    ? `, strict ${Math.round(compiled.coverageRatio * 100)}%`
-    : "";
-  return `🧠 rules: compiled ${compiled.counts.always} always, ${compiled.counts.listed} listed (${effectiveCoverage} injectable${strictCoverage}${compiled.stale ? ", stale" : ""}${detail ? `, ${detail}` : ""})`;
-}
-
-function runtimeResultFooterText(
-  cache: RuleScanCache | null,
-  result: RuntimeRuleInjectionResult,
-  detail?: string,
-): string {
-  if (result.decision === "compiled_injected" && result.compiled.ok) {
-    return compiledFooterText(result.compiled, detail);
-  }
-  if (result.decision === "fail_closed_drop" && result.compiled.ok === false) {
-    return `⚠️ rules: compiled view ${result.compiled.reason}${detail ? ` (${detail})` : ""}`;
-  }
-  const legacy = legacyFooterText(cache);
-  return detail ? `${legacy} (${detail})` : legacy;
+  const base = `${warn ? "⚠️" : "🧠"} rules: neighbor ${counts.always} always, ${counts.listed} listed`;
+  return detail ? `${base} (${detail})` : base;
 }
 
 function alignPolicyFooterSession(selection: { selected: boolean; sessionId?: string }): void {
@@ -999,50 +477,9 @@ function setPolicyRejectedFooter(sessionId: string, reason: string): void {
   };
 }
 
-function setPolicyFallbackFooter(args: {
-  selection: { selected: boolean; sessionId?: string };
-  reason: string;
-  cache: RuleScanCache | null;
-  normalResult?: RuntimeRuleInjectionResult;
-  detail?: string;
-  label?: string;
-}): void {
-  if (!args.selection.selected || !args.selection.sessionId) return;
-  const normalText = args.normalResult
-    ? runtimeResultFooterText(args.cache, args.normalResult, args.detail)
-    : legacyFooterText(args.cache);
-  const label = args.label ?? "policy fallback";
-  policyFooterState = {
-    sessionId: args.selection.sessionId,
-    text: `${normalText}; ${label}: ${args.reason}`,
-  };
-}
-
-function runtimeFooterText(cache: RuleScanCache | null, settings: RuleInjectorSettings, detail?: string): string {
+function runtimeFooterText(cache: RuleScanCache | null, _settings: RuleInjectorSettings, detail?: string): string {
   if (policyFooterState) return policyFooterState.text;
-  if (cache) {
-    const compiled = readCompiledRuleInjectionForRuntime({
-      abrainHome: cache.abrainHome,
-      nonce: cache.nonce,
-      settings: settings.compiledViewInjection,
-      activeProjectId: cache.activeProjectId,
-    });
-    if (compiled.ok) return compiledFooterText(compiled, detail);
-    const failed = compiled as Extract<CompiledViewReadResult, { ok: false }>;
-    maybeScheduleSelfHeal({
-      abrainHome: cache.abrainHome,
-      cwd: cache.cwd,
-      activeProjectId: cache.activeProjectId,
-      compiledViewEnabled: settings.compiledViewInjection.enabled,
-      compiledOk: false,
-      reason: failed.reason,
-    });
-    if (settings.compiledViewInjection.enabled && !settings.compiledViewInjection.fallbackToLegacyOnError) {
-      return `⚠️ rules: compiled view ${failed.reason}${detail ? ` (${detail})` : ""}`;
-    }
-  }
-  const legacy = legacyFooterText(cache);
-  return detail ? `${legacy} (${detail})` : legacy;
+  return neighborFooterText(cache, detail);
 }
 
 function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined, cache: RuleScanCache | null, settings: RuleInjectorSettings, detail?: string): void {
@@ -1054,17 +491,9 @@ function setFooterStatus(ctx: { ui?: { setStatus?(key: string, text: string | un
   }
 }
 
-// ── Real-time footer refresh ───────────────────────────────────────────
-// The footer is otherwise a session_start SNAPSHOT: a rule written
-// mid-session by the background sediment lane would not surface until
-// `/rule reload` or the next restart. We mirror sediment's globalThis
-// setStatus-capture pattern (survives pi's module teardown/reload) and
-// fs.watch the rules inject-mode dirs so a write refreshes the footer live.
+// ── Diagnostic footer refresh (no watcher; /rule reload + test hook only) ──
 interface RuleInjectorRealtimeGlobal {
   __abrainRules_setFooter?: (msg: string) => void;
-  __abrainRules_watchers?: fs.FSWatcher[];
-  __abrainRules_debounce?: ReturnType<typeof setTimeout>;
-  __abrainRules_watchKey?: string;
 }
 const _RG = globalThis as unknown as RuleInjectorRealtimeGlobal;
 
@@ -1072,15 +501,12 @@ function footerText(cache: RuleScanCache | null, settings: RuleInjectorSettings)
   return runtimeFooterText(cache, settings);
 }
 
-/** Capture a KEY-bound setStatus into globalThis so the fs.watch callback
- *  (which has no ctx) can push the footer. Mirrors sediment's pattern. */
+/** Capture a KEY-bound setStatus into globalThis so diagnostic refresh can push. */
 function captureRulesFooterSetter(
   ctx: { ui?: { setStatus?(key: string, text: string | undefined): void } } | undefined,
 ): void {
   const setStatus = ctx?.ui?.setStatus;
   if (!setStatus) {
-    // Clear a stale setter from a previous session so the watch callback does
-    // not target a dead UI (audit P2).
     _RG.__abrainRules_setFooter = undefined;
     return;
   }
@@ -1088,7 +514,7 @@ function captureRulesFooterSetter(
   _RG.__abrainRules_setFooter = (msg: string) => { try { bound(RULE_STATUS_KEY, msg); } catch { /* best-effort */ } };
 }
 
-/** Re-scan + push the footer via the captured setter. Best-effort. */
+/** Re-scan + push the readonly-neighbor footer via the captured setter. Best-effort. */
 export function refreshRulesFooterRealtime(cwd: string, settings: RuleInjectorSettings): void {
   const setFooter = _RG.__abrainRules_setFooter;
   if (!setFooter) return;
@@ -1096,42 +522,6 @@ export function refreshRulesFooterRealtime(cwd: string, settings: RuleInjectorSe
     cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd, settings });
     setFooter(footerText(cachedRules, settings));
   } catch { /* best-effort */ }
-}
-
-/** Watch the rules inject-mode dirs (leaf, non-recursive — rule files are flat
- *  files in always/ and listed/) so a mid-session write refreshes the
- *  footer in real time. Idempotent: re-keys + tears down prior watchers on
- *  cwd/project change. persistent:false so it never blocks pi exit. */
-function setupRulesWatcher(cwd: string, settings: RuleInjectorSettings, activeProjectId: string | undefined): void {
-  const key = `${cwd}|${activeProjectId ?? ""}`;
-  if (_RG.__abrainRules_watchKey === key && (_RG.__abrainRules_watchers?.length ?? 0) > 0) return;
-  for (const w of _RG.__abrainRules_watchers ?? []) { try { w.close(); } catch { /* */ } }
-  // Cancel any queued debounce from the OLD key so it cannot later refresh the
-  // footer with stale (wrong-project) counts (audit P2).
-  if (_RG.__abrainRules_debounce) { clearTimeout(_RG.__abrainRules_debounce); _RG.__abrainRules_debounce = undefined; }
-  _RG.__abrainRules_watchers = [];
-  _RG.__abrainRules_watchKey = key;
-  const dirs = [
-    path.join(ABRAIN_HOME, "rules", "always"),
-    path.join(ABRAIN_HOME, "rules", "listed"),
-    ...(activeProjectId ? [
-      path.join(ABRAIN_HOME, "projects", activeProjectId, "rules", "always"),
-      path.join(ABRAIN_HOME, "projects", activeProjectId, "rules", "listed"),
-    ] : []),
-  ];
-  for (const dir of dirs) {
-    try {
-      if (!fs.existsSync(dir)) continue;
-      const w = fs.watch(dir, { persistent: false }, () => {
-        if (_RG.__abrainRules_debounce) clearTimeout(_RG.__abrainRules_debounce);
-        _RG.__abrainRules_debounce = setTimeout(() => refreshRulesFooterRealtime(cwd, settings), 300);
-      });
-      // fs.watch emits async 'error' events that the surrounding try/catch does
-      // NOT catch; an unhandled one can crash the process (audit P1).
-      w.on("error", () => { try { w.close(); } catch { /* */ } });
-      _RG.__abrainRules_watchers.push(w);
-    } catch { /* fs.watch unsupported / dir vanished — best-effort */ }
-  }
 }
 
 function notifyWarningsOnce(ctx: { ui?: { notify?(message: string, type?: NotifyType): void } } | undefined, cache: RuleScanCache): void {
@@ -1144,19 +534,6 @@ function notifyWarningsOnce(ctx: { ui?: { notify?(message: string, type?: Notify
     ctx.ui.notify(`abrain rules: loaded with ${warnings.length} warning(s)\n${preview}${suffix}`, "warning");
   } catch {
     // notify is best-effort
-  }
-}
-
-function ensureRuleDirs(abrainHome: string): void {
-  for (const rel of [path.join("rules", "always"), path.join("rules", "listed")]) {
-    try { fs.mkdirSync(path.join(abrainHome, rel), { recursive: true, mode: 0o700 }); } catch { /* best-effort */ }
-  }
-}
-
-function ensureProjectRuleDirs(abrainHome: string, projectId: string | undefined): void {
-  if (!projectId) return;
-  for (const rel of [path.join("rules", "always"), path.join("rules", "listed")]) {
-    try { fs.mkdirSync(path.join(abrainProjectDir(abrainHome, projectId), rel), { recursive: true, mode: 0o700 }); } catch { /* best-effort */ }
   }
 }
 
@@ -1333,17 +710,17 @@ export default function activateRuleInjector(pi: ExtensionAPI): void {
     async handler(args: string, ctx) {
       const trimmed = args.trim();
       const [sub = "list", ...rest] = trimmed ? trimmed.split(/\s+/) : [];
-      const runtime = resolveRuntimeRuleInjectorSettings(settings, ctx);
+      const runtimeSettings = resolveRuntimeRuleInjectorSettings(settings, ctx);
       if (sub === "reload") {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
-        setFooterStatus(ctx, cachedRules, runtime.settings, runtime.liveCanary.active ? "reloaded, live canary active" : "reloaded");
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtimeSettings });
+        setFooterStatus(ctx, cachedRules, runtimeSettings, "reloaded");
         notifyWarningsOnce(ctx, cachedRules);
         const counts = ruleCounts(cachedRules);
         ctx.ui?.notify?.(`abrain rules reloaded: ${counts.always} always, ${counts.listed} listed`, "info");
         return;
       }
       if (!cachedRules || path.resolve(ctx?.cwd || process.cwd()) !== cachedRules.cwd) {
-        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtime.settings });
+        cachedRules = scanRules({ abrainHome: ABRAIN_HOME, cwd: ctx?.cwd || process.cwd(), settings: runtimeSettings });
       }
       if (sub === "list") {
         ctx.ui?.notify?.(formatRuleList(cachedRules, rest.join(" ")), "info");

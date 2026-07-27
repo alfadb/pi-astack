@@ -185,7 +185,6 @@ function transpileExtensions(outRoot) {
     // Keep the staged rule-injector import closure loadable for stable-view
     // production authority only. D3-v2 session-start runtime modules are retired.
     for (const leaf of [
-      "dualread-audit.ts",
       "proposition-policy-stable-view-reader.ts",
       "proposition-policy-stable-view-runtime-audit.ts",
     ]) {
