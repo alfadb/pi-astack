@@ -119,8 +119,10 @@ import type { PiTuiBag } from "./prompt-user/ui/PromptDialog";
 // prompt_user, but a separate substrate/hook.
 import {
   askVaultAuthorizationViaDialog,
+  askVaultAuthorizationViaRouter,
   isVaultDialogInFlight,
 } from "./vault-authorize";
+import { readRouterUiEnv } from "./prompt-user/router-form";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 // Priority: ABRAIN_ROOT env var > default ~/.abrain (aligned with memory/parser.ts)
@@ -375,9 +377,10 @@ interface VaultReleaseUi {
   notify?(message: string, type?: string): void;
   select?(title: string, items: string[], opts?: { timeout?: number; signal?: AbortSignal }): Promise<string | undefined>;
   confirm?(title: string, message: string, opts?: { timeout?: number; signal?: AbortSignal }): Promise<boolean>;
-  // ADR 0022 P3b: ctx.ui.custom is the inline-overlay primitive pi exposes
-  // to extensions. PromptDialog overlay rides on top of this; vault auth
-  // delegates to it when present, with ui.select retained as fallback.
+  // ADR 0022 P3b: ctx.ui.custom is TUI-only (pi 0.82.1 RPC stubs it to
+  // resolve undefined). Vault auth uses it only when mode === "tui";
+  // mode === "rpc" sessions use pi-router form intake when env is present;
+  // undefined/other modes fall through to ui.select / ui.confirm.
   custom?(
     factory: (tui: unknown, theme: unknown, kb: unknown, done: (v: unknown) => void) => unknown,
     options?: Record<string, unknown>,
@@ -800,10 +803,10 @@ let cachedVaultDialogBuilder: PromptDialogDeps["buildDialog"] | null = null;
 // ADR 0022 housekeeping batch A (b) (2026-05-19): telemetry state. We
 // track two flags so the first session_start can decide whether to emit
 // a startup_telemetry audit row + ui.notify warning. Conditions are
-// (i) the dialog builder failed to load AND (ii) ctx.ui.custom IS
-// present — i.e. overlay is the expected UX but we will silently fall
-// back to ui.select. If ui.custom is also missing this is a headless
-// session, not a degradation, so we stay quiet.
+// (i) mode === "tui" (RPC does not use PromptDialog), (ii) the dialog
+// builder failed to load, AND (iii) ctx.ui.custom IS present — i.e.
+// overlay is the expected TUI UX but we will silently fall back to
+// ui.select. If mode is not tui or ui.custom is missing, stay quiet.
 let vaultDialogBuilderInitFailed = false;
 let vaultDialogBuilderTelemetrySent = false;
 
@@ -850,7 +853,7 @@ export function __setVaultDialogBuilderInitFailedForTests(v: boolean): void {
 // Mirror of VaultEvent.ui_path in vault-writer.ts; kept narrow so any
 // drift between authorizeVault* return shape and the audit field surfaces
 // at compile time.
-type VaultUiPath = "overlay" | "select" | "confirm" | "cached" | "none";
+type VaultUiPath = "overlay" | "router" | "select" | "confirm" | "cached" | "none";
 const vaultBashRuns = new Map<string, VaultBashRunRecord>();
 
 const LocalDynamicBorder: PiTuiBag["DynamicBorder"] = class {
@@ -1036,6 +1039,12 @@ type BashOutputAuthOutcome = {
   ui_path: VaultUiPath;
 };
 
+function hostExtensionMode(hostCtx: unknown): string | undefined {
+  if (!hostCtx || typeof hostCtx !== "object") return undefined;
+  const mode = (hostCtx as { mode?: unknown }).mode;
+  return typeof mode === "string" ? mode : undefined;
+}
+
 async function authorizeVaultBashOutput(
   ui: VaultReleaseUi | undefined,
   record: VaultBashRunRecord,
@@ -1053,7 +1062,7 @@ async function authorizeVaultBashOutput(
 
   const keyList = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
   // ADR 0022 housekeeping batch A (g): ui_path is bound by the caller of
-  // applyChoice (overlay vs select), not by the choice itself.
+  // applyChoice (overlay vs router vs select), not by the choice itself.
   const applyChoice = (
     choice: string | undefined,
     ui_path: VaultUiPath,
@@ -1067,11 +1076,18 @@ async function authorizeVaultBashOutput(
     return { decision: "withhold", ui_path };
   };
 
-  // ADR 0022 P3b: prefer PromptDialog overlay when available; fall
-  // through to ui.select on dialog_error / ui_unavailable. cancelled
-  // is treated as deny (fail-closed) so an Esc / abort during overlay
-  // is equivalent to choosing "No".
-  if (typeof ui.custom === "function" && cachedVaultDialogBuilder) {
+  // Path order (pi 0.82.1 RPC + pi-router):
+  //   1. TUI PromptDialog only when mode === "tui" (RPC stubs custom→undefined)
+  //   2. pi-router form only when mode === "rpc" and PI_ROUTER_UI_* env is complete
+  //      (undefined / future modes must NOT enter router — deny-first select)
+  //   3. ui.select fallback
+  //   4. none → withhold
+  const mode = hostExtensionMode(hostCtx);
+  const useTuiCustom =
+    mode === "tui" && typeof ui.custom === "function" && !!cachedVaultDialogBuilder;
+  let routerAttempted = false;
+
+  if (useTuiCustom) {
     const r = await askVaultAuthorizationViaDialog({
       ui,
       variant: "bash_output_release",
@@ -1084,7 +1100,7 @@ async function authorizeVaultBashOutput(
       // the raw enum from `choices`, not the display label.
       labelFor: vaultBashOutputDisplayLabel,
       signal,
-      buildDialog: cachedVaultDialogBuilder,
+      buildDialog: cachedVaultDialogBuilder!,
     });
     if (r.ok) return applyChoice(r.choice, "overlay");
     if (r.reason === "cancelled") {
@@ -1094,6 +1110,32 @@ async function authorizeVaultBashOutput(
     // dialog_error / ui_unavailable — best effort notify and fall through.
     if (r.reason === "dialog_error") {
       ui.notify?.(`vault bash output: dialog error, falling back to select: ${r.detail ?? "(no detail)"}`, "warning");
+    }
+  } else if (mode === "rpc") {
+    const routerEnv = readRouterUiEnv();
+    if (routerEnv) {
+      routerAttempted = true;
+      const r = await askVaultAuthorizationViaRouter({
+        routerEnv,
+        variant: "bash_output_release",
+        reason: title,
+        header: "Vault bash output",
+        question: `Release this command's output to the LLM? (keys: ${keyList || "<none>"})`,
+        choices: VAULT_BASH_OUTPUT_AUTH_CHOICES,
+        signal,
+      });
+      if (r.ok) return applyChoice(r.choice, "router");
+      if (r.reason === "cancelled") {
+        ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
+        return { decision: "withhold", ui_path: "router" };
+      }
+      // Transport / protocol / unknown-choice → may fall through to select.
+      if (r.reason === "dialog_error") {
+        ui.notify?.(
+          `vault bash output: router form error, falling back to select: ${r.detail ?? "(no detail)"}`,
+          "warning",
+        );
+      }
     }
   }
 
@@ -1116,7 +1158,8 @@ async function authorizeVaultBashOutput(
     }
   }
   ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
-  return { decision: "withhold", ui_path: "none" };
+  // Router substrate failed and no select fallback exists → withhold.
+  return { decision: "withhold", ui_path: routerAttempted ? "router" : "none" };
 }
 
 // ADR 0022 housekeeping batch A (g) (2026-05-19): return type carries
@@ -1147,7 +1190,7 @@ async function authorizeVaultRelease(
   ui.notify?.(title, "warning");
 
   // ADR 0022 housekeeping batch A (g): ui_path bound by caller (overlay vs
-  // select vs confirm). applyChoice stays a pure choice-→-outcome mapping.
+  // router vs select vs confirm). applyChoice stays a pure choice-→-outcome mapping.
   const applyChoice = (
     choice: string | undefined,
     ui_path: VaultUiPath,
@@ -1161,11 +1204,20 @@ async function authorizeVaultRelease(
     return { ok: false, reason: vaultReleaseChoiceReason(choice), ui_path };
   };
 
-  // ADR 0022 P3b: prefer PromptDialog overlay when ctx.ui.custom is
-  // available AND the dialog builder loaded successfully in activate().
-  // Fall through to ui.select on dialog_error / ui_unavailable. A
-  // cancelled overlay is treated as deny-this-call (NOT deny+remember).
-  if (typeof ui.custom === "function" && cachedVaultDialogBuilder) {
+  // Path order (pi 0.82.1 RPC + pi-router):
+  //   1. TUI PromptDialog only when mode === "tui" (RPC stubs custom→undefined)
+  //   2. pi-router form only when mode === "rpc" and PI_ROUTER_UI_* env is complete
+  //      (undefined / future modes must NOT enter router — deny-first select/confirm)
+  //   3. ui.select / ui.confirm fallback
+  //   4. none → deny
+  // Vault does NOT go through askPromptUser's pending manager / prompt_user
+  // audit lane; router transport is shared, ownership stays here.
+  const mode = hostExtensionMode(hostCtx);
+  const useTuiCustom =
+    mode === "tui" && typeof ui.custom === "function" && !!cachedVaultDialogBuilder;
+  let routerAttempted = false;
+
+  if (useTuiCustom) {
     const r = await askVaultAuthorizationViaDialog({
       ui,
       variant: "vault_release",
@@ -1178,13 +1230,39 @@ async function authorizeVaultRelease(
       // the raw enum from `choices`, not the display label.
       labelFor: vaultReleaseDisplayLabel,
       signal,
-      buildDialog: cachedVaultDialogBuilder,
+      buildDialog: cachedVaultDialogBuilder!,
     });
     if (r.ok) return applyChoice(r.choice, "overlay");
     if (r.reason === "cancelled") return { ok: false, reason: "cancelled", ui_path: "overlay" };
     // dialog_error / ui_unavailable — best effort notify and fall through.
     if (r.reason === "dialog_error") {
       ui.notify?.(`vault_release: dialog error, falling back to select: ${r.detail ?? "(no detail)"}`, "warning");
+    }
+  } else if (mode === "rpc") {
+    const routerEnv = readRouterUiEnv();
+    if (routerEnv) {
+      routerAttempted = true;
+      const r = await askVaultAuthorizationViaRouter({
+        routerEnv,
+        variant: "vault_release",
+        reason: title,
+        header: `Release ${authKey(scope, key)}?`,
+        question: "Authorize plaintext release into LLM context?",
+        choices: VAULT_RELEASE_AUTH_CHOICES,
+        signal,
+      });
+      if (r.ok) return applyChoice(r.choice, "router");
+      // form_cancelled / abort → deny with ui_path router (no fallback).
+      if (r.reason === "cancelled") {
+        return { ok: false, reason: "cancelled", ui_path: "router" };
+      }
+      // Transport / protocol / unknown-choice → may fall through.
+      if (r.reason === "dialog_error") {
+        ui.notify?.(
+          `vault_release: router form error, falling back to select: ${r.detail ?? "(no detail)"}`,
+          "warning",
+        );
+      }
     }
   }
 
@@ -1223,7 +1301,12 @@ async function authorizeVaultRelease(
   }
 
   ui.notify?.("vault_release denied: no UI authorization method available", "warning");
-  return { ok: false, reason: "ui_authorization_unavailable", ui_path: "none" };
+  // Router substrate failed and no select/confirm fallback → deny.
+  return {
+    ok: false,
+    reason: "ui_authorization_unavailable",
+    ui_path: routerAttempted ? "router" : "none",
+  };
 }
 
 // ── ADR 0022 housekeeping batch A subgroup 2 post-audit refactor ──
@@ -1244,7 +1327,7 @@ async function authorizeVaultRelease(
 // function; behaviour is byte-identical.
 async function processVaultBashToolResult(
   event: { toolName?: string; toolCallId?: string; content?: unknown; details?: Record<string, unknown>; input?: { command?: string } },
-  ctx: { ui?: VaultReleaseUi; signal?: AbortSignal },
+  ctx: { ui?: VaultReleaseUi; signal?: AbortSignal; mode?: string },
 ): Promise<{ content?: unknown; details?: unknown } | undefined> {
   // ── Vault bash output authorization guard ─────────────────
   // Outer try/catch: if authorizeVaultBashOutput or redaction
@@ -1668,21 +1751,23 @@ export default function activate(pi: ExtensionAPI): void {
         });
       }
       // ADR 0022 housekeeping batch A (b) (2026-05-19): vault dialog
-      // builder telemetry. If activate() detected that pi-tui /
-      // makeBuildDialog failed AND this session has a working ctx.ui.custom,
-      // overlay was expected but vault auth will silently fall back to
-      // ui.select. Emit ONE audit row + ui.notify warning so operators
-      // can detect the degradation (otherwise it shows up only as a
-      // subtle UX difference — line-based prompt vs. boxed overlay).
+      // builder telemetry — TUI-only. RPC never uses PromptDialog, so a
+      // missing builder is not a degradation there. If activate() failed
+      // pi-tui / makeBuildDialog AND mode === "tui" with working
+      // ctx.ui.custom, overlay was expected and vault auth falls back to
+      // ui.select. Emit ONE audit row + ui.notify warning for operators.
       //
       // Why session_start (not activate): activate() runs before any
-      // ctx exists; we need ctx.ui to know whether ui.custom is
-      // present. session_start is the first hook with ctx and runs
-      // once per session. We guard with vaultDialogBuilderTelemetrySent
+      // ctx exists; we need ctx.mode / ctx.ui. session_start is the first
+      // hook with ctx and runs once per session. Guard with
+      // vaultDialogBuilderTelemetrySent
       // so refresh / fork / reactivate cycles don’t double-emit.
       try {
+        // RPC router auth never uses PromptDialog; telemetry is TUI-only.
+        const mode = (ctx as { mode?: unknown } | undefined)?.mode;
         const hasUiCustom = typeof (ctx as any)?.ui?.custom === "function";
         if (
+          mode === "tui" &&
           vaultDialogBuilderInitFailed &&
           hasUiCustom &&
           !vaultDialogBuilderTelemetrySent
@@ -2161,7 +2246,9 @@ export default function activate(pi: ExtensionAPI): void {
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         // The handler accepts a richer ctx than the abrain Vault one;
-        // narrow with a cast. ui.custom is exposed by pi RPC + TUI.
+        // narrow with a cast. ui.custom is TUI-only (pi 0.82.1 RPC stubs
+        // it to resolve undefined); guard with mode === "tui". Vault
+        // authorization uses the same mode gate + pi-router form path.
         const promptCtx = ctx as unknown as {
           ui: {
             custom?: unknown;

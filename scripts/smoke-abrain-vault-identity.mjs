@@ -125,6 +125,14 @@ for (const file of [
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
+// Shared pi-router form transport (vault-authorize runtime import).
+{
+  const puDir = path.join(tmpDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  const compiled = transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts"));
+  fs.writeFileSync(path.join(puDir, "router-form.cjs"), compiled);
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
+}
 // _shared/runtime is required by index.ts via ../_shared/runtime
 fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
 fs.writeFileSync(path.join(tmpDir, "_shared", "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));

@@ -19,6 +19,8 @@
  *     user who has an open prompt_user must still be able to
  *     authorize a vault release (different substrate, different
  *     semantics). BUT vault has its OWN concurrent gate (see below).
+ *     The shared pi-router form *transport* (`prompt-user/router-form`)
+ *     is reused for explicit mode === "rpc"; vault still owns lock + audit.
  *
  * Failure modes (caller falls through to `ui.select`):
  *   - `ui_unavailable` — `ctx.ui.custom` not registered
@@ -56,6 +58,10 @@
 
 import type { PromptUserParams } from "./prompt-user/types";
 import type { PromptDialogDeps, RawDialogResult } from "./prompt-user/service";
+import {
+  postRouterForm,
+  type RouterUiEnv,
+} from "./prompt-user/router-form";
 
 // ── Public contract ─────────────────────────────────────────────────
 
@@ -198,6 +204,44 @@ export function __peekVaultDialogLockForTests(): boolean {
   return __vaultDialogInFlight;
 }
 
+function __assertVaultChoices(
+  choices: readonly string[],
+): AskVaultAuthorizationResult | null {
+  // #4 Shape invariant: callers in index.ts pass stable 3/4-choice
+  // arrays from vault-bash.ts / index.ts. A buggy or hostile caller
+  // with empty/single choices would render a vault UI with no
+  // escape — fail closed.
+  if (!Array.isArray(choices) || choices.length < 2) {
+    return {
+      ok: false,
+      reason: "dialog_error",
+      detail: `vault dialog requires >= 2 choices, got ${
+        Array.isArray(choices) ? choices.length : typeof choices
+      }`,
+    };
+  }
+  return null;
+}
+
+function __acquireVaultDialogLock(): AskVaultAuthorizationResult | null {
+  // #3 Concurrent gate: vault has its own pending lock, independent
+  // of prompt_user's INV-I (which is enforced in manager.ts and
+  // belongs to the LLM-facing prompt_user surface, not vault).
+  // Shared across TUI dialog AND router form so two concurrent vault
+  // authorizations cannot cross-grant a 'Session' answer.
+  if (__vaultDialogInFlight) {
+    return {
+      ok: false,
+      reason: "dialog_error",
+      detail:
+        "another vault authorization dialog is already pending — " +
+        "wait for the user to answer the first one",
+    };
+  }
+  __vaultDialogInFlight = true;
+  return null;
+}
+
 export async function askVaultAuthorizationViaDialog(
   args: AskVaultAuthorizationArgs,
 ): Promise<AskVaultAuthorizationResult> {
@@ -212,19 +256,8 @@ export async function askVaultAuthorizationViaDialog(
     return { ok: false, reason: "ui_unavailable" };
   }
 
-  // #4 Shape invariant: callers in index.ts pass stable 3/4-choice
-  // arrays from vault-bash.ts / index.ts. A buggy or hostile caller
-  // with empty/single choices would render a vault UI with no
-  // escape — fail closed.
-  if (!Array.isArray(choices) || choices.length < 2) {
-    return {
-      ok: false,
-      reason: "dialog_error",
-      detail: `vault dialog requires >= 2 choices, got ${
-        Array.isArray(choices) ? choices.length : typeof choices
-      }`,
-    };
-  }
+  const shapeErr = __assertVaultChoices(choices);
+  if (shapeErr) return shapeErr;
 
   // #1 Pre-aborted signal: return immediately, never open the overlay.
   // The old behavior (resolveOuter after the lock + still calling
@@ -234,22 +267,146 @@ export async function askVaultAuthorizationViaDialog(
     return { ok: false, reason: "cancelled" };
   }
 
-  // #3 Concurrent gate: vault has its own pending lock, independent
-  // of prompt_user's INV-I (which is enforced in manager.ts and
-  // belongs to the LLM-facing prompt_user surface, not vault).
-  if (__vaultDialogInFlight) {
-    return {
-      ok: false,
-      reason: "dialog_error",
-      detail:
-        "another vault authorization dialog is already pending — " +
-        "wait for the user to answer the first one",
-    };
-  }
-  __vaultDialogInFlight = true;
+  const lockErr = __acquireVaultDialogLock();
+  if (lockErr) return lockErr;
 
   try {
     return await __runVaultDialog(args);
+  } finally {
+    __vaultDialogInFlight = false;
+  }
+}
+
+export interface AskVaultAuthorizationViaRouterArgs {
+  routerEnv: RouterUiEnv;
+  variant: "vault_release" | "bash_output_release";
+  reason: string;
+  header: string;
+  question: string;
+  choices: readonly string[];
+  signal?: AbortSignal;
+  /** Test seam; defaults to globalThis.fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Vault authorization via pi-router Web/RPC form intake.
+ *
+ * Independent of askPromptUser's pending manager and prompt_user audit
+ * lane. Shares the vault concurrent gate with the TUI dialog path.
+ *
+ * Result mapping for the authorizeVault* caller:
+ *   ok:true choice          → applyChoice(..., "router")
+ *   cancelled               → user cancel (form_cancelled) OR abort;
+ *                             caller denies with ui_path="router" and
+ *                             MUST NOT fall through (user already said no)
+ *   dialog_error            → transport/protocol/unknown-choice failure;
+ *                             caller MAY fall through to select/confirm
+ *   ui_unavailable          → not used for router path outcomes (env
+ *                             missing is the caller's gate); reserved
+ *                             for shape/lock failures that match dialog
+ *
+ * Note: form_timeout / network / malformed map to dialog_error so the
+ * caller can offer select/confirm fallback rather than silent deny.
+ * form_cancelled maps to cancelled (real user rejection).
+ */
+export async function askVaultAuthorizationViaRouter(
+  args: AskVaultAuthorizationViaRouterArgs,
+): Promise<AskVaultAuthorizationResult> {
+  const { routerEnv, variant, reason, header, question, choices, signal, fetchImpl } =
+    args;
+
+  const shapeErr = __assertVaultChoices(choices);
+  if (shapeErr) return shapeErr;
+
+  if (signal && (signal as AbortSignal).aborted === true) {
+    return { ok: false, reason: "cancelled" };
+  }
+
+  const lockErr = __acquireVaultDialogLock();
+  if (lockErr) return lockErr;
+
+  try {
+    const transport = await postRouterForm({
+      routerEnv,
+      variant,
+      reason,
+      questions: [
+        {
+          id: "_vault_decision",
+          header,
+          question,
+          type: "single",
+          options: choices.map((label) => ({ label })),
+        },
+      ],
+      signal,
+      fetchImpl,
+    });
+
+    if (transport.ok) {
+      // Single-choice vault auth requires EXACTLY one returned
+      // _vault_decision string. Missing / empty / multi / non-array /
+      // blank / unknown never authorize — protocol failure so the
+      // caller may fall through to select/confirm.
+      const ans = transport.answers["_vault_decision"];
+      if (!Array.isArray(ans) || ans.length !== 1) {
+        return {
+          ok: false,
+          reason: "dialog_error",
+          detail:
+            `router form must return exactly one _vault_decision string, ` +
+            `got ${Array.isArray(ans) ? `length=${ans.length}` : typeof ans}`,
+        };
+      }
+      const choice = String(ans[0] ?? "").trim();
+      if (!choice) {
+        return {
+          ok: false,
+          reason: "dialog_error",
+          detail: "router form _vault_decision answer is empty",
+        };
+      }
+      if (!choices.includes(choice)) {
+        // Unknown choice is protocol failure — never authorize. Caller
+        // may fall through to select/confirm for a real decision.
+        return {
+          ok: false,
+          reason: "dialog_error",
+          detail:
+            `router form returned unknown choice '${choice.slice(0, 64)}' ` +
+            `(expected one of: ${choices.join(", ").slice(0, 256)})`,
+        };
+      }
+      return { ok: true, choice };
+    }
+
+    // Real user cancellation on Web — fail closed, no fallback.
+    if (transport.reason === "user-rejected") {
+      return {
+        ok: false,
+        reason: "cancelled",
+        detail: transport.detail,
+      };
+    }
+
+    // Mid-flight AbortSignal — structured cause, not detail regex.
+    // Caller stamps ui_path=router and MUST NOT fall through.
+    if (transport.reason === "cancelled" && transport.cause === "abort") {
+      return {
+        ok: false,
+        reason: "cancelled",
+        detail: transport.detail,
+      };
+    }
+
+    // form_timeout (cause:"timeout") / network / auth / malformed →
+    // substrate failure. dialog_error triggers select/confirm fallback.
+    return {
+      ok: false,
+      reason: "dialog_error",
+      detail: transport.detail ?? transport.reason,
+    };
   } finally {
     __vaultDialogInFlight = false;
   }

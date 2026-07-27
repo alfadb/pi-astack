@@ -91,7 +91,7 @@ fs.mkdirSync(promptUserUiDir, { recursive: true });
 fs.writeFileSync(path.join(tmpDir, "redact.cjs"), transpile(path.join(repoRoot, "extensions/abrain/redact.ts")));
 fs.writeFileSync(path.join(tmpDir, "redact.js"), `module.exports = require("./redact.cjs");\n`);
 
-for (const m of ["types", "schema", "manager", "service", "handler"]) {
+for (const m of ["types", "schema", "manager", "router-form", "service", "handler"]) {
   const cjs = path.join(promptUserDir, `${m}.cjs`);
   fs.writeFileSync(cjs, transpile(path.join(repoRoot, "extensions/abrain/prompt-user", `${m}.ts`)));
   fs.copyFileSync(cjs, path.join(promptUserDir, `${m}.js`));
@@ -1239,6 +1239,41 @@ await asyncCheck("router path: network error → ui-unavailable (NOT user-reject
       if (r.ok) throw new Error(`expected !ok: ${JSON.stringify(r)}`);
       if (r.reason === "user-rejected") {
         throw new Error("network error must not be user-rejected");
+      }
+      if (r.reason !== "ui-unavailable") {
+        throw new Error(`expected ui-unavailable, got ${r.reason}: ${JSON.stringify(r)}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await asyncCheck("router path: malformed answers array → ui-unavailable (not ok empty)", async () => {
+  await withRouterEnv(async () => {
+    manager.__resetForTests();
+    handlerMod.resetSoftCapCounter();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 200,
+      async json() {
+        // Wire contract is object keyed by qid. Array must not become ok:true.
+        return { answers: [] };
+      },
+    });
+    try {
+      const json = await handlerMod.executePromptUserTool(
+        {
+          reason: "malformed answers",
+          questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+        },
+        undefined,
+        { ui: { custom: async () => undefined }, hasUI: true, mode: "rpc" },
+        { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+      );
+      const r = JSON.parse(json);
+      if (r.ok) {
+        throw new Error(`answers:[] must not be ok: ${JSON.stringify(r)}`);
       }
       if (r.reason !== "ui-unavailable") {
         throw new Error(`expected ui-unavailable, got ${r.reason}: ${JSON.stringify(r)}`);

@@ -73,8 +73,34 @@ if (!registeredTools.includes("vault_release")) {
 if (!registeredTools.includes("prompt_user")) {
   throw new Error(`prompt_user tool was not registered: ${registeredTools.join(", ")}`);
 }
-if (typeof handlers.get("session_start") !== "function") {
+const sessionStart = handlers.get("session_start");
+if (typeof sessionStart !== "function") {
   throw new Error("session_start handler was not registered");
+}
+
+// dialog_builder_unavailable telemetry is TUI-only: RPC never uses PromptDialog.
+// Simulate activate()-time builder failure and assert mode gate without broad scaffolding.
+{
+  indexModule.__resetVaultDialogBuilderTelemetryForTests();
+  indexModule.__setVaultDialogBuilderInitFailedForTests(true);
+  const ui = { custom: async () => undefined, notify: () => {} };
+  await sessionStart({}, { mode: "rpc", ui });
+  let state = indexModule.__peekVaultDialogBuilderTelemetryForTests();
+  if (state.sent) {
+    throw new Error(`dialog_builder telemetry must NOT fire in rpc: ${JSON.stringify(state)}`);
+  }
+  await sessionStart({}, { mode: "tui", ui });
+  state = indexModule.__peekVaultDialogBuilderTelemetryForTests();
+  if (!state.sent || !state.failed) {
+    throw new Error(`dialog_builder telemetry must fire once in tui: ${JSON.stringify(state)}`);
+  }
+  // Idempotent: second TUI session_start must not re-send.
+  await sessionStart({}, { mode: "tui", ui });
+  state = indexModule.__peekVaultDialogBuilderTelemetryForTests();
+  if (!state.sent) {
+    throw new Error(`telemetry sent flag should remain true: ${JSON.stringify(state)}`);
+  }
+  indexModule.__resetVaultDialogBuilderTelemetryForTests();
 }
 
 console.log("abrain vault overlay startup: ok");

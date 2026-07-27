@@ -207,6 +207,14 @@ check("hook is a boolean (not a function) → false", () => {
 
 check("real vault-authorize.isVaultDialogInFlight integrates with the helper", () => {
   const vaDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-auth-"));
+  // vault-authorize runtime-imports shared router form transport.
+  const puDir = path.join(vaDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(puDir, "router-form.cjs"),
+    transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts")),
+  );
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
   fs.writeFileSync(
     path.join(vaDir, "vault-authorize.cjs"),
     transpile(path.join(repoRoot, "extensions/abrain/vault-authorize.ts")),
@@ -445,6 +453,13 @@ check("trigger-path ORDERING anchor: defer checks before rearm consumption (OPUS
 
 check("env gate: __resetVaultDialogLockForTests throws without PI_ASTACK_ENABLE_TEST_HOOKS=1", () => {
   const vaDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-auth-gate-"));
+  const puDir = path.join(vaDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(puDir, "router-form.cjs"),
+    transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts")),
+  );
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
   fs.writeFileSync(
     path.join(vaDir, "vault-authorize.cjs"),
     transpile(path.join(repoRoot, "extensions/abrain/vault-authorize.ts")),

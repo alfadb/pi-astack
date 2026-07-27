@@ -281,14 +281,15 @@ export interface VaultEvent {
    *  ambiguous: a cancelled overlay and a cancelled ui.select looked
    *  identical. (DEEPSEEK xhigh P0 reclassified P2; A-batch synthesis
    *  2026-05-19 multi-LLM round.)
-   *    - "overlay"  : PromptDialog overlay (default since ADR 0022 P3b)
+   *    - "overlay"  : PromptDialog overlay (TUI mode, ADR 0022 P3b)
+   *    - "router"   : pi-router Web/RPC form intake (non-TUI)
    *    - "select"   : ui.select fallback (ui.custom unavailable / dialog_error)
    *    - "confirm"  : ui.confirm fallback (legacy binary y/n)
    *    - "cached"   : session grant short-circuit, no UI surfaced this call
    *    - "none"     : no UI method available, forced deny / withhold
    *  Free-form optional; consumers should treat unknown values as
    *  forward-compat unknown rather than error. */
-  ui_path?: "overlay" | "select" | "confirm" | "cached" | "none";
+  ui_path?: "overlay" | "router" | "select" | "confirm" | "cached" | "none";
 }
 
 /**

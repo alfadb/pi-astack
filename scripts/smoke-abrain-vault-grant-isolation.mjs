@@ -168,6 +168,14 @@ for (const file of ABRAIN_LEAF_FILES) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
+// Shared pi-router form transport (vault-authorize + index runtime import).
+{
+  const puDir = path.join(tmpDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  const compiled = transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts"));
+  fs.writeFileSync(path.join(puDir, "router-form.cjs"), compiled);
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
+}
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 // Stage abrain/index.ts last so its require()s can resolve to the .cjs
@@ -278,11 +286,16 @@ function resetState() {
   indexModule.__clearVaultBashRunsForTests();
 }
 
+// TUI host context: PromptDialog overlay only runs when mode === "tui"
+// (pi 0.82.1 RPC stubs custom and vault must not enter that path).
+const TUI_CTX = { mode: "tui" };
+const RPC_CTX = { mode: "rpc" };
+
 // Build a ui that EXERCISES the overlay (PromptDialog) path. The
 // captured choice is fed into the fake buildDialog via askVaultAuth...
 // The ui object exposes ui.custom + ui.notify so the overlay guard in
-// authorizeVaultRelease (`typeof ui.custom === "function" &&
-// cachedVaultDialogBuilder`) passes. We set a synthetic builder via
+// authorizeVaultRelease (mode === "tui" && typeof ui.custom === "function" &&
+// cachedVaultDialogBuilder) passes. We set a synthetic builder via
 // __setVaultDialogBuilderForTests so the helper drives onDone with
 // our chosen label.
 function makeOverlayUi(captureRef = {}) {
@@ -321,16 +334,16 @@ function installOverlayBuilder(pickLabel) {
 
 // ── (g) ui_path end-to-end stamping ─────────────────────────────────────
 //
-// authorizeVaultRelease has FIVE distinct ui_path values. We hit each one
-// and assert the returned outcome carries the right tag. Negative-test
-// (manual): change the expected string to "wrong" — assertion fails fast.
+// authorizeVaultRelease has SIX distinct ui_path values (incl. router).
+// We hit each one and assert the returned outcome carries the right tag.
+// Negative-test (manual): change the expected string to "wrong" — assertion fails fast.
 
 await check("ui_path stamp: cached (session grant from prior call)", async () => {
   resetState();
   installOverlayBuilder("Session"); // grants the session
   const { ui } = makeOverlayUi();
   const first = await indexModule.__authorizeVaultReleaseForTests(
-    ui, "global", "alpha", undefined, undefined, {},
+    ui, "global", "alpha", undefined, undefined, TUI_CTX,
   );
   if (!first.ok) throw new Error(`first call should grant Session, got ${JSON.stringify(first)}`);
   if (first.ui_path !== "overlay") throw new Error(`first.ui_path=${first.ui_path}`);
@@ -345,7 +358,7 @@ await check("ui_path stamp: cached (session grant from prior call)", async () =>
   const second = await indexModule.__authorizeVaultReleaseForTests(
     { custom: () => { throw new Error("must not be called"); },
       notify: () => {} },
-    "global", "alpha", undefined, undefined, {},
+    "global", "alpha", undefined, undefined, TUI_CTX,
   );
   if (!second.ok) throw new Error(`session grant did not persist: ${JSON.stringify(second)}`);
   if (second.ui_path !== "cached")
@@ -359,7 +372,7 @@ await check("ui_path stamp: overlay (PromptDialog path picks 'Yes once')", async
   installOverlayBuilder("Yes once");
   const { ui, events } = makeOverlayUi();
   const out = await indexModule.__authorizeVaultReleaseForTests(
-    ui, "global", "beta", "test reason", undefined, {},
+    ui, "global", "beta", "test reason", undefined, TUI_CTX,
   );
   if (!out.ok) throw new Error(`expected ok, got ${JSON.stringify(out)}`);
   if (out.ui_path !== "overlay") throw new Error(`ui_path=${out.ui_path}`);
@@ -473,7 +486,7 @@ await check("INV-E: vault session grant for key A does NOT leak to key B", async
   installOverlayBuilder("Session");
   const { ui: uiA } = makeOverlayUi();
   const a = await indexModule.__authorizeVaultReleaseForTests(
-    uiA, "global", "alpha-key", undefined, undefined, {},
+    uiA, "global", "alpha-key", undefined, undefined, TUI_CTX,
   );
   if (!a.ok) throw new Error(`A should grant: ${JSON.stringify(a)}`);
 
@@ -489,7 +502,7 @@ await check("INV-E: vault session grant for key A does NOT leak to key B", async
   });
   const { ui: uiB } = makeOverlayUi();
   const b = await indexModule.__authorizeVaultReleaseForTests(
-    uiB, "global", "beta-key", undefined, undefined, {},
+    uiB, "global", "beta-key", undefined, undefined, TUI_CTX,
   );
   if (b.ok) throw new Error(`B should NOT inherit A's grant: ${JSON.stringify(b)}`);
   if (bOverlayHits !== 1) throw new Error(`B should drive its own overlay, hits=${bOverlayHits}`);
@@ -500,7 +513,7 @@ await check("INV-E: deny+remember for key C does NOT block key D", async () => {
   installOverlayBuilder("Deny + remember");
   const { ui: uiC } = makeOverlayUi();
   const c = await indexModule.__authorizeVaultReleaseForTests(
-    uiC, "global", "gamma-key", undefined, undefined, {},
+    uiC, "global", "gamma-key", undefined, undefined, TUI_CTX,
   );
   if (c.ok) throw new Error(`C should deny: ${JSON.stringify(c)}`);
 
@@ -511,7 +524,7 @@ await check("INV-E: deny+remember for key C does NOT block key D", async () => {
   indexModule.__setVaultDialogBuilderForTests(() => { cReplayBuilderHits += 1; return {}; });
   const cReplay = await indexModule.__authorizeVaultReleaseForTests(
     { custom: () => { throw new Error("must not be called"); }, notify: () => {} },
-    "global", "gamma-key", undefined, undefined, {},
+    "global", "gamma-key", undefined, undefined, TUI_CTX,
   );
   if (cReplay.ok) throw new Error(`C-replay should still deny: ${JSON.stringify(cReplay)}`);
   if (cReplay.reason !== "denied_remembered")
@@ -526,7 +539,7 @@ await check("INV-E: deny+remember for key C does NOT block key D", async () => {
   installOverlayBuilder("Yes once");
   const { ui: uiD } = makeOverlayUi();
   const d = await indexModule.__authorizeVaultReleaseForTests(
-    uiD, "global", "delta-key", undefined, undefined, {},
+    uiD, "global", "delta-key", undefined, undefined, TUI_CTX,
   );
   if (!d.ok) throw new Error(`D should not inherit C's deny-remember: ${JSON.stringify(d)}`);
   if (d.ui_path !== "overlay") throw new Error(`d.ui_path=${d.ui_path}`);
@@ -570,7 +583,7 @@ await check("bash output: overlay 'Yes once' returns { decision:'release', ui_pa
     releases: [{ scope: "global", key: "alpha", value: "REDACTED" }],
     variables: [{ varName: "VAULT_alpha", scopeKey: "global:alpha" }],
   };
-  const outcome = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, {});
+  const outcome = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, TUI_CTX);
   // Critical: outcome MUST be an object with both fields. The pre-fix bug
   // hinged on a caller treating this as a string.
   if (typeof outcome !== "object" || outcome === null)
@@ -612,7 +625,7 @@ await check("bash output: 'No' returns { decision:'withhold', ui_path:'overlay' 
     releases: [{ scope: "global", key: "alpha", value: "REDACTED" }],
     variables: [{ varName: "VAULT_alpha", scopeKey: "global:alpha" }],
   };
-  const outcome = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, {});
+  const outcome = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, TUI_CTX);
   if (outcome.decision !== "withhold") throw new Error(JSON.stringify(outcome));
   if (outcome.ui_path !== "overlay") throw new Error(`ui_path=${outcome.ui_path}`);
 });
@@ -629,7 +642,7 @@ await check("bash output: session grant fast-path returns ui_path:'cached'", asy
     variables: [{ varName: "VAULT_alpha", scopeKey: "global:alpha" }],
   };
   const { ui } = makeOverlayUi();
-  const first = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, {});
+  const first = await indexModule.__authorizeVaultBashOutputForTests(ui, record, undefined, TUI_CTX);
   if (first.decision !== "release" || first.ui_path !== "overlay")
     throw new Error(`first should overlay+release: ${JSON.stringify(first)}`);
   // Second call with the SAME grantKey must short-circuit via
@@ -639,7 +652,7 @@ await check("bash output: session grant fast-path returns ui_path:'cached'", asy
     { custom: () => { throw new Error("must not be called"); }, notify: () => {} },
     recordSameGrant,
     undefined,
-    {},
+    TUI_CTX,
   );
   if (second.decision !== "release") throw new Error(JSON.stringify(second));
   if (second.ui_path !== "cached") throw new Error(`ui_path=${second.ui_path}`);
@@ -658,6 +671,538 @@ await check("bash output: undefined ui returns { decision:'withhold', ui_path:'n
   const outcome = await indexModule.__authorizeVaultBashOutputForTests(undefined, record, undefined, {});
   if (outcome.decision !== "withhold") throw new Error(JSON.stringify(outcome));
   if (outcome.ui_path !== "none") throw new Error(`ui_path=${outcome.ui_path}`);
+});
+
+// ── Router form path (vault_release + bash_output_release) ─────────────
+// Explicit mode === "rpc" + PI_ROUTER_UI_* env → POST /v1/ui/form.
+// mode undefined / future modes MUST NOT enter router even when env is
+// set (deny-first select/confirm). Must not enter RPC custom stub;
+// user cancel stamps ui_path=router; transport errors may fall through
+// to select; unknown choices never authorize.
+
+function withRouterEnv(fn) {
+  const prev = {
+    endpoint: process.env.PI_ROUTER_UI_ENDPOINT,
+    token: process.env.PI_ROUTER_UI_TOKEN,
+    instanceId: process.env.PI_ROUTER_INSTANCE_ID,
+  };
+  process.env.PI_ROUTER_UI_ENDPOINT = "http://127.0.0.1:3900/v1/ui/form";
+  process.env.PI_ROUTER_UI_TOKEN = "test-token-abcdef";
+  process.env.PI_ROUTER_INSTANCE_ID = "inst-vault-1";
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (prev.endpoint === undefined) delete process.env.PI_ROUTER_UI_ENDPOINT;
+      else process.env.PI_ROUTER_UI_ENDPOINT = prev.endpoint;
+      if (prev.token === undefined) delete process.env.PI_ROUTER_UI_TOKEN;
+      else process.env.PI_ROUTER_UI_TOKEN = prev.token;
+      if (prev.instanceId === undefined) delete process.env.PI_ROUTER_INSTANCE_ID;
+      else process.env.PI_ROUTER_INSTANCE_ID = prev.instanceId;
+    });
+}
+
+await check("router vault_release: success maps choice + ui_path=router; RPC custom not entered", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const fetchCalls = [];
+    let customHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      fetchCalls.push({ url: String(url), init });
+      const body = JSON.parse(init.body);
+      if (body.variant !== "vault_release") throw new Error(`variant=${body.variant}`);
+      if (body.instanceId !== "inst-vault-1") throw new Error(`instanceId=${body.instanceId}`);
+      const auth = init.headers?.authorization || init.headers?.Authorization;
+      if (auth !== "Bearer test-token-abcdef") throw new Error(`auth=${auth}`);
+      const q = body.questions?.[0];
+      if (!q || q.id !== "_vault_decision") throw new Error(`question id=${q?.id}`);
+      if (!Array.isArray(q.options) || q.options.length < 2) {
+        throw new Error(`options: ${JSON.stringify(q.options)}`);
+      }
+      return {
+        status: 200,
+        async json() {
+          return { answers: { _vault_decision: ["Yes once"] } };
+        },
+      };
+    };
+    try {
+      const ui = {
+        custom: async () => {
+          customHits += 1;
+          return undefined; // RPC stub shape
+        },
+        notify: () => {},
+        select: async () => {
+          throw new Error("select must not run on router success");
+        },
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-alpha", "need secret", undefined, RPC_CTX,
+      );
+      if (!out.ok) throw new Error(`expected ok: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "router") throw new Error(`ui_path=${out.ui_path}`);
+      if (customHits !== 0) throw new Error(`RPC custom must not be entered, hits=${customHits}`);
+      if (fetchCalls.length !== 1) throw new Error(`fetch calls=${fetchCalls.length}`);
+      // Token must never appear in thrown messages / audit helpers here.
+      const blob = JSON.stringify(fetchCalls.map((c) => c.url));
+      if (blob.includes("test-token-abcdef")) throw new Error("token leaked into url log");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router vault_release: form_cancelled → deny ui_path=router (no select fallback)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    let selectHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 409,
+      async json() {
+        return { kind: "form_cancelled", message: "user cancelled" };
+      },
+    });
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "Yes once";
+        },
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-cancel", undefined, undefined, RPC_CTX,
+      );
+      if (out.ok) throw new Error(`must deny: ${JSON.stringify(out)}`);
+      if (out.reason !== "cancelled") throw new Error(`reason=${out.reason}`);
+      if (out.ui_path !== "router") throw new Error(`ui_path=${out.ui_path}`);
+      if (selectHits !== 0) throw new Error(`user cancel must not fall through to select, hits=${selectHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router vault_release: network error may fall through to select", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    let selectHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED synthetic");
+    };
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "Yes once";
+        },
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-net", undefined, undefined, RPC_CTX,
+      );
+      if (!out.ok) throw new Error(`select fallback should grant: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "select") throw new Error(`ui_path=${out.ui_path}`);
+      if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router vault_release: unknown choice never authorizes (falls through to select deny)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 200,
+      async json() {
+        return { answers: { _vault_decision: ["TOTALLY_UNKNOWN"] } };
+      },
+    });
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => "No",
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-unknown", undefined, undefined, RPC_CTX,
+      );
+      if (out.ok) throw new Error(`unknown choice must not authorize: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "select") throw new Error(`expected select after unknown, ui_path=${out.ui_path}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router vault_release: transport error + no fallback → deny ui_path=router", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 500,
+      async json() {
+        return { kind: "internal", message: "boom" };
+      },
+    });
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        // no select / confirm
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-nofallback", undefined, undefined, RPC_CTX,
+      );
+      if (out.ok) throw new Error(`must deny: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "router") throw new Error(`ui_path=${out.ui_path}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router bash_output_release: success maps release + ui_path=router", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      const body = JSON.parse(init.body);
+      if (body.variant !== "bash_output_release") throw new Error(`variant=${body.variant}`);
+      return {
+        status: 200,
+        async json() {
+          return { answers: { _vault_decision: ["Session"] } };
+        },
+      };
+    };
+    try {
+      let customHits = 0;
+      const ui = {
+        custom: async () => {
+          customHits += 1;
+          return undefined;
+        },
+        notify: () => {},
+      };
+      const record = {
+        toolCallId: "tcid-router-bash",
+        grantKey: "router-bash-grant",
+        envFile: path.join(tmpDir, "nonexistent-env-router"),
+        originalCommand: "echo hi",
+        releases: [{ scope: "global", key: "alpha", value: "REDACTED" }],
+        variables: [{ varName: "VAULT_alpha", scopeKey: "global:alpha" }],
+      };
+      const outcome = await indexModule.__authorizeVaultBashOutputForTests(
+        ui, record, undefined, RPC_CTX,
+      );
+      if (outcome.decision !== "release") throw new Error(JSON.stringify(outcome));
+      if (outcome.ui_path !== "router") throw new Error(`ui_path=${outcome.ui_path}`);
+      if (customHits !== 0) throw new Error(`RPC custom must not be entered, hits=${customHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("no-router env: RPC custom stub not entered; select fallback used", async () => {
+  resetState();
+  // Ensure router env is absent for this fixture.
+  const prevE = process.env.PI_ROUTER_UI_ENDPOINT;
+  const prevT = process.env.PI_ROUTER_UI_TOKEN;
+  const prevI = process.env.PI_ROUTER_INSTANCE_ID;
+  delete process.env.PI_ROUTER_UI_ENDPOINT;
+  delete process.env.PI_ROUTER_UI_TOKEN;
+  delete process.env.PI_ROUTER_INSTANCE_ID;
+  try {
+    let customHits = 0;
+    let selectHits = 0;
+    const ui = {
+      custom: async () => {
+        customHits += 1;
+        return undefined;
+      },
+      notify: () => {},
+      select: async () => {
+        selectHits += 1;
+        return "Yes once";
+      },
+    };
+    // Even with builder installed, mode=rpc must not use custom.
+    installOverlayBuilder("Session");
+    const out = await indexModule.__authorizeVaultReleaseForTests(
+      ui, "global", "rpc-no-router", undefined, undefined, RPC_CTX,
+    );
+    if (!out.ok) throw new Error(JSON.stringify(out));
+    if (out.ui_path !== "select") throw new Error(`ui_path=${out.ui_path}`);
+    if (customHits !== 0) throw new Error(`customHits=${customHits}`);
+    if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+  } finally {
+    if (prevE === undefined) delete process.env.PI_ROUTER_UI_ENDPOINT;
+    else process.env.PI_ROUTER_UI_ENDPOINT = prevE;
+    if (prevT === undefined) delete process.env.PI_ROUTER_UI_TOKEN;
+    else process.env.PI_ROUTER_UI_TOKEN = prevT;
+    if (prevI === undefined) delete process.env.PI_ROUTER_INSTANCE_ID;
+    else process.env.PI_ROUTER_INSTANCE_ID = prevI;
+  }
+});
+
+await check("router vault_release: malformed answers array never authorizes", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    let selectHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 200,
+      async json() {
+        // Wire contract is object keyed by qid — array is malformed.
+        return { answers: [] };
+      },
+    });
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "No";
+        },
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-answers-array", undefined, undefined, RPC_CTX,
+      );
+      if (out.ok) throw new Error(`answers:[] must not authorize: ${JSON.stringify(out)}`);
+      // Transport ui-unavailable → vault dialog_error → select fallback.
+      if (out.ui_path !== "select") throw new Error(`ui_path=${out.ui_path}`);
+      if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("router vault_release: mid-flight AbortSignal → cancel ui_path=router (no fallback)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const vaultAuth = require(path.join(tmpDir, "vault-authorize.cjs"));
+    vaultAuth.__resetVaultDialogLockForTests();
+
+    let selectHits = 0;
+    let fetchEntered;
+    const fetchEnteredP = new Promise((resolve) => {
+      fetchEntered = resolve;
+    });
+    const ac = new AbortController();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (_url, init) => {
+      fetchEntered();
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error("expected abort signal on router fetch"));
+          return;
+        }
+        if (signal.aborted) {
+          reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+          return;
+        }
+        signal.addEventListener(
+          "abort",
+          () => {
+            reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+          },
+          { once: true },
+        );
+      });
+    };
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "Yes once";
+        },
+      };
+      const p = indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-abort", undefined, ac.signal, RPC_CTX,
+      );
+      await fetchEnteredP;
+      ac.abort();
+      const out = await p;
+      if (out.ok) throw new Error(`must deny on abort: ${JSON.stringify(out)}`);
+      if (out.reason !== "cancelled") throw new Error(`reason=${out.reason}`);
+      if (out.ui_path !== "router") throw new Error(`ui_path=${out.ui_path}`);
+      if (selectHits !== 0) {
+        throw new Error(`abort must not fall through to select, hits=${selectHits}`);
+      }
+      if (vaultAuth.__peekVaultDialogLockForTests()) {
+        throw new Error("vault dialog lock leaked after mid-flight abort");
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+      vaultAuth.__resetVaultDialogLockForTests();
+    }
+  });
+});
+
+await check("router vault_release: concurrent lock blocks second (no cross-grant; hang settles)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    const vaultAuth = require(path.join(tmpDir, "vault-authorize.cjs"));
+    vaultAuth.__resetVaultDialogLockForTests();
+
+    let resolveHang;
+    const hangPromise = new Promise((resolve) => {
+      resolveHang = resolve;
+    });
+    let firstEntered;
+    const firstEnteredP = new Promise((resolve) => {
+      firstEntered = resolve;
+    });
+    let fetchCount = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        firstEntered();
+        return hangPromise;
+      }
+      // Second request must be blocked by vault lock before fetch.
+      throw new Error(`unexpected second router fetch (count=${fetchCount})`);
+    };
+    try {
+      const uiHang = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          throw new Error("select must not run on hanging first request");
+        },
+      };
+      const p1 = indexModule.__authorizeVaultReleaseForTests(
+        uiHang, "global", "lock-a", undefined, undefined, RPC_CTX,
+      );
+      await firstEnteredP;
+
+      let selectHits = 0;
+      const ui2 = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "No";
+        },
+      };
+      const out2 = await indexModule.__authorizeVaultReleaseForTests(
+        ui2, "global", "lock-b", undefined, undefined, RPC_CTX,
+      );
+      // Contended lock → dialog_error → select deny. Must not inherit Session.
+      if (out2.ok) throw new Error(`second must not cross-grant: ${JSON.stringify(out2)}`);
+      if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+      if (fetchCount !== 1) throw new Error(`fetchCount=${fetchCount}`);
+
+      // Cleanly settle the hanging first request.
+      resolveHang({
+        status: 200,
+        async json() {
+          return { answers: { _vault_decision: ["Session"] } };
+        },
+      });
+      const out1 = await p1;
+      if (!out1.ok) throw new Error(`first should grant after settle: ${JSON.stringify(out1)}`);
+      if (out1.ui_path !== "router") throw new Error(`ui_path=${out1.ui_path}`);
+      if (vaultAuth.__peekVaultDialogLockForTests()) {
+        throw new Error("vault dialog lock leaked after concurrent settle");
+      }
+    } finally {
+      // Always unstick hang + clear lock so a failure cannot strand later checks.
+      try {
+        resolveHang?.({
+          status: 500,
+          async json() {
+            return { kind: "internal", message: "test teardown" };
+          },
+        });
+      } catch {
+        /* already settled */
+      }
+      globalThis.fetch = origFetch;
+      vaultAuth.__resetVaultDialogLockForTests();
+    }
+  });
+});
+
+await check("router vault_release: multi-value _vault_decision never authorizes", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    let selectHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 200,
+      async json() {
+        // Exactly-one contract: multi-select payload is protocol failure.
+        return { answers: { _vault_decision: ["Yes once", "Session"] } };
+      },
+    });
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "No";
+        },
+      };
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "router-multi", undefined, undefined, RPC_CTX,
+      );
+      if (out.ok) throw new Error(`multi-value must not authorize: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "select") throw new Error(`ui_path=${out.ui_path}`);
+      if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await check("mode undefined + router env: does NOT call fetch (deny-first select)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    let fetchHits = 0;
+    let selectHits = 0;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      fetchHits += 1;
+      throw new Error("fetch must not run when mode is undefined");
+    };
+    try {
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+        select: async () => {
+          selectHits += 1;
+          return "No";
+        },
+      };
+      // hostCtx without mode (or mode: undefined) must skip router entirely.
+      const out = await indexModule.__authorizeVaultReleaseForTests(
+        ui, "global", "mode-undef-router", undefined, undefined, {},
+      );
+      if (out.ok) throw new Error(`expected deny: ${JSON.stringify(out)}`);
+      if (out.ui_path !== "select") throw new Error(`ui_path=${out.ui_path}`);
+      if (fetchHits !== 0) throw new Error(`fetchHits=${fetchHits} (router must not run)`);
+      if (selectHits !== 1) throw new Error(`selectHits=${selectHits}`);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });
 
 // ── (b) startup telemetry probes ───────────────────────────────────────
@@ -745,7 +1290,7 @@ await check("handler E2E: release path — outcome.decision destructure works (c
     details: { foo: "bar" },
   };
   const { ui } = makeOverlayUi();
-  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui });
+  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui, mode: "tui" });
 
   // PRIMARY ASSERTION (catches ff3dd9e P0): the release branch MUST be
   // reachable. Pre-fix `decision !== "release"` compared the wrapper
@@ -797,7 +1342,7 @@ await check("handler E2E: withhold path — audit gets ui_path + content is with
     details: {},
   };
   const { ui } = makeOverlayUi();
-  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui });
+  const result = await indexModule.__handleVaultBashToolResultForTests(event, { ui, mode: "tui" });
 
   if (!result.details.vault.outputWithheld) {
     throw new Error(`expected outputWithheld=true, got ${JSON.stringify(result.details.vault)}`);
@@ -841,6 +1386,74 @@ await check("handler E2E: unknown toolCallId is bypassed silently", async () => 
   if (rows.some((r) => r.op === "bash_output_release" || r.op === "bash_output_withhold")) {
     throw new Error(`unexpected audit rows for missing record: ${JSON.stringify(rows)}`);
   }
+});
+
+await check("handler E2E: bash_output_release via router (mode=rpc, ui_path=router)", async () => {
+  await withRouterEnv(async () => {
+    resetState();
+    clearAuditFile();
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async (_url, init) => {
+        const body = JSON.parse(init.body);
+        if (body.variant !== "bash_output_release") {
+          throw new Error(`variant=${body.variant}`);
+        }
+        return {
+          status: 200,
+          async json() {
+            return { answers: { _vault_decision: ["Yes once"] } };
+          },
+        };
+      };
+      const tcid = "e2e-router-release-1";
+      indexModule.__seedVaultBashRunForTests(tcid, buildSeededRecord(tcid));
+      const event = {
+        toolName: "bash",
+        toolCallId: tcid,
+        content: [{ type: "text", text: "output containing SECRET_VALUE_FOR_TEST literally" }],
+        details: { foo: "bar" },
+      };
+      const ui = {
+        custom: async () => {
+          throw new Error("RPC custom must not be entered on router path");
+        },
+        notify: () => {},
+        select: async () => {
+          throw new Error("select must not run on router success");
+        },
+      };
+      const result = await indexModule.__handleVaultBashToolResultForTests(event, {
+        ui,
+        mode: "rpc",
+      });
+      if (!result?.details?.vault || result.details.vault.outputReleased !== true) {
+        throw new Error(`expected outputReleased=true: ${JSON.stringify(result)}`);
+      }
+      if (result.details.vault.outputWithheld) {
+        throw new Error(`router release wrote outputWithheld: ${JSON.stringify(result.details.vault)}`);
+      }
+      const serialized = JSON.stringify(result.content);
+      if (serialized.includes("SECRET_VALUE_FOR_TEST")) {
+        throw new Error(`redaction failed: plaintext leaked: ${serialized.slice(0, 200)}`);
+      }
+      if (!serialized.includes("<vault:global:alpha>")) {
+        throw new Error(`redaction missing placeholder: ${serialized.slice(0, 200)}`);
+      }
+      const rows = await readAuditRows();
+      const releaseRow = rows.find((r) => r.op === "bash_output_release");
+      if (!releaseRow) {
+        throw new Error(`bash_output_release row missing: ${JSON.stringify(rows)}`);
+      }
+      if (releaseRow.ui_path !== "router") {
+        throw new Error(`expected ui_path=router, got ${JSON.stringify(releaseRow)}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+      const vaultAuth = require(path.join(tmpDir, "vault-authorize.cjs"));
+      vaultAuth.__resetVaultDialogLockForTests();
+    }
+  });
 });
 
 await check("handler E2E: outer-envelope fail-closed catch withholds (OPUS P1-5 intentional ui_path omit)", async () => {
@@ -933,8 +1546,9 @@ delete process.env.ABRAIN_ROOT;
 // Third-round audit fix (GPT-5.5 P2-1): record count drift as a regular
 // failure regardless of other failures, so a delete-check + other-fail
 // combination still surfaces the drift.
-// 22 helper E2E + handler E2E + 1 require-time fail-fast = 23.
-const EXPECTED_ASSERTIONS = 23;
+// 1 require-time + ui_path/grant/bash + 7 router + 4 router hardening +
+// mode-undefined-no-fetch + telemetry + handler E2E (incl. router) = 36.
+const EXPECTED_ASSERTIONS = 36;
 if (total !== EXPECTED_ASSERTIONS) {
   failures.push({
     name: "assertion count drift",

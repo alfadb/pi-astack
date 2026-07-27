@@ -113,6 +113,14 @@ for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "b
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
+// Shared pi-router form transport (vault-authorize runtime import).
+{
+  const puDir = path.join(tmpDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  const compiled = transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts"));
+  fs.writeFileSync(path.join(puDir, "router-form.cjs"), compiled);
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
+}
 fs.writeFileSync(path.join(tmpDir, "rule-injector.js"), "module.exports = function activateRuleInjectorForSmoke() {};\n");
 
 let indexSrc = fs.readFileSync(path.join(repoRoot, "extensions/abrain/index.ts"), "utf8");

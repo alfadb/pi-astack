@@ -253,9 +253,10 @@ await check("appendVaultReadAudit: read-path ops land in vault-events.jsonl with
 await check("INV-D (batch A g): VaultEvent.ui_path round-trips through jsonl write", async () => {
   const { home } = freshAbrainHome();
   fs.mkdirSync(path.join(home, ".state"), { recursive: true });
-  // All five legal ui_path values, plus one row with ui_path absent.
+  // All six legal ui_path values, plus one row with ui_path absent.
   const cases = [
     { op: "release",         lane: "vault_release", ui_path: "overlay" },
+    { op: "release",         lane: "vault_release", ui_path: "router" },
     { op: "release_denied",  lane: "vault_release", ui_path: "select", reason: "cancelled" },
     { op: "release_denied",  lane: "vault_release", ui_path: "confirm", reason: "denied" },
     { op: "release",         lane: "vault_release", ui_path: "cached" },

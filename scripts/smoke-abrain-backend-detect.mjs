@@ -513,7 +513,8 @@ fs.mkdirSync(path.join(tmpDir, "rule-injector"), { recursive: true });
 const promptUserDir = path.join(tmpDir, "prompt-user");
 const promptUserUiDir = path.join(promptUserDir, "ui");
 fs.mkdirSync(promptUserUiDir, { recursive: true });
-for (const m of ["types", "schema", "manager", "service", "handler"]) {
+// router-form is a runtime dep of service.ts + vault-authorize.ts.
+for (const m of ["types", "schema", "manager", "router-form", "service", "handler"]) {
   const cjsPath = path.join(promptUserDir, `${m}.cjs`);
   fs.writeFileSync(cjsPath, transpileTsToCjs(path.join(repoRoot, "extensions/abrain/prompt-user", `${m}.ts`)));
   fs.copyFileSync(cjsPath, path.join(promptUserDir, `${m}.js`));

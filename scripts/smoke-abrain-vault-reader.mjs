@@ -56,14 +56,23 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vr-"));
 // ADR 0019: vault-reader.ts + keychain.ts now import runtime constants from
 // ./backend-detect, so include it in the load set.
 // ADR 0022 P3b: vault-authorize.ts loaded here as a library to exercise the
-// PromptDialog overlay path with a synthetic ctx.ui.custom mock. Pure helpers
-// — type-only imports of prompt-user types, no runtime require()s.
+// PromptDialog overlay path with a synthetic ctx.ui.custom mock. Type-only
+// imports of prompt-user types remain; router form transport is a real
+// runtime require for the non-TUI vault path.
 for (const file of ["backend-detect", "vault-reader", "vault-writer", "keychain", "vault-authorize"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
 }
 // Relative imports in transpiled CommonJS keep the original .ts-free names.
 for (const file of ["backend-detect", "vault-reader", "vault-writer", "keychain", "vault-authorize"]) {
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
+}
+// Stage shared router form transport (vault-authorize runtime import).
+{
+  const puDir = path.join(tmpDir, "prompt-user");
+  fs.mkdirSync(puDir, { recursive: true });
+  const compiled = transpile(path.join(repoRoot, "extensions/abrain/prompt-user/router-form.ts"));
+  fs.writeFileSync(path.join(puDir, "router-form.cjs"), compiled);
+  fs.copyFileSync(path.join(puDir, "router-form.cjs"), path.join(puDir, "router-form.js"));
 }
 
 const reader = require(path.join(tmpDir, "vault-reader.cjs"));
