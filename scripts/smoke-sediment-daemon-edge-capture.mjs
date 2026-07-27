@@ -493,42 +493,8 @@ await check("restart turn0 different leaves + A→B→A + c6_collision + legacy 
   assert(legacyLeaf === `legacy_content:${"a".repeat(64)}`, `legacy leaf ${legacyLeaf}`);
   assert(edge.resolveTerminalLeafId({ leafTip: { id: "x", parentId: null, type: "message" } }) === "x", "prefer tip");
 
-  // Unreferenced source recovery: identity from capture audit + source leaf; never synthesize.
-  // Scenario: old c6_content_conflict shape = different real leaves same C6 left orphan source
-  // after leaf-admission conflict is terminal_identity; here we orphan by writing source via
-  // a different leaf that conflicts? Actually: seed pair on leafU, then different leaf orphan
-  // succeeds under leaf admission. To create unreferenced source we use: capture with leafO
-  // after intentionally removing only journal records is forbidden — instead write pair on
-  // leafO then delete is forbidden. Create orphan via capture that writes source then we
-  // simulate pre-admission crash by using conflict on SAME leaf (terminal_identity) which
-  // is REJECTED forever, plus a recoverable orphan via capture audit for a different leaf
-  // whose candidate was never written: write source by complete pair then... 
-  // Practical path: complete pair on leafA; second capture same C6 different leafB completes
-  // (c6_collision). To get unreferenced: use captureEdgeProtocolCandidate is not pair.
-  // Force: write messages through pair with capture audit, then remove candidate+witness files
-  // is mutation of journal — allowed only in test tmp. Better: admit path from conflict on
-  // different content same leaf is rejected. Recoverable case = source written + capture audit
-  // for a leaf that has no candidate yet.
-  // Implement: seed pair leaf-u; capture orphan with leaf-orphan (different leaf, same C6) which
-  // SUCCEEDS under leaf admission. So create unreferenced by writing source envelope manually
-  // is complex. Use: pair capture for orphanLeaf that will succeed — then we need unreferenced.
-  // Orphan via: first capture writes source+pair; second different content SAME leaf conflicts
-  // leaving source unreferenced with capture audit error_code=terminal_identity_content_conflict
-  // → rejected never recover. Separately: write capture-audit entry for a source that exists
-  // without candidate (create source via pair on leafX, then we need source-only).
-  // Simplest recoverable fixture: complete pair, copy capture-audit row, then for a NEW content
-  // write only the source sidecar by re-running capture that conflicts... 
-  // Use captureEdgeProtocolTerminalPair for leaf-rec with content A (complete). For content B
-  // with leaf-rec2 (different leaf) complete. Neither is unreferenced.
-  // Create unreferenced: use durableAtomic path through capture that fails AFTER source write
-  // with journal_failed? 
-  // From code: conflict still leaves source. terminal_identity → rejected.
-  // For recoverable: append a capture-audit row with c6_content_conflict (old) for content B
-  // with leaf-rec2, and ensure source B exists without candidate.
-  // How source B exists: capture with leaf-rec2 content B completes → has candidate. 
-  // So remove candidate records for B only in test? That mutates journal.
-  // Acceptable in tmp: write pair A; write pair B; delete B's journal records leaving source B;
-  // capture audit already has B's complete entry → recover B with real leaf from audit.
+  // Unreferenced source recovery fixture (tmp only): write pair A+B, delete B journal records
+  // leaving source B + capture-audit identity; recover B without synthesizing C6/leaf.
   const sessionId3 = "sess-unref";
   const captureAuditPath = path.join(edge.edgeProtocolShadowRoot(abrainHome), "capture-audit.jsonl");
   const operatorAuditPath = path.join(tmp, "operator-audit-unref.jsonl");
@@ -1300,20 +1266,22 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   const captureAuditPath = path.join(tmp, "adv-capture-audit.jsonl");
   const operatorAuditPath = path.join(tmp, "adv-operator-audit.jsonl");
 
-  // T4: same C6 multiple candidates without leaf → ambiguous_candidate (never latest).
+  // T4 / F3: same C6 multiple candidates without leaf → ambiguous_candidate (never latest).
   const sessAmb = "sess-ambiguous";
-  await edge.captureEdgeProtocolTerminalPair({
+  const pLa1 = await edge.captureEdgeProtocolTerminalPair({
     abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessAmb,
     messages: [{ role: "assistant", id: "la1", stopReason: "stop", content: [{ type: "text", text: "a1" }] }],
     c6: { session_id: sessAmb, turn_id: 1 },
     leafTip: { id: "la1", parentId: null, type: "message" },
   });
-  await edge.captureEdgeProtocolTerminalPair({
+  const pLa2 = await edge.captureEdgeProtocolTerminalPair({
     abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessAmb,
     messages: [{ role: "assistant", id: "la2", stopReason: "stop", content: [{ type: "text", text: "a2" }] }],
     c6: { session_id: sessAmb, turn_id: 1 },
     leafTip: { id: "la2", parentId: null, type: "message" },
   });
+  assert(pLa1.status === "complete" && pLa2.status === "complete", "T4 seed pairs");
+  const recordsBeforeMiss = countEdgeRecords(sessAmb).records;
   const amb = await edge.writeEdgeTerminalWitness({
     abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessAmb,
     c6: { session_id: sessAmb, turn_id: 1 },
@@ -1322,7 +1290,17 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(amb.status === "journal_failed", `amb status ${amb.status}`);
   assert(amb.error_code === "ambiguous_candidate", `amb code ${amb.error_code}`);
 
-  // With real leaf id, agent_settled-style selection succeeds.
+  // F3: unknown leaf must NOT fall back to C6 latest / must not write.
+  const missLeaf = await edge.writeEdgeTerminalWitness({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessAmb,
+    c6: { session_id: sessAmb, turn_id: 1 },
+    leafTip: { id: "la3-unknown", parentId: null, type: "message" },
+  });
+  assert(missLeaf.status === "journal_failed", `miss status ${missLeaf.status}`);
+  assert(missLeaf.error_code === "leaf_not_found", `miss code ${missLeaf.error_code}`);
+  assert(countEdgeRecords(sessAmb).records === recordsBeforeMiss, "F3 unknown leaf zero write");
+
+  // With real leaf id, agent_settled-style selection succeeds and binds that leaf's candidate.
   const okLeaf = await edge.writeEdgeTerminalWitness({
     abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessAmb,
     c6: { session_id: sessAmb, turn_id: 1 },
@@ -1330,6 +1308,11 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
     idempotentReuse: true,
   });
   assert(okLeaf.status === "written", `leaf select ${okLeaf.status}`);
+  assert(okLeaf.record?.leaf_tip?.id === "la1", `F3 witness leaf ${okLeaf.record?.leaf_tip?.id}`);
+  assert(
+    okLeaf.record?.candidate_ref?.record_id === pLa1.candidate?.record?.record_id,
+    `F3 witness must bind la1 candidate not la2 (got ${okLeaf.record?.candidate_ref?.record_id})`,
+  );
 
   // T6: symlink source fail-closed
   const sessSym = "sess-symlink";
@@ -1402,10 +1385,44 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(dryT2.rejected >= 1, `T2 rejected=${dryT2.rejected}`);
   assert((dryT2.items || []).some((i) => i.result === "rejected" && i.error_code === "terminal_identity_content_conflict"), "T2 item rejected");
 
-  // T5 already covered by legacy reuse test; T9 dry-run zero write checked above.
-  // Production-copy style: read-only hash of real production tree must not change.
-  const prodRoot = path.join(os.homedir(), ".abrain", ".state", "sediment", "edge-protocol-shadow");
-  if (fs.existsSync(prodRoot)) {
+  // F4: limit_reached / truncated / remaining_unknown when eligible hits --limit.
+  const lim = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessNr, captureAuditPath, limit: 1,
+  });
+  // sessNr has ≥1 eligible nonrecoverable; with limit 1 may or may not truncate depending on count.
+  assert(typeof lim.limit_reached === "boolean", "F4 limit_reached field");
+  assert(typeof lim.truncated === "boolean", "F4 truncated field");
+  assert(typeof lim.remaining_unknown === "boolean", "F4 remaining_unknown field");
+  assert(lim.truncated === lim.limit_reached && lim.remaining_unknown === lim.limit_reached, "F4 flag consistency");
+
+  // F5: audit append rejects symlink (fail closed).
+  const auditSymTarget = path.join(tmp, "audit-outside.jsonl");
+  fs.writeFileSync(auditSymTarget, "");
+  const auditSymPath = path.join(tmp, "audit-symlink.jsonl");
+  fs.symlinkSync(auditSymTarget, auditSymPath);
+  let auditSymErr = null;
+  try {
+    await edge.appendEdgeOperatorAuditEntry(auditSymPath, {
+      schema: edge.EDGE_OPERATOR_AUDIT_SCHEMA,
+      schema_version: 1,
+      created_at: new Date().toISOString(),
+      mode: "dry_run",
+      kind: "summary",
+      session_id_hash: "x".repeat(64),
+      scanned: 0,
+      eligible: 0,
+    });
+  } catch (err) {
+    auditSymErr = err;
+  }
+  assert(auditSymErr, "F5 symlink audit append must throw");
+  assert(String(auditSymErr.message || auditSymErr).includes("audit_symlink_rejected")
+    || String(auditSymErr.message || auditSymErr).includes("symlink"),
+    `F5 err ${auditSymErr.message || auditSymErr}`);
+
+  // Production-copy dry-run: hash /tmp copy before/after actual recovery (never touch real home).
+  const realProdRoot = path.join(os.homedir(), ".abrain", ".state", "sediment", "edge-protocol-shadow");
+  if (fs.existsSync(realProdRoot)) {
     const hashTree = (dir) => {
       const h = crypto.createHash("sha256");
       const walk = (d) => {
@@ -1413,17 +1430,33 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
           const p = path.join(d, name);
           const st = fs.lstatSync(p);
           h.update(name);
-          if (st.isDirectory() && !st.isSymbolicLink()) walk(p);
+          if (st.isSymbolicLink()) {
+            h.update(`symlink:${fs.readlinkSync(p)}`);
+          } else if (st.isDirectory()) walk(p);
           else if (st.isFile()) h.update(fs.readFileSync(p));
         }
       };
       walk(dir);
       return h.digest("hex");
     };
-    const before = hashTree(prodRoot);
-    // Dry-run recovery against production root via copy is out of scope; only prove we did not touch it.
-    const after = hashTree(prodRoot);
-    assert(before === after, "production tree hash must be unchanged");
+    const prodCopyHome = fs.mkdtempSync(path.join(os.tmpdir(), "edge-prodcopy-smoke-"));
+    const prodCopyRoot = path.join(prodCopyHome, "edge-protocol-shadow");
+    fs.cpSync(realProdRoot, prodCopyRoot, { recursive: true, verbatimSymlinks: true });
+    // Point a disposable abrain home so recovery walks the copy, not production.
+    const copyAbrain = path.join(prodCopyHome, "abrain");
+    fs.mkdirSync(path.join(copyAbrain, ".state", "sediment"), { recursive: true, mode: 0o700 });
+    fs.symlinkSync(prodCopyRoot, path.join(copyAbrain, ".state", "sediment", "edge-protocol-shadow"));
+    const before = hashTree(prodCopyRoot);
+    await edge.recoverEdgeProtocolUnreferencedSources({
+      abrainHome: copyAbrain,
+      ownerProjectRoot: ownerRootReal,
+      allSessions: true,
+      limit: 5,
+      captureAuditPath: path.join(tmp, "empty-capture-audit-for-prodcopy.jsonl"),
+    });
+    const after = hashTree(prodCopyRoot);
+    assert(before === after, "production-copy dry-run must not mutate tree hash");
+    fs.rmSync(prodCopyHome, { recursive: true, force: true });
   }
 
   // Execute recoverable only + second pass 0 + operator audit durable (T9)
@@ -1454,6 +1487,11 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(restored.c6.turn_id === 2 && restored.c6.subturn === 1 && restored.c6.sub_agent_label === "worker", "C6 preserved");
   assert(restored.leaf_tip.id === "leaf-t9", "leaf preserved");
   assert(restored.payload_digest === dig9, "digest preserved");
+  // F8: operator-facing leaf id is hash prefix, never short leaf id full value.
+  const leafHashPrefix = edge.idHashPrefix("leaf-t9");
+  const recoveredItem = (e1.items || []).find((i) => i.result === "recovered");
+  assert(recoveredItem?.terminal_leaf_id_prefix === leafHashPrefix, `F8 leaf hash prefix got ${recoveredItem?.terminal_leaf_id_prefix}`);
+  assert(recoveredItem?.terminal_leaf_id_prefix !== "leaf-t9", "F8 must not emit raw short leaf id");
   const e2 = await edge.recoverEdgeProtocolUnreferencedSources({
     abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessOk,
     limit: 5, captureAuditPath, operatorAuditPath, execute: true,
@@ -1462,6 +1500,11 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(countEdgeRecords(sessOk).records === 2, "T9 records stable");
   assert(recsBefore9 === 2, "original seed was pair");
   assert(fs.existsSync(operatorAuditPath), "T9 operator audit durable");
+  // F8/F9: execute operator audit only eligible actions + summary (no already_referenced noise).
+  const opLines = fs.readFileSync(operatorAuditPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert(opLines.every((row) => row.result !== "already_referenced"), "F8 no already_referenced operator audit rows");
+  assert(opLines.some((row) => row.kind === "summary"), "F8 summary audit present");
+  assert(opLines.some((row) => row.kind === "item" && row.result === "recovered"), "F8 eligible recovered audit present");
 });
 
 await check("strict tsc on producer surface including index.ts", async () => {

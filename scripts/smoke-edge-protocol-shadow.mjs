@@ -128,13 +128,22 @@ if (childMode === "race-wit") {
   // Brief yield so peer cand cold-start can land; parent also seeds one candidate.
   await new Promise((r) => setTimeout(r, 20));
   let written = 0;
+  const sessionRoot = edge.edgeSessionRoot(abrainHome, ownerRoot, sessionId);
   for (let i = 0; i < n; i += 1) {
+    // Pin exact candidate by record id — never fall back to C6 latest via fake leaf.
+    const records = await edge.listEdgeJournalRecords(sessionRoot);
+    const cands = records.filter((r) => r.record_type === "candidate_capture");
+    if (cands.length === 0) {
+      process.stdout.write(`wit\tnone\n`);
+      continue;
+    }
+    const target = cands[cands.length - 1];
     const w = await edge.writeEdgeTerminalWitness({
       abrainHome,
       ownerProjectRoot: ownerRoot,
       sessionId,
       c6,
-      leafTip: { id: `wit-leaf-${i}`, parentId: null, type: "message" },
+      candidateRecordId: target.record_id,
     });
     if (w.status === "written") {
       written += 1;
@@ -143,6 +152,12 @@ if (childMode === "race-wit") {
       );
     } else if (w.status === "no_candidate") {
       process.stdout.write(`wit\tnone\n`);
+    } else if (
+      w.error_code === "ambiguous_candidate"
+      || w.error_code === "leaf_not_found"
+      || w.error_code === "candidate_not_found"
+    ) {
+      process.stdout.write(`wit\tskip\t${w.error_code}\n`);
     } else {
       process.stderr.write(`RACE_WIT_FAIL ${w.error_code || w.status}\n`);
       process.exit(2);
@@ -596,22 +611,33 @@ await check("source-before-candidate + modes + content id", async () => {
   assert(r.record.capabilities.session_transaction === false, "must not claim session_transaction");
 });
 
-await check("agent_settled witness refs latest candidate and does not seal", async () => {
+await check("agent_settled witness pins candidate and does not seal", async () => {
   const sessionRoot = edge.edgeSessionRoot(abrainHome, ownerRoot, sessionId);
   const before = await edge.listEdgeJournalRecords(sessionRoot);
   const latestCand = [...before].reverse().find((x) => x.record_type === "candidate_capture");
   assert(latestCand, "need a candidate first");
+  // Unknown leaf must fail closed (no C6-latest fallback).
+  const miss = await edge.writeEdgeTerminalWitness({
+    abrainHome,
+    ownerProjectRoot: ownerRoot,
+    sessionId,
+    c6,
+    leafTip: { id: "leaf-unknown", parentId: null, type: "message" },
+  });
+  assert(miss.status === "journal_failed" && miss.error_code === "leaf_not_found", `miss ${miss.status}/${miss.error_code}`);
+  // Pin explicit candidate — multi same-C6 without leaf is ambiguous; pin is the settled path.
   const w = await edge.writeEdgeTerminalWitness({
     abrainHome,
     ownerProjectRoot: ownerRoot,
     sessionId,
     c6,
+    candidateRecordId: latestCand.record_id,
     leafTip: { id: "leaf-1", parentId: null, type: "message", timestampUtc: "2026-07-24T00:00:00.000Z" },
   });
   assert(w.status === "written", `witness failed: ${w.error_code} ${w.error_detail}`);
   assert(w.record.record_type === "terminal_witness", "wrong type");
   assert(w.record.settlement_status === "unsupported_core_capability", "wrong settlement_status");
-  assert(w.record.candidate_ref?.record_id === latestCand.record_id, "witness not pointing at latest candidate");
+  assert(w.record.candidate_ref?.record_id === latestCand.record_id, "witness not pointing at pinned candidate");
   assert(w.record.candidate_ref?.producer_seq === latestCand.producer_seq, "witness producer_seq mismatch");
   assert(w.record.capabilities.terminal_seal === false, "witness must not seal");
   assert(Array.isArray(w.record.deferred_by_missing_core), "missing deferred_by_missing_core");
@@ -883,10 +909,10 @@ await check("sessionId/c6.session_id mismatch fails closed before source IO", as
   assert(w.error_code === "session_c6_mismatch", `witness code ${w.error_code}`);
 });
 
-await check("cross-process candidate-vs-witness race refs lock-critical latest", async () => {
+await check("cross-process candidate-vs-witness race pins valid prior candidates", async () => {
   const raceSession = "sess-wit-race";
   // Seed one candidate so witness path is not starved when cand process cold-starts.
-  // Concurrent cand/wit still races lock-critical latest after this seed.
+  // Witnesses pin exact candidateRecordId (no C6-latest fallback); concurrent journal must stay consistent.
   const seed = await edge.captureEdgeProtocolCandidate({
     abrainHome,
     ownerProjectRoot: ownerRoot,
@@ -917,17 +943,13 @@ await check("cross-process candidate-vs-witness race refs lock-critical latest",
   const wits = records.filter((r) => r.record_type === "terminal_witness");
   assert(cands.length >= 1, "need candidates");
   assert(wits.length >= 1, "need witnesses");
+  const candById = new Map(cands.map((c) => [c.record_id, c]));
   for (const w of wits) {
     assert(w.candidate_ref?.record_id, "witness missing candidate_ref");
-    // Critical-section latest: among candidates with seq < witness.seq, max must equal ref.
-    const prior = cands.filter((c) => c.producer_seq < w.producer_seq);
-    assert(prior.length >= 1, `witness seq=${w.producer_seq} has no prior candidate`);
-    const maxPrior = prior.reduce((a, b) => (a.producer_seq > b.producer_seq ? a : b));
-    assert(
-      w.candidate_ref.producer_seq === maxPrior.producer_seq,
-      `witness did not ref lock-critical latest: ref=${w.candidate_ref.producer_seq} maxPrior=${maxPrior.producer_seq}`,
-    );
-    assert(w.candidate_ref.record_id === maxPrior.record_id, "witness record_id not lock-critical latest");
+    const target = candById.get(w.candidate_ref.record_id);
+    assert(target, `witness refs missing candidate ${w.candidate_ref.record_id}`);
+    assert(target.producer_seq < w.producer_seq, `witness seq=${w.producer_seq} must be after cand ${target.producer_seq}`);
+    assert(w.candidate_ref.producer_seq === target.producer_seq, "candidate_ref producer_seq mismatch");
     assert(w.capabilities.terminal_seal === false, "witness must not seal");
   }
 });

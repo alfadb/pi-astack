@@ -125,6 +125,9 @@ const out = {
   skipped: result.skipped,
   already_referenced: result.already_referenced,
   sessions_scanned: result.sessions_scanned,
+  limit_reached: result.limit_reached === true,
+  truncated: result.truncated === true,
+  remaining_unknown: result.remaining_unknown === true,
   ...(result.operator_audit_path_hash_prefix
     ? { operator_audit_path_hash_prefix: result.operator_audit_path_hash_prefix }
     : {}),
