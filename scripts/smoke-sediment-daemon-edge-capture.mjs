@@ -1260,6 +1260,37 @@ await check("legacy candidate-only + witness recovery reuses legacy_content key"
   });
   assert(wit.status === "written", `wit ${wit.status}`);
   assert(countEdgeRecords(sessionId).records === 2, "idempotent witness reuse");
+
+  // R6: separate witness with real leaf + digest binds legacy candidate; without digest fail closed.
+  const sessR6 = "sess-legacy-r6";
+  const r6Messages = [
+    { role: "user", content: [{ type: "text", text: "r6-user" }] },
+    { role: "assistant", id: "leaf-r6-real", type: "message", content: [{ type: "text", text: "r6-asst" }], stopReason: "stop" },
+  ];
+  const r6c6 = { session_id: sessR6, turn_id: 1 };
+  const r6cap = await edge.captureEdgeProtocolCandidate({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessR6, messages: r6Messages, c6: r6c6,
+  });
+  assert(r6cap.status === "captured", "R6 legacy candidate");
+  const r6digest = r6cap.record.payload_digest;
+  const r6miss = await edge.writeEdgeTerminalWitness({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessR6, c6: r6c6,
+    leafTip: { id: "leaf-r6-real", parentId: null, type: "message" },
+    // no payloadDigest → fail closed
+  });
+  assert(r6miss.status === "journal_failed" && r6miss.error_code === "leaf_not_found",
+    `R6 no-digest must fail closed got ${r6miss.status}/${r6miss.error_code}`);
+  assert(countEdgeRecords(sessR6).records === 1, "R6 no-digest zero witness write");
+  const r6ok = await edge.writeEdgeTerminalWitness({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessR6, c6: r6c6,
+    leafTip: { id: "leaf-r6-real", parentId: null, type: "message" },
+    payloadDigest: r6digest,
+    idempotentReuse: true,
+  });
+  assert(r6ok.status === "written", `R6 digest bind ${r6ok.status}`);
+  assert(r6ok.record?.candidate_ref?.record_id === r6cap.record.record_id, "R6 binds legacy candidate");
+  assert(r6ok.record?.leaf_tip?.id === "leaf-r6-real", "R6 witness carries real leaf");
+  assert(countEdgeRecords(sessR6).records === 2, "R6 candidate+witness");
 });
 
 await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates", async () => {
@@ -1385,17 +1416,39 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(dryT2.rejected >= 1, `T2 rejected=${dryT2.rejected}`);
   assert((dryT2.items || []).some((i) => i.result === "rejected" && i.error_code === "terminal_identity_content_conflict"), "T2 item rejected");
 
-  // F4: limit_reached / truncated / remaining_unknown when eligible hits --limit.
-  const lim = await edge.recoverEdgeProtocolUnreferencedSources({
-    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: sessNr, captureAuditPath, limit: 1,
+  // F4/R1: truncated true only when eligible remainder exists; exact finish → false.
+  const limSess = "sess-lim-trunc";
+  const limAudit = path.join(tmp, "lim-capture-audit.jsonl");
+  for (let i = 0; i < 3; i++) {
+    const leafId = `leaf-lim-${i}`;
+    await edge.captureEdgeProtocolTerminalPair({
+      abrainHome, ownerProjectRoot: ownerRootReal, sessionId: limSess,
+      messages: [{ role: "assistant", id: leafId, stopReason: "stop", content: [{ type: "text", text: `lim${i}` }] }],
+      c6: { session_id: limSess, turn_id: i + 1 },
+      leafTip: { id: leafId, parentId: null, type: "message" },
+      captureAuditPath: limAudit,
+    });
+  }
+  // Drop journal so all 3 sources become unreferenced but recoverable via audit.
+  const limRoot = edge.edgeSessionRoot(abrainHome, ownerRootReal, limSess);
+  for (const n of fs.readdirSync(edge.edgeJournalRecordsDir(limRoot))) {
+    fs.unlinkSync(path.join(edge.edgeJournalRecordsDir(limRoot), n));
+  }
+  const limExact = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: limSess, captureAuditPath: limAudit, limit: 3,
   });
-  // sessNr has ≥1 eligible nonrecoverable; with limit 1 may or may not truncate depending on count.
-  assert(typeof lim.limit_reached === "boolean", "F4 limit_reached field");
-  assert(typeof lim.truncated === "boolean", "F4 truncated field");
-  assert(typeof lim.remaining_unknown === "boolean", "F4 remaining_unknown field");
-  assert(lim.truncated === lim.limit_reached && lim.remaining_unknown === lim.limit_reached, "F4 flag consistency");
+  assert(limExact.eligible === 3, `R1 exact eligible=${limExact.eligible}`);
+  assert(limExact.limit_reached === false && limExact.truncated === false && limExact.remaining_unknown === false,
+    `R1 exact finish must not truncate (got limit_reached=${limExact.limit_reached})`);
+  const limCut = await edge.recoverEdgeProtocolUnreferencedSources({
+    abrainHome, ownerProjectRoot: ownerRootReal, sessionId: limSess, captureAuditPath: limAudit, limit: 1,
+  });
+  assert(limCut.eligible === 1, `R1 cut eligible=${limCut.eligible}`);
+  assert(limCut.limit_reached === true && limCut.truncated === true && limCut.remaining_unknown === true,
+    `R1 cut must truncate (got limit_reached=${limCut.limit_reached})`);
+  assert(limCut.scanned >= 1, `R1 scanned accurate got ${limCut.scanned}`);
 
-  // F5: audit append rejects symlink (fail closed).
+  // F5: audit append rejects file symlink (fail closed).
   const auditSymTarget = path.join(tmp, "audit-outside.jsonl");
   fs.writeFileSync(auditSymTarget, "");
   const auditSymPath = path.join(tmp, "audit-symlink.jsonl");
@@ -1420,9 +1473,35 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
     || String(auditSymErr.message || auditSymErr).includes("symlink"),
     `F5 err ${auditSymErr.message || auditSymErr}`);
 
-  // Production-copy dry-run: hash /tmp copy before/after actual recovery (never touch real home).
-  const realProdRoot = path.join(os.homedir(), ".abrain", ".state", "sediment", "edge-protocol-shadow");
-  if (fs.existsSync(realProdRoot)) {
+  // R3: abrainHome ancestor symlink must NOT block capture-audit (trust root = abrainHome).
+  const linkBase = fs.mkdtempSync(path.join(os.tmpdir(), "edge-anc-symlink-"));
+  const realAnc = path.join(linkBase, "real");
+  fs.mkdirSync(realAnc, { recursive: true });
+  const linkAnc = path.join(linkBase, "link");
+  fs.symlinkSync(realAnc, linkAnc);
+  const ancAbrain = path.join(linkAnc, "abrain");
+  fs.mkdirSync(ancAbrain, { recursive: true, mode: 0o700 });
+  const ancOwner = fs.mkdtempSync(path.join(os.tmpdir(), "edge-anc-owner-"));
+  const ancPair = await edge.captureEdgeProtocolTerminalPair({
+    abrainHome: ancAbrain,
+    ownerProjectRoot: fs.realpathSync(ancOwner),
+    sessionId: "sess-anc-symlink",
+    messages: [{ role: "assistant", id: "leaf-anc", stopReason: "stop", content: [{ type: "text", text: "anc" }] }],
+    c6: { session_id: "sess-anc-symlink", turn_id: 1 },
+    leafTip: { id: "leaf-anc", parentId: null, type: "message" },
+  });
+  assert(ancPair.status === "complete", `R3 ancestor symlink pair ${ancPair.status} ${ancPair.error_code || ""}`);
+  const ancAudit = path.join(edge.edgeProtocolShadowRoot(ancAbrain), "capture-audit.jsonl");
+  assert(fs.existsSync(ancAudit), "R3 capture-audit must exist under symlinked ancestor");
+  const ancRows = fs.readFileSync(ancAudit, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  assert(ancRows.some((r) => r.result === "capture_attempt"), "R3 intent row present");
+  assert(ancRows.some((r) => r.result === "complete"), "R3 outcome row present");
+  fs.rmSync(linkBase, { recursive: true, force: true });
+  fs.rmSync(ancOwner, { recursive: true, force: true });
+
+  // R4: synthetic production-copy fixture — never read/write real ~/.abrain.
+  // Assert non-zero scanned/eligible/nonrecoverable expectations; dry-run must not mutate.
+  {
     const hashTree = (dir) => {
       const h = crypto.createHash("sha256");
       const walk = (d) => {
@@ -1430,33 +1509,52 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
           const p = path.join(d, name);
           const st = fs.lstatSync(p);
           h.update(name);
-          if (st.isSymbolicLink()) {
-            h.update(`symlink:${fs.readlinkSync(p)}`);
-          } else if (st.isDirectory()) walk(p);
+          if (st.isSymbolicLink()) h.update(`symlink:${fs.readlinkSync(p)}`);
+          else if (st.isDirectory()) walk(p);
           else if (st.isFile()) h.update(fs.readFileSync(p));
         }
       };
       walk(dir);
       return h.digest("hex");
     };
-    const prodCopyHome = fs.mkdtempSync(path.join(os.tmpdir(), "edge-prodcopy-smoke-"));
-    const prodCopyRoot = path.join(prodCopyHome, "edge-protocol-shadow");
-    fs.cpSync(realProdRoot, prodCopyRoot, { recursive: true, verbatimSymlinks: true });
-    // Point a disposable abrain home so recovery walks the copy, not production.
-    const copyAbrain = path.join(prodCopyHome, "abrain");
-    fs.mkdirSync(path.join(copyAbrain, ".state", "sediment"), { recursive: true, mode: 0o700 });
-    fs.symlinkSync(prodCopyRoot, path.join(copyAbrain, ".state", "sediment", "edge-protocol-shadow"));
-    const before = hashTree(prodCopyRoot);
-    await edge.recoverEdgeProtocolUnreferencedSources({
+    const copyHome = fs.mkdtempSync(path.join(os.tmpdir(), "edge-prodcopy-synth-"));
+    const copyAbrain = path.join(copyHome, "abrain");
+    const copyOwner = fs.realpathSync(fs.mkdtempSync(path.join(copyHome, "owner-")));
+    fs.mkdirSync(copyAbrain, { recursive: true, mode: 0o700 });
+    // Seed one complete pair then strip journal → 1 unreferenced healthy source, no audit → nonrecoverable.
+    const seed = await edge.captureEdgeProtocolTerminalPair({
       abrainHome: copyAbrain,
-      ownerProjectRoot: ownerRootReal,
-      allSessions: true,
-      limit: 5,
-      captureAuditPath: path.join(tmp, "empty-capture-audit-for-prodcopy.jsonl"),
+      ownerProjectRoot: copyOwner,
+      sessionId: "sess-prodcopy",
+      messages: [{ role: "assistant", id: "leaf-pc", stopReason: "stop", content: [{ type: "text", text: "pc" }] }],
+      c6: { session_id: "sess-prodcopy", turn_id: 1 },
+      leafTip: { id: "leaf-pc", parentId: null, type: "message" },
+      captureAuditPath: path.join(copyHome, "seed-audit-discard.jsonl"),
     });
-    const after = hashTree(prodCopyRoot);
-    assert(before === after, "production-copy dry-run must not mutate tree hash");
-    fs.rmSync(prodCopyHome, { recursive: true, force: true });
+    assert(seed.status === "complete", "R4 seed pair");
+    const pcRoot = edge.edgeSessionRoot(copyAbrain, copyOwner, "sess-prodcopy");
+    for (const n of fs.readdirSync(edge.edgeJournalRecordsDir(pcRoot))) {
+      fs.unlinkSync(path.join(edge.edgeJournalRecordsDir(pcRoot), n));
+    }
+    // Remove capture-audit so recovery has no identity → nonrecoverable.
+    const edgeRoot = edge.edgeProtocolShadowRoot(copyAbrain);
+    const before = hashTree(edgeRoot);
+    const dry = await edge.recoverEdgeProtocolUnreferencedSources({
+      abrainHome: copyAbrain,
+      ownerProjectRoot: copyOwner,
+      sessionId: "sess-prodcopy",
+      limit: 10,
+      captureAuditPath: path.join(copyHome, "empty-capture-audit.jsonl"),
+    });
+    const after = hashTree(edgeRoot);
+    assert(before === after, "R4 dry-run must not mutate synthetic tree");
+    assert(dry.scanned >= 1, `R4 scanned non-zero got ${dry.scanned}`);
+    assert(dry.eligible >= 1, `R4 eligible non-zero got ${dry.eligible}`);
+    assert(dry.nonrecoverable >= 1, `R4 nonrecoverable non-zero got ${dry.nonrecoverable}`);
+    assert(dry.recovered === 0, "R4 dry-run recovered 0");
+    // Guard: must not touch real user home.
+    assert(!copyAbrain.startsWith(path.join(os.homedir(), ".abrain")), "R4 must not use real home");
+    fs.rmSync(copyHome, { recursive: true, force: true });
   }
 
   // Execute recoverable only + second pass 0 + operator audit durable (T9)
@@ -1470,7 +1568,15 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
     captureAuditPath,
   });
   assert(p9.status === "complete", "t9 seed");
-  const dig9 = p9.candidate.source.content_id;
+  // Intent-before-admission: capture_attempt must precede complete outcome.
+  const auditRows9 = fs.readFileSync(captureAuditPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const dig9pre = p9.candidate.source.content_id;
+  const rowsFor9 = auditRows9.filter((r) => r.content_id === dig9pre && r.session_id === sessOk);
+  const attemptIdx = rowsFor9.findIndex((r) => r.result === "capture_attempt");
+  const completeIdx = rowsFor9.findIndex((r) => r.result === "complete");
+  assert(attemptIdx >= 0, "capture_attempt intent must be durable");
+  assert(completeIdx >= 0 && completeIdx > attemptIdx, "complete outcome after intent");
+  const dig9 = dig9pre;
   const root9 = edge.edgeSessionRoot(abrainHome, ownerRootReal, sessOk);
   const recsBefore9 = countEdgeRecords(sessOk).records;
   for (const n of fs.readdirSync(edge.edgeJournalRecordsDir(root9))) {
@@ -1505,6 +1611,12 @@ await check("Opus adversarial T1/T1c/T2/T4/T5/T6/T7/T9 identity + operator gates
   assert(opLines.every((row) => row.result !== "already_referenced"), "F8 no already_referenced operator audit rows");
   assert(opLines.some((row) => row.kind === "summary"), "F8 summary audit present");
   assert(opLines.some((row) => row.kind === "item" && row.result === "recovered"), "F8 eligible recovered audit present");
+  // R2: durable operator summary includes truncation flags.
+  const summary = opLines.find((row) => row.kind === "summary");
+  assert(typeof summary.limit_reached === "boolean", "R2 summary limit_reached");
+  assert(typeof summary.truncated === "boolean", "R2 summary truncated");
+  assert(typeof summary.remaining_unknown === "boolean", "R2 summary remaining_unknown");
+  assert(typeof summary.scanned === "number", "R2 summary scanned");
 });
 
 await check("strict tsc on producer surface including index.ts", async () => {

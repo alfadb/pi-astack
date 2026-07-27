@@ -183,6 +183,13 @@ export interface EdgeWitnessArgs {
    * historical writeEdgeTerminalWitness multi-call append semantics.
    */
   idempotentReuse?: boolean;
+  /**
+   * Optional payload digest (sha256 of messages JSON). Required to bind a separate
+   * witness to a legacy candidate-only row (`legacy_content:<digest>`) when the
+   * caller provides a real leaf that is not yet indexed. Without digest, leaf miss
+   * stays fail-closed (never C6 latest).
+   */
+  payloadDigest?: string;
 }
 
 export type EdgeTerminalPairStatus =
@@ -275,6 +282,17 @@ export const EDGE_AUDIT_MAX_LINE_BYTES = 64 * 1024;
 /** Capture-audit index read cap (4× source max = 32 MiB). */
 export const EDGE_CAPTURE_AUDIT_MAX_READ_BYTES = EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES * 4;
 
+/** Capture-audit row results. `capture_attempt` is durable intent before source/pair. */
+export type EdgeCaptureAuditResult =
+  | "capture_attempt"
+  | "complete"
+  | "candidate_only"
+  | "conflict"
+  | "source_failed"
+  | "journal_failed"
+  | "audit_failed"
+  | string;
+
 export interface EdgeCaptureAuditEntry {
   schema: typeof EDGE_CAPTURE_AUDIT_SCHEMA;
   schema_version: 1;
@@ -283,7 +301,8 @@ export interface EdgeCaptureAuditEntry {
   content_id: string;
   c6: EdgeC6Identity;
   leaf_tip: EdgeLeafTip;
-  result: string;
+  /** `capture_attempt` = pre-admission intent; other values = post outcome. */
+  result: EdgeCaptureAuditResult;
   error_code?: string;
   candidate_record_id?: string;
   witness_record_id?: string;
@@ -312,6 +331,12 @@ export interface EdgeOperatorAuditEntry {
   failed?: number;
   skipped?: number;
   already_referenced?: number;
+  /** Summary-only: true when scan stopped early due to --limit with remaining work. */
+  limit_reached?: boolean;
+  /** Alias of limit_reached for operator durable summary. */
+  truncated?: boolean;
+  /** True when remaining unreferenced sources after limit are unknown. */
+  remaining_unknown?: boolean;
 }
 
 export interface EdgeMissingWitnessRecoveryResult {
@@ -618,12 +643,19 @@ export function idHashPrefix(id: string | undefined, n = 12): string | undefined
 }
 
 /**
- * Fail-closed audit JSONL append: realpath parent, lstat regular file,
- * O_NOFOLLOW|O_APPEND|O_CREAT, bounded line. Symlink → reject.
+ * Fail-closed durable audit JSONL append.
+ *
+ * Trust model matches journal layout:
+ *  - trustRoot = realpath(abrainHome) when provided (or realpath of parent)
+ *  - only descendants under trustRoot + the file itself must be non-symlink
+ *  - abrainHome *ancestors* may contain symlinks (realpath resolves them)
+ *  - O_NOFOLLOW|O_APPEND|O_CREAT, bounded line, fsync file + parent dir
+ * Never swallows IO/path failures — callers decide fail-closed policy.
  */
 export async function appendEdgeAuditJsonlLine(
   auditPath: string,
   entry: unknown,
+  opts?: { trustRoot?: string },
 ): Promise<void> {
   const line = `${JSON.stringify(entry)}\n`;
   const lineBytes = Buffer.byteLength(line, "utf-8");
@@ -633,32 +665,46 @@ export async function appendEdgeAuditJsonlLine(
   const resolved = path.resolve(auditPath);
   const parentNamed = path.dirname(resolved);
   await fs.mkdir(parentNamed, { recursive: true, mode: DIR_MODE });
-  // Fail closed if any path component of the named parent is a symlink.
-  {
-    let cursor = parentNamed;
-    const chain: string[] = [];
-    while (true) {
-      chain.push(cursor);
-      const next = path.dirname(cursor);
-      if (next === cursor) break;
-      cursor = next;
-    }
-    for (const hop of chain.reverse()) {
-      try {
-        const st = await fs.lstat(hop);
-        if (st.isSymbolicLink()) throw new Error("audit_parent_symlink_rejected");
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw err;
-      }
-    }
-  }
+
   let parentReal: string;
   try {
     parentReal = await fs.realpath(parentNamed);
   } catch (err) {
     throw new Error(`audit_parent_realpath_failed:${errMessage(err)}`);
   }
+
+  // Trust root: realpath(abrainHome) when provided and reachable; else parentReal.
+  // Ancestors of trustRoot are allowed to be symlinks (same as journal ownership).
+  let trustRoot = parentReal;
+  if (opts?.trustRoot) {
+    const namedRoot = path.resolve(opts.trustRoot);
+    try {
+      const rootSt = await fs.lstat(namedRoot);
+      if (rootSt.isSymbolicLink()) throw new Error("audit_trust_root_symlink_rejected");
+      if (!rootSt.isDirectory()) throw new Error("audit_trust_root_not_directory");
+      trustRoot = await fs.realpath(namedRoot);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("audit_")) throw err;
+      throw new Error(`audit_trust_root_realpath_failed:${errMessage(err)}`);
+    }
+    if (!isUnderOrEqual(parentReal, trustRoot)) {
+      // Operator audit may live outside abrainHome (e.g. /tmp). Fall back to parentReal.
+      trustRoot = parentReal;
+    } else {
+      // Descendants under trustRoot must not be symlinks (component walk, no follow).
+      const rel = path.relative(trustRoot, parentReal);
+      if (rel && rel !== ".") {
+        let cursor = trustRoot;
+        for (const part of rel.split(path.sep).filter(Boolean)) {
+          cursor = path.join(cursor, part);
+          const st = await fs.lstat(cursor);
+          if (st.isSymbolicLink()) throw new Error("audit_parent_symlink_rejected");
+          if (!st.isDirectory()) throw new Error("audit_parent_not_directory");
+        }
+      }
+    }
+  }
+
   const finalPath = path.join(parentReal, path.basename(resolved));
   try {
     const st = await fs.lstat(finalPath);
@@ -667,6 +713,7 @@ export async function appendEdgeAuditJsonlLine(
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
+
   const noFollow = fsSync.constants.O_NOFOLLOW ?? 0;
   const flags =
     fsSync.constants.O_WRONLY
@@ -687,17 +734,22 @@ export async function appendEdgeAuditJsonlLine(
     const st = await fh.stat();
     if (!st.isFile()) throw new Error("audit_not_regular_file");
     await fh.writeFile(line, "utf-8");
+    // Durable intent: fsync file contents before returning success.
+    await fh.sync();
   } finally {
     await fh.close();
   }
+  // fsync parent so the directory entry for a newly created audit file is durable.
+  await fsyncDirectory(parentReal);
 }
 
-/** Append one capture-audit JSONL row (best-effort durable; never throws into capture path). */
+/** Append one capture-audit JSONL row (throws on failure — capture path fail-closed). */
 export async function appendEdgeCaptureAuditEntry(
   auditPath: string,
   entry: EdgeCaptureAuditEntry,
+  opts?: { trustRoot?: string },
 ): Promise<void> {
-  await appendEdgeAuditJsonlLine(auditPath, entry);
+  await appendEdgeAuditJsonlLine(auditPath, entry, opts);
 }
 
 /** Load capture audit entries; index by session_id + content_id for unique match. */
@@ -778,9 +830,11 @@ export async function loadEdgeCaptureAuditIndex(
 }
 
 /**
- * Unique capture-audit match for (session, content_id).
- * Returns null when zero or ambiguous (>1 distinct C6/leaf identities).
- * terminal_identity_content_conflict-only sets are rejected (never recoverable).
+ * Unique capture-audit identity for (session, content_id).
+ *
+ * Recovery evidence = unique `capture_attempt` + optional outcome rows with the
+ * same C6/leaf. A `terminal_identity_content_conflict` outcome always rejects.
+ * Crash after intent (attempt only, no outcome) remains recoverable.
  */
 export function resolveUniqueCaptureAuditIdentity(
   index: Map<string, EdgeCaptureAuditEntry[]>,
@@ -795,16 +849,13 @@ export function resolveUniqueCaptureAuditIdentity(
 } {
   const list = index.get(`${sessionId}\0${contentId}`) ?? [];
   if (list.length === 0) return { ok: false, reason: "missing" };
-  if (list.every((e) => e.error_code === "terminal_identity_content_conflict" || e.result === "conflict" && e.error_code === "terminal_identity_content_conflict")) {
-    // If all entries are terminal_identity conflicts, never recover.
-    const allTerminalConflict = list.every(
-      (e) => e.error_code === "terminal_identity_content_conflict",
-    );
-    if (allTerminalConflict) return { ok: false, reason: "terminal_identity_content_conflict" };
+  // Any terminal-identity conflict outcome permanently rejects recovery.
+  if (list.some((e) => e.error_code === "terminal_identity_content_conflict")) {
+    return { ok: false, reason: "terminal_identity_content_conflict" };
   }
-  // Prefer non-conflict complete/candidate_only/c6_content_conflict rows as identity sources.
+  // Identity sources: capture_attempt intent and non-conflict outcomes.
   const usable = list.filter((e) => e.error_code !== "terminal_identity_content_conflict");
-  if (usable.length === 0) return { ok: false, reason: "terminal_identity_content_conflict" };
+  if (usable.length === 0) return { ok: false, reason: "missing" };
   const first = usable[0]!;
   const firstC6 = c6Key(first.c6);
   const firstLeaf = first.leaf_tip.id;
@@ -813,8 +864,9 @@ export function resolveUniqueCaptureAuditIdentity(
       return { ok: false, reason: "ambiguous" };
     }
   }
-  // Preserve original number/string turn_id/subturn from first usable entry.
-  return { ok: true, entry: first };
+  // Prefer capture_attempt (durable intent) so number/string C6 fields are original.
+  const attempt = usable.find((e) => e.result === "capture_attempt");
+  return { ok: true, entry: attempt ?? first };
 }
 
 /** Terminal assistant leaf from immutable source messages (never content_id synthetic). */
@@ -930,8 +982,9 @@ export function assertEdgeSessionRootLayout(args: {
 export async function appendEdgeOperatorAuditEntry(
   auditPath: string,
   entry: EdgeOperatorAuditEntry,
+  opts?: { trustRoot?: string },
 ): Promise<void> {
-  await appendEdgeAuditJsonlLine(auditPath, entry);
+  await appendEdgeAuditJsonlLine(auditPath, entry, opts);
 }
 
 export function emitEdgeProtocolShadowDiagnosticOnce(code: string, _detail?: string): void {
@@ -1385,7 +1438,7 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
           throw new Error("candidate c6 mismatch for pinned candidateRecordId");
         }
       } else {
-        const selected = selectWitnessCandidate(index, c6, args.leafTip);
+        const selected = selectWitnessCandidate(index, c6, args.leafTip, args.payloadDigest);
         if (selected.kind === "ambiguous") {
           throw new Error("ambiguous_candidate");
         }
@@ -1459,6 +1512,8 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
 /**
  * Witness candidate selection under journal index.
  * Caller leaf identity → exact leaf+C6 candidate only (miss → leaf_not_found; never C6 latest).
+ * Legacy candidate-only rows (`legacy_content:<digest>`): bind only when payloadDigest is
+ * provided and exactly one same-C6+digest legacy candidate matches. No digest → fail closed.
  * No leaf + multiple same-C6 candidates → ambiguous (never latest).
  * No leaf + exactly one same-C6 candidate → that candidate.
  */
@@ -1466,6 +1521,7 @@ function selectWitnessCandidate(
   index: JournalIndex,
   c6: EdgeC6Identity,
   leafTip?: EdgeLeafTip,
+  payloadDigest?: string,
 ):
   | { kind: "one"; candidate: { record: EdgeJournalRecord; path: string } }
   | { kind: "none" }
@@ -1479,6 +1535,18 @@ function selectWitnessCandidate(
     if (sameC6OnLeaf.length > 0) {
       // Real leaf hit: newest candidate for that exact leaf+C6.
       return { kind: "one", candidate: sameC6OnLeaf[sameC6OnLeaf.length - 1]! };
+    }
+    // R6: legacy candidate bind requires explicit unique digest match (never latest).
+    if (typeof payloadDigest === "string" && /^[0-9a-f]{64}$/.test(payloadDigest)) {
+      const legacyKey = `legacy_content:${payloadDigest}`;
+      const legacyList = index.candidatesByLeaf.get(legacyKey) ?? [];
+      const legacyHits = legacyList.filter(
+        (c) => c.record.payload_digest === payloadDigest && c6Key(c.record.c6) === wantC6,
+      );
+      if (legacyHits.length === 1) {
+        return { kind: "one", candidate: legacyHits[0]! };
+      }
+      if (legacyHits.length > 1) return { kind: "ambiguous" };
     }
     // Leaf identity provided but no matching candidate — never fall back to C6 latest.
     return { kind: "leaf_not_found" };
@@ -1637,28 +1705,31 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
   const auditPath =
     args.captureAuditPath
     ?? path.join(edgeProtocolShadowRoot(args.abrainHome), "capture-audit.jsonl");
+  // Trust root = realpath(abrainHome): ancestor symlinks OK; descendants/file no symlink.
+  const auditTrustRoot = path.resolve(args.abrainHome);
 
+  /** Durable capture-audit append. Throws — never swallowed on the admission path. */
   const writeAudit = async (
     result: string,
-    extra: { error_code?: string; candidate_record_id?: string; witness_record_id?: string; content_id?: string } = {},
+    extra: { error_code?: string; candidate_record_id?: string; witness_record_id?: string; content_id: string },
   ): Promise<void> => {
-    try {
-      await appendEdgeCaptureAuditEntry(auditPath, {
+    await appendEdgeCaptureAuditEntry(
+      auditPath,
+      {
         schema: EDGE_CAPTURE_AUDIT_SCHEMA,
         schema_version: 1,
         created_at: new Date().toISOString(),
         session_id: sessionId,
-        content_id: extra.content_id ?? "0".repeat(64),
+        content_id: extra.content_id,
         c6,
         leaf_tip: leafTip,
         result,
         ...(extra.error_code ? { error_code: extra.error_code } : {}),
         ...(extra.candidate_record_id ? { candidate_record_id: extra.candidate_record_id } : {}),
         ...(extra.witness_record_id ? { witness_record_id: extra.witness_record_id } : {}),
-      });
-    } catch {
-      // Capture path must not fail closed on audit IO; recovery needs best-effort rows.
-    }
+      },
+      { trustRoot: auditTrustRoot },
+    );
   };
 
   try {
@@ -1675,7 +1746,12 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     });
     const sourceByteLength = Buffer.byteLength(sourceBody, "utf-8");
     if (sourceByteLength > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
-      await writeAudit("source_failed", { error_code: "source_too_large", content_id: payloadDigest });
+      // Size fail is known before intent; still record outcome when possible.
+      try {
+        await writeAudit("source_failed", { error_code: "source_too_large", content_id: payloadDigest });
+      } catch {
+        /* size failure already definitive */
+      }
       return {
         status: "source_failed",
         duration_ms: performance.now() - started,
@@ -1684,6 +1760,21 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
         error_detail: sanitizeDiagnostic(`source exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
       };
     }
+
+    // R5: durable capture_attempt intent BEFORE source/journal. Fail closed on audit failure.
+    try {
+      await writeAudit("capture_attempt", { content_id: payloadDigest });
+    } catch (err) {
+      emitEdgeProtocolShadowDiagnosticOnce("capture_audit_intent_failed");
+      return {
+        status: "journal_failed",
+        duration_ms: performance.now() - started,
+        terminal_leaf_id: terminalLeafId,
+        error_code: "capture_audit_intent_failed",
+        error_detail: sanitizeDiagnostic(errMessage(err)),
+      };
+    }
+
     const sourcePath = edgeSourcePath(sessionRoot, payloadDigest);
     let sourceStatus: EdgeWriteStatus;
     try {
@@ -1693,7 +1784,18 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     } catch (err) {
       const detail = errMessage(err);
       const code = detail === "source_collision" ? "source_collision" : "source_write_failed";
-      await writeAudit("source_failed", { error_code: code, content_id: payloadDigest });
+      try {
+        await writeAudit("source_failed", { error_code: code, content_id: payloadDigest });
+      } catch (auditErr) {
+        emitEdgeProtocolShadowDiagnosticOnce("capture_audit_outcome_failed");
+        return {
+          status: "source_failed",
+          duration_ms: performance.now() - started,
+          terminal_leaf_id: terminalLeafId,
+          error_code: code,
+          error_detail: sanitizeDiagnostic(`${detail}; audit_outcome_failed:${errMessage(auditErr)}`),
+        };
+      }
       return {
         status: "source_failed",
         duration_ms: performance.now() - started,
@@ -1729,7 +1831,11 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
 
     if (locked.kind === "conflict") {
       emitEdgeProtocolShadowDiagnosticOnce(locked.error_code);
-      await writeAudit("conflict", { error_code: locked.error_code, content_id: payloadDigest });
+      try {
+        await writeAudit("conflict", { error_code: locked.error_code, content_id: payloadDigest });
+      } catch {
+        emitEdgeProtocolShadowDiagnosticOnce("capture_audit_outcome_failed");
+      }
       return {
         status: "conflict",
         duration_ms: performance.now() - started,
@@ -1739,7 +1845,11 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       };
     }
     if (locked.kind === "failed") {
-      await writeAudit("journal_failed", { error_code: locked.error_code, content_id: payloadDigest });
+      try {
+        await writeAudit("journal_failed", { error_code: locked.error_code, content_id: payloadDigest });
+      } catch {
+        emitEdgeProtocolShadowDiagnosticOnce("capture_audit_outcome_failed");
+      }
       return {
         status: "journal_failed",
         duration_ms: performance.now() - started,
@@ -1763,11 +1873,15 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     };
 
     if (locked.kind === "candidate_only") {
-      await writeAudit("candidate_only", {
-        error_code: locked.error_code,
-        content_id: payloadDigest,
-        candidate_record_id: locked.candidate.record_id,
-      });
+      try {
+        await writeAudit("candidate_only", {
+          error_code: locked.error_code,
+          content_id: payloadDigest,
+          candidate_record_id: locked.candidate.record_id,
+        });
+      } catch {
+        emitEdgeProtocolShadowDiagnosticOnce("capture_audit_outcome_failed");
+      }
       return {
         status: "candidate_only",
         duration_ms: performance.now() - started,
@@ -1780,11 +1894,15 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       };
     }
 
-    await writeAudit("complete", {
-      content_id: payloadDigest,
-      candidate_record_id: locked.candidate.record_id,
-      witness_record_id: locked.witness.record_id,
-    });
+    try {
+      await writeAudit("complete", {
+        content_id: payloadDigest,
+        candidate_record_id: locked.candidate.record_id,
+        witness_record_id: locked.witness.record_id,
+      });
+    } catch {
+      emitEdgeProtocolShadowDiagnosticOnce("capture_audit_outcome_failed");
+    }
     return {
       status: "complete",
       duration_ms: performance.now() - started,
@@ -2311,6 +2429,7 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
   let sessionsScanned = 0;
   let limitReached = false;
   const operatorAuditPath = args.operatorAuditPath ? path.resolve(args.operatorAuditPath) : undefined;
+  const abrainHomeResolved = path.resolve(args.abrainHome);
 
   /**
    * Push recovery item. Operator audit records only eligible actions (+ summary),
@@ -2336,12 +2455,12 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
         ...(item.terminal_leaf_id_prefix ? { terminal_leaf_id_prefix: item.terminal_leaf_id_prefix } : {}),
         ...(item.candidate_record_id_prefix ? { candidate_record_id_prefix: item.candidate_record_id_prefix } : {}),
         ...(item.witness_record_id_prefix ? { witness_record_id_prefix: item.witness_record_id_prefix } : {}),
-      });
+      }, { trustRoot: abrainHomeResolved });
     }
   };
 
   try {
-    const abrainHome = path.resolve(args.abrainHome);
+    const abrainHome = abrainHomeResolved;
     let captureIndex = new Map<string, EdgeCaptureAuditEntry[]>();
     if (args.captureAuditPath) {
       captureIndex = await loadEdgeCaptureAuditIndex(path.resolve(args.captureAuditPath));
@@ -2528,9 +2647,9 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
             continue;
           }
 
-          // limit counts eligible only; stop early and mark truncated.
+          // limit counts eligible only. truncated only when another eligible remains.
           if (eligible >= limit) {
-            limitReached = true;
+            limitReached = true; // at least one remaining eligible not processed
             break;
           }
           eligible += 1;
@@ -2719,15 +2838,10 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
             }, sessionName, auditEligible);
           }
         }
-        if (eligible >= limit) {
-          limitReached = true;
-          break;
-        }
+        // Propagate early stop only when an eligible remainder forced the break.
+        if (limitReached) break;
       }
-      if (eligible >= limit) {
-        limitReached = true;
-        break;
-      }
+      if (limitReached) break;
     }
 
     if (operatorAuditPath && mode === "execute") {
@@ -2748,7 +2862,10 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
         failed,
         skipped,
         already_referenced: alreadyReferenced,
-      });
+        limit_reached: limitReached,
+        truncated: limitReached,
+        remaining_unknown: limitReached,
+      }, { trustRoot: abrainHome });
     }
 
     return {

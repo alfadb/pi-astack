@@ -215,9 +215,11 @@ import {
 import {
   captureEdgeProtocolCandidate,
   captureEdgeProtocolTerminalPair,
+  computePayloadDigest,
   emitEdgeProtocolShadowDiagnosticOnce,
   initializeEdgeProtocolShadowSession,
   recoverEdgeProtocolMissingWitnessesForOwner,
+  toJsonSafe,
   writeEdgeTerminalWitness,
   _resetEdgeProtocolShadowDiagnosticsForTests,
   type EdgeC6Identity,
@@ -1398,6 +1400,8 @@ async function writeEdgeTerminalWitnessFromCaller(args: {
   abrainHome: string;
   leafTip?: EdgeLeafTip;
   c6: EdgeC6Identity | undefined;
+  /** Optional messages for legacy candidate digest bind (R6). */
+  messages?: unknown;
 }): Promise<void> {
   if (!args.sessionId) return;
   if (!args.c6) {
@@ -1413,12 +1417,23 @@ async function writeEdgeTerminalWitnessFromCaller(args: {
     }).catch(() => {});
     return;
   }
+  // R6: agent_settled may compute payload digest from messages to bind legacy candidates.
+  let payloadDigest: string | undefined;
+  if (args.messages !== undefined) {
+    try {
+      const messagesJson = JSON.stringify(toJsonSafe(args.messages));
+      payloadDigest = computePayloadDigest(messagesJson);
+    } catch {
+      payloadDigest = undefined;
+    }
+  }
   const result = await writeEdgeTerminalWitness({
     abrainHome: args.abrainHome,
     ownerProjectRoot: args.ownerProjectRoot,
     sessionId: args.sessionId,
     c6: args.c6,
     leafTip: args.leafTip,
+    ...(payloadDigest ? { payloadDigest } : {}),
   });
   if (result.status === "written") return;
   // no_candidate is observable (low-cardinality diagnostic + audit), never silent.
@@ -7325,6 +7340,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           getLeafEntry?(): unknown;
           getSessionId?(): string | undefined | null;
           getSessionFile?(): string | undefined | null;
+          getBranch?(fromId?: string): Array<{ message?: unknown } | unknown>;
         };
       },
     ) => {
@@ -7356,6 +7372,23 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       const ownerProjectRoot = resolveCaptureSourceProjectRoot(cwd, abrainHome);
       const leafTip = edgeLeafTipFromSessionManager(liveCtx.sessionManager);
       const frozenC6 = edgeC6FromAnchor(sessionId, getCurrentAnchor());
+      // R6: derive messages from branch so legacy candidate can bind via payload digest.
+      let branchMessages: unknown[] | undefined;
+      try {
+        const branch = liveCtx.sessionManager?.getBranch?.();
+        if (Array.isArray(branch)) {
+          branchMessages = branch
+            .map((entry) => {
+              if (entry && typeof entry === "object" && "message" in entry) {
+                return (entry as { message?: unknown }).message;
+              }
+              return entry;
+            })
+            .filter((m) => m !== undefined && m !== null);
+        }
+      } catch {
+        branchMessages = undefined;
+      }
       await writeEdgeTerminalWitnessFromCaller({
         cwd,
         sessionId,
@@ -7363,6 +7396,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         abrainHome,
         leafTip,
         c6: frozenC6,
+        ...(branchMessages ? { messages: branchMessages } : {}),
       });
     },
   );
