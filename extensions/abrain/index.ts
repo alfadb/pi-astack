@@ -2171,6 +2171,9 @@ export default function activate(pi: ExtensionAPI): void {
           };
           signal?: AbortSignal;
           hasUI?: boolean;
+          // pi extension mode: guard TUI-only custom() with mode === "tui"
+          // so RPC/Web sessions can use pi-router form intake instead.
+          mode?: string;
         };
         const json = await promptHandlerModule.executePromptUserTool(
           params,

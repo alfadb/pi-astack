@@ -543,7 +543,7 @@ await asyncCheck("happy path: single question → ok:true, answers as array (INV
       }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     fakeDeps,
   );
   const r = JSON.parse(json);
@@ -583,7 +583,7 @@ await asyncCheck("INV-C secret: ok:true with placeholder + redactions field", as
       questions: [{ id: "token", header: "Token", question: "Enter token?", type: "secret" }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   const r = JSON.parse(json);
@@ -612,7 +612,7 @@ await asyncCheck("P1-fix: INV-I concurrent reject also calls recordBlocked", asy
   const firstPromise = handlerMod.executePromptUserTool(
     { reason: "first", questions: [{ id: "a", header: "h", question: "q?", type: "text" }] },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   await new Promise((r) => setImmediate(r));
@@ -620,7 +620,7 @@ await asyncCheck("P1-fix: INV-I concurrent reject also calls recordBlocked", asy
   await handlerMod.executePromptUserTool(
     { reason: "second", questions: [{ id: "b", header: "h", question: "q?", type: "text" }] },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   const invIBlocked = recordedBlocked.find(
@@ -662,7 +662,7 @@ await asyncCheck("INV-I: concurrent prompt_user returns distinctive detail", asy
       questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   // Wait one microtask so manager.acquirePending has run.
@@ -677,7 +677,7 @@ await asyncCheck("INV-I: concurrent prompt_user returns distinctive detail", asy
       questions: [{ id: "b", header: "h", question: "q?", type: "text" }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   const second = JSON.parse(secondJson);
@@ -811,6 +811,7 @@ await asyncCheck("P1-fix: service.askPromptUser entry re-runs redactPromptParams
   const ctx = {
     ui: { custom: async (factory) => await new Promise((resolve) => factory({}, {}, {}, resolve)) },
     hasUI: true,
+    mode: "tui",
   };
   const deps = {
     buildDialog: ({ onDone }) => {
@@ -862,10 +863,10 @@ await asyncCheck("soft cap: 3rd call in same session has detail batching warning
     reason: "x",
     questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
   });
-  await handlerMod.executePromptUserTool(mkParams(), undefined, { ui, hasUI: true }, deps);
-  await handlerMod.executePromptUserTool(mkParams(), undefined, { ui, hasUI: true }, deps);
+  await handlerMod.executePromptUserTool(mkParams(), undefined, { ui, hasUI: true, mode: "tui" }, deps);
+  await handlerMod.executePromptUserTool(mkParams(), undefined, { ui, hasUI: true, mode: "tui" }, deps);
   const thirdJson = await handlerMod.executePromptUserTool(
-    mkParams(), undefined, { ui, hasUI: true }, deps,
+    mkParams(), undefined, { ui, hasUI: true, mode: "tui" }, deps,
   );
   const third = JSON.parse(thirdJson);
   if (!third.ok) throw new Error(`third should still succeed: ${JSON.stringify(third)}`);
@@ -925,7 +926,7 @@ await asyncCheck("R8 P1#1: session drain → service.ts disposer calls dialog.__
       }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   // Yield so service.ts kicks off the dialog factory + registers disposer.
@@ -970,7 +971,7 @@ await asyncCheck("R8 P1#1: ctx.signal abort → disposer fires teardown", async 
       questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
     },
     ac.signal,
-    { ui, hasUI: true, signal: ac.signal },
+    { ui, hasUI: true, mode: "tui", signal: ac.signal },
     deps,
   );
   await new Promise((r) => setImmediate(r));
@@ -1024,7 +1025,7 @@ await asyncCheck("R8 P1#1: successful submit → disposer still runs (idempotent
       questions: [{ id: "s", header: "h", question: "q?", type: "secret" }],
     },
     undefined,
-    { ui, hasUI: true },
+    { ui, hasUI: true, mode: "tui" },
     deps,
   );
   const r = JSON.parse(json);
@@ -1043,6 +1044,372 @@ await asyncCheck("R8 P1#1: successful submit → disposer still runs (idempotent
   // Verify only the real submit done call landed.
   if (doneCalls.length !== 1) {
     throw new Error(`success path: done calls=${JSON.stringify(doneCalls)}, expected 1 (the submit, not extra null)`);
+  }
+});
+
+// ── Router UI form path (pi-router daemon loopback) ─────────────────
+//
+// When ctx.mode !== "tui" and PI_ROUTER_UI_* env is present, service
+// POSTs to the daemon form endpoint instead of using custom()/fallback.
+// Reason mapping must never lie about user rejection.
+
+function withRouterEnv(fn) {
+  const prev = {
+    endpoint: process.env.PI_ROUTER_UI_ENDPOINT,
+    token: process.env.PI_ROUTER_UI_TOKEN,
+    instanceId: process.env.PI_ROUTER_INSTANCE_ID,
+  };
+  process.env.PI_ROUTER_UI_ENDPOINT = "http://127.0.0.1:3900/v1/ui/form";
+  process.env.PI_ROUTER_UI_TOKEN = "test-token-abcdef";
+  process.env.PI_ROUTER_INSTANCE_ID = "inst-test-1";
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (prev.endpoint === undefined) delete process.env.PI_ROUTER_UI_ENDPOINT;
+      else process.env.PI_ROUTER_UI_ENDPOINT = prev.endpoint;
+      if (prev.token === undefined) delete process.env.PI_ROUTER_UI_TOKEN;
+      else process.env.PI_ROUTER_UI_TOKEN = prev.token;
+      if (prev.instanceId === undefined) delete process.env.PI_ROUTER_INSTANCE_ID;
+      else process.env.PI_ROUTER_INSTANCE_ID = prev.instanceId;
+    });
+}
+
+await asyncCheck("router path: success maps answers (INV-H + secret redaction)", async () => {
+  await withRouterEnv(async () => {
+    manager.__resetForTests();
+    handlerMod.resetSoftCapCounter();
+    const fetchCalls = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      fetchCalls.push({ url: String(url), init });
+      const body = JSON.parse(init.body);
+      if (body.instanceId !== "inst-test-1") throw new Error(`instanceId=${body.instanceId}`);
+      if (body.variant !== "question") throw new Error(`variant=${body.variant}`);
+      if (!Array.isArray(body.questions) || body.questions.length !== 2) {
+        throw new Error(`questions shape: ${JSON.stringify(body.questions)}`);
+      }
+      const auth = init.headers?.authorization || init.headers?.Authorization;
+      if (auth !== "Bearer test-token-abcdef") throw new Error(`auth=${auth}`);
+      return {
+        status: 200,
+        async json() {
+          return {
+            answers: {
+              pick: ["yes"],
+              token: ["ghp_ROUTER_SECRET_VALUE"],
+            },
+          };
+        },
+      };
+    };
+    try {
+      // RPC-like: custom is a stub that would return undefined; must NOT be used.
+      const ui = {
+        custom: async () => undefined,
+        notify: () => {},
+      };
+      const deps = { ...handlerDeps, dialog: { buildDialog: () => { throw new Error("TUI must not run"); } } };
+      const json = await handlerMod.executePromptUserTool(
+        {
+          reason: "router happy",
+          questions: [
+            {
+              id: "pick", header: "h", question: "q?", type: "single",
+              options: [{ label: "yes" }, { label: "no" }],
+            },
+            { id: "token", header: "Token", question: "secret?", type: "secret" },
+          ],
+        },
+        undefined,
+        { ui, hasUI: true, mode: "rpc" },
+        deps,
+      );
+      const r = JSON.parse(json);
+      if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r)}`);
+      if (!Array.isArray(r.answers.pick) || r.answers.pick[0] !== "yes") {
+        throw new Error(`pick answers: ${JSON.stringify(r.answers.pick)}`);
+      }
+      if (r.answers.token[0] !== "[REDACTED_SECRET:token]") {
+        throw new Error(`secret not redacted: ${r.answers.token[0]}`);
+      }
+      if (!r.redactions?.token?.placeholder) throw new Error("redactions missing");
+      const blob = JSON.stringify(r);
+      if (blob.includes("ghp_ROUTER_SECRET")) throw new Error(`raw secret leaked: ${blob}`);
+      if (fetchCalls.length !== 1) throw new Error(`fetch calls=${fetchCalls.length}`);
+      if (!String(fetchCalls[0].url).includes("/v1/ui/form")) {
+        throw new Error(`url=${fetchCalls[0].url}`);
+      }
+      if (!r.detail?.includes("pi-router")) {
+        throw new Error(`detail should mark router path: ${r.detail}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await asyncCheck("router path: form_cancelled → user-rejected", async () => {
+  await withRouterEnv(async () => {
+    manager.__resetForTests();
+    handlerMod.resetSoftCapCounter();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 409,
+      async json() {
+        return { kind: "form_cancelled", message: "form request was cancelled" };
+      },
+    });
+    try {
+      const json = await handlerMod.executePromptUserTool(
+        {
+          reason: "cancel me",
+          questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+        },
+        undefined,
+        { ui: { custom: async () => undefined }, hasUI: true, mode: "rpc" },
+        { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+      );
+      const r = JSON.parse(json);
+      if (r.ok || r.reason !== "user-rejected") {
+        throw new Error(`expected user-rejected, got ${JSON.stringify(r)}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await asyncCheck("router path: form_timeout → cancelled (NOT user-rejected)", async () => {
+  await withRouterEnv(async () => {
+    manager.__resetForTests();
+    handlerMod.resetSoftCapCounter();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      status: 504,
+      async json() {
+        return { kind: "form_timeout", message: "form request timed out waiting for a response" };
+      },
+    });
+    try {
+      const json = await handlerMod.executePromptUserTool(
+        {
+          reason: "timeout me",
+          questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+        },
+        undefined,
+        { ui: { custom: async () => undefined }, hasUI: true, mode: "rpc" },
+        { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+      );
+      const r = JSON.parse(json);
+      if (r.ok) throw new Error(`expected !ok: ${JSON.stringify(r)}`);
+      if (r.reason === "user-rejected") {
+        throw new Error("timeout must not be user-rejected");
+      }
+      if (r.reason !== "cancelled") {
+        throw new Error(`expected cancelled, got ${r.reason}: ${JSON.stringify(r)}`);
+      }
+      if (!/time\s*out|timed\s*out/i.test(r.detail || "")) {
+        throw new Error(`detail should mention timeout: ${r.detail}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await asyncCheck("router path: network error → ui-unavailable (NOT user-rejected)", async () => {
+  await withRouterEnv(async () => {
+    manager.__resetForTests();
+    handlerMod.resetSoftCapCounter();
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED 127.0.0.1:3900");
+    };
+    try {
+      const json = await handlerMod.executePromptUserTool(
+        {
+          reason: "network fail",
+          questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+        },
+        undefined,
+        { ui: { custom: async () => undefined }, hasUI: true, mode: "rpc" },
+        { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+      );
+      const r = JSON.parse(json);
+      if (r.ok) throw new Error(`expected !ok: ${JSON.stringify(r)}`);
+      if (r.reason === "user-rejected") {
+        throw new Error("network error must not be user-rejected");
+      }
+      if (r.reason !== "ui-unavailable") {
+        throw new Error(`expected ui-unavailable, got ${r.reason}: ${JSON.stringify(r)}`);
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
+});
+
+await asyncCheck("router path: variants vault_release + bash_output_release POST correctly", async () => {
+  await withRouterEnv(async () => {
+    const serviceMod = require(path.join(promptUserDir, "service"));
+    for (const variant of ["vault_release", "bash_output_release"]) {
+      manager.__resetForTests();
+      let posted = null;
+      const origFetch = globalThis.fetch;
+      globalThis.fetch = async (_url, init) => {
+        posted = JSON.parse(init.body);
+        return {
+          status: 200,
+          async json() {
+            return { answers: { _vault_decision: ["Yes once"] } };
+          },
+        };
+      };
+      try {
+        const result = await serviceMod.askPromptUser(
+          {
+            ui: { custom: async () => undefined },
+            hasUI: true,
+            mode: "rpc",
+          },
+          {
+            reason: `auth via ${variant}`,
+            questions: [{
+              id: "_vault_decision",
+              header: "Release?",
+              question: "Authorize?",
+              type: "single",
+              options: [{ label: "Yes once" }, { label: "No" }],
+            }],
+          },
+          { buildDialog: () => { throw new Error("no TUI"); } },
+          { recordAsk: () => {}, recordResult: () => {} },
+          { variant },
+        );
+        if (!result.ok) throw new Error(`${variant}: ${JSON.stringify(result)}`);
+        if (posted?.variant !== variant) {
+          throw new Error(`${variant}: posted variant=${posted?.variant}`);
+        }
+        if (result.answers._vault_decision[0] !== "Yes once") {
+          throw new Error(`${variant}: answers=${JSON.stringify(result.answers)}`);
+        }
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    }
+  });
+});
+
+await asyncCheck("no router env + non-TUI → chainedFallback (not user-rejected stub)", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  // Ensure router env is absent.
+  const prevE = process.env.PI_ROUTER_UI_ENDPOINT;
+  const prevT = process.env.PI_ROUTER_UI_TOKEN;
+  const prevI = process.env.PI_ROUTER_INSTANCE_ID;
+  delete process.env.PI_ROUTER_UI_ENDPOINT;
+  delete process.env.PI_ROUTER_UI_TOKEN;
+  delete process.env.PI_ROUTER_INSTANCE_ID;
+  try {
+    const ui = {
+      // RPC stub: custom is a function but returns undefined immediately.
+      custom: async () => undefined,
+      select: async () => "yes",
+      input: async () => undefined,
+      notify: () => {},
+    };
+    const json = await handlerMod.executePromptUserTool(
+      {
+        reason: "fallback after stub",
+        questions: [{
+          id: "x", header: "h", question: "q?", type: "single",
+          options: [{ label: "yes" }, { label: "no" }],
+        }],
+      },
+      undefined,
+      { ui, hasUI: true, mode: "rpc" },
+      { ...handlerDeps, dialog: { buildDialog: () => { throw new Error("no TUI"); } } },
+    );
+    const r = JSON.parse(json);
+    if (!r.ok) throw new Error(`expected fallback ok, got ${JSON.stringify(r)}`);
+    if (r.answers.x[0] !== "yes") throw new Error(`got ${r.answers.x[0]}`);
+    if (!r.detail?.includes("fallback")) {
+      throw new Error(`detail should mark fallback: ${r.detail}`);
+    }
+  } finally {
+    if (prevE === undefined) delete process.env.PI_ROUTER_UI_ENDPOINT;
+    else process.env.PI_ROUTER_UI_ENDPOINT = prevE;
+    if (prevT === undefined) delete process.env.PI_ROUTER_UI_TOKEN;
+    else process.env.PI_ROUTER_UI_TOKEN = prevT;
+    if (prevI === undefined) delete process.env.PI_ROUTER_INSTANCE_ID;
+    else process.env.PI_ROUTER_INSTANCE_ID = prevI;
+  }
+});
+
+await asyncCheck("no router env + non-TUI + secret → ui-unavailable (chainedFallback)", async () => {
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  const prevE = process.env.PI_ROUTER_UI_ENDPOINT;
+  const prevT = process.env.PI_ROUTER_UI_TOKEN;
+  const prevI = process.env.PI_ROUTER_INSTANCE_ID;
+  delete process.env.PI_ROUTER_UI_ENDPOINT;
+  delete process.env.PI_ROUTER_UI_TOKEN;
+  delete process.env.PI_ROUTER_INSTANCE_ID;
+  try {
+    const ui = {
+      custom: async () => undefined,
+      select: async () => "yes",
+      input: async () => "secret",
+      notify: () => {},
+    };
+    const json = await handlerMod.executePromptUserTool(
+      {
+        reason: "secret needs overlay",
+        questions: [{ id: "tok", header: "Token", question: "Enter?", type: "secret" }],
+      },
+      undefined,
+      { ui, hasUI: true, mode: "rpc" },
+      { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+    );
+    const r = JSON.parse(json);
+    if (r.ok || r.reason !== "ui-unavailable") {
+      throw new Error(`expected ui-unavailable for secret fallback, got ${JSON.stringify(r)}`);
+    }
+  } finally {
+    if (prevE === undefined) delete process.env.PI_ROUTER_UI_ENDPOINT;
+    else process.env.PI_ROUTER_UI_ENDPOINT = prevE;
+    if (prevT === undefined) delete process.env.PI_ROUTER_UI_TOKEN;
+    else process.env.PI_ROUTER_UI_TOKEN = prevT;
+    if (prevI === undefined) delete process.env.PI_ROUTER_INSTANCE_ID;
+    else process.env.PI_ROUTER_INSTANCE_ID = prevI;
+  }
+});
+
+await asyncCheck("RPC custom stub empty resolve is NOT user-rejected when mode=tui forced", async () => {
+  // Defense-in-depth: even if TUI path is entered and custom returns
+  // empty, reason must be ui-unavailable — never a fake user-rejected.
+  manager.__resetForTests();
+  handlerMod.resetSoftCapCounter();
+  const ui = {
+    custom: async () => undefined, // stub
+    notify: () => {},
+  };
+  const json = await handlerMod.executePromptUserTool(
+    {
+      reason: "stub empty",
+      questions: [{ id: "a", header: "h", question: "q?", type: "text" }],
+    },
+    undefined,
+    { ui, hasUI: true, mode: "tui" },
+    { ...handlerDeps, dialog: { buildDialog: () => ({}) } },
+  );
+  const r = JSON.parse(json);
+  if (r.ok) throw new Error(`expected !ok: ${JSON.stringify(r)}`);
+  if (r.reason === "user-rejected") {
+    throw new Error("empty custom resolve must not be user-rejected");
+  }
+  if (r.reason !== "ui-unavailable") {
+    throw new Error(`expected ui-unavailable, got ${r.reason}: ${JSON.stringify(r)}`);
   }
 });
 
