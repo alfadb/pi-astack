@@ -126,8 +126,16 @@ last-close 触发 seal；pending materialize 必须可在崩溃后按 journal �
 - 不同 leaf 即使 C6 相同 → 写独立 candidate+witness，并记录 `c6_collision` diagnostic（不 fail closed）。
 - 同 leaf 同 content digest → 幂等 reuse。
 - 同 leaf 不同 content digest → fail closed `terminal_identity_content_conflict`（不 append）。
-- Immutable journal：不得改写旧 records；scan/index 可从 candidate `leaf_tip` 或 content digest 推导 legacy leaf identity；旧记录无新字段仍可 dedupe。
-- Source-only 不可见：冲突/失败须有显式 audit；journal 未引用 sources 仅由 **operator** `recover-edge-unreferenced-sources` 恢复（默认 dry-run，`--execute` 才写；限定 abrain/owner/session + limit；同 writer lock + monotonic `producer_seq`；只写 candidate+witness，不创建 semantic job/ACK、不改 source bytes；**不**在 `session_start` 自动回放）。
+- Immutable journal：不得改写旧 records；scan/index 可从 candidate `leaf_tip` 或 content digest 推导 legacy leaf identity（`legacy_content:<digest>`）；新 capture 同时查真实 leaf key 与 legacy key，**仅**在相同 C6 + 相同 digest 时 reuse，避免重复 pair。
+- `writeEdgeTerminalWitness`：有真实 leaf 时按 leaf 选 candidate；同 C6 多个 candidate 且无 leaf → fail closed `ambiguous_candidate`（禁止选 latest）；`agent_settled` 传真实 leaf id。
+- Source-only 不可见：每次 pair capture 写 durable **capture audit**（session/digest/C6/leaf/result；含 conflict）。journal 未引用 sources 仅由 **operator** `recover-edge-unreferenced-sources` 恢复：
+  - 默认 dry-run 零写；`--execute` 才写 candidate+witness
+  - **绝不合成 C6/leaf**：leaf 从 source 末端 terminal assistant（`role=assistant` 且 `stopReason!=toolUse`）的 id/type，或唯一 capture-audit `leaf_tip`；C6 **只**从 capture audit 对 `(session,digest)` 的唯一匹配恢复（保留原 number/string/subturn/subagent/parent）
+  - execute 强制：`--owner-project-root` realpath、`--session-id` 或 `--all-sessions`、正整数 `--limit`（≤100，只计 eligible）、`--capture-audit-path`、`--operator-audit-path`
+  - 无法唯一匹配 → `nonrecoverable`（崩溃 source-only 无 audit 保持 source-only，不能猜）
+  - 旧 `c6_content_conflict`（不同真实 leaf）可 recover；`terminal_identity_content_conflict` **永不** recover（`rejected`）
+  - 同 writer lock + monotonic `producer_seq`；只写 candidate+witness，不创建 semantic job/ACK、不改 source bytes；**不**在 `session_start` 自动回放
+  - source 读：lstat / `O_NOFOLLOW` / ≤8MiB，symlink fail-closed；session root 必须属于 edge owner layout；stdout/operator audit 不输出原始 session/path/digest（hash/record id prefix）
 
 ## 7. Source 状态与 edge redrive
 

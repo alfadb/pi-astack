@@ -160,6 +160,8 @@ export interface EdgeCaptureArgs {
   /** Capture-time SessionManager leaf tip (not settled tip). */
   leafTip?: EdgeLeafTip;
   createdAt?: string;
+  /** Optional durable capture-audit JSONL (associates digest↔C6↔leaf). */
+  captureAuditPath?: string;
 }
 
 export interface EdgeWitnessArgs {
@@ -218,13 +220,18 @@ export type EdgeUnreferencedSourceItemResult =
   | "reused"
   | "already_referenced"
   | "skipped"
-  | "failed";
+  | "failed"
+  | "nonrecoverable"
+  | "rejected";
 
 export interface EdgeUnreferencedSourceRecoveryItem {
-  session_id: string;
+  /** Session id hash prefix only — never raw session id in operator stdout. */
+  session_id_hash_prefix: string;
   content_id_prefix: string;
   result: EdgeUnreferencedSourceItemResult;
-  terminal_leaf_id?: string;
+  terminal_leaf_id_prefix?: string;
+  candidate_record_id_prefix?: string;
+  witness_record_id_prefix?: string;
   c6_collision?: boolean;
   error_code?: string;
   error_detail?: string;
@@ -236,16 +243,65 @@ export interface EdgeUnreferencedSourceRecoveryResult {
   mode: "dry_run" | "execute";
   duration_ms: number;
   scanned: number;
+  /** Healthy-terminal unreferenced sources considered within limit. */
   eligible: number;
+  recoverable: number;
+  nonrecoverable: number;
+  rejected: number;
   recovered: number;
   reused: number;
   failed: number;
   skipped: number;
   already_referenced: number;
   sessions_scanned: number;
+  operator_audit_path_hash_prefix?: string;
   items: EdgeUnreferencedSourceRecoveryItem[];
   error_code?: string;
   error_detail?: string;
+}
+
+/** Production capture attempt audit — associates source digest with original C6+leaf. */
+export const EDGE_CAPTURE_AUDIT_SCHEMA = "pi-astack/edge-capture-audit/v1" as const;
+export const EDGE_OPERATOR_AUDIT_SCHEMA = "pi-astack/edge-operator-audit/v1" as const;
+export const EDGE_OPERATOR_RECOVERY_MAX_LIMIT = 100 as const;
+
+export interface EdgeCaptureAuditEntry {
+  schema: typeof EDGE_CAPTURE_AUDIT_SCHEMA;
+  schema_version: 1;
+  created_at: string;
+  session_id: string;
+  content_id: string;
+  c6: EdgeC6Identity;
+  leaf_tip: EdgeLeafTip;
+  result: string;
+  error_code?: string;
+  candidate_record_id?: string;
+  witness_record_id?: string;
+}
+
+export interface EdgeOperatorAuditEntry {
+  schema: typeof EDGE_OPERATOR_AUDIT_SCHEMA;
+  schema_version: 1;
+  created_at: string;
+  mode: "dry_run" | "execute";
+  kind: "item" | "summary";
+  session_id_hash: string;
+  content_id_prefix?: string;
+  result?: string;
+  error_code?: string;
+  terminal_leaf_id_prefix?: string;
+  candidate_record_id_prefix?: string;
+  witness_record_id_prefix?: string;
+  scanned?: number;
+  eligible?: number;
+  recoverable?: number;
+  nonrecoverable?: number;
+  rejected?: number;
+  recovered?: number;
+  reused?: number;
+  failed?: number;
+  skipped?: number;
+  already_referenced?: number;
 }
 
 export interface EdgeMissingWitnessRecoveryResult {
@@ -288,6 +344,8 @@ const RECORD_FILENAME_RE = /^(\d{20})__([0-9a-f]{64})\.json$/;
 /** Owner-wide recovery bounds (cost-controlled on session_start). */
 const RECOVERY_MAX_SESSIONS = 64;
 const RECOVERY_MAX_CANDIDATES_PER_SESSION = 256;
+/** Healthy terminal stopReasons accepted for unreferenced-source recovery. */
+const UNREF_SOURCE_RECOVERY_ACCEPTED_STOP = new Set(["stop", "length"]);
 
 /** Unique + stable for this Node process lifetime. Journal writer identity only. */
 const PROCESS_JOURNAL_WRITER_EPOCH: string = `${Date.now().toString(36)}-pid${process.pid}-${crypto.randomUUID()}`;
@@ -486,7 +544,8 @@ export function c6Key(c6: EdgeC6Identity): string {
  * Durable pair admission leaf identity for a session.
  * Prefer real terminal descriptor `leaf_tip.id`; legacy journal rows without
  * leaf_tip derive a stable id from candidate/source content digest so old
- * records still dedupe without rewrite.
+ * records still dedupe without rewrite. Operator recovery never invents this
+ * synthetic form — only index/admission may derive it for legacy rows.
  */
 export function resolveTerminalLeafId(args: {
   leafTip?: EdgeLeafTip | null;
@@ -506,15 +565,286 @@ export function resolveTerminalLeafId(args: {
   return null;
 }
 
-/** Synthetic leaf tip used only by unreferenced-source operator recovery. */
-export function legacySourceRecoveryLeafTip(contentId: string, timestampUtc?: string): EdgeLeafTip {
-  assertContentId(contentId);
+/** Unified leaf_tip.type fallback for durable records (never invent leaf id). */
+export function resolveLeafTipType(type: unknown): string {
+  if (typeof type === "string") {
+    const t = type.trim();
+    if (t) return t;
+  }
+  return "message";
+}
+
+/** Normalize a real leaf tip for durable admission (id required; type fallback only). */
+export function normalizeLeafTip(leafTip: EdgeLeafTip): EdgeLeafTip {
+  const id = typeof leafTip.id === "string" ? leafTip.id.trim() : "";
+  if (!id) throw new Error("leaf_tip.id required");
+  const parentId =
+    leafTip.parentId === null || leafTip.parentId === undefined
+      ? null
+      : String(leafTip.parentId);
   return {
-    id: contentId,
-    parentId: null,
-    type: "legacy_source_recovery",
-    ...(timestampUtc ? { timestampUtc } : {}),
+    id,
+    parentId,
+    type: resolveLeafTipType(leafTip.type),
+    ...(typeof leafTip.timestampUtc === "string" && leafTip.timestampUtc
+      ? { timestampUtc: leafTip.timestampUtc }
+      : {}),
   };
+}
+
+export function sessionIdHash(sessionId: string): string {
+  return sha256Hex(sessionId);
+}
+
+export function idPrefix(id: string | undefined, n = 12): string | undefined {
+  if (typeof id !== "string" || !id) return undefined;
+  return id.slice(0, n);
+}
+
+/** Append one capture-audit JSONL row (best-effort durable; never throws into capture path). */
+export async function appendEdgeCaptureAuditEntry(
+  auditPath: string,
+  entry: EdgeCaptureAuditEntry,
+): Promise<void> {
+  const line = `${JSON.stringify(entry)}\n`;
+  await fs.mkdir(path.dirname(auditPath), { recursive: true, mode: DIR_MODE });
+  await fs.appendFile(auditPath, line, { mode: SOURCE_MODE });
+}
+
+/** Load capture audit entries; index by session_id + content_id for unique match. */
+export async function loadEdgeCaptureAuditIndex(
+  auditPath: string,
+): Promise<Map<string, EdgeCaptureAuditEntry[]>> {
+  const map = new Map<string, EdgeCaptureAuditEntry[]>();
+  let raw: string;
+  try {
+    const st = await fs.lstat(auditPath);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      throw new Error("capture_audit_not_regular_file");
+    }
+    if (st.size > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES * 4) {
+      throw new Error("capture_audit_too_large");
+    }
+    raw = await fs.readFile(auditPath, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return map;
+    throw err;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const o = parsed as Record<string, unknown>;
+    if (o.schema !== EDGE_CAPTURE_AUDIT_SCHEMA || o.schema_version !== 1) continue;
+    if (typeof o.session_id !== "string" || typeof o.content_id !== "string") continue;
+    if (!/^[0-9a-f]{64}$/.test(o.content_id)) continue;
+    if (!o.c6 || typeof o.c6 !== "object" || Array.isArray(o.c6)) continue;
+    if (!o.leaf_tip || typeof o.leaf_tip !== "object" || Array.isArray(o.leaf_tip)) continue;
+    const leaf = o.leaf_tip as Record<string, unknown>;
+    if (typeof leaf.id !== "string" || !leaf.id.trim()) continue;
+    let c6: EdgeC6Identity;
+    try {
+      c6 = normalizeC6(o.c6 as EdgeC6Identity);
+    } catch {
+      continue;
+    }
+    if (c6.session_id !== o.session_id) continue;
+    let leafTip: EdgeLeafTip;
+    try {
+      leafTip = normalizeLeafTip({
+        id: leaf.id,
+        parentId: (leaf.parentId as string | null | undefined) ?? null,
+        type: resolveLeafTipType(leaf.type),
+        ...(typeof leaf.timestampUtc === "string" ? { timestampUtc: leaf.timestampUtc } : {}),
+      });
+    } catch {
+      continue;
+    }
+    const entry: EdgeCaptureAuditEntry = {
+      schema: EDGE_CAPTURE_AUDIT_SCHEMA,
+      schema_version: 1,
+      created_at: typeof o.created_at === "string" ? o.created_at : new Date(0).toISOString(),
+      session_id: o.session_id,
+      content_id: o.content_id,
+      c6,
+      leaf_tip: leafTip,
+      result: typeof o.result === "string" ? o.result : "unknown",
+      ...(typeof o.error_code === "string" ? { error_code: o.error_code } : {}),
+      ...(typeof o.candidate_record_id === "string" ? { candidate_record_id: o.candidate_record_id } : {}),
+      ...(typeof o.witness_record_id === "string" ? { witness_record_id: o.witness_record_id } : {}),
+    };
+    // terminal_identity_content_conflict rows are never recovery sources of truth for admit.
+    const key = `${entry.session_id}\0${entry.content_id}`;
+    const list = map.get(key) ?? [];
+    list.push(entry);
+    map.set(key, list);
+  }
+  return map;
+}
+
+/**
+ * Unique capture-audit match for (session, content_id).
+ * Returns null when zero or ambiguous (>1 distinct C6/leaf identities).
+ * terminal_identity_content_conflict-only sets are rejected (never recoverable).
+ */
+export function resolveUniqueCaptureAuditIdentity(
+  index: Map<string, EdgeCaptureAuditEntry[]>,
+  sessionId: string,
+  contentId: string,
+): {
+  ok: true;
+  entry: EdgeCaptureAuditEntry;
+} | {
+  ok: false;
+  reason: "missing" | "ambiguous" | "terminal_identity_content_conflict";
+} {
+  const list = index.get(`${sessionId}\0${contentId}`) ?? [];
+  if (list.length === 0) return { ok: false, reason: "missing" };
+  if (list.every((e) => e.error_code === "terminal_identity_content_conflict" || e.result === "conflict" && e.error_code === "terminal_identity_content_conflict")) {
+    // If all entries are terminal_identity conflicts, never recover.
+    const allTerminalConflict = list.every(
+      (e) => e.error_code === "terminal_identity_content_conflict",
+    );
+    if (allTerminalConflict) return { ok: false, reason: "terminal_identity_content_conflict" };
+  }
+  // Prefer non-conflict complete/candidate_only/c6_content_conflict rows as identity sources.
+  const usable = list.filter((e) => e.error_code !== "terminal_identity_content_conflict");
+  if (usable.length === 0) return { ok: false, reason: "terminal_identity_content_conflict" };
+  const first = usable[0]!;
+  const firstC6 = c6Key(first.c6);
+  const firstLeaf = first.leaf_tip.id;
+  for (const e of usable) {
+    if (c6Key(e.c6) !== firstC6 || e.leaf_tip.id !== firstLeaf) {
+      return { ok: false, reason: "ambiguous" };
+    }
+  }
+  // Preserve original number/string turn_id/subturn from first usable entry.
+  return { ok: true, entry: first };
+}
+
+/** Terminal assistant leaf from immutable source messages (never content_id synthetic). */
+export function extractTerminalLeafFromSourceMessages(
+  messages: ReadonlyArray<unknown>,
+): { ok: true; leafTip: EdgeLeafTip; stopReason: string } | { ok: false; reason: string } {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+    const row = m as Record<string, unknown>;
+    if (row.role !== "assistant") continue;
+    const stop = typeof row.stopReason === "string" ? row.stopReason : "";
+    if (!stop) return { ok: false, reason: "no_stop_reason" };
+    if (stop === "toolUse") return { ok: false, reason: "tool_use_intermediate" };
+    if (stop === "error") return { ok: false, reason: "agent_error" };
+    if (stop === "aborted") return { ok: false, reason: "agent_aborted" };
+    if (!UNREF_SOURCE_RECOVERY_ACCEPTED_STOP.has(stop)) {
+      return { ok: false, reason: "unaccepted_stop_reason" };
+    }
+    const id =
+      (typeof row.id === "string" && row.id.trim())
+      || (typeof row.messageId === "string" && row.messageId.trim())
+      || "";
+    if (!id) return { ok: false, reason: "missing_terminal_leaf_id" };
+    const parentId =
+      row.parentId === null || row.parentId === undefined
+        ? null
+        : typeof row.parentId === "string"
+          ? row.parentId
+          : null;
+    const timestampUtc =
+      typeof row.timestampUtc === "string"
+        ? row.timestampUtc
+        : typeof row.timestamp === "string"
+          ? row.timestamp
+          : undefined;
+    return {
+      ok: true,
+      stopReason: stop,
+      leafTip: {
+        id,
+        parentId,
+        type: resolveLeafTipType(row.type),
+        ...(timestampUtc ? { timestampUtc } : {}),
+      },
+    };
+  }
+  return { ok: false, reason: "no_assistant" };
+}
+
+/** Fail-closed source sidecar read: lstat + O_NOFOLLOW + 8MiB cap. */
+export async function readEdgeSourceBytesSafe(
+  sourcePath: string,
+): Promise<{ ok: true; bytes: Buffer } | { ok: false; error_code: string }> {
+  try {
+    const st = await fs.lstat(sourcePath);
+    if (st.isSymbolicLink()) return { ok: false, error_code: "source_symlink_rejected" };
+    if (!st.isFile()) return { ok: false, error_code: "source_not_file" };
+    if (st.size > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+      return { ok: false, error_code: "source_too_large" };
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ok: false, error_code: "source_missing" };
+    }
+    return { ok: false, error_code: "source_lstat_failed" };
+  }
+  try {
+    const fh = await fs.open(
+      sourcePath,
+      fsSync.constants.O_RDONLY | (fsSync.constants.O_NOFOLLOW ?? 0),
+    );
+    try {
+      const st = await fh.stat();
+      if (st.size > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+        return { ok: false, error_code: "source_too_large" };
+      }
+      const bytes = Buffer.alloc(st.size);
+      let offset = 0;
+      while (offset < st.size) {
+        const { bytesRead } = await fh.read(bytes, offset, st.size - offset, offset);
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+      }
+      return { ok: true, bytes: bytes.subarray(0, offset) };
+    } finally {
+      await fh.close();
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "EINVAL") {
+      return { ok: false, error_code: "source_symlink_rejected" };
+    }
+    return { ok: false, error_code: "source_read_failed" };
+  }
+}
+
+/** Assert sessionRoot equals the edge owner layout path for this session. */
+export function assertEdgeSessionRootLayout(args: {
+  abrainHome: string;
+  ownerProjectRoot: string;
+  sessionId: string;
+  sessionRoot: string;
+}): string {
+  const expected = edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, args.sessionId);
+  const got = path.resolve(args.sessionRoot);
+  if (got !== path.resolve(expected)) {
+    throw new Error("session_root_not_edge_owner_layout");
+  }
+  return got;
+}
+
+export async function appendEdgeOperatorAuditEntry(
+  auditPath: string,
+  entry: EdgeOperatorAuditEntry,
+): Promise<void> {
+  const line = `${JSON.stringify(entry)}\n`;
+  await fs.mkdir(path.dirname(auditPath), { recursive: true, mode: DIR_MODE });
+  await fs.appendFile(auditPath, line, { mode: SOURCE_MODE });
 }
 
 export function emitEdgeProtocolShadowDiagnosticOnce(code: string, _detail?: string): void {
@@ -911,12 +1241,12 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
 
 /**
  * agent_settled: local durable TerminalWitness only.
- * References latest candidate for this session/C6. Never terminal_seal / TurnSettled.
- *
- * Default semantics are unchanged from pre-continuous-producer: each call may
- * append a new witness for the latest/pinned candidate. Idempotent reuse and
- * pair capture live in `captureEdgeProtocolTerminalPair` or require explicit
- * `idempotentReuse: true` / `candidateRecordId` opts.
+ * Candidate selection:
+ *  - pinned candidateRecordId (must match C6)
+ *  - else real leafTip id → candidates for that leaf (prefer same C6)
+ *  - else same C6 only when exactly one candidate; multiple without leaf →
+ *    fail closed `ambiguous_candidate` (never pick latest)
+ * Never terminal_seal / TurnSettled.
  */
 export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<EdgeTerminalWitnessResult> {
   const started = performance.now();
@@ -952,8 +1282,7 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
   const sessionRoot = edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, sessionId);
   try {
     await ensureSessionLayout(sessionRoot, args.abrainHome);
-    // findLatest/pin + allocateSeq + durable witness create must share one OFD lock
-    // critical section so concurrent candidate writers cannot race the ref.
+    // selection + allocateSeq + durable witness create share one OFD lock.
     const written = await withJournalWriter(sessionRoot, args.abrainHome, async (writer) => {
       const index = await loadJournalIndex(sessionRoot);
       writer.seedSeq(index.maxSeq + 1);
@@ -968,8 +1297,12 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
           throw new Error("candidate c6 mismatch for pinned candidateRecordId");
         }
       } else {
-        latest = indexFindLatestCandidateForC6(index, c6);
-        if (!latest) return { kind: "no_candidate" as const };
+        const selected = selectWitnessCandidate(index, c6, args.leafTip);
+        if (selected.kind === "ambiguous") {
+          throw new Error("ambiguous_candidate");
+        }
+        if (selected.kind === "none") return { kind: "no_candidate" as const };
+        latest = selected.candidate;
       }
       // Opt-in only: default public API may still append multiple witnesses.
       if (args.idempotentReuse === true) {
@@ -987,13 +1320,22 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
           throw new Error("witness_source_missing");
         }
       }
+      // Prefer caller leaf (agent_settled real leaf); fall back to candidate leaf_tip.
+      const leafTip = args.leafTip
+        ? normalizeLeafTip({
+            id: args.leafTip.id,
+            parentId: args.leafTip.parentId ?? null,
+            type: resolveLeafTipType(args.leafTip.type),
+            ...(args.leafTip.timestampUtc ? { timestampUtc: args.leafTip.timestampUtc } : {}),
+          })
+        : latest.record.leaf_tip;
       return writeWitnessRecordUnderLock({
         writer,
         sessionRoot,
         sessionId,
         c6,
         candidate: latest.record,
-        leafTip: args.leafTip,
+        leafTip,
         createdAt: args.createdAt,
       });
     });
@@ -1007,13 +1349,48 @@ export async function writeEdgeTerminalWitness(args: EdgeWitnessArgs): Promise<E
       record_path: written.recordPath,
     };
   } catch (err) {
+    const detail = errMessage(err);
     return {
       status: "journal_failed",
       duration_ms: performance.now() - started,
-      error_code: "witness_write_failed",
-      error_detail: sanitizeDiagnostic(errMessage(err)),
+      error_code: detail === "ambiguous_candidate" ? "ambiguous_candidate" : "witness_write_failed",
+      error_detail: sanitizeDiagnostic(detail),
     };
   }
+}
+
+/**
+ * Witness candidate selection under journal index.
+ * Same C6 + multiple candidates without leaf → ambiguous (never latest).
+ */
+function selectWitnessCandidate(
+  index: JournalIndex,
+  c6: EdgeC6Identity,
+  leafTip?: EdgeLeafTip,
+): 
+  | { kind: "one"; candidate: { record: EdgeJournalRecord; path: string } }
+  | { kind: "none" }
+  | { kind: "ambiguous" } {
+  const wantC6 = c6Key(c6);
+  const leafId = resolveTerminalLeafId({ leafTip: leafTip ?? null });
+  if (leafId) {
+    const byLeaf = index.candidatesByLeaf.get(leafId) ?? [];
+    const sameC6OnLeaf = byLeaf.filter((c) => c6Key(c.record.c6) === wantC6);
+    if (sameC6OnLeaf.length > 0) {
+      // Real leaf hit: newest candidate for that leaf+C6.
+      return { kind: "one", candidate: sameC6OnLeaf[sameC6OnLeaf.length - 1]! };
+    }
+    // Leaf miss (legacy rows / historical multi-append): use latest same-C6 candidate.
+    // Ambiguous only applies when no leaf is provided at all.
+    const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
+    if (sameC6.length === 0) return { kind: "none" };
+    return { kind: "one", candidate: sameC6[sameC6.length - 1]! };
+  }
+  const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
+  if (sameC6.length === 0) return { kind: "none" };
+  // No leaf + multiple candidates for same C6 → fail closed (never pick latest).
+  if (sameC6.length > 1) return { kind: "ambiguous" };
+  return { kind: "one", candidate: sameC6[0]! };
 }
 
 /**
@@ -1055,27 +1432,32 @@ export async function captureEdgeProtocolTerminalPair(
   }
   return captureEdgeProtocolTerminalPairAtSessionRoot({
     abrainHome: args.abrainHome,
+    ownerProjectRoot: args.ownerProjectRoot,
     sessionRoot: edgeSessionRoot(args.abrainHome, args.ownerProjectRoot, sessionId),
     sessionId,
     messages: args.messages,
     c6: args.c6,
     leafTip: args.leafTip,
     createdAt: args.createdAt,
+    captureAuditPath: args.captureAuditPath,
   });
 }
 
 /**
- * Pair capture against an already-resolved session root (operator recovery).
+ * Pair capture against an already-resolved session root.
+ * When ownerProjectRoot is provided, sessionRoot must match edge owner layout.
  * Same admission semantics as {@link captureEdgeProtocolTerminalPair}.
  */
 export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
   abrainHome: string;
+  ownerProjectRoot?: string;
   sessionRoot: string;
   sessionId: string;
   messages: unknown;
   c6: EdgeC6Identity;
   leafTip?: EdgeLeafTip;
   createdAt?: string;
+  captureAuditPath?: string;
 }): Promise<EdgeTerminalPairCaptureResult> {
   const started = performance.now();
   const sessionId = args.sessionId;
@@ -1116,14 +1498,72 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     };
   }
   // Normalize leaf tip so durable records always carry the admission identity.
-  const leafTip: EdgeLeafTip = {
-    id: terminalLeafId,
-    parentId: args.leafTip?.parentId ?? null,
-    type: args.leafTip?.type ?? "message",
-    ...(args.leafTip?.timestampUtc ? { timestampUtc: args.leafTip.timestampUtc } : {}),
+  let leafTip: EdgeLeafTip;
+  try {
+    leafTip = normalizeLeafTip({
+      id: terminalLeafId,
+      parentId: args.leafTip?.parentId ?? null,
+      type: resolveLeafTipType(args.leafTip?.type),
+      ...(args.leafTip?.timestampUtc ? { timestampUtc: args.leafTip.timestampUtc } : {}),
+    });
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      error_code: "invalid_leaf_tip",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+
+  let sessionRoot: string;
+  try {
+    if (args.ownerProjectRoot) {
+      sessionRoot = assertEdgeSessionRootLayout({
+        abrainHome: args.abrainHome,
+        ownerProjectRoot: args.ownerProjectRoot,
+        sessionId,
+        sessionRoot: args.sessionRoot,
+      });
+    } else {
+      sessionRoot = path.resolve(args.sessionRoot);
+    }
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      terminal_leaf_id: terminalLeafId,
+      error_code: "session_root_not_edge_owner_layout",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+
+  const auditPath =
+    args.captureAuditPath
+    ?? path.join(edgeProtocolShadowRoot(args.abrainHome), "capture-audit.jsonl");
+
+  const writeAudit = async (
+    result: string,
+    extra: { error_code?: string; candidate_record_id?: string; witness_record_id?: string; content_id?: string } = {},
+  ): Promise<void> => {
+    try {
+      await appendEdgeCaptureAuditEntry(auditPath, {
+        schema: EDGE_CAPTURE_AUDIT_SCHEMA,
+        schema_version: 1,
+        created_at: new Date().toISOString(),
+        session_id: sessionId,
+        content_id: extra.content_id ?? "0".repeat(64),
+        c6,
+        leaf_tip: leafTip,
+        result,
+        ...(extra.error_code ? { error_code: extra.error_code } : {}),
+        ...(extra.candidate_record_id ? { candidate_record_id: extra.candidate_record_id } : {}),
+        ...(extra.witness_record_id ? { witness_record_id: extra.witness_record_id } : {}),
+      });
+    } catch {
+      // Capture path must not fail closed on audit IO; recovery needs best-effort rows.
+    }
   };
 
-  const sessionRoot = path.resolve(args.sessionRoot);
   try {
     await ensureSessionLayout(sessionRoot, args.abrainHome);
     const messagesSafe = toJsonSafe(args.messages);
@@ -1138,6 +1578,7 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     });
     const sourceByteLength = Buffer.byteLength(sourceBody, "utf-8");
     if (sourceByteLength > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+      await writeAudit("source_failed", { error_code: "source_too_large", content_id: payloadDigest });
       return {
         status: "source_failed",
         duration_ms: performance.now() - started,
@@ -1154,11 +1595,13 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       sourceStatus = await createOrVerifyEdgeSidecar(sessionRoot, sourcePath, sourceBody);
     } catch (err) {
       const detail = errMessage(err);
+      const code = detail === "source_collision" ? "source_collision" : "source_write_failed";
+      await writeAudit("source_failed", { error_code: code, content_id: payloadDigest });
       return {
         status: "source_failed",
         duration_ms: performance.now() - started,
         terminal_leaf_id: terminalLeafId,
-        error_code: detail === "source_collision" ? "source_collision" : "source_write_failed",
+        error_code: code,
         error_detail: sanitizeDiagnostic(detail),
       };
     }
@@ -1170,170 +1613,26 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       byte_length: sourceByteLength,
     };
 
-    type PairLockResult =
-      | {
-          kind: "complete";
-          candidate: EdgeJournalRecord;
-          candidatePath: string;
-          candidateReused: boolean;
-          witness: EdgeJournalRecord;
-          witnessPath: string;
-          witnessReused: boolean;
-          c6Collision: boolean;
-        }
-      | {
-          kind: "candidate_only";
-          candidate: EdgeJournalRecord;
-          candidatePath: string;
-          candidateReused: boolean;
-          c6Collision: boolean;
-          error_code: string;
-          error_detail?: string;
-        }
-      | { kind: "conflict"; error_code: string; error_detail: string }
-      | { kind: "failed"; error_code: string; error_detail: string };
-
-    const locked = await withJournalWriter(sessionRoot, args.abrainHome, async (writer): Promise<PairLockResult> => {
-      // One index load under the OFD lock: candidate/witness lookup + seq.
+    const locked = await withJournalWriter(sessionRoot, args.abrainHome, async (writer) => {
       const index = await loadJournalIndex(sessionRoot);
       writer.seedSeq(index.maxSeq + 1);
-      const wantC6 = c6Key(c6);
-
-      // Admission key = terminal leaf (not C6). Same leaf different content fail closed.
-      const sameLeaf = index.candidatesByLeaf.get(terminalLeafId) ?? [];
-      const matching = sameLeaf.find((c) => c.record.payload_digest === payloadDigest) ?? null;
-      if (!matching && sameLeaf.length > 0) {
-        const otherDigest = sameLeaf[sameLeaf.length - 1]?.record.payload_digest;
-        if (otherDigest && otherDigest !== payloadDigest) {
-          return {
-            kind: "conflict",
-            error_code: "terminal_identity_content_conflict",
-            error_detail: sanitizeDiagnostic("same terminal leaf already has a different content digest"),
-          };
-        }
-      }
-
-      // C6 collision is attribution diagnostic only — never unique admission.
-      const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
-      const c6Collision = sameC6.some((c) => {
-        const otherLeaf = resolveTerminalLeafId({
-          leafTip: c.record.leaf_tip,
-          payloadDigest: c.record.payload_digest,
-          sourceContentId: c.record.source_ref?.content_id,
-        });
-        return otherLeaf !== null && otherLeaf !== terminalLeafId;
+      return admitTerminalPairUnderLock({
+        writer,
+        index,
+        sessionRoot,
+        sessionId,
+        c6,
+        leafTip,
+        terminalLeafId,
+        payloadDigest,
+        sourceRef,
+        createdAt: args.createdAt,
       });
-
-      let candidateReused = false;
-      let candidateRecord: EdgeJournalRecord;
-      let candidatePath: string;
-
-      if (matching) {
-        candidateReused = true;
-        candidateRecord = matching.record;
-        candidatePath = matching.path;
-      } else {
-        const producerSeq = writer.allocateSeq();
-        const runGeneration = producerSeq;
-        const createdAtRecord = args.createdAt ?? new Date().toISOString();
-        const partial = {
-          schema: EDGE_JOURNAL_SCHEMA,
-          schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
-          session_id: sessionId,
-          session_writer_epoch: writer.session_writer_epoch,
-          record_type: "candidate_capture" as const,
-          created_at: createdAtRecord,
-          payload_digest: payloadDigest,
-          c6,
-          run_generation: runGeneration,
-          source_ref: sourceRef,
-          capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
-          leaf_tip: leafTip,
-          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
-        };
-        const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
-        candidateRecord = {
-          ...partial,
-          record_id: recordId,
-          producer_seq: producerSeq,
-          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
-        };
-        candidatePath = edgeRecordPath(sessionRoot, producerSeq, recordId);
-        const body = `${JSON.stringify(candidateRecord)}\n`;
-        if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
-          return {
-            kind: "failed",
-            error_code: "record_too_large",
-            error_detail: sanitizeDiagnostic(`record exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
-          };
-        }
-        const status = await durableAtomicCreateFile(candidatePath, body, {
-          mode: SOURCE_MODE,
-          verifyCreated: false,
-          tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
-        });
-        if (status === "collision") {
-          return {
-            kind: "failed",
-            error_code: "journal_record_collision",
-            error_detail: sanitizeDiagnostic("journal record collision"),
-          };
-        }
-        await assertMode(candidatePath, SOURCE_MODE);
-        if (c6Collision) {
-          emitEdgeProtocolShadowDiagnosticOnce("c6_collision");
-        }
-      }
-
-      const existingWit = index.witnessByCandidateId.get(candidateRecord.record_id);
-      if (existingWit) {
-        return {
-          kind: "complete",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          witness: existingWit.record,
-          witnessPath: existingWit.path,
-          witnessReused: true,
-          c6Collision,
-        };
-      }
-
-      try {
-        const wit = await writeWitnessRecordUnderLock({
-          writer,
-          sessionRoot,
-          sessionId,
-          c6,
-          candidate: candidateRecord,
-          leafTip: leafTip ?? candidateRecord.leaf_tip,
-          createdAt: args.createdAt,
-        });
-        return {
-          kind: "complete",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          witness: wit.record,
-          witnessPath: wit.recordPath,
-          witnessReused: false,
-          c6Collision,
-        };
-      } catch (err) {
-        return {
-          kind: "candidate_only",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          c6Collision,
-          error_code: "witness_write_failed",
-          error_detail: sanitizeDiagnostic(errMessage(err)),
-        };
-      }
     });
 
     if (locked.kind === "conflict") {
       emitEdgeProtocolShadowDiagnosticOnce(locked.error_code);
+      await writeAudit("conflict", { error_code: locked.error_code, content_id: payloadDigest });
       return {
         status: "conflict",
         duration_ms: performance.now() - started,
@@ -1343,6 +1642,7 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       };
     }
     if (locked.kind === "failed") {
+      await writeAudit("journal_failed", { error_code: locked.error_code, content_id: payloadDigest });
       return {
         status: "journal_failed",
         duration_ms: performance.now() - started,
@@ -1366,6 +1666,11 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
     };
 
     if (locked.kind === "candidate_only") {
+      await writeAudit("candidate_only", {
+        error_code: locked.error_code,
+        content_id: payloadDigest,
+        candidate_record_id: locked.candidate.record_id,
+      });
       return {
         status: "candidate_only",
         duration_ms: performance.now() - started,
@@ -1378,6 +1683,11 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
       };
     }
 
+    await writeAudit("complete", {
+      content_id: payloadDigest,
+      candidate_record_id: locked.candidate.record_id,
+      witness_record_id: locked.witness.record_id,
+    });
     return {
       status: "complete",
       duration_ms: performance.now() - started,
@@ -1407,10 +1717,12 @@ export async function captureEdgeProtocolTerminalPairAtSessionRoot(args: {
 /**
  * Operator-only: admit an already-durable content-addressed source as a
  * candidate+witness pair without re-serializing messages or rewriting source bytes.
+ * Requires ownerProjectRoot so sessionRoot is validated against edge owner layout.
  * Same leaf admission / c6_collision / producer_seq rules as live pair capture.
  */
 export async function admitExistingSourceAsTerminalPair(args: {
   abrainHome: string;
+  ownerProjectRoot: string;
   sessionRoot: string;
   sessionId: string;
   contentId: string;
@@ -1466,17 +1778,53 @@ export async function admitExistingSourceAsTerminalPair(args: {
       error_detail: sanitizeDiagnostic("contentId must be 64 hex"),
     };
   }
-  const leafTip: EdgeLeafTip = {
-    id: terminalLeafId,
-    parentId: args.leafTip.parentId ?? null,
-    type: args.leafTip.type || "message",
-    ...(args.leafTip.timestampUtc ? { timestampUtc: args.leafTip.timestampUtc } : {}),
-  };
-  const sessionRoot = path.resolve(args.sessionRoot);
+  let leafTip: EdgeLeafTip;
+  try {
+    leafTip = normalizeLeafTip({
+      id: terminalLeafId,
+      parentId: args.leafTip.parentId ?? null,
+      type: resolveLeafTipType(args.leafTip.type),
+      ...(args.leafTip.timestampUtc ? { timestampUtc: args.leafTip.timestampUtc } : {}),
+    });
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      terminal_leaf_id: terminalLeafId,
+      error_code: "invalid_leaf_tip",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
+  let sessionRoot: string;
+  try {
+    sessionRoot = assertEdgeSessionRootLayout({
+      abrainHome: args.abrainHome,
+      ownerProjectRoot: args.ownerProjectRoot,
+      sessionId,
+      sessionRoot: args.sessionRoot,
+    });
+  } catch (err) {
+    return {
+      status: "journal_failed",
+      duration_ms: performance.now() - started,
+      terminal_leaf_id: terminalLeafId,
+      error_code: "session_root_not_edge_owner_layout",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
   const payloadDigest = args.contentId;
   const sourcePath = edgeSourcePath(sessionRoot, payloadDigest);
   try {
-    await fs.stat(sourcePath);
+    const st = await fs.lstat(sourcePath);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      return {
+        status: "source_failed",
+        duration_ms: performance.now() - started,
+        terminal_leaf_id: terminalLeafId,
+        error_code: st.isSymbolicLink() ? "source_symlink_rejected" : "source_not_file",
+        error_detail: sanitizeDiagnostic("existing source invalid"),
+      };
+    }
   } catch {
     return {
       status: "source_failed",
@@ -1495,157 +1843,21 @@ export async function admitExistingSourceAsTerminalPair(args: {
 
   try {
     await ensureSessionLayout(sessionRoot, args.abrainHome);
-    type PairLockResult =
-      | {
-          kind: "complete";
-          candidate: EdgeJournalRecord;
-          candidatePath: string;
-          candidateReused: boolean;
-          witness: EdgeJournalRecord;
-          witnessPath: string;
-          witnessReused: boolean;
-          c6Collision: boolean;
-        }
-      | {
-          kind: "candidate_only";
-          candidate: EdgeJournalRecord;
-          candidatePath: string;
-          candidateReused: boolean;
-          c6Collision: boolean;
-          error_code: string;
-          error_detail?: string;
-        }
-      | { kind: "conflict"; error_code: string; error_detail: string }
-      | { kind: "failed"; error_code: string; error_detail: string };
-
-    const locked = await withJournalWriter(sessionRoot, args.abrainHome, async (writer): Promise<PairLockResult> => {
+    const locked = await withJournalWriter(sessionRoot, args.abrainHome, async (writer) => {
       const index = await loadJournalIndex(sessionRoot);
       writer.seedSeq(index.maxSeq + 1);
-      const wantC6 = c6Key(c6);
-      const sameLeaf = index.candidatesByLeaf.get(terminalLeafId) ?? [];
-      const matching = sameLeaf.find((c) => c.record.payload_digest === payloadDigest) ?? null;
-      if (!matching && sameLeaf.length > 0) {
-        const otherDigest = sameLeaf[sameLeaf.length - 1]?.record.payload_digest;
-        if (otherDigest && otherDigest !== payloadDigest) {
-          return {
-            kind: "conflict",
-            error_code: "terminal_identity_content_conflict",
-            error_detail: sanitizeDiagnostic("same terminal leaf already has a different content digest"),
-          };
-        }
-      }
-      const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
-      const c6Collision = sameC6.some((c) => {
-        const otherLeaf = resolveTerminalLeafId({
-          leafTip: c.record.leaf_tip,
-          payloadDigest: c.record.payload_digest,
-          sourceContentId: c.record.source_ref?.content_id,
-        });
-        return otherLeaf !== null && otherLeaf !== terminalLeafId;
+      return admitTerminalPairUnderLock({
+        writer,
+        index,
+        sessionRoot,
+        sessionId,
+        c6,
+        leafTip,
+        terminalLeafId,
+        payloadDigest,
+        sourceRef,
+        createdAt: args.createdAt,
       });
-
-      let candidateReused = false;
-      let candidateRecord: EdgeJournalRecord;
-      let candidatePath: string;
-      if (matching) {
-        candidateReused = true;
-        candidateRecord = matching.record;
-        candidatePath = matching.path;
-      } else {
-        const producerSeq = writer.allocateSeq();
-        const runGeneration = producerSeq;
-        const createdAtRecord = args.createdAt ?? new Date().toISOString();
-        const partial = {
-          schema: EDGE_JOURNAL_SCHEMA,
-          schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
-          session_id: sessionId,
-          session_writer_epoch: writer.session_writer_epoch,
-          record_type: "candidate_capture" as const,
-          created_at: createdAtRecord,
-          payload_digest: payloadDigest,
-          c6,
-          run_generation: runGeneration,
-          source_ref: sourceRef,
-          capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
-          leaf_tip: leafTip,
-          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
-        };
-        const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
-        candidateRecord = {
-          ...partial,
-          record_id: recordId,
-          producer_seq: producerSeq,
-          deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
-        };
-        candidatePath = edgeRecordPath(sessionRoot, producerSeq, recordId);
-        const body = `${JSON.stringify(candidateRecord)}\n`;
-        if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
-          return {
-            kind: "failed",
-            error_code: "record_too_large",
-            error_detail: sanitizeDiagnostic(`record exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
-          };
-        }
-        const status = await durableAtomicCreateFile(candidatePath, body, {
-          mode: SOURCE_MODE,
-          verifyCreated: false,
-          tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
-        });
-        if (status === "collision") {
-          return {
-            kind: "failed",
-            error_code: "journal_record_collision",
-            error_detail: sanitizeDiagnostic("journal record collision"),
-          };
-        }
-        await assertMode(candidatePath, SOURCE_MODE);
-        if (c6Collision) emitEdgeProtocolShadowDiagnosticOnce("c6_collision");
-      }
-
-      const existingWit = index.witnessByCandidateId.get(candidateRecord.record_id);
-      if (existingWit) {
-        return {
-          kind: "complete",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          witness: existingWit.record,
-          witnessPath: existingWit.path,
-          witnessReused: true,
-          c6Collision,
-        };
-      }
-      try {
-        const wit = await writeWitnessRecordUnderLock({
-          writer,
-          sessionRoot,
-          sessionId,
-          c6,
-          candidate: candidateRecord,
-          leafTip,
-          createdAt: args.createdAt,
-        });
-        return {
-          kind: "complete",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          witness: wit.record,
-          witnessPath: wit.recordPath,
-          witnessReused: false,
-          c6Collision,
-        };
-      } catch (err) {
-        return {
-          kind: "candidate_only",
-          candidate: candidateRecord,
-          candidatePath,
-          candidateReused,
-          c6Collision,
-          error_code: "witness_write_failed",
-          error_detail: sanitizeDiagnostic(errMessage(err)),
-        };
-      }
     });
 
     if (locked.kind === "conflict") {
@@ -1886,66 +2098,161 @@ export async function recoverEdgeProtocolMissingWitnessesForOwner(args: {
   }
 }
 
-const UNREF_SOURCE_RECOVERY_ACCEPTED_STOP = new Set(["stop", "length"]);
-
 /**
  * Operator recovery for journal-unreferenced source sidecars.
  *
- * Default dry-run (no writes). `--execute` / `execute:true` writes candidate+witness
- * under the same session journal OFD lock + monotonic producer_seq. Never creates
- * semantic jobs / ACK / mutates source bytes. Never auto-invoked on session_start.
+ * Default dry-run (no writes). execute writes candidate+witness under the same
+ * session journal OFD lock + monotonic producer_seq. Never creates semantic
+ * jobs / ACK / mutates source bytes. Never auto-invoked on session_start.
  *
- * Eligible sources: valid envelope, healthy terminal assistant, not already
- * referenced by a candidate. Terminal leaf identity for recovery uses the
- * content_id as a stable synthetic leaf (legacy_source_recovery) so redrive is
- * idempotent without inventing SessionManager tips.
+ * Identity rules (never synthesize C6/leaf):
+ *  - leaf from source terminal assistant id/type/stopReason when present;
+ *    otherwise from unique production capture-audit leaf_tip for (session,digest)
+ *  - C6 only from unique capture-audit match (preserves number/string/subturn/parent)
+ *  - no unique audit match → nonrecoverable (crash source-only stays source-only)
+ *  - terminal_identity_content_conflict → rejected, never recover
+ *  - old c6_content_conflict with distinct real leaves is recoverable via audit+leaf
  */
 export async function recoverEdgeProtocolUnreferencedSources(args: {
   abrainHome: string;
   ownerProjectRoot?: string;
   sessionId?: string;
+  /** Explicit multi-session walk; required for execute when sessionId omitted. */
+  allSessions?: boolean;
+  /** Eligible-only cap; execute requires positive integer ≤ 100. */
   limit?: number;
   execute?: boolean;
+  /** Required for execute: production capture audit JSONL path. */
+  captureAuditPath?: string;
+  /** Required for execute: durable operator audit JSONL path. */
+  operatorAuditPath?: string;
 }): Promise<EdgeUnreferencedSourceRecoveryResult> {
   const started = performance.now();
   const mode: "dry_run" | "execute" = args.execute === true ? "execute" : "dry_run";
-  const limit = args.limit !== undefined && Number.isInteger(args.limit) && args.limit > 0
-    ? args.limit
-    : Number.POSITIVE_INFINITY;
+  const empty = (extra: Partial<EdgeUnreferencedSourceRecoveryResult> = {}): EdgeUnreferencedSourceRecoveryResult => ({
+    status: "failed",
+    mode,
+    duration_ms: performance.now() - started,
+    scanned: 0,
+    eligible: 0,
+    recoverable: 0,
+    nonrecoverable: 0,
+    rejected: 0,
+    recovered: 0,
+    reused: 0,
+    failed: 0,
+    skipped: 0,
+    already_referenced: 0,
+    sessions_scanned: 0,
+    items: [],
+    ...extra,
+  });
+
+  // Execute gates: owner realpath, session scope, limit, capture+operator audit paths.
+  let ownerProjectRoot: string | undefined;
+  if (args.ownerProjectRoot) {
+    try {
+      ownerProjectRoot = await fs.realpath(path.resolve(args.ownerProjectRoot));
+    } catch (err) {
+      return empty({
+        error_code: "owner_project_root_invalid",
+        error_detail: sanitizeDiagnostic(errMessage(err)),
+      });
+    }
+  }
+  if (mode === "execute") {
+    if (!ownerProjectRoot) {
+      return empty({
+        error_code: "owner_project_root_required",
+        error_detail: sanitizeDiagnostic("execute requires --owner-project-root (realpath)"),
+      });
+    }
+    if (!args.sessionId && args.allSessions !== true) {
+      return empty({
+        error_code: "session_scope_required",
+        error_detail: sanitizeDiagnostic("execute requires --session-id or --all-sessions"),
+      });
+    }
+    if (args.limit === undefined || !Number.isInteger(args.limit) || args.limit < 1 || args.limit > EDGE_OPERATOR_RECOVERY_MAX_LIMIT) {
+      return empty({
+        error_code: "limit_required",
+        error_detail: sanitizeDiagnostic(`execute requires positive --limit ≤ ${EDGE_OPERATOR_RECOVERY_MAX_LIMIT}`),
+      });
+    }
+    if (!args.captureAuditPath) {
+      return empty({
+        error_code: "capture_audit_path_required",
+        error_detail: sanitizeDiagnostic("execute requires --capture-audit-path"),
+      });
+    }
+    if (!args.operatorAuditPath) {
+      return empty({
+        error_code: "operator_audit_path_required",
+        error_detail: sanitizeDiagnostic("execute requires --operator-audit-path"),
+      });
+    }
+  }
+
+  const limit =
+    args.limit !== undefined && Number.isInteger(args.limit) && args.limit > 0
+      ? Math.min(args.limit, EDGE_OPERATOR_RECOVERY_MAX_LIMIT)
+      : mode === "execute"
+        ? 0
+        : EDGE_OPERATOR_RECOVERY_MAX_LIMIT;
+
   const items: EdgeUnreferencedSourceRecoveryItem[] = [];
   let scanned = 0;
   let eligible = 0;
+  let recoverable = 0;
+  let nonrecoverable = 0;
+  let rejected = 0;
   let recovered = 0;
   let reused = 0;
   let failed = 0;
   let skipped = 0;
   let alreadyReferenced = 0;
   let sessionsScanned = 0;
+  const operatorAuditPath = args.operatorAuditPath ? path.resolve(args.operatorAuditPath) : undefined;
+
+  const pushItem = async (item: EdgeUnreferencedSourceRecoveryItem, sessionIdForHash: string): Promise<void> => {
+    items.push(item);
+    if (operatorAuditPath && mode === "execute") {
+      await appendEdgeOperatorAuditEntry(operatorAuditPath, {
+        schema: EDGE_OPERATOR_AUDIT_SCHEMA,
+        schema_version: 1,
+        created_at: new Date().toISOString(),
+        mode,
+        kind: "item",
+        session_id_hash: sessionIdHash(sessionIdForHash),
+        content_id_prefix: item.content_id_prefix,
+        result: item.result,
+        ...(item.error_code ? { error_code: item.error_code } : {}),
+        ...(item.terminal_leaf_id_prefix ? { terminal_leaf_id_prefix: item.terminal_leaf_id_prefix } : {}),
+        ...(item.candidate_record_id_prefix ? { candidate_record_id_prefix: item.candidate_record_id_prefix } : {}),
+        ...(item.witness_record_id_prefix ? { witness_record_id_prefix: item.witness_record_id_prefix } : {}),
+      });
+    }
+  };
 
   try {
     const abrainHome = path.resolve(args.abrainHome);
+    let captureIndex = new Map<string, EdgeCaptureAuditEntry[]>();
+    if (args.captureAuditPath) {
+      captureIndex = await loadEdgeCaptureAuditIndex(path.resolve(args.captureAuditPath));
+    } else if (mode === "execute") {
+      return empty({ error_code: "capture_audit_path_required" });
+    }
+
     const root = edgeProtocolShadowRoot(abrainHome);
     const byOwnerDir = path.join(root, "by-owner");
     let ownerKeys: string[];
     try {
       const st = await fs.lstat(byOwnerDir);
       if (st.isSymbolicLink() || !st.isDirectory()) {
-        return {
-          status: "failed",
-          mode,
-          duration_ms: performance.now() - started,
-          scanned: 0,
-          eligible: 0,
-          recovered: 0,
-          reused: 0,
-          failed: 0,
-          skipped: 0,
-          already_referenced: 0,
-          sessions_scanned: 0,
-          items: [],
+        return empty({
           error_code: "edge_root_invalid",
           error_detail: sanitizeDiagnostic("by-owner is not a directory"),
-        };
+        });
       }
       ownerKeys = await fs.readdir(byOwnerDir);
     } catch (err) {
@@ -1956,6 +2263,9 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
           duration_ms: performance.now() - started,
           scanned: 0,
           eligible: 0,
+          recoverable: 0,
+          nonrecoverable: 0,
+          rejected: 0,
           recovered: 0,
           reused: 0,
           failed: 0,
@@ -1968,9 +2278,10 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
       throw err;
     }
 
-    const wantOwnerKey = args.ownerProjectRoot
-      ? edgeOwnerKey(args.ownerProjectRoot)
-      : null;
+    const wantOwnerKey = ownerProjectRoot ? edgeOwnerKey(ownerProjectRoot) : null;
+    if (mode === "execute" && !wantOwnerKey) {
+      return empty({ error_code: "owner_project_root_required" });
+    }
     ownerKeys.sort();
     for (const ownerKey of ownerKeys) {
       if (wantOwnerKey && ownerKey !== wantOwnerKey) continue;
@@ -1993,6 +2304,7 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
       sessionNames.sort();
       for (const sessionName of sessionNames) {
         if (args.sessionId && sessionName !== args.sessionId) continue;
+        if (!args.sessionId && mode === "execute" && args.allSessions !== true) continue;
         const sessionPath = path.join(sessionsDir, sessionName);
         try {
           const st = await fs.lstat(sessionPath);
@@ -2004,6 +2316,20 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
           skipped += 1;
           continue;
         }
+        // Execute: session root must belong to edge owner layout for this owner.
+        if (mode === "execute" && ownerProjectRoot) {
+          try {
+            assertEdgeSessionRootLayout({
+              abrainHome,
+              ownerProjectRoot,
+              sessionId: sessionName,
+              sessionRoot: sessionPath,
+            });
+          } catch {
+            skipped += 1;
+            continue;
+          }
+        }
         sessionsScanned += 1;
         const sourcesDir = edgeSourcesDir(sessionPath);
         let sourceNames: string[];
@@ -2014,38 +2340,46 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
           throw err;
         }
         const index = await loadJournalIndex(sessionPath);
+        const sessHashPrefix = sessionIdHash(sessionName).slice(0, 12);
         sourceNames.sort();
         for (const sourceName of sourceNames) {
           if (!/^[0-9a-f]{64}\.json$/.test(sourceName)) continue;
-          if (scanned >= limit) break;
           scanned += 1;
           const contentId = sourceName.slice(0, 64);
           const contentPrefix = contentId.slice(0, 12);
           if (index.candidatesByContentId.has(contentId)) {
             alreadyReferenced += 1;
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "already_referenced",
-            });
+            }, sessionName);
             continue;
           }
 
           const sourcePath = path.join(sourcesDir, sourceName);
-          let raw: Buffer;
-          try {
-            raw = await fs.readFile(sourcePath);
-          } catch (err) {
-            failed += 1;
-            items.push({
-              session_id: sessionName,
-              content_id_prefix: contentPrefix,
-              result: "failed",
-              error_code: "source_read_failed",
-              error_detail: sanitizeDiagnostic(errMessage(err)),
-            });
+          const read = await readEdgeSourceBytesSafe(sourcePath);
+          if (!read.ok) {
+            if (read.error_code === "source_symlink_rejected") {
+              rejected += 1;
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
+                content_id_prefix: contentPrefix,
+                result: "rejected",
+                error_code: read.error_code,
+              }, sessionName);
+            } else {
+              failed += 1;
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
+                content_id_prefix: contentPrefix,
+                result: "failed",
+                error_code: read.error_code,
+              }, sessionName);
+            }
             continue;
           }
+          const raw = read.bytes;
           const verified = verifyEdgeSourceEnvelopeBytes(raw, {
             sessionId: sessionName,
             contentId,
@@ -2053,12 +2387,12 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
           });
           if (!verified.ok) {
             skipped += 1;
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "skipped",
               error_code: verified.code,
-            });
+            }, sessionName);
             continue;
           }
           let messages: unknown;
@@ -2066,49 +2400,130 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
             messages = JSON.parse(verified.messages_raw);
           } catch {
             skipped += 1;
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "skipped",
               error_code: "messages_parse_failed",
-            });
+            }, sessionName);
             continue;
           }
           if (!Array.isArray(messages) || !sourceHasHealthyTerminalAssistant(messages)) {
             skipped += 1;
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "skipped",
               error_code: "not_healthy_terminal",
-            });
+            }, sessionName);
             continue;
           }
 
+          // limit counts eligible only
+          if (eligible >= limit) {
+            break;
+          }
           eligible += 1;
-          const leafTip = legacySourceRecoveryLeafTip(contentId);
+
+          const auditHit = resolveUniqueCaptureAuditIdentity(captureIndex, sessionName, contentId);
+          if (!auditHit.ok) {
+            if (auditHit.reason === "terminal_identity_content_conflict") {
+              rejected += 1;
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
+                content_id_prefix: contentPrefix,
+                result: "rejected",
+                error_code: "terminal_identity_content_conflict",
+              }, sessionName);
+            } else {
+              nonrecoverable += 1;
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
+                content_id_prefix: contentPrefix,
+                result: "nonrecoverable",
+                error_code: auditHit.reason === "ambiguous" ? "capture_audit_ambiguous" : "capture_audit_missing",
+              }, sessionName);
+            }
+            continue;
+          }
+          if (auditHit.entry.error_code === "terminal_identity_content_conflict") {
+            rejected += 1;
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
+              content_id_prefix: contentPrefix,
+              result: "rejected",
+              error_code: "terminal_identity_content_conflict",
+            }, sessionName);
+            continue;
+          }
+
+          // Leaf: prefer source terminal assistant id; else capture-audit leaf (never content_id).
+          const sourceLeaf = extractTerminalLeafFromSourceMessages(messages);
+          let leafTip: EdgeLeafTip;
+          if (sourceLeaf.ok) {
+            if (sourceLeaf.leafTip.id !== auditHit.entry.leaf_tip.id) {
+              rejected += 1;
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
+                content_id_prefix: contentPrefix,
+                result: "rejected",
+                error_code: "source_audit_leaf_mismatch",
+                terminal_leaf_id_prefix: idPrefix(sourceLeaf.leafTip.id),
+              }, sessionName);
+              continue;
+            }
+            leafTip = {
+              id: sourceLeaf.leafTip.id,
+              parentId: sourceLeaf.leafTip.parentId ?? auditHit.entry.leaf_tip.parentId ?? null,
+              type: resolveLeafTipType(sourceLeaf.leafTip.type || auditHit.entry.leaf_tip.type),
+              ...(sourceLeaf.leafTip.timestampUtc || auditHit.entry.leaf_tip.timestampUtc
+                ? { timestampUtc: sourceLeaf.leafTip.timestampUtc ?? auditHit.entry.leaf_tip.timestampUtc }
+                : {}),
+            };
+          } else if (sourceLeaf.reason === "missing_terminal_leaf_id") {
+            // Healthy terminal without message id: use audit leaf (immutable production identity).
+            leafTip = normalizeLeafTip(auditHit.entry.leaf_tip);
+          } else {
+            nonrecoverable += 1;
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
+              content_id_prefix: contentPrefix,
+              result: "nonrecoverable",
+              error_code: sourceLeaf.reason,
+            }, sessionName);
+            continue;
+          }
+
+          // C6 only from capture audit — preserve original number/string/subturn/parent.
+          const c6 = normalizeC6(auditHit.entry.c6);
           const terminalLeafId = leafTip.id;
-          const c6: EdgeC6Identity = {
-            session_id: sessionName,
-            turn_id: "source_recovery",
-            sub_agent_label: "unreferenced_source_recovery",
-          };
+          recoverable += 1;
 
           if (mode === "dry_run") {
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "would_recover",
-              terminal_leaf_id: terminalLeafId,
-            });
+              terminal_leaf_id_prefix: idPrefix(terminalLeafId),
+            }, sessionName);
+            continue;
+          }
+
+          if (!ownerProjectRoot) {
+            failed += 1;
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
+              content_id_prefix: contentPrefix,
+              result: "failed",
+              error_code: "owner_project_root_required",
+            }, sessionName);
             continue;
           }
 
           try {
-            // Admit the existing content-addressed source without re-serializing
-            // messages (re-stringify would drift payload_digest and leave orphans).
             const pair = await admitExistingSourceAsTerminalPair({
               abrainHome,
+              ownerProjectRoot,
               sessionRoot: sessionPath,
               sessionId: sessionName,
               contentId,
@@ -2119,24 +2534,27 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
             if (pair.status === "complete") {
               if (pair.candidate_reused && pair.witness_reused) {
                 reused += 1;
-                items.push({
-                  session_id: sessionName,
+                await pushItem({
+                  session_id_hash_prefix: sessHashPrefix,
                   content_id_prefix: contentPrefix,
                   result: "reused",
-                  terminal_leaf_id: terminalLeafId,
+                  terminal_leaf_id_prefix: idPrefix(terminalLeafId),
+                  candidate_record_id_prefix: idPrefix(pair.candidate?.record?.record_id),
+                  witness_record_id_prefix: idPrefix(pair.witness?.record?.record_id),
                   c6_collision: pair.c6_collision,
-                });
+                }, sessionName);
               } else {
                 recovered += 1;
-                items.push({
-                  session_id: sessionName,
+                await pushItem({
+                  session_id_hash_prefix: sessHashPrefix,
                   content_id_prefix: contentPrefix,
                   result: "recovered",
-                  terminal_leaf_id: terminalLeafId,
+                  terminal_leaf_id_prefix: idPrefix(terminalLeafId),
+                  candidate_record_id_prefix: idPrefix(pair.candidate?.record?.record_id),
+                  witness_record_id_prefix: idPrefix(pair.witness?.record?.record_id),
                   c6_collision: pair.c6_collision,
-                });
+                }, sessionName);
               }
-              // Refresh content index for subsequent items in same session.
               if (pair.candidate?.record) {
                 index.candidatesByContentId.set(contentId, {
                   record: pair.candidate.record,
@@ -2144,41 +2562,74 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
                 });
               }
             } else if (pair.status === "conflict") {
-              failed += 1;
-              items.push({
-                session_id: sessionName,
-                content_id_prefix: contentPrefix,
-                result: "failed",
-                terminal_leaf_id: terminalLeafId,
-                error_code: pair.error_code ?? "conflict",
-                error_detail: pair.error_detail,
-              });
+              if (pair.error_code === "terminal_identity_content_conflict") {
+                rejected += 1;
+                await pushItem({
+                  session_id_hash_prefix: sessHashPrefix,
+                  content_id_prefix: contentPrefix,
+                  result: "rejected",
+                  terminal_leaf_id_prefix: idPrefix(terminalLeafId),
+                  error_code: "terminal_identity_content_conflict",
+                  error_detail: pair.error_detail,
+                }, sessionName);
+              } else {
+                failed += 1;
+                await pushItem({
+                  session_id_hash_prefix: sessHashPrefix,
+                  content_id_prefix: contentPrefix,
+                  result: "failed",
+                  terminal_leaf_id_prefix: idPrefix(terminalLeafId),
+                  error_code: pair.error_code ?? "conflict",
+                  error_detail: pair.error_detail,
+                }, sessionName);
+              }
             } else {
               failed += 1;
-              items.push({
-                session_id: sessionName,
+              await pushItem({
+                session_id_hash_prefix: sessHashPrefix,
                 content_id_prefix: contentPrefix,
                 result: "failed",
-                terminal_leaf_id: terminalLeafId,
+                terminal_leaf_id_prefix: idPrefix(terminalLeafId),
                 error_code: pair.error_code ?? pair.status,
                 error_detail: pair.error_detail,
-              });
+              }, sessionName);
             }
           } catch (err) {
             failed += 1;
-            items.push({
-              session_id: sessionName,
+            await pushItem({
+              session_id_hash_prefix: sessHashPrefix,
               content_id_prefix: contentPrefix,
               result: "failed",
-              terminal_leaf_id: terminalLeafId,
+              terminal_leaf_id_prefix: idPrefix(terminalLeafId),
               error_code: "pair_capture_threw",
               error_detail: sanitizeDiagnostic(errMessage(err)),
-            });
+            }, sessionName);
           }
         }
-        if (scanned >= limit) break;
+        if (eligible >= limit) break;
       }
-      if (scanned >= limit) break;
+      if (eligible >= limit) break;
+    }
+
+    if (operatorAuditPath && mode === "execute") {
+      await appendEdgeOperatorAuditEntry(operatorAuditPath, {
+        schema: EDGE_OPERATOR_AUDIT_SCHEMA,
+        schema_version: 1,
+        created_at: new Date().toISOString(),
+        mode,
+        kind: "summary",
+        session_id_hash: args.sessionId ? sessionIdHash(args.sessionId) : "all_sessions",
+        scanned,
+        eligible,
+        recoverable,
+        nonrecoverable,
+        rejected,
+        recovered,
+        reused,
+        failed,
+        skipped,
+        already_referenced: alreadyReferenced,
+      });
     }
 
     return {
@@ -2187,12 +2638,16 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
       duration_ms: performance.now() - started,
       scanned,
       eligible,
+      recoverable,
+      nonrecoverable,
+      rejected,
       recovered,
       reused,
       failed,
       skipped,
       already_referenced: alreadyReferenced,
       sessions_scanned: sessionsScanned,
+      ...(operatorAuditPath ? { operator_audit_path_hash_prefix: sha256Hex(operatorAuditPath).slice(0, 12) } : {}),
       items,
     };
   } catch (err) {
@@ -2202,6 +2657,9 @@ export async function recoverEdgeProtocolUnreferencedSources(args: {
       duration_ms: performance.now() - started,
       scanned,
       eligible,
+      recoverable,
+      nonrecoverable,
+      rejected,
       recovered,
       reused,
       failed,
@@ -2246,192 +2704,6 @@ export async function listEdgeJournalRecords(sessionRoot: string): Promise<EdgeJ
   }
   records.sort((a, b) => a.producer_seq - b.producer_seq);
   return records;
-}
-
-/**
- * Latest candidate for C6: scan record filenames by producer_seq descending;
- * return on first matching candidate. Normal agent_settled hits near the newest
- * record — does not full-parse the journal.
- */
-export async function findLatestCandidateForC6(
-  sessionRoot: string,
-  c6: EdgeC6Identity,
-): Promise<{ record: EdgeJournalRecord; path: string } | null> {
-  const want = c6Key(c6);
-  const dir = edgeJournalRecordsDir(sessionRoot);
-  let names: string[];
-  try {
-    names = await fs.readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  // 20-digit zero-padded producer_seq prefix → lexicographic order == seq order.
-  const newestFirst = names
-    .filter((name) => RECORD_FILENAME_RE.test(name))
-    .sort()
-    .reverse();
-  for (const name of newestFirst) {
-    const full = path.join(dir, name);
-    let parsed: EdgeJournalRecord;
-    try {
-      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
-      continue;
-    }
-    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
-    if (c6Key(parsed.c6) !== want) continue;
-    return { record: parsed, path: full };
-  }
-  return null;
-}
-
-/** Candidate by exact record_id (for pinned witness recovery). */
-export async function findCandidateByRecordId(
-  sessionRoot: string,
-  recordId: string,
-): Promise<{ record: EdgeJournalRecord; path: string } | null> {
-  if (!/^[0-9a-f]{64}$/.test(recordId)) return null;
-  const dir = edgeJournalRecordsDir(sessionRoot);
-  let names: string[];
-  try {
-    names = await fs.readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  for (const name of names) {
-    const parsedName = parseEdgeRecordFilename(name);
-    if (!parsedName || parsedName.recordId !== recordId) continue;
-    const full = path.join(dir, name);
-    let parsed: EdgeJournalRecord;
-    try {
-      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
-      continue;
-    }
-    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
-    if (parsed.record_id !== recordId) continue;
-    return { record: parsed, path: full };
-  }
-  return null;
-}
-
-/**
- * Legacy helper: existing candidate for same C6 + payload_digest.
- * Pair admission no longer keys on C6; prefer {@link findCandidateForLeafAndDigest}.
- * Newest-first so concurrent retries latch onto the durable head for that content.
- */
-export async function findCandidateForC6AndDigest(
-  sessionRoot: string,
-  c6: EdgeC6Identity,
-  payloadDigest: string,
-): Promise<{ record: EdgeJournalRecord; path: string } | null> {
-  if (!/^[0-9a-f]{64}$/.test(payloadDigest)) return null;
-  const want = c6Key(c6);
-  const dir = edgeJournalRecordsDir(sessionRoot);
-  let names: string[];
-  try {
-    names = await fs.readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  const newestFirst = names
-    .filter((name) => RECORD_FILENAME_RE.test(name))
-    .sort()
-    .reverse();
-  for (const name of newestFirst) {
-    const full = path.join(dir, name);
-    let parsed: EdgeJournalRecord;
-    try {
-      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
-      continue;
-    }
-    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
-    if (parsed.payload_digest !== payloadDigest) continue;
-    if (c6Key(parsed.c6) !== want) continue;
-    return { record: parsed, path: full };
-  }
-  return null;
-}
-
-/**
- * Idempotent pair key: existing candidate for same terminal leaf + payload_digest.
- * Legacy rows without leaf_tip derive leaf id from content digest.
- */
-export async function findCandidateForLeafAndDigest(
-  sessionRoot: string,
-  terminalLeafId: string,
-  payloadDigest: string,
-): Promise<{ record: EdgeJournalRecord; path: string } | null> {
-  if (!terminalLeafId || !/^[0-9a-f]{64}$/.test(payloadDigest)) return null;
-  const dir = edgeJournalRecordsDir(sessionRoot);
-  let names: string[];
-  try {
-    names = await fs.readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  const newestFirst = names
-    .filter((name) => RECORD_FILENAME_RE.test(name))
-    .sort()
-    .reverse();
-  for (const name of newestFirst) {
-    const full = path.join(dir, name);
-    let parsed: EdgeJournalRecord;
-    try {
-      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
-      continue;
-    }
-    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "candidate_capture") continue;
-    if (parsed.payload_digest !== payloadDigest) continue;
-    const leafId = resolveTerminalLeafId({
-      leafTip: parsed.leaf_tip,
-      payloadDigest: parsed.payload_digest,
-      sourceContentId: parsed.source_ref?.content_id,
-    });
-    if (leafId !== terminalLeafId) continue;
-    return { record: parsed, path: full };
-  }
-  return null;
-}
-
-/** Existing terminal_witness for a candidate record_id (idempotent witness gate). */
-export async function findTerminalWitnessForCandidate(
-  sessionRoot: string,
-  candidateRecordId: string,
-): Promise<{ record: EdgeJournalRecord; path: string } | null> {
-  if (!/^[0-9a-f]{64}$/.test(candidateRecordId)) return null;
-  const dir = edgeJournalRecordsDir(sessionRoot);
-  let names: string[];
-  try {
-    names = await fs.readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  // Newest-first: a late duplicate would still be found; callers treat any hit as complete.
-  const newestFirst = names
-    .filter((name) => RECORD_FILENAME_RE.test(name))
-    .sort()
-    .reverse();
-  for (const name of newestFirst) {
-    const full = path.join(dir, name);
-    let parsed: EdgeJournalRecord;
-    try {
-      parsed = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
-      continue;
-    }
-    if (parsed.schema !== EDGE_JOURNAL_SCHEMA || parsed.record_type !== "terminal_witness") continue;
-    if (parsed.candidate_ref?.record_id !== candidateRecordId) continue;
-    return { record: parsed, path: full };
-  }
-  return null;
 }
 
 // ── internals ──────────────────────────────────────────────────────────
@@ -2597,13 +2869,203 @@ async function loadJournalIndex(sessionRoot: string): Promise<JournalIndex> {
   };
 }
 
-function indexFindLatestCandidateForC6(
-  index: JournalIndex,
-  c6: EdgeC6Identity,
-): { record: EdgeJournalRecord; path: string } | null {
-  const list = index.candidatesByC6.get(c6Key(c6));
-  if (!list || list.length === 0) return null;
-  return list[list.length - 1] ?? null;
+type PairLockResult =
+  | {
+      kind: "complete";
+      candidate: EdgeJournalRecord;
+      candidatePath: string;
+      candidateReused: boolean;
+      witness: EdgeJournalRecord;
+      witnessPath: string;
+      witnessReused: boolean;
+      c6Collision: boolean;
+    }
+  | {
+      kind: "candidate_only";
+      candidate: EdgeJournalRecord;
+      candidatePath: string;
+      candidateReused: boolean;
+      c6Collision: boolean;
+      error_code: string;
+      error_detail?: string;
+    }
+  | { kind: "conflict"; error_code: string; error_detail: string }
+  | { kind: "failed"; error_code: string; error_detail: string };
+
+/**
+ * Shared pair admission under journal OFD lock (live capture + operator admit).
+ *
+ * Looks up real terminal leaf key and legacy_content:digest; reuses only when
+ * same C6 + same digest (avoids duplicate pairs for legacy candidate-only rows).
+ */
+async function admitTerminalPairUnderLock(args: {
+  writer: JournalWriter;
+  index: JournalIndex;
+  sessionRoot: string;
+  sessionId: string;
+  c6: EdgeC6Identity;
+  leafTip: EdgeLeafTip;
+  terminalLeafId: string;
+  payloadDigest: string;
+  sourceRef: EdgeSourceRef;
+  createdAt?: string;
+}): Promise<PairLockResult> {
+  const {
+    writer,
+    index,
+    sessionRoot,
+    sessionId,
+    c6,
+    leafTip,
+    terminalLeafId,
+    payloadDigest,
+    sourceRef,
+  } = args;
+  const wantC6 = c6Key(c6);
+
+  // Admission key = terminal leaf (not C6). Same leaf different content fail closed.
+  const sameLeaf = index.candidatesByLeaf.get(terminalLeafId) ?? [];
+  let matching = sameLeaf.find((c) => c.record.payload_digest === payloadDigest) ?? null;
+
+  // Legacy candidate-only rows: keyed as legacy_content:digest. Reuse only when
+  // same C6 + same digest (never invent a second pair for the same content).
+  if (!matching) {
+    const legacyKey = `legacy_content:${payloadDigest}`;
+    const legacyList = index.candidatesByLeaf.get(legacyKey) ?? [];
+    const legacyHit = legacyList.find(
+      (c) => c.record.payload_digest === payloadDigest && c6Key(c.record.c6) === wantC6,
+    ) ?? null;
+    if (legacyHit) matching = legacyHit;
+  }
+
+  if (!matching && sameLeaf.length > 0) {
+    const otherDigest = sameLeaf[sameLeaf.length - 1]?.record.payload_digest;
+    if (otherDigest && otherDigest !== payloadDigest) {
+      return {
+        kind: "conflict",
+        error_code: "terminal_identity_content_conflict",
+        error_detail: sanitizeDiagnostic("same terminal leaf already has a different content digest"),
+      };
+    }
+  }
+
+  // C6 collision is attribution diagnostic only — never unique admission.
+  const sameC6 = index.candidatesByC6.get(wantC6) ?? [];
+  const c6Collision = sameC6.some((c) => {
+    const otherLeaf = resolveTerminalLeafId({
+      leafTip: c.record.leaf_tip,
+      payloadDigest: c.record.payload_digest,
+      sourceContentId: c.record.source_ref?.content_id,
+    });
+    return otherLeaf !== null && otherLeaf !== terminalLeafId && otherLeaf !== `legacy_content:${payloadDigest}`;
+  });
+
+  let candidateReused = false;
+  let candidateRecord: EdgeJournalRecord;
+  let candidatePath: string;
+
+  if (matching) {
+    candidateReused = true;
+    candidateRecord = matching.record;
+    candidatePath = matching.path;
+  } else {
+    const producerSeq = writer.allocateSeq();
+    const runGeneration = producerSeq;
+    const createdAtRecord = args.createdAt ?? new Date().toISOString();
+    const partial = {
+      schema: EDGE_JOURNAL_SCHEMA,
+      schema_version: EDGE_JOURNAL_SCHEMA_VERSION,
+      session_id: sessionId,
+      session_writer_epoch: writer.session_writer_epoch,
+      record_type: "candidate_capture" as const,
+      created_at: createdAtRecord,
+      payload_digest: payloadDigest,
+      c6,
+      run_generation: runGeneration,
+      source_ref: sourceRef,
+      capabilities: EDGE_PROTOCOL_SHADOW_CAPABILITIES,
+      leaf_tip: leafTip,
+      deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"] as const,
+    };
+    const recordId = computeEdgeJournalRecordId(partial as Readonly<Record<string, unknown>>);
+    candidateRecord = {
+      ...partial,
+      record_id: recordId,
+      producer_seq: producerSeq,
+      deferred_by_missing_core: ["session_transaction", "launch_broker", "terminal_seal", "link_open_close"],
+    };
+    candidatePath = edgeRecordPath(sessionRoot, producerSeq, recordId);
+    const body = `${JSON.stringify(candidateRecord)}\n`;
+    if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
+      return {
+        kind: "failed",
+        error_code: "record_too_large",
+        error_detail: sanitizeDiagnostic(`record exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
+      };
+    }
+    const status = await durableAtomicCreateFile(candidatePath, body, {
+      mode: SOURCE_MODE,
+      verifyCreated: false,
+      tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
+    });
+    if (status === "collision") {
+      return {
+        kind: "failed",
+        error_code: "journal_record_collision",
+        error_detail: sanitizeDiagnostic("journal record collision"),
+      };
+    }
+    await assertMode(candidatePath, SOURCE_MODE);
+    if (c6Collision) {
+      emitEdgeProtocolShadowDiagnosticOnce("c6_collision");
+    }
+  }
+
+  const existingWit = index.witnessByCandidateId.get(candidateRecord.record_id);
+  if (existingWit) {
+    return {
+      kind: "complete",
+      candidate: candidateRecord,
+      candidatePath,
+      candidateReused,
+      witness: existingWit.record,
+      witnessPath: existingWit.path,
+      witnessReused: true,
+      c6Collision,
+    };
+  }
+
+  try {
+    const wit = await writeWitnessRecordUnderLock({
+      writer,
+      sessionRoot,
+      sessionId,
+      c6,
+      candidate: candidateRecord,
+      leafTip: leafTip ?? candidateRecord.leaf_tip,
+      createdAt: args.createdAt,
+    });
+    return {
+      kind: "complete",
+      candidate: candidateRecord,
+      candidatePath,
+      candidateReused,
+      witness: wit.record,
+      witnessPath: wit.recordPath,
+      witnessReused: false,
+      c6Collision,
+    };
+  } catch (err) {
+    return {
+      kind: "candidate_only",
+      candidate: candidateRecord,
+      candidatePath,
+      candidateReused,
+      c6Collision,
+      error_code: "witness_write_failed",
+      error_detail: sanitizeDiagnostic(errMessage(err)),
+    };
+  }
 }
 
 /**
