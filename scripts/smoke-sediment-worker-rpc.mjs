@@ -2127,6 +2127,174 @@ await check("deferred unfinished artifact → current_candidate_deferred; no CP 
   sediment._resetAutoWriteStateForTests();
 });
 
+await check("deferred attempt-local: recursive candidate cannot advance CP; next terminal isolated", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+
+  // Attempt A: note deferred under ALS; consume path would throw deferred.
+  let sawDeferred = false;
+  await sediment._runWithTaskScopedCandidateDeferredAttemptForTests(async () => {
+    sediment._noteTaskScopedCandidateDeferredForTests("sess-shared");
+    assert(sediment._isTaskScopedCandidateDeferredThisAttemptForTests() === true, "attempt A deferred");
+    // CP-hold contract still holds for deferred reasons.
+    assert(
+      sediment._shouldAdvanceAfterResultsForTests([
+        { status: "skipped", reason: "multiview_staged_for_replay" },
+        { status: "created", reason: undefined },
+      ]) === false,
+      "deferred + later created must HOLD CP (no recursive advance)",
+    );
+    sawDeferred = true;
+  });
+  assert(sawDeferred, "attempt A ran");
+
+  // Next independent attempt (same session id): ALS empty — no sticky leak.
+  await sediment._runWithTaskScopedCandidateDeferredAttemptForTests(async () => {
+    assert(
+      sediment._isTaskScopedCandidateDeferredThisAttemptForTests() === false,
+      "next terminal/attempt must not inherit sticky deferred",
+    );
+    assert(
+      sediment._shouldAdvanceAfterResultsForTests([
+        { status: "created" },
+      ]) === true,
+      "independent task drain still advances when no deferred",
+    );
+  });
+
+  // Worker: deferred after same-attempt CP advance → fatal invariant, not retryable redrive.
+  const term = hex64("term-deferred-cp-advanced");
+  const m = baseManifest({
+    request_id: hex64("req-deferred-cp-advanced"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [
+      { role: "user", content: "d1" },
+      { role: "assistant", content: "d2", stopReason: "end_turn" },
+    ],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const store = new Map();
+  const tipId = "sw-tip-deferred-adv";
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      // Bug reproduction: deferred throw after CP already covers tip this attempt.
+      store.set(snapshot.checkpointSessionId, {
+        lastProcessedEntryId: snapshot.branchEntries[snapshot.branchEntries.length - 1]?.id ?? tipId,
+      });
+      const err = new Error("current_candidate_deferred");
+      err.code = "current_candidate_deferred";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(
+    r.error_code === "deadline_after_checkpoint_advanced",
+    `CP+deferred same attempt must fatal invariant, got=${r.error_code}`,
+  );
+  assert(r.retryable === false, "invariant nonretryable");
+  assert(r.restart_child === true, "invariant restarts child");
+  assert(worker.isWorkerProcessPoisoned() === true, "invariant poisons process");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  resetWorkerBudgetTestState();
+  sediment._resetAutoWriteStateForTests();
+});
+
+await check("receipt_write_failed after CP advanced is nonretryable restart_child", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-receipt-write-fail");
+  const m = baseManifest({
+    request_id: hex64("req-receipt-write-fail"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "rwf" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+
+  const receiptPath = worker.sedimentWorkerReceiptPath(abrainHome, term);
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, {
+        lastProcessedEntryId: snapshot.branchEntries[snapshot.branchEntries.length - 1]?.id ?? "tip",
+      });
+      // After pre-check (ENOENT) + CP advance: plant a directory at the receipt
+      // path so create-only atomic write fails (post-CP, first cause preserved).
+      fs.mkdirSync(receiptPath, { recursive: true });
+      // more=false void after CP advance → receipt path
+    },
+    env: process.env,
+  });
+  assert(r.error_code === "receipt_write_failed", `code=${r.error_code}`);
+  assert(r.retryable === false, "receipt_write_failed after CP must be nonretryable");
+  assert(r.restart_child === true, "receipt_write_failed after CP must restart_child");
+  assert(r.settled === false, "not settled");
+  try { fs.rmSync(receiptPath, { recursive: true, force: true }); } catch { /* ignore */ }
+  resetWorkerBudgetTestState();
+});
+
+await check("deadline cleanup with receipt present prefers processed over fatal", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-deadline-cleanup-receipt");
+  const m = baseManifest({
+    request_id: hex64("req-deadline-cleanup-receipt"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "dl-clean" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const store = new Map();
+  // Pre-seed success receipt: deadline path must prefer it.
+  const receiptDir = path.dirname(worker.sedimentWorkerReceiptPath(abrainHome, term));
+  fs.mkdirSync(receiptDir, { recursive: true });
+  fs.writeFileSync(worker.sedimentWorkerReceiptPath(abrainHome, term), JSON.stringify({
+    schema: "pi-astack/sediment-worker-receipt/v1",
+    terminal_record_id: term,
+    request_id: m.request_id,
+    status: "processed",
+    settled: true,
+    memory_decisions: 0,
+    memory_writes: 0,
+    created_at: new Date().toISOString(),
+  }));
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async () => {
+      const err = new Error("current_candidate_deferred");
+      err.code = "current_candidate_deferred";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(r.status === "processed" || r.status === "already_processed", `status=${r.status}`);
+  assert(r.settled === true, "receipt wins over deferred");
+  resetWorkerBudgetTestState();
+});
+
 await check("more=false completed at soft deadline still writes create-only receipt via hard reserve", async () => {
   resetWorkerBudgetTestState();
   const term = hex64("term-soft-receipt");

@@ -1685,6 +1685,111 @@ function failCpAdvancedNoReceipt(
   });
 }
 
+/**
+ * Before any retryable current_candidate_deferred / no_progress / deadline-class
+ * result: re-read processed receipt and CP.
+ * - valid receipt → settled success (prefer over retryable)
+ * - this-attempt CP advanced or covers tip without receipt → fatal
+ *   checkpoint/receipt invariant (poison; do not wait for redrive)
+ * - normal deferred / no_progress requires CP not advanced
+ */
+async function resolveRetryableWithReceiptCpInvariant(args: {
+  ids: { request_id: string; terminal_record_id: string };
+  code: string;
+  retryable?: boolean;
+  pass_iterations?: number;
+  abrainHome: string;
+  projectRoot: string;
+  cpSessionId: string;
+  branchEntries: readonly unknown[];
+  beforeCp: { lastProcessedEntryId?: string };
+  /**
+   * - `covers_tip`: fatal only when durable CP covers sidecar tip (partial more-loop advance stays retryable).
+   * - `any_advance`: fatal on any this-attempt CP advance OR covers tip (deferred must not advance CP).
+   */
+  fatalOn: "covers_tip" | "any_advance";
+  loadSessionCheckpoint: (projectRoot: string, sessionId: string) => Promise<{ lastProcessedEntryId?: string }>;
+  countPublicationOutboxPending?: (abrainHome: string) => Promise<number>;
+  hasPublicationOutboxPending?: (abrainHome: string) => Promise<boolean>;
+}): Promise<SedimentWorkerResult> {
+  const {
+    ids,
+    code,
+    abrainHome,
+    projectRoot,
+    cpSessionId,
+    branchEntries,
+    beforeCp,
+    fatalOn,
+  } = args;
+  try {
+    const existing = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
+    if (existing) {
+      return await withPublicationPendingFlag(
+        resultFromProcessedReceipt(existing, ids.request_id),
+        abrainHome,
+        args.countPublicationOutboxPending,
+        args.hasPublicationOutboxPending,
+      );
+    }
+  } catch {
+    /* corrupt re-read still fail-closed below if CP covers tip / advanced */
+  }
+  if (fsSync.existsSync(sedimentWorkerReceiptPath(abrainHome, ids.terminal_record_id))) {
+    try {
+      const raced = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
+      if (raced) {
+        return await withPublicationPendingFlag(
+          resultFromProcessedReceipt(raced, ids.request_id),
+          abrainHome,
+          args.countPublicationOutboxPending,
+          args.hasPublicationOutboxPending,
+        );
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  try {
+    const after = await args.loadSessionCheckpoint(projectRoot, cpSessionId);
+    const advanced = checkpointAdvanced(beforeCp, after);
+    const coversTip = checkpointCoversBranchTip(after, branchEntries);
+    const fatal = fatalOn === "any_advance"
+      ? (advanced || coversTip)
+      : coversTip;
+    if (fatal) {
+      return failCpAdvancedNoReceipt(ids, {
+        ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
+      });
+    }
+  } catch {
+    /* CP load failed: still return original retryable if we cannot prove advance */
+  }
+  // Poison closed-set codes still poison when CP did not cover tip (unreaped/serial).
+  if (isPoisonRestartCode(code) || isWorkerDeadlineErrorCode(code)) {
+    return failDeadline(ids, code, {
+      ...(args.retryable !== undefined ? { retryable: args.retryable } : {}),
+      ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
+    });
+  }
+  return failResult(ids, code, {
+    retryable: args.retryable ?? true,
+    ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
+  });
+}
+
+/** CP advanced + receipt write failed: nonretryable, restart_child; keep first cause. */
+function failReceiptWriteAfterCpAdvanced(
+  ids: { request_id: string; terminal_record_id: string },
+  opts?: { pass_iterations?: number },
+): SedimentWorkerResult {
+  return failResult(ids, "receipt_write_failed", {
+    retryable: false,
+    restart_child: true,
+    ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
+  });
+}
+
 function failProcessPoisoned(
   ids: { request_id: string; terminal_record_id: string },
 ): SedimentWorkerResult {
@@ -1866,7 +1971,9 @@ export async function runSedimentWorkerTask(
           messages: verified.messages,
           modelRegistry: deps.modelRegistry,
         });
-        const cpSessionId = snapshot.checkpointSessionId;
+        // Worker snapshots always pin a daemon-worker CP slot (buildWorkerPassSnapshot).
+        const cpSessionId = snapshot.checkpointSessionId
+          ?? workerCheckpointSessionId(manifest.session_id);
         const projectRoot = snapshot.cwd;
 
         // Baseline CP before this attempt (deadline capture + prior-no-receipt check).
@@ -1925,7 +2032,23 @@ export async function runSedimentWorkerTask(
               } catch (err) {
                 if (err instanceof WorkerDeadlineError) {
                   progress("pass", "aborted");
-                  return failDeadline(ids, err.code, { pass_iterations: iterations });
+                  // Re-read receipt/CP before any retryable deadline return.
+                  // Partial more-loop advance remains retryable; covers tip is fatal.
+                  return await resolveRetryableWithReceiptCpInvariant({
+                    ids,
+                    code: err.code,
+                    retryable: true,
+                    pass_iterations: iterations,
+                    abrainHome,
+                    projectRoot,
+                    cpSessionId,
+                    branchEntries: snapshot.branchEntries,
+                    beforeCp,
+                    fatalOn: "covers_tip",
+                    loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                    countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                    hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                  });
                 }
                 // Pass may throw plain Error with deadline code message/property
                 // (e.g. index stage precheck → stage_deadline).
@@ -1939,18 +2062,44 @@ export async function runSedimentWorkerTask(
                     : undefined;
                 if (code) {
                   progress("pass", "aborted");
-                  return failDeadline(ids, code, { pass_iterations: iterations });
+                  return await resolveRetryableWithReceiptCpInvariant({
+                    ids,
+                    code,
+                    retryable: true,
+                    pass_iterations: iterations,
+                    abrainHome,
+                    projectRoot,
+                    cpSessionId,
+                    branchEntries: snapshot.branchEntries,
+                    beforeCp,
+                    fatalOn: "covers_tip",
+                    loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                    countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                    hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                  });
                 }
                 // Task-scoped current-candidate deferred unfinished artifact
                 // (multiview pending / staging deferred / promotion-needed):
-                // retryable, no CP advance / no receipt / not processed.
+                // retryable only when this attempt did not advance CP / no receipt.
+                // Any this-attempt CP advance without receipt → fatal invariant + poison.
                 if (
                   (typeof errCode === "string" && errCode === "current_candidate_deferred")
                   || (err instanceof Error && err.message === "current_candidate_deferred")
                 ) {
-                  return failResult(ids, "current_candidate_deferred", {
+                  return await resolveRetryableWithReceiptCpInvariant({
+                    ids,
+                    code: "current_candidate_deferred",
                     retryable: true,
                     pass_iterations: iterations,
+                    abrainHome,
+                    projectRoot,
+                    cpSessionId,
+                    branchEntries: snapshot.branchEntries,
+                    beforeCp,
+                    fatalOn: "any_advance",
+                    loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                    countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                    hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
                   });
                 }
                 return failResult(ids, "pipeline_threw", { retryable: true, pass_iterations: iterations });
@@ -1988,7 +2137,22 @@ export async function runSedimentWorkerTask(
                 const retryable = classified.retryable
                   ?? (isDeterministicNoProgressCode(code) ? false : true);
                 progress("pass", "end");
-                return failResult(ids, code, { retryable, pass_iterations: iterations });
+                // Re-read receipt/CP before retryable or non-retryable no_progress return.
+                return await resolveRetryableWithReceiptCpInvariant({
+                  ids,
+                  code,
+                  retryable,
+                  pass_iterations: iterations,
+                  abrainHome,
+                  projectRoot,
+                  cpSessionId,
+                  branchEntries: snapshot.branchEntries,
+                  beforeCp,
+                  fatalOn: "covers_tip",
+                  loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                  countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                  hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                });
               }
               lastMore = !classifiedNoProgress
                 && !!(passResult && typeof passResult === "object" && (passResult as { more?: unknown }).more === true);
@@ -1997,7 +2161,21 @@ export async function runSedimentWorkerTask(
               if (lastMore) {
                 // more=true without real CP advance is no-progress / livelock — fail closed.
                 if (!advanced) {
-                  return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
+                  return await resolveRetryableWithReceiptCpInvariant({
+                    ids,
+                    code: "no_progress",
+                    retryable: true,
+                    pass_iterations: iterations,
+                    abrainHome,
+                    projectRoot,
+                    cpSessionId,
+                    branchEntries: snapshot.branchEntries,
+                    beforeCp,
+                    fatalOn: "covers_tip",
+                    loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                    countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                    hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                  });
                 }
                 // more loop must re-check remaining budget; cannot open 16 full budgets.
                 continue;
@@ -2008,7 +2186,21 @@ export async function runSedimentWorkerTask(
                 // Void return without classification remains retryable no_progress
                 // (transient / unknown soft skip). Deterministic codes must be
                 // surfaced explicitly by the pass (M4).
-                return failResult(ids, "no_progress", { retryable: true, pass_iterations: iterations });
+                return await resolveRetryableWithReceiptCpInvariant({
+                  ids,
+                  code: "no_progress",
+                  retryable: true,
+                  pass_iterations: iterations,
+                  abrainHome,
+                  projectRoot,
+                  cpSessionId,
+                  branchEntries: snapshot.branchEntries,
+                  beforeCp,
+                  fatalOn: "covers_tip",
+                  loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                  countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                  hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                });
               }
 
               // Real CP advanced and backlog exhausted → create-only success receipt.
@@ -2027,31 +2219,65 @@ export async function runSedimentWorkerTask(
                 created_at: (deps.now?.() ?? new Date()).toISOString(),
               };
 
-              let writeStatus: "created" | "identical" | "collision";
-              try {
+              // CP already advanced: receipt write failure is nonretryable +
+              // restart_child (preserve first cause). Simple atomic-write retry
+              // within the hard reserve only — no complex state machine.
+              let writeStatus: "created" | "identical" | "collision" | undefined;
+              {
                 const hardRem = Math.max(0, absoluteDeadlineMs - clock());
                 if (hardRem <= 0) {
-                  return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
+                  return failReceiptWriteAfterCpAdvanced(ids, { pass_iterations: iterations });
                 }
                 const writeBudgetMs = Math.min(SEDIMENT_WORKER_CLEANUP_RESERVE_MS, hardRem);
-                let timedOut = false;
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                try {
-                  writeStatus = await Promise.race([
-                    writeProcessedReceipt(abrainHome, receipt),
-                    new Promise<never>((_, reject) => {
-                      timer = setTimeout(() => {
-                        timedOut = true;
-                        reject(new Error("receipt_write_timeout"));
-                      }, writeBudgetMs);
-                    }),
-                  ]);
-                } finally {
-                  if (timer !== undefined) clearTimeout(timer);
-                  void timedOut;
+                const writeDeadlineAt = clock() + writeBudgetMs;
+                let lastErr: unknown;
+                // One immediate retry within remaining budget after first failure.
+                for (let attempt = 0; attempt < 2; attempt++) {
+                  const rem = writeDeadlineAt - clock();
+                  if (rem <= 0) {
+                    lastErr = new Error("receipt_write_timeout");
+                    break;
+                  }
+                  let timedOut = false;
+                  let timer: ReturnType<typeof setTimeout> | undefined;
+                  try {
+                    writeStatus = await Promise.race([
+                      writeProcessedReceipt(abrainHome, receipt),
+                      new Promise<never>((_, reject) => {
+                        timer = setTimeout(() => {
+                          timedOut = true;
+                          reject(new Error("receipt_write_timeout"));
+                        }, rem);
+                      }),
+                    ]);
+                    lastErr = undefined;
+                    break;
+                  } catch (e) {
+                    lastErr = e;
+                    void timedOut;
+                  } finally {
+                    if (timer !== undefined) clearTimeout(timer);
+                  }
                 }
-              } catch {
-                return failResult(ids, "receipt_write_failed", { retryable: true, pass_iterations: iterations });
+                if (writeStatus === undefined) {
+                  void lastErr;
+                  // Prefer success if a concurrent write left a valid receipt.
+                  try {
+                    const raced = await readProcessedReceipt(abrainHome, manifest!.terminal_record_id);
+                    if (raced) {
+                      progress("receipt", "end");
+                      return await withPublicationPendingFlag(
+                        resultFromProcessedReceipt(raced, manifest!.request_id),
+                        abrainHome,
+                        deps.countPublicationOutboxPending,
+                        deps.hasPublicationOutboxPending,
+                      );
+                    }
+                  } catch {
+                    /* fall through */
+                  }
+                  return failReceiptWriteAfterCpAdvanced(ids, { pass_iterations: iterations });
+                }
               }
 
               if (writeStatus === "collision") {

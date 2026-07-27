@@ -35,6 +35,7 @@
  *   8. Audit row.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import * as os from "node:os";
@@ -293,26 +294,39 @@ const CURRENT_CANDIDATE_DEFERRED_REASONS = new Set([
   "promotion_needed",
 ]);
 
-/** Process-local: taskScoped session noted an unfinished current-candidate artifact this pass. */
-const taskScopedCandidateDeferredBySession = new Map<string, true>();
+/**
+ * Attempt-local (AsyncLocalStorage) flag: current agent-end pass noted an
+ * unfinished task-scoped candidate artifact. Deep mark/consume only affect the
+ * active pass; exception / deadline / next terminal cannot leak across attempts
+ * or independent worker tasks for the same session.
+ */
+type TaskScopedCandidateDeferredAttempt = { deferred: boolean };
+const taskScopedCandidateDeferredAttemptALS =
+  new AsyncLocalStorage<TaskScopedCandidateDeferredAttempt>();
+
+function runWithTaskScopedCandidateDeferredAttempt<T>(fn: () => T): T {
+  return taskScopedCandidateDeferredAttemptALS.run({ deferred: false }, fn);
+}
 
 function isCurrentCandidateDeferredReason(reason: string | undefined): boolean {
   return typeof reason === "string" && CURRENT_CANDIDATE_DEFERRED_REASONS.has(reason);
 }
 
-function noteTaskScopedCandidateDeferredIfWorker(
-  sessionId: string | undefined,
-  taskScoped: boolean,
-): void {
-  if (!taskScoped || !sessionId) return;
-  taskScopedCandidateDeferredBySession.set(sessionId, true);
+function noteTaskScopedCandidateDeferredIfWorker(taskScoped: boolean): void {
+  if (!taskScoped) return;
+  const store = taskScopedCandidateDeferredAttemptALS.getStore();
+  if (store) store.deferred = true;
 }
 
-function consumeTaskScopedCandidateDeferred(sessionId: string | undefined): boolean {
-  if (!sessionId) return false;
-  const hit = taskScopedCandidateDeferredBySession.has(sessionId);
-  taskScopedCandidateDeferredBySession.delete(sessionId);
-  return hit;
+function isTaskScopedCandidateDeferredThisAttempt(): boolean {
+  return taskScopedCandidateDeferredAttemptALS.getStore()?.deferred === true;
+}
+
+function consumeTaskScopedCandidateDeferred(): boolean {
+  const store = taskScopedCandidateDeferredAttemptALS.getStore();
+  if (!store?.deferred) return false;
+  store.deferred = false;
+  return true;
 }
 
 function throwCurrentCandidateDeferred(): never {
@@ -5293,6 +5307,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // Per-claim backlog budget (AGENT_END_BACKLOG_WINDOWS_PER_TURN):
           // when exhausted with frozen tip still ahead, the outer run returns
           // more=true and the queue yields to the next macro tick.
+          // Task-scoped deferred: stop recursive drain so later windows cannot
+          // advance CP after unfinished multiview/staging artifacts.
+          if (isTaskScopedCandidateDeferredThisAttempt()) return;
           const cyc = sessionAgentCycle.get(sessionId);
           if (!cyc || cyc.started > cyc.ended) return;
           if (cyc.drainCount >= AGENT_END_BACKLOG_WINDOWS_PER_TURN) return;
@@ -5544,7 +5561,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                       // checkpoint, but this drain pass has no classifier of
                       // its own — an extractor llm_skip here advances past the
                       // held window with only the R3' recall flag as the net.
-                      const checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto);
+                      // Deferred unfinished artifact must HOLD CP even if a later
+                      // outcome looks advance-safe (stop recursive drain).
+                      const checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
+                        && !isTaskScopedCandidateDeferredThisAttempt();
                       if (checkpointAdvanced && win.lastEntryId) {
                         await saveSessionCheckpointWithLineage(cwd, sessionId, branchNow, win.lastEntryId);
                       }
@@ -5748,7 +5768,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                         autoWriteInFlight.delete(sessionId);
                         _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
                       }
-                      scheduleDrainIfBacklog(); // recurse
+                      // Guarded: deferred unfinished artifact stops task recursive drain.
+                      scheduleDrainIfBacklog(); // recurse (no-op when attempt deferred)
                       // Pass sessionId so same-session drain completion
                       // leaves the ✅/⚠️ indicator visible (only cross-
                       // session /new flips it back to idle).
@@ -5883,9 +5904,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                 const safelyStaged = classifierResult.stagingWritten === true;
                 // Task-scoped: staging is unfinished without global resolver/promotion.
                 if (taskScoped && safelyStaged && !captured && !terminalReject) {
-                  noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+                  noteTaskScopedCandidateDeferredIfWorker(true);
                 }
-                const advance = !holdForPromptBudget && !transient && (
+                const advance = !holdForPromptBudget && !transient
+                  && !isTaskScopedCandidateDeferredThisAttempt()
+                  && (
                   captured
                   || terminalReject
                   || (safelyStaged && !taskScoped)
@@ -6134,7 +6157,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               unreapedIfTimeout: true as const,
             };
             checkpointAdvanced = shouldAdvanceAfterAutoOutcome(auto)
-              && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings);
+              && !holdForStagingOnlyParseFailure(auto, classifierResultMain, settings)
+              && !isTaskScopedCandidateDeferredThisAttempt();
             if (checkpointAdvanced && effectiveWindow.lastEntryId) {
               await raceAutoWriteAwait(
                 saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId),
@@ -6988,8 +7012,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           // Task-scoped: current candidate left unfinished artifact this run
           // (multiview pending / staging deferred / promotion-needed) →
           // explicit current_candidate_deferred. No CP / receipt / processed.
-          // Only this-run outcome keys (process-local note); no global scan.
-          if (taskScoped && consumeTaskScopedCandidateDeferred(snapshot.sessionId)) {
+          // Attempt-local ALS note only; no session sticky map / global scan.
+          if (taskScoped && consumeTaskScopedCandidateDeferred()) {
             throwCurrentCandidateDeferred();
           }
 
@@ -7047,14 +7071,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
 
           // ALS-scoped checkpoint slot for daemon worker (inherits into detached work).
           // Foreground leaves checkpointSessionId unset → no ALS store → provenance id.
+          // Nested attempt-local deferred ALS: mark/consume never leak to the next
+          // terminal or independent worker task for the same session.
           const runPassBody = async (): Promise<SedimentWorkerPassOutcome> => {
-            if (snapshot.checkpointSessionId) {
-              return await runWithCheckpointSessionIdOverride(
-                snapshot.checkpointSessionId,
-                () => runPassBodyInner(),
-              );
-            }
-            return await runPassBodyInner();
+            return await runWithTaskScopedCandidateDeferredAttempt(async () => {
+              if (snapshot.checkpointSessionId) {
+                return await runWithCheckpointSessionIdOverride(
+                  snapshot.checkpointSessionId,
+                  () => runPassBodyInner(),
+                );
+              }
+              return await runPassBodyInner();
+            });
           };
 
           if (workerRuntimeActive && workerDeadlineMs !== undefined) {
@@ -7928,7 +7956,6 @@ async function tryAutoWriteLane(args: {
         // Task-scoped: provisional staging is unfinished without global promotion.
         if (staged) {
           noteTaskScopedCandidateDeferredIfWorker(
-            sessionId,
             autoWriteDeadlineMs !== undefined || args.signal !== undefined,
           );
         }
@@ -8953,8 +8980,10 @@ async function tryAutoWriteLane(args: {
         || isCurrentCandidateDeferredReason(curatedSkipReason)
       )
     ) {
-      noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+      noteTaskScopedCandidateDeferredIfWorker(true);
       // Still materialize skip result for this-run keys; CP will HOLD; pass throws.
+      // Stop this-task recursive candidate drain immediately — later candidates
+      // must not advance CP after an unfinished deferred artifact.
       results.push({
         slug: draft.title,
         path: "",
@@ -8965,7 +8994,7 @@ async function tryAutoWriteLane(args: {
         correlationId,
         candidateId,
       });
-      continue;
+      break;
     }
     // ADR 0031 CAS parity: pass observed neighbor statuses so the curator's
     // archive/delete/merge ops pin expected_status and abort (instead of
@@ -8997,7 +9026,11 @@ async function tryAutoWriteLane(args: {
         deleteReason: curated.decision.op === "delete" ? curated.decision.reason || curated.decision.rationale || "deleted by sediment curator" : undefined,
       }), { ...autoWriteBound, unreapedIfTimeout: true });
       if (taskScopedAutoWrite && writeResults.some((r) => isCurrentCandidateDeferredReason(r.reason))) {
-        noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+        noteTaskScopedCandidateDeferredIfWorker(true);
+        results.push(...writeResults);
+        emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "end");
+        // Stop recursive candidate drain after deferred writer outcome.
+        break;
       }
       results.push(...writeResults);
       emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "end");
@@ -9208,7 +9241,7 @@ export function _resetAutoWriteStateForTests(): void {
   sessionCorrectionWorkingSet.clear();
   sessionTaskLocalSet.clear();
   deferredStopBySession.clear();
-  taskScopedCandidateDeferredBySession.clear();
+  // Attempt-local deferred ALS has no process sticky map to clear.
   sedimentAgentEndTestHooks = undefined;
   maintenanceScheduleObserverForTests = undefined;
   sourceProjectRootByCwd.clear();
@@ -9255,12 +9288,28 @@ export function _setMaintenanceScheduleObserverForTests(observer: ((lane: string
   maintenanceScheduleObserverForTests = observer;
 }
 
-/** Test-only: mark task-scoped current-candidate deferred for a session. */
-export function _noteTaskScopedCandidateDeferredForTests(sessionId: string): void {
+/** Test-only: mark task-scoped current-candidate deferred in the active attempt ALS. */
+export function _noteTaskScopedCandidateDeferredForTests(_sessionId?: string): void {
   if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
     throw new Error("_noteTaskScopedCandidateDeferredForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
   }
-  noteTaskScopedCandidateDeferredIfWorker(sessionId, true);
+  noteTaskScopedCandidateDeferredIfWorker(true);
+}
+
+/** Test-only: run fn under a fresh attempt-local deferred ALS context. */
+export function _runWithTaskScopedCandidateDeferredAttemptForTests<T>(fn: () => T): T {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_runWithTaskScopedCandidateDeferredAttemptForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return runWithTaskScopedCandidateDeferredAttempt(fn);
+}
+
+/** Test-only: whether the active attempt ALS has deferred noted. */
+export function _isTaskScopedCandidateDeferredThisAttemptForTests(): boolean {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error("_isTaskScopedCandidateDeferredThisAttemptForTests requires PI_ASTACK_ENABLE_TEST_HOOKS=1");
+  }
+  return isTaskScopedCandidateDeferredThisAttempt();
 }
 
 /** Test-only: closed deferred reason detection (this-run keys only). */
