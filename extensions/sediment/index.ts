@@ -1083,9 +1083,9 @@ function resolveForegroundAuthorityPosture(): ForegroundLocalExecutorPosture {
 }
 
 function resolveEffectiveExecutionOwner(settings?: SedimentSettings): "foreground" | "daemon" {
-  // Once a strict store is active/draining/corrupt, ordinary Pi remains a
-  // capture surface only. A strict free store or a missing store keeps the
-  // worker-first rollout's legacy behavior.
+  // Once the authority store exists (held/draining/free/unavailable), ordinary
+  // Pi remains a capture surface only. Only a completely missing store keeps
+  // the worker-first rollout's legacy settings-based execution.
   if (resolveForegroundAuthorityPosture() === "capture_only") return "daemon";
   const s = settings ?? resolveSedimentSettings();
   if (s.executionOwner !== "daemon") return "foreground";
@@ -3841,9 +3841,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         applySedimentStatus(setStatus, sessionId, "idle");
       }
 
-      // An active/draining/corrupt strict authority store leaves ordinary Pi
-      // capture-only. Edge layout/capture remains available through its own
-      // hooks, but recovery, publication, and startup semantic work stop here.
+      // An existing authority store (held/draining/free/unavailable) leaves
+      // ordinary Pi capture-only. Edge layout/capture remains available through
+      // its own hooks, but recovery, publication, and startup semantic work stop.
       if (authorityCaptureOnly) return;
 
       // Durable intake recovery is independent of canonical startup. Pending

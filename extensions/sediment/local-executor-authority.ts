@@ -454,22 +454,19 @@ export function admitLocalExecutorAuthority(args: {
 }
 
 /**
- * Foreground execution posture. Existing/missing legacy installs keep their
- * behavior. Any active, draining, malformed, unreadable, or still-locked store
- * is capture-only. A strict free record with an observed-free lock returns to
- * legacy behavior for this worker-first rollout slice.
+ * Foreground execution posture. Only a completely missing authority store keeps
+ * legacy settings-based execution. Once the store exists — held, draining, free,
+ * or unreadable/unavailable — ordinary Pi is always capture-only. Task/maintenance
+ * admission remains a separate strict path and is not decided here.
  */
 export function classifyForegroundLocalExecutorPosture(
   abrainHome: string,
-  observation: LocalExecutorAuthorityObservationDeps = {},
+  _observation: LocalExecutorAuthorityObservationDeps = {},
 ): ForegroundLocalExecutorPosture {
   try {
     const canonicalAbrain = canonicalAbrainRoot(abrainHome);
     if (authorityStorePresence(canonicalAbrain) === "absent") return "legacy";
-    const observed = observeStableAuthority(canonicalAbrain, observation);
-    return observed.record.mode === "free" && observed.lock === "free"
-      ? "legacy"
-      : "capture_only";
+    return "capture_only";
   } catch {
     return "capture_only";
   }

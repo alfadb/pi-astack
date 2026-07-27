@@ -89,12 +89,10 @@ Ordinary Pi classifies the authority store read-only at semantic admission point
 
 | Observation | Foreground behavior |
 | --- | --- |
-| store missing | legacy behavior |
-| strict `free+none` and physical lock observed free | legacy behavior |
-| strict `held` | capture-only |
-| strict `draining` | capture-only |
-| corrupt/unreadable/unstable store or lock observation unavailable | capture-only |
-| `free` while lock is still held | capture-only |
+| store missing | legacy settings-based execution |
+| store exists (`held` / `draining` / `free+none` free or still-locked / corrupt / unreadable / unavailable) | capture-only |
+
+After authority activation (directory present), free+unlocked is still capture-only. Only a completely missing store retains legacy behavior. Task/maintenance admission remains a separate strict path and is not decided by this foreground classification.
 
 Capture-only keeps durable intake and edge candidate/witness capture available but does not enqueue or recover a local sediment pass, drain publication, replay, run policy/liveness recovery, or start writer work. When sediment is **enabled**, `session_start` still initializes the TUI edge layout and performs bounded owner-wide candidate-only witness recovery before the semantic early return. `settings.enabled=false` remains full legacy disable: zero authority IO, zero edge-recovery reopening through the main session_start path, and zero publication/policy startup — the edge triple gate must not reopen that path (edge keeps its independent session_start). On `agent_end`, fully disabled sediment+edge returns before any authority posture observation. `draining` only blocks new admission; it does not claim the old worker tree has stopped.
 
@@ -120,4 +118,4 @@ npx tsc --noEmit --skipLibCheck --moduleResolution bundler --module preserve --t
 git diff --check
 ```
 
-`smoke:lsea-worker-admission` covers every strict-record field omission, paired task/maintenance field omission, Unix non-`0600`, read-lock-read ABA, all three closed codes and retryable/no-restart shape, real Linux `flock` hold/release, Windows `EBUSY` versus ACL/unavailable classification plus symlink/non-regular rejection, free+held foreground posture, task/maintenance durable zero-delta rejection, capability zero side effect, and the absence of B1-B8 authority calls. `smoke:sediment-daemon-edge-capture` covers the capture-only `session_start` boundary and candidate-only witness recovery only when sediment is enabled, plus regressions that `settings.enabled=false` does not reopen authority recovery via the edge triple gate and that `agent_end` fully-disabled returns before authority IO.
+`smoke:lsea-worker-admission` covers every strict-record field omission, paired task/maintenance field omission, Unix non-`0600`, read-lock-read ABA, all three closed codes and retryable/no-restart shape, real Linux `flock` hold/release, Windows `EBUSY` versus ACL/unavailable classification plus symlink/non-regular rejection, store-exists foreground capture-only (including free+unlocked) versus missing-store legacy posture, task/maintenance durable zero-delta rejection, capability zero side effect, and the absence of B1-B8 authority calls. `smoke:sediment-daemon-edge-capture` covers the capture-only `session_start` boundary and candidate-only witness recovery only when sediment is enabled, plus regressions that `settings.enabled=false` does not reopen authority recovery via the edge triple gate and that `agent_end` fully-disabled returns before authority IO.

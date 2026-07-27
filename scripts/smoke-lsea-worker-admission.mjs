@@ -465,7 +465,7 @@ await check("Windows observer distinguishes sharing violation from ACL/unavailab
   writeAuthority();
 });
 
-await check("foreground: held/draining/corrupt capture-only; free/missing legacy", async () => {
+await check("foreground: store-exists capture-only (held/draining/corrupt/free); missing legacy", async () => {
   writeAuthority();
   assert(authority.classifyForegroundLocalExecutorPosture(abrain, {
     observeLock: () => "held",
@@ -484,7 +484,7 @@ await check("foreground: held/draining/corrupt capture-only; free/missing legacy
   }) === "capture_only", "free + held lock must remain capture-only");
   assert(authority.classifyForegroundLocalExecutorPosture(abrain, {
     observeLock: () => "free",
-  }) === "legacy", "free + released lock must be legacy");
+  }) === "capture_only", "free + unlocked must remain capture-only after authority activation");
   assert(authority.classifyForegroundLocalExecutorPosture(legacyAbrain) === "legacy", "missing store must be legacy");
 });
 

@@ -298,11 +298,11 @@ export interface SedimentSettings {
    *   edge shadow) but does NOT enqueue, schedule recovery, or run the normal
    *   sediment pass. Headless worker (PI_ASTACK_SEDIMENT_WORKER_MODE=1) is the
    *   sole pass executor.
-   * LSEA overlay: an active/draining/corrupt strict authority store makes the
-   * ordinary process capture-only regardless of this legacy setting: durable
+   * LSEA overlay: once the authority store exists (held/draining/free/unavailable),
+   * ordinary process is capture-only regardless of this legacy setting: durable
    * intake/edge witness capture remains, but no foreground semantic enqueue,
-   * recovery, replay, policy, publication, or writer work starts. A strict
-   * free+unlocked or cleanly missing store retains legacy behavior during rollout.
+   * recovery, replay, policy, publication, or writer work starts. Only a cleanly
+   * missing store retains legacy settings-based execution during rollout.
    */
   executionOwner: "foreground" | "daemon";
 
