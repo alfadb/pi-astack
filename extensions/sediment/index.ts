@@ -318,6 +318,21 @@ function noteTaskScopedCandidateDeferredIfWorker(taskScoped: boolean): void {
   if (store) store.deferred = true;
 }
 
+/**
+ * Task-scoped: classifier this-run `stagingWritten` is an unfinished provisional
+ * artifact (no global resolver/promotion). Mark attempt deferred so CP cannot
+ * advance and recursive candidate/drain stops. Short-window capture exception
+ * is applied at the call site (do not mark when captured/terminalReject).
+ */
+function noteClassifierStagingDeferredIfWorker(
+  taskScoped: boolean,
+  stagingWritten: boolean | undefined,
+): void {
+  if (taskScoped && stagingWritten === true) {
+    noteTaskScopedCandidateDeferredIfWorker(true);
+  }
+}
+
 function isTaskScopedCandidateDeferredThisAttempt(): boolean {
   return taskScopedCandidateDeferredAttemptALS.getStore()?.deferred === true;
 }
@@ -558,6 +573,13 @@ interface SedimentAgentEndCapture {
 
 interface SedimentAgentEndTestHooks {
   run?: (snapshot: SedimentAgentEndSnapshotForTests) => Promise<void | { more: true }>;
+  /**
+   * When set, replaces runCorrectionPipeline for this pass (stagingWritten
+   * trajectory tests). Must return a full CorrectionPipelineResult shape.
+   */
+  correctionPipeline?: (
+    ...args: Parameters<typeof runCorrectionPipeline>
+  ) => ReturnType<typeof runCorrectionPipeline>;
 }
 
 let sedimentAgentEndTestHooks: SedimentAgentEndTestHooks | undefined;
@@ -5131,14 +5153,18 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
               }
             }
           } catch { /* outcome enrich best-effort; silent-skip */ }
-          const cr = await runCorrectionPipeline(effectiveWindow.entries.length > 0 ? effectiveWindow.entries : branch, relatedEntries, {
+          const classifierEntries = effectiveWindow.entries.length > 0 ? effectiveWindow.entries : branch;
+          const classifierDeps = {
             settings: clampSettingsForWorker(settings),
             modelRegistry: modelRegistry as Parameters<typeof runCorrectionPipeline>[2]["modelRegistry"],
             signal: workerSignal,
             directLaneOwnsWindow,
             projectId,
             projectRoot: cwd,
-          });
+          };
+          const cr = sedimentAgentEndTestHooks?.correctionPipeline
+            ? await sedimentAgentEndTestHooks.correctionPipeline(classifierEntries, relatedEntries, classifierDeps)
+            : await runCorrectionPipeline(classifierEntries, relatedEntries, classifierDeps);
           // Log classifier result to audit — always, so failures are traceable.
           appendAudit(cwd, {
             operation: "correction_classifier",
@@ -5902,9 +5928,10 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
                   : auto.kind === "wrote" && hasPositiveWriteCapture(auto.results);
                 const terminalReject = auto.kind === "tier1_direct" && isTerminalTier1Reject(auto.result);
                 const safelyStaged = classifierResult.stagingWritten === true;
-                // Task-scoped: staging is unfinished without global resolver/promotion.
-                if (taskScoped && safelyStaged && !captured && !terminalReject) {
-                  noteTaskScopedCandidateDeferredIfWorker(true);
+                // Task-scoped: staging unfinished without capture/terminal reject → deferred.
+                // Short-window keeps capture exception (unified with long-window mark helper).
+                if (safelyStaged && !captured && !terminalReject) {
+                  noteClassifierStagingDeferredIfWorker(taskScoped, true);
                 }
                 const advance = !holdForPromptBudget && !transient
                   && !isTaskScopedCandidateDeferredThisAttempt()
@@ -6107,6 +6134,9 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
             const classifierResultMain = correctionPromise
               ? await correctionPromise.catch(() => null)
               : null;
+            // Task-scoped: this-run stagingWritten is unfinished provisional artifact.
+            // Mark deferred immediately so later candidate/drain cannot advance CP.
+            noteClassifierStagingDeferredIfWorker(taskScoped, classifierResultMain?.stagingWritten);
             const auto = await tryAutoWriteLane({
               cwd,
               sessionId,
@@ -6746,21 +6776,35 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       }
 
       // Lane A/G do not run a curator in-line, but the classifier still
-      // contributes active-correction routing state and audit. Keep it
-      // fire-and-forget so explicit user-attested writes stay synchronous.
+      // contributes active-correction routing state and audit.
+      // Task-scoped worker MUST await classifier before CP: this-run
+      // stagingWritten is an unfinished provisional artifact and must mark
+      // deferred (no CP / no receipt). Foreground stays fire-and-forget.
       const explicitDispatchCorrelationId = explicitCorrelationId ?? aboutMeCorrelationId;
-      if (correctionPromise && explicitDispatchCorrelationId) {
-        const explicitDispatchLane: "explicit" | "about_me" = explicitCorrelationId ? "explicit" : "about_me";
-        _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
-        correctionPromise
-          .then((classifierResult) => {
-            recordCorrectionDispatch(explicitDispatchLane, explicitDispatchCorrelationId, classifierResult, false);
-          })
-          .catch(() => {})
-          .finally(() => {
-            _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
-            maybeSetIdleIfNoInflight(sessionId);
-          });
+      const explicitDispatchLane: "explicit" | "about_me" = explicitCorrelationId ? "explicit" : "about_me";
+      if (correctionPromise) {
+        if (taskScoped) {
+          try {
+            const classifierResult = await correctionPromise;
+            noteClassifierStagingDeferredIfWorker(true, classifierResult?.stagingWritten);
+            if (explicitDispatchCorrelationId) {
+              recordCorrectionDispatch(explicitDispatchLane, explicitDispatchCorrelationId, classifierResult, false);
+            }
+          } catch {
+            /* classifier failure: no staging mark; CP decision uses write outcomes only */
+          }
+        } else if (explicitDispatchCorrelationId) {
+          _G.__sediment_inflightCount = (_G.__sediment_inflightCount ?? 0) + 1;
+          correctionPromise
+            .then((classifierResult) => {
+              recordCorrectionDispatch(explicitDispatchLane, explicitDispatchCorrelationId, classifierResult, false);
+            })
+            .catch(() => {})
+            .finally(() => {
+              _G.__sediment_inflightCount = Math.max(0, (_G.__sediment_inflightCount ?? 1) - 1);
+              maybeSetIdleIfNoInflight(sessionId);
+            });
+        }
       }
 
       // ── Combined checkpoint advance ─────────────────────────────
@@ -6769,13 +6813,16 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
       // (some terminal success/duplicate, some transient fail) still
       // persists processedCandidateKeys WITHOUT advancing lastProcessedEntryId
       // so retries skip already-applied candidates.
-      const combinedShouldAdvance = laneAShouldAdvance && laneGShouldAdvance;
+      // Task-scoped deferred (classifier staging / unfinished artifact) HOLDs CP.
+      const combinedShouldAdvance = laneAShouldAdvance && laneGShouldAdvance
+        && !isTaskScopedCandidateDeferredThisAttempt();
       if (combinedShouldAdvance && effectiveWindow.lastEntryId) {
         await saveSessionCheckpointWithLineage(cwd, sessionId, branch, effectiveWindow.lastEntryId, {
           processedCandidateKeys: appliedKeys,
         });
-      } else if (appliedKeys.length > 0) {
+      } else if (appliedKeys.length > 0 && !isTaskScopedCandidateDeferredThisAttempt()) {
         // Partial durable progress without watermark advance.
+        // Deferred unfinished artifact: do not persist keys either (retry full window).
         const prev = await loadSessionCheckpoint(cwd, sessionId);
         await saveSessionCheckpoint(cwd, sessionId, {
           ...prev,
@@ -6786,6 +6833,8 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
         });
       }
 
+      // Post-CP audits are best-effort: CP is the last durable action that
+      // affects task success for this lane. Audit throw must not flip to retry.
       // F3b/c (2026-06-12 audit fix plan PR-A1): explicit/about_me windows may
       // carry user imperatives unrelated to the fences. R3' keys the recall
       // audit on the raw transcript across ALL lanes — these two synchronous
@@ -6854,7 +6903,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           lane_advance_decision: laneAShouldAdvance,
           // Partial durable keys may be saved even when watermark holds.
           processed_candidate_keys: appliedKeys,
-        });
+        }).catch(() => {}); // post-CP best-effort: must not reverse durable CP
       }
 
       if (drafts.length > 0 && explicitCorrelationId) {
@@ -6865,7 +6914,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpointAdvanced: combinedShouldAdvance,
           lane: "explicit",
           correlationId: explicitCorrelationId,
-        });
+        }).catch(() => {}); // post-CP best-effort
       }
 
       // ── Lane G audit row ────────────────────────────────────────
@@ -6915,7 +6964,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpoint_advanced: combinedShouldAdvance,
           lane_advance_decision: laneGShouldAdvance,
           processed_candidate_keys: appliedKeys,
-        });
+        }).catch(() => {}); // post-CP best-effort: must not reverse durable CP
       }
 
       if (aboutMeDrafts.length > 0 && aboutMeCorrelationId) {
@@ -6926,7 +6975,7 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
           checkpointAdvanced: combinedShouldAdvance,
           lane: "about_me",
           correlationId: aboutMeCorrelationId,
-        });
+        }).catch(() => {}); // post-CP best-effort
       }
 
       // ── Notify (one notification per active lane) ────────────────

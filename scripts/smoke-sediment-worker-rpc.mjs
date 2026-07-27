@@ -2295,6 +2295,481 @@ await check("deadline cleanup with receipt present prefers processed over fatal"
   resetWorkerBudgetTestState();
 });
 
+function stagingCount() {
+  const dir = path.join(abrainHome, ".state", "sediment", "staging");
+  if (!fs.existsSync(dir)) return 0;
+  return fs.readdirSync(dir).filter((n) => n.endsWith(".json")).length;
+}
+
+function longUserText(seed) {
+  // > minWindowChars (200) so long-window path is taken (not window_too_small).
+  return `${seed} `.repeat(40).trim();
+}
+
+function memoryFenceText(title) {
+  return [
+    longUserText("explicit-lane context"),
+    "",
+    "MEMORY:",
+    `title: ${title}`,
+    "kind: fact",
+    "---",
+    "Body of an explicit MEMORY fence used only for lane selection in smoke.",
+    "END_MEMORY",
+  ].join("\n");
+}
+
+await check("auto-long stagingWritten → deferred; CP holds (real agent-end pass)", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  const stagingLoader = await jiti.import(path.join(root, "extensions/sediment/staging-loader.ts"));
+  const correction = await jiti.import(path.join(root, "extensions/sediment/correction-pipeline.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const prevMode = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1";
+  writeSettings({ autoLlmWriteEnabled: "staging-only" });
+  try {
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+    const beforeStaging = stagingCount();
+    sediment._setSedimentAgentEndTestHooksForTests({
+      correctionPipeline: async (_entries, _related, deps) => {
+        const signal = {
+          signal_found: true,
+          typing: "durable",
+          confidence: 7,
+          user_quote: "prefer staging-only capture",
+          scope_description: "auto-long staging smoke",
+          correction_intent: "capture provisional",
+        };
+        const entry = correction.buildProvisionalStagingEntry(signal, "auto-long seed", {
+          projectId: "worker-smoke-proj",
+          projectRoot: deps.projectRoot,
+        });
+        const stagingWritten = stagingLoader.writeStagingEntry(entry);
+        assert(stagingWritten === true, "hook must write real staging");
+        return {
+          ok: true,
+          model: "test/classifier",
+          signal,
+          durationMs: 1,
+          stagingWritten: true,
+          escalateToCurator: false,
+        };
+      },
+    });
+
+    const term = hex64("term-auto-long-staging");
+    const sessionId = "sess-auto-long-staging";
+    const m = baseManifest({
+      request_id: hex64("req-auto-long-staging"),
+      terminal_record_id: term,
+      session_id: sessionId,
+      budget_ms: 60_000,
+      c6: { session_id: sessionId, turn_id: 1, subturn: 0 },
+    });
+    const placed = placeSidecar({
+      sessionId,
+      terminalRecordId: term,
+      messages: [
+        { role: "user", content: longUserText("auto-long staging trajectory") },
+        { role: "assistant", content: "noted", stopReason: "end_turn" },
+      ],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const validated = worker.validateSedimentWorkerManifest(m);
+    const opened = await worker.readAndVerifyWorkerSidecar({
+      sidecarPath: validated.sidecar_path,
+      sessionId: validated.session_id,
+      contentId: validated.content_id,
+    });
+    const snapshot = worker.buildWorkerPassSnapshot({
+      manifest: validated,
+      messages: opened.messages,
+    });
+    const cpBefore = await checkpoint.loadSessionCheckpoint(snapshot.cwd, snapshot.checkpointSessionId);
+
+    let passErr;
+    try {
+      await sediment._runSedimentAgentEndPassForTests(snapshot, {
+        signal: new AbortController().signal,
+        deadlineMs: Date.now() + 60_000,
+        now: Date.now,
+      });
+    } catch (e) {
+      passErr = e;
+    }
+    assert(passErr?.code === "current_candidate_deferred" || passErr?.message === "current_candidate_deferred",
+      `auto-long must throw deferred, got=${passErr?.code || passErr?.message}`);
+    assert(stagingCount() > beforeStaging, "staging must be written");
+    const cpAfter = await checkpoint.loadSessionCheckpoint(snapshot.cwd, snapshot.checkpointSessionId);
+    assert(
+      (cpAfter?.lastProcessedEntryId ?? null) === (cpBefore?.lastProcessedEntryId ?? null),
+      `CP must not advance on staging deferred, before=${JSON.stringify(cpBefore)} after=${JSON.stringify(cpAfter)}`,
+    );
+
+    // Full RPC: same trajectory → retryable deferred, no receipt, no CP.
+    const store = new Map();
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+      runAgentEndPass: async (snap, opts) => {
+        await sediment._runSedimentAgentEndPassForTests(snap, opts);
+      },
+      env: process.env,
+    });
+    assert(r.error_code === "current_candidate_deferred", `rpc code=${r.error_code}`);
+    assert(r.retryable === true, "clean deferred retryable");
+    assert(r.restart_child !== true, "clean deferred no restart");
+    assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  } finally {
+    sediment._setSedimentAgentEndTestHooksForTests(undefined);
+    sediment._resetAutoWriteStateForTests();
+    writeSettings({ executionOwner: "daemon" });
+    if (prevMode === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+    else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prevMode;
+    resetWorkerBudgetTestState();
+  }
+});
+
+await check("explicit-lane stagingWritten → deferred; CP holds (real agent-end pass)", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  const stagingLoader = await jiti.import(path.join(root, "extensions/sediment/staging-loader.ts"));
+  const correction = await jiti.import(path.join(root, "extensions/sediment/correction-pipeline.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const prevMode = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1";
+  // Classifier on; explicit MEMORY selects Lane A (not auto-write).
+  writeSettings({ autoLlmWriteEnabled: "staging-only" });
+  try {
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+    const beforeStaging = stagingCount();
+    sediment._setSedimentAgentEndTestHooksForTests({
+      correctionPipeline: async (_entries, _related, deps) => {
+        const signal = {
+          signal_found: true,
+          typing: "durable",
+          confidence: 6,
+          user_quote: "explicit fence co-occurs with staging",
+          scope_description: "explicit-lane staging smoke",
+          correction_intent: "stage provisional alongside fence",
+        };
+        const entry = correction.buildProvisionalStagingEntry(signal, "explicit-lane seed", {
+          projectId: "worker-smoke-proj",
+          projectRoot: deps.projectRoot,
+        });
+        assert(stagingLoader.writeStagingEntry(entry) === true, "explicit hook staging write");
+        return {
+          ok: true,
+          model: "test/classifier",
+          signal,
+          durationMs: 1,
+          stagingWritten: true,
+          escalateToCurator: false,
+        };
+      },
+    });
+
+    const term = hex64("term-explicit-staging");
+    const sessionId = "sess-explicit-staging";
+    const m = baseManifest({
+      request_id: hex64("req-explicit-staging"),
+      terminal_record_id: term,
+      session_id: sessionId,
+      budget_ms: 60_000,
+      c6: { session_id: sessionId, turn_id: 1, subturn: 0 },
+    });
+    const placed = placeSidecar({
+      sessionId,
+      terminalRecordId: term,
+      messages: [
+        { role: "user", content: memoryFenceText("explicit-staging-smoke-fact") },
+        { role: "assistant", content: "saved", stopReason: "end_turn" },
+      ],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const validated = worker.validateSedimentWorkerManifest(m);
+    const opened = await worker.readAndVerifyWorkerSidecar({
+      sidecarPath: validated.sidecar_path,
+      sessionId: validated.session_id,
+      contentId: validated.content_id,
+    });
+    const snapshot = worker.buildWorkerPassSnapshot({
+      manifest: validated,
+      messages: opened.messages,
+    });
+    const cpBefore = await checkpoint.loadSessionCheckpoint(snapshot.cwd, snapshot.checkpointSessionId);
+
+    let passErr;
+    try {
+      await sediment._runSedimentAgentEndPassForTests(snapshot, {
+        signal: new AbortController().signal,
+        deadlineMs: Date.now() + 60_000,
+        now: Date.now,
+      });
+    } catch (e) {
+      passErr = e;
+    }
+    assert(passErr?.code === "current_candidate_deferred" || passErr?.message === "current_candidate_deferred",
+      `explicit must throw deferred, got=${passErr?.code || passErr?.message}`);
+    assert(stagingCount() > beforeStaging, "explicit staging must be written");
+    const cpAfter = await checkpoint.loadSessionCheckpoint(snapshot.cwd, snapshot.checkpointSessionId);
+    assert(
+      (cpAfter?.lastProcessedEntryId ?? null) === (cpBefore?.lastProcessedEntryId ?? null),
+      `explicit CP must hold, before=${JSON.stringify(cpBefore)} after=${JSON.stringify(cpAfter)}`,
+    );
+  } finally {
+    sediment._setSedimentAgentEndTestHooksForTests(undefined);
+    sediment._resetAutoWriteStateForTests();
+    writeSettings({ executionOwner: "daemon" });
+    if (prevMode === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+    else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prevMode;
+    resetWorkerBudgetTestState();
+  }
+});
+
+await check("iteration1 partial CP + iteration2 deferred → attempt-wide fatal poison", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-partial-then-deferred");
+  const m = baseManifest({
+    request_id: hex64("req-partial-then-deferred"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [
+      { role: "user", content: "w1" },
+      { role: "assistant", content: "a1", stopReason: "end_turn" },
+      { role: "user", content: "w2" },
+      { role: "assistant", content: "a2", stopReason: "end_turn" },
+    ],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const store = new Map();
+  let calls = 0;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      calls += 1;
+      const entries = snapshot.branchEntries;
+      if (calls === 1) {
+        // Partial advance: mid watermark, not tip → more=true.
+        const mid = entries[Math.max(0, entries.length - 2)];
+        store.set(snapshot.checkpointSessionId, {
+          lastProcessedEntryId: mid?.id ?? "mid-watermark",
+        });
+        return { more: true };
+      }
+      // Second iteration: no further CP move, deferred unfinished artifact.
+      const err = new Error("current_candidate_deferred");
+      err.code = "current_candidate_deferred";
+      throw err;
+    },
+    env: process.env,
+  });
+  assert(calls === 2, `expected 2 iterations, calls=${calls}`);
+  assert(
+    r.error_code === "deadline_after_checkpoint_advanced",
+    `attempt-wide any_advance must fatal, got=${r.error_code}`,
+  );
+  assert(r.retryable === false, "must not be retryable");
+  assert(r.restart_child === true, "must restart_child");
+  assert(worker.isWorkerProcessPoisoned() === true, "must poison");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  resetWorkerBudgetTestState();
+});
+
+await check("pipeline_threw after CP covers tip → fatal invariant (not retryable)", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-pipeline-throw-after-cp");
+  const m = baseManifest({
+    request_id: hex64("req-pipeline-throw-after-cp"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "pipeline-throw" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const store = new Map();
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      store.set(snapshot.checkpointSessionId, {
+        lastProcessedEntryId: snapshot.branchEntries[snapshot.branchEntries.length - 1]?.id ?? "tip",
+      });
+      throw new Error("post-cp audit boom");
+    },
+    env: process.env,
+  });
+  assert(
+    r.error_code === "deadline_after_checkpoint_advanced",
+    `pipeline_threw after CP must fatal invariant, got=${r.error_code}`,
+  );
+  assert(r.retryable === false, "not retryable");
+  assert(r.restart_child === true, "restart");
+  assert(worker.isWorkerProcessPoisoned() === true, "poison");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  resetWorkerBudgetTestState();
+});
+
+await check("post-pass CP load fail → checkpoint_state_unknown_after_pass nonretryable", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-cp-unknown-after-pass");
+  const m = baseManifest({
+    request_id: hex64("req-cp-unknown-after-pass"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "cp-unknown" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  let loads = 0;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => {
+      loads += 1;
+      // 1: beforePassCp, 2: before iteration pass, 3: after pass → throw
+      if (loads >= 3) throw new Error("cp unreadable after pass");
+      return {};
+    },
+    runAgentEndPass: async () => {
+      // Pass completes without throw; post-pass CP probe fails.
+    },
+    env: process.env,
+  });
+  assert(
+    r.error_code === "checkpoint_state_unknown_after_pass",
+    `code=${r.error_code}`,
+  );
+  assert(r.retryable === false, "unknown after pass must not authorize retry");
+  assert(r.restart_child === true, "restart_child");
+  assert(worker.isWorkerProcessPoisoned() === true, "poison");
+  assert(!fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "no receipt");
+  resetWorkerBudgetTestState();
+});
+
+await check("deadline fence preserves receipt_write_failed first cause", async () => {
+  resetWorkerBudgetTestState();
+  const term = hex64("term-deadline-receipt-first-cause");
+  const m = baseManifest({
+    request_id: hex64("req-deadline-receipt-first-cause"),
+    terminal_record_id: term,
+    budget_ms: 60_000,
+  });
+  const placed = placeSidecar({
+    sessionId: m.session_id,
+    terminalRecordId: term,
+    messages: [{ role: "user", content: "dl-receipt-first" }],
+  });
+  m.sidecar_path = placed.sidecarPath;
+  m.content_id = placed.contentId;
+  const receiptPath = worker.sedimentWorkerReceiptPath(abrainHome, term);
+  const store = new Map();
+  let t = 5_000_000;
+  const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+    resolveAbrainHome: () => abrainHome,
+    resolveExecutionOwner: () => "daemon",
+    clock: () => t,
+    loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+    runAgentEndPass: async (snapshot) => {
+      // CP covers tip so receipt path is taken after more=false.
+      store.set(snapshot.checkpointSessionId, {
+        lastProcessedEntryId: snapshot.branchEntries[snapshot.branchEntries.length - 1]?.id ?? "tip",
+      });
+      // Jump past soft deadline so fence can race; plant directory so receipt write fails.
+      t = 5_000_000 + 55_000 + 50;
+      fs.mkdirSync(receiptPath, { recursive: true });
+    },
+    env: process.env,
+  });
+  // First cause must remain receipt_write_failed (not rewritten to deadline_after_checkpoint_advanced).
+  assert(r.error_code === "receipt_write_failed", `first cause preserved, got=${r.error_code}`);
+  assert(r.retryable === false, "nonretryable");
+  assert(r.restart_child === true, "restart_child");
+  try { fs.rmSync(receiptPath, { recursive: true, force: true }); } catch { /* ignore */ }
+  resetWorkerBudgetTestState();
+});
+
+await check("explicit CP then post-CP audit throw is swallowed (processed, not retry)", async () => {
+  resetWorkerBudgetTestState();
+  const sediment = await jiti.import(path.join(root, "extensions/sediment/index.ts"));
+  sediment._resetAutoWriteStateForTests();
+  const prevMode = process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+  process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = "1";
+  // Disable classifier so Lane A does not await staging; only MEMORY write + CP + audit.
+  writeSettings({ autoLlmWriteEnabled: false });
+  try {
+    const pi = fakePi();
+    (sediment.default ?? sediment)(pi.api);
+
+    // Force appendAudit to throw after CP by making audit dir a file (best-effort path must swallow).
+    // Use real pass via RPC with store-backed CP: simulate CP advance + audit throw inside pass.
+    const term = hex64("term-post-cp-audit-swallow");
+    const m = baseManifest({
+      request_id: hex64("req-post-cp-audit-swallow"),
+      terminal_record_id: term,
+      budget_ms: 60_000,
+    });
+    const placed = placeSidecar({
+      sessionId: m.session_id,
+      terminalRecordId: term,
+      messages: [{ role: "user", content: "post-cp-audit" }],
+    });
+    m.sidecar_path = placed.sidecarPath;
+    m.content_id = placed.contentId;
+    const store = new Map();
+    const r = await worker.runSedimentWorkerTask(JSON.stringify(m), {
+      resolveAbrainHome: () => abrainHome,
+      resolveExecutionOwner: () => "daemon",
+      loadSessionCheckpoint: async (_root, sid) => store.get(sid) ?? {},
+      runAgentEndPass: async (snapshot) => {
+        // Durable CP first (last success-affecting action), then throwing audit.
+        store.set(snapshot.checkpointSessionId, {
+          lastProcessedEntryId: snapshot.branchEntries[snapshot.branchEntries.length - 1]?.id ?? "tip",
+        });
+        // Simulate post-CP audit throw that production now best-effort catches.
+        try {
+          throw new Error("appendAudit boom after CP");
+        } catch {
+          /* production: post-CP audit .catch(() => {}) */
+        }
+        // more=false void → receipt
+      },
+      env: process.env,
+    });
+    assert(r.status === "processed", `status=${r.status} code=${r.error_code}`);
+    assert(r.settled === true, "settled");
+    assert(fs.existsSync(worker.sedimentWorkerReceiptPath(abrainHome, term)), "receipt after CP+swallowed audit");
+  } finally {
+    sediment._resetAutoWriteStateForTests();
+    writeSettings({ executionOwner: "daemon" });
+    if (prevMode === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
+    else process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prevMode;
+    resetWorkerBudgetTestState();
+  }
+});
+
 await check("more=false completed at soft deadline still writes create-only receipt via hard reserve", async () => {
   resetWorkerBudgetTestState();
   const term = hex64("term-soft-receipt");

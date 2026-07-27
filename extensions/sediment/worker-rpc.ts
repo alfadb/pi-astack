@@ -162,6 +162,9 @@ const DEADLINE_ERROR_SET = new Set<string>(SEDIMENT_WORKER_DEADLINE_ERROR_CODES)
  * Fail closed — cannot auto no_progress / already_processed loop. restart_child=true.
  */
 export const SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE = "deadline_after_checkpoint_advanced" as const;
+/** Post-pass CP re-read failed: cannot authorize retry (state unknown after durable work). */
+export const SEDIMENT_WORKER_CHECKPOINT_STATE_UNKNOWN_AFTER_PASS_CODE =
+  "checkpoint_state_unknown_after_pass" as const;
 /** Process-local poison after unreaped/deadline — subsequent worker-run refuses claim/pass. */
 export const SEDIMENT_WORKER_PROCESS_POISONED_CODE = "worker_process_poisoned" as const;
 
@@ -175,6 +178,7 @@ export const SEDIMENT_WORKER_POISON_RESTART_CODES = [
   "cancel_cleanup_unreaped",
   "pass_deadline_exceeded_unreaped",
   SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE,
+  SEDIMENT_WORKER_CHECKPOINT_STATE_UNKNOWN_AFTER_PASS_CODE,
   SEDIMENT_WORKER_PROCESS_POISONED_CODE,
 ] as const;
 export type SedimentWorkerPoisonRestartCode = (typeof SEDIMENT_WORKER_POISON_RESTART_CODES)[number];
@@ -1686,12 +1690,17 @@ function failCpAdvancedNoReceipt(
 }
 
 /**
- * Before any retryable current_candidate_deferred / no_progress / deadline-class
- * result: re-read processed receipt and CP.
+ * Before any post-pass retryable exit (deferred / no_progress / deadline /
+ * pipeline_threw / …): re-read processed receipt and CP.
  * - valid receipt → settled success (prefer over retryable)
  * - this-attempt CP advanced or covers tip without receipt → fatal
  *   checkpoint/receipt invariant (poison; do not wait for redrive)
- * - normal deferred / no_progress requires CP not advanced
+ * - normal deferred / no_progress requires CP not advanced this attempt
+ *
+ * `beforeCp` for `any_advance` MUST be the attempt baseline (before first pass),
+ * not the per-iteration watermark. Pass `anyAdvanced` so partial more-loop
+ * advances in earlier iterations still fatal deferred even when the current
+ * iteration did not move CP.
  */
 async function resolveRetryableWithReceiptCpInvariant(args: {
   ids: { request_id: string; terminal_record_id: string };
@@ -1702,7 +1711,10 @@ async function resolveRetryableWithReceiptCpInvariant(args: {
   projectRoot: string;
   cpSessionId: string;
   branchEntries: readonly unknown[];
+  /** Attempt baseline CP (before first pass of this worker task). */
   beforeCp: { lastProcessedEntryId?: string };
+  /** True when any iteration of this attempt advanced durable CP. */
+  anyAdvanced?: boolean;
   /**
    * - `covers_tip`: fatal only when durable CP covers sidecar tip (partial more-loop advance stays retryable).
    * - `any_advance`: fatal on any this-attempt CP advance OR covers tip (deferred must not advance CP).
@@ -1722,6 +1734,7 @@ async function resolveRetryableWithReceiptCpInvariant(args: {
     beforeCp,
     fatalOn,
   } = args;
+  const anyAdvanced = args.anyAdvanced === true;
   try {
     const existing = await readProcessedReceipt(abrainHome, ids.terminal_record_id);
     if (existing) {
@@ -1752,7 +1765,7 @@ async function resolveRetryableWithReceiptCpInvariant(args: {
   }
   try {
     const after = await args.loadSessionCheckpoint(projectRoot, cpSessionId);
-    const advanced = checkpointAdvanced(beforeCp, after);
+    const advanced = anyAdvanced || checkpointAdvanced(beforeCp, after);
     const coversTip = checkpointCoversBranchTip(after, branchEntries);
     const fatal = fatalOn === "any_advance"
       ? (advanced || coversTip)
@@ -1763,7 +1776,14 @@ async function resolveRetryableWithReceiptCpInvariant(args: {
       });
     }
   } catch {
-    /* CP load failed: still return original retryable if we cannot prove advance */
+    // Cannot re-read CP: if this attempt already advanced, treat as fatal invariant
+    // (do not authorize retry when durable progress is known).
+    if (anyAdvanced) {
+      return failCpAdvancedNoReceipt(ids, {
+        ...(args.pass_iterations !== undefined ? { pass_iterations: args.pass_iterations } : {}),
+      });
+    }
+    /* CP load failed without proven advance: fall through to original code */
   }
   // Poison closed-set codes still poison when CP did not cover tip (unreaped/serial).
   if (isPoisonRestartCode(code) || isWorkerDeadlineErrorCode(code)) {
@@ -1786,6 +1806,17 @@ function failReceiptWriteAfterCpAdvanced(
   return failResult(ids, "receipt_write_failed", {
     retryable: false,
     restart_child: true,
+    ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
+  });
+}
+
+/** Post-pass CP re-read failed: nonretryable + restart/poison (cannot authorize retry). */
+function failCheckpointStateUnknownAfterPass(
+  ids: { request_id: string; terminal_record_id: string },
+  opts?: { pass_iterations?: number },
+): SedimentWorkerResult {
+  return failDeadline(ids, SEDIMENT_WORKER_CHECKPOINT_STATE_UNKNOWN_AFTER_PASS_CODE, {
+    retryable: false,
     ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
   });
 }
@@ -2043,7 +2074,8 @@ export async function runSedimentWorkerTask(
                     projectRoot,
                     cpSessionId,
                     branchEntries: snapshot.branchEntries,
-                    beforeCp,
+                    beforeCp: beforePassCp,
+                    anyAdvanced,
                     fatalOn: "covers_tip",
                     loadSessionCheckpoint: deps.loadSessionCheckpoint,
                     countPublicationOutboxPending: deps.countPublicationOutboxPending,
@@ -2071,7 +2103,8 @@ export async function runSedimentWorkerTask(
                     projectRoot,
                     cpSessionId,
                     branchEntries: snapshot.branchEntries,
-                    beforeCp,
+                    beforeCp: beforePassCp,
+                    anyAdvanced,
                     fatalOn: "covers_tip",
                     loadSessionCheckpoint: deps.loadSessionCheckpoint,
                     countPublicationOutboxPending: deps.countPublicationOutboxPending,
@@ -2081,7 +2114,7 @@ export async function runSedimentWorkerTask(
                 // Task-scoped current-candidate deferred unfinished artifact
                 // (multiview pending / staging deferred / promotion-needed):
                 // retryable only when this attempt did not advance CP / no receipt.
-                // Any this-attempt CP advance without receipt → fatal invariant + poison.
+                // Any this-attempt CP advance (any iteration) without receipt → fatal.
                 if (
                   (typeof errCode === "string" && errCode === "current_candidate_deferred")
                   || (err instanceof Error && err.message === "current_candidate_deferred")
@@ -2095,14 +2128,32 @@ export async function runSedimentWorkerTask(
                     projectRoot,
                     cpSessionId,
                     branchEntries: snapshot.branchEntries,
-                    beforeCp,
+                    beforeCp: beforePassCp,
+                    anyAdvanced,
                     fatalOn: "any_advance",
                     loadSessionCheckpoint: deps.loadSessionCheckpoint,
                     countPublicationOutboxPending: deps.countPublicationOutboxPending,
                     hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
                   });
                 }
-                return failResult(ids, "pipeline_threw", { retryable: true, pass_iterations: iterations });
+                // Unexpected pipeline throw after pass work: same receipt/CP invariant
+                // (CP advanced this attempt without receipt must not authorize retry).
+                return await resolveRetryableWithReceiptCpInvariant({
+                  ids,
+                  code: "pipeline_threw",
+                  retryable: true,
+                  pass_iterations: iterations,
+                  abrainHome,
+                  projectRoot,
+                  cpSessionId,
+                  branchEntries: snapshot.branchEntries,
+                  beforeCp: beforePassCp,
+                  anyAdvanced,
+                  fatalOn: "any_advance",
+                  loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                  countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                  hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                });
               }
 
               progress("checkpoint", "start");
@@ -2110,7 +2161,8 @@ export async function runSedimentWorkerTask(
               try {
                 afterCp = await deps.loadSessionCheckpoint(projectRoot, cpSessionId);
               } catch {
-                return failResult(ids, "checkpoint_load_failed", { retryable: true, pass_iterations: iterations });
+                // Post-pass CP state unknown: cannot authorize retry (may have advanced).
+                return failCheckpointStateUnknownAfterPass(ids, { pass_iterations: iterations });
               }
               progress("checkpoint", "end");
 
@@ -2147,7 +2199,8 @@ export async function runSedimentWorkerTask(
                   projectRoot,
                   cpSessionId,
                   branchEntries: snapshot.branchEntries,
-                  beforeCp,
+                  beforeCp: beforePassCp,
+                  anyAdvanced,
                   fatalOn: "covers_tip",
                   loadSessionCheckpoint: deps.loadSessionCheckpoint,
                   countPublicationOutboxPending: deps.countPublicationOutboxPending,
@@ -2170,7 +2223,8 @@ export async function runSedimentWorkerTask(
                     projectRoot,
                     cpSessionId,
                     branchEntries: snapshot.branchEntries,
-                    beforeCp,
+                    beforeCp: beforePassCp,
+                    anyAdvanced,
                     fatalOn: "covers_tip",
                     loadSessionCheckpoint: deps.loadSessionCheckpoint,
                     countPublicationOutboxPending: deps.countPublicationOutboxPending,
@@ -2195,7 +2249,8 @@ export async function runSedimentWorkerTask(
                   projectRoot,
                   cpSessionId,
                   branchEntries: snapshot.branchEntries,
-                  beforeCp,
+                  beforeCp: beforePassCp,
+                  anyAdvanced,
                   fatalOn: "covers_tip",
                   loadSessionCheckpoint: deps.loadSessionCheckpoint,
                   countPublicationOutboxPending: deps.countPublicationOutboxPending,
@@ -2334,9 +2389,22 @@ export async function runSedimentWorkerTask(
             }
 
             // more-iteration budget exhausted with more still true: retryable non-final, no receipt.
-            return failResult(ids, "more_budget_exhausted", {
+            // Still run receipt/CP invariant (covers tip without receipt is fatal).
+            return await resolveRetryableWithReceiptCpInvariant({
+              ids,
+              code: "more_budget_exhausted",
               retryable: true,
               pass_iterations: iterations,
+              abrainHome,
+              projectRoot,
+              cpSessionId,
+              branchEntries: snapshot.branchEntries,
+              beforeCp: beforePassCp,
+              anyAdvanced,
+              fatalOn: "covers_tip",
+              loadSessionCheckpoint: deps.loadSessionCheckpoint,
+              countPublicationOutboxPending: deps.countPublicationOutboxPending,
+              hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
             });
           }, {
             signal: ac.signal,
@@ -2451,7 +2519,12 @@ export async function runSedimentWorkerTask(
           settledResult: SedimentWorkerResult,
         ): Promise<SedimentWorkerResult> => {
           poisonIfSerialOrUnreaped(settledResult.error_code);
-          if (settledResult.error_code === SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE) {
+          // Preserve first-cause codes that already settled nonretryable/restart.
+          if (
+            settledResult.error_code === SEDIMENT_WORKER_CP_ADVANCED_NO_RECEIPT_CODE
+            || settledResult.error_code === "receipt_write_failed"
+            || settledResult.error_code === SEDIMENT_WORKER_CHECKPOINT_STATE_UNKNOWN_AFTER_PASS_CODE
+          ) {
             return settledResult;
           }
           if (
