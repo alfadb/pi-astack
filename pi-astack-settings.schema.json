@@ -400,7 +400,7 @@
         "constraintShadowCompiler": {
           "type": "object",
           "additionalProperties": false,
-          "description": "ADR 0039 retained constraint compiler and separately gated automatic scheduling substrate. Explicit dossier/compiler runs remain available when autoRefresh is false; production write/startup/sync/repair triggers require separate re-authorization through autoRefresh.enabled.",
+          "description": "ADR 0039 retained constraint compiler and separately gated automatic scheduling substrate. Explicit dossier/compiler runs remain available when autoRefresh is false; production write/startup/marker/liveness triggers require separate re-authorization through autoRefresh.enabled.",
           "properties": {
             "_comment": {
               "type": "string",
@@ -479,12 +479,12 @@
               "type": "object",
               "additionalProperties": false,
               "default": { "enabled": false },
-              "description": "Retained ADR 0039 automatic scheduling substrate for successful Constraint Evidence Event append, startup marker/liveness recovery, startup Git sync, and compiled-view repair. Production should keep this false for explicit on-demand operation; false does not disable the compiler, dossier, audit readers, Constraint events, or L2 projection capability.",
+              "description": "Retained ADR 0039 automatic scheduling substrate for successful Constraint Evidence Event append, startup needs_refresh marker recovery, liveness recovery, and startup Git sync. Production should keep this false for explicit on-demand/manual operation; false does not disable the compiler, dossier, audit readers, Constraint events, or L2 projection capability. Does not repair or reinject a session compiled-view (Policy stable-view is sole session rule authority).",
               "properties": {
                 "enabled": {
                   "type": "boolean",
                   "default": false,
-                  "description": "Single production kill switch for every automatic shadow compile trigger. false keeps explicit dossier/compiler commands and audit/migration code available while making event-write, startup, sync, and repair scheduling return auto_refresh_disabled."
+                  "description": "Single production kill switch for every automatic shadow compile trigger. false keeps explicit dossier/compiler commands and audit/migration code available while making event-write, startup marker, liveness recovery, and startup Git sync scheduling return auto_refresh_disabled."
                 },
                 "debounceMs": {
                   "type": "number",

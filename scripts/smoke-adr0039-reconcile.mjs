@@ -706,13 +706,12 @@ function computeLegacyKnowledgeCoverage(abrainHome) {
 }
 
 function loadRuntimeThresholds() {
-  const cfg = fs.existsSync(settingsPath) ? readJson(settingsPath) : {};
-  const compiled = cfg.ruleInjector?.compiledViewInjection ?? {};
-  const shadowAuto = cfg.sediment?.constraintShadowCompiler?.autoRefresh ?? {};
+  // Explicit historical constants for offline constraint-shadow integrity checks.
+  // ruleInjector.compiledViewInjection is retired and is not a settings source.
   return {
-    staleAfterMs: Number(compiled.staleAfterMs ?? shadowAuto.eventStaleAfterMs ?? 24 * 60 * 60 * 1000),
-    minCoverageRatio: Number(compiled.minCoverageRatio ?? 1),
-    deadProjectorAfterMs: Number(cfg.sediment?.constraintShadowCompiler?.deadProjectorAfterMs ?? 4 * 60 * 60 * 1000),
+    staleAfterMs: 24 * 60 * 60 * 1000,
+    minCoverageRatio: 1,
+    deadProjectorAfterMs: 4 * 60 * 60 * 1000,
   };
 }
 

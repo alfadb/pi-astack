@@ -167,9 +167,8 @@ function createSourceRepo() {
     ["projects/pi-global/base.md", "# project fixture\n"],
     ["l2/views/constraint/latest/compiled-view.md", compiledL2],
     ["l2/views/knowledge/latest/world/canonical-shadow-smoke.md", knowledgeProjection.markdown],
-    [".state/sediment/constraint-shadow/latest/compiled-view.md", "runtime compiled bundle fixture\n"],
-    [".state/sediment/constraint-shadow/latest/decision.json", "{\"fixture\":true}\n"],
-    ["read-config.json", `${JSON.stringify({ ruleInjector: { compiledViewInjection: { enabled: true } }, sediment: { knowledgeProjector: { canonicalReadMode: "projection_only", l2OutputRoot: "repo" } } }, null, 2)}\n`],
+    // read-config only drives knowledge projection_only hashing; compiledViewInjection is retired.
+    ["read-config.json", `${JSON.stringify({ sediment: { knowledgeProjector: { canonicalReadMode: "projection_only", l2OutputRoot: "repo" } } }, null, 2)}\n`],
   ]) {
     const file = path.join(root, relative);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -436,12 +435,12 @@ await check("incomplete committed decision and source HEAD drift both invalidate
 
 await check("actual canonical read bundles, pure fold output, and untracked bytes drive change detection", async () => {
   const readBefore = await shadow.captureCanonicalSourceSnapshot({ sourceAbrainHome: source.root, readConfigPath: source.readConfigPath });
-  const runtimeBundle = path.join(source.root, ".state/sediment/constraint-shadow/latest/compiled-view.md");
-  const runtimeOriginal = fs.readFileSync(runtimeBundle);
-  fs.writeFileSync(runtimeBundle, "mutated runtime read bundle\n", "utf8");
+  const knowledgeBundle = path.join(source.root, "l2/views/knowledge/latest/world/canonical-shadow-smoke.md");
+  const knowledgeOriginal = fs.readFileSync(knowledgeBundle);
+  fs.writeFileSync(knowledgeBundle, "mutated knowledge read bundle\n", "utf8");
   const readAfter = await shadow.captureCanonicalSourceSnapshot({ sourceAbrainHome: source.root, readConfigPath: source.readConfigPath });
   assert(shadow.compareCanonicalSourceSnapshots(readBefore, readAfter).readChanged === true, "actual read bundle mutation did not set readChanged");
-  fs.writeFileSync(runtimeBundle, runtimeOriginal);
+  fs.writeFileSync(knowledgeBundle, knowledgeOriginal);
 
   const foldBefore = await shadow.captureCanonicalSourceSnapshot({ sourceAbrainHome: source.root, readConfigPath: source.readConfigPath });
   const foldUpdate = knowledgeFixture({
@@ -499,7 +498,7 @@ await check("dossier is deterministic and proves source/ref/index/worktree/push/
   assert(first.report.phase_disabled_shadow_count_before === 0 && first.report.phase_disabled_shadow_count_after === 0, "dossier did not prove zero canonical phase-disabled shadows");
   assert(String(first.report.report_file_sha256_rule).includes("recorded externally"), "report file hash rule is missing");
   assert(first.report.source_before.canonical_read.bundles.knowledge.files > 0, "knowledge read bundle was not hashed");
-  assert(first.report.source_before.canonical_read.bundles.constraint.files > 0, "constraint read bundle was not hashed");
+  assert(!Object.hasOwn(first.report.source_before.canonical_read.bundles, "constraint"), "retired constraint runtime read bundle must not be hashed");
   const foldProjection = knowledgeRender.renderKnowledgeProjectionFromSet([{ eventId: source.knowledge.event_id, body: source.knowledge.body }]);
   const foldIdentity = knowledgeRender.knowledgeIdentityKey(source.knowledge.body);
   const expectedFoldInputHash = jcs.jcsSha256Hex({

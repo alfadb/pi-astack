@@ -1440,22 +1440,18 @@ async function canonicalReadSnapshot(sourceAbrainHome: string, readConfigPath?: 
   }
   const sediment = isRecord(root.sediment) ? root.sediment : {};
   const projector = isRecord(sediment.knowledgeProjector) ? sediment.knowledgeProjector : {};
-  const ruleInjector = isRecord(root.ruleInjector) ? root.ruleInjector : {};
-  const compiled = isRecord(ruleInjector.compiledViewInjection) ? ruleInjector.compiledViewInjection : {};
   const knowledgeMode = projector.canonicalReadMode === "projection_only" || projector.canonicalReadMode === "projection_with_legacy_fallback"
     ? projector.canonicalReadMode
     : "legacy";
   const knowledgeRelative = "l2/views/knowledge/latest";
-  const constraintRelative = ".state/sediment/constraint-shadow/latest";
+  // Constraint compiled-view runtime bundle projection is retired (Policy stable-view is sole
+  // session rule authority). Do not read ruleInjector.compiledViewInjection or hash
+  // constraint-shadow as a live canonical read surface.
   const knowledgeBundle = knowledgeMode === "projection_only"
     ? await treeHash(path.join(sourceAbrainHome, ...knowledgeRelative.split("/")))
     : null;
-  const constraintBundle = compiled.enabled === true
-    ? await treeHash(path.join(sourceAbrainHome, ...constraintRelative.split("/")))
-    : null;
   const bundles = {
     knowledge: knowledgeBundle ? { enabled: true, relative_path: knowledgeRelative, ...knowledgeBundle } : { enabled: false, relative_path: null, hash: jcsSha256Hex({ state: "disabled" }), files: 0, bytes: 0 },
-    constraint: constraintBundle ? { enabled: true, relative_path: constraintRelative, ...constraintBundle } : { enabled: false, relative_path: null, hash: jcsSha256Hex({ state: "disabled" }), files: 0, bytes: 0 },
   };
   return {
     source,
@@ -1463,8 +1459,6 @@ async function canonicalReadSnapshot(sourceAbrainHome: string, readConfigPath?: 
     canonical_read_config: {
       knowledge_mode: knowledgeMode,
       knowledge_source: knowledgeMode === "projection_only" ? knowledgeRelative : null,
-      constraint_compiled_view_enabled: compiled.enabled === true,
-      constraint_source: compiled.enabled === true ? constraintRelative : null,
     },
     bundles,
     bundles_hash: jcsSha256Hex(bundles),

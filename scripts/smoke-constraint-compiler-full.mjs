@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
 const suites = [
-  "smoke-constraint-runtime-gate.mjs",
   "smoke-constraint-legacy-retirement.mjs",
   "smoke-constraint-semantic-review-pack.mjs",
   "smoke-constraint-text-delta-dispositions-writer.mjs",

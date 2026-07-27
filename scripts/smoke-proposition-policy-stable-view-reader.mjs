@@ -288,12 +288,15 @@ try {
     assert(!budget.ok && budget.reason === "oversize", `aggregate budget=${JSON.stringify(budget)}`);
   });
 
+  // Negative fixture: obsolete compiledViewInjection / D3-v2 / disabled selector gates must be ignored;
+  // Policy stable-view remains the sole session rule authority regardless of these residual keys.
   await check("runtime injects exactly one policy fence and ignores all obsolete config gates/sources", async () => {
     writeOldRuntimeSources(published);
     const runtimeHome = path.join(tmpRoot, "runtime-home");
     writeFile(path.join(runtimeHome, ".pi", "agent", "pi-astack-settings.json"), `${JSON.stringify({
       ruleInjector: {
         enabled: false,
+        // Intentional obsolete keys: must not restore compiled/D3 injection or block stable-view.
         compiledViewInjection: { enabled: true, fallbackToLegacyOnError: true },
         propositionLifecycleFreshnessD3V2SessionStartInjection: { enabled: true, selector: { session_ids: [sessionId] } },
         propositionPolicyStableViewInjection: {

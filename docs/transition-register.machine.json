@@ -188,26 +188,28 @@
       "authorization_status": "not_authorized",
       "entered": "2026-07-08",
       "review_by": "2026-07-27",
-      "current": "completed / not_authorized retired/superseded (2026-07-27 S0). Constraint dual-read flip never became production session rule authority; Policy stable-view supersedes compiled-view/legacy injection. Compiled-view injection helpers, liveCanary, self-heal scheduler, and dual-read audit module deleted from rule-injector. Historical compiler/dual-read evidence remains immutable and non-rerunnable as cold residual.",
+      "current": "completed / not_authorized retired/superseded (2026-07-27 S0 + residual gate cleanup). Constraint dual-read flip never became production session rule authority; Policy stable-view supersedes compiled-view/legacy injection. Compiled-view injection helpers, liveCanary, self-heal scheduler, dual-read audit module, and compiled runtime gate dossier/smoke deleted. Historical compiler/dual-read evidence remains immutable and non-rerunnable as cold residual.",
       "exit": [
         "DONE: compiled/dual-read/self-heal injection path deleted from production code",
         "DONE: Policy stable-view is sole session rule authority",
+        "DONE: constraint runtime gate dossier/smoke/package aliases deleted (no archive)",
         "BOUNDARY: residual constraint L2/compiler offline tooling is not a flip surface"
       ],
       "evidence": [
         "constraint dual-read audit historical rows",
         "shadow compiler metrics historical",
         "ADR0040 Policy stable-view runtime flip",
-        "2026-07-27 S0 compiled rule injection retirement"
+        "2026-07-27 S0 compiled rule injection retirement",
+        "2026-07-27 residual compiled runtime gate cleanup"
       ],
       "owner": "constraint-pipeline",
       "consumer": [
         "constraint compiler",
-        "constraint runtime gate"
+        "constraint-shadow manual report"
       ],
       "renewal_count": 0,
       "risk_class": "critical",
-      "next_action": "Keep retired/superseded. Do not restore compiled-view injection, dual-read runtime, or treat constraint-shadow as session rule authority. Residual projection/audit alignment stays under other blocked residual faces if needed."
+      "next_action": "Keep retired/superseded. Do not restore compiled-view injection, dual-read runtime, runtime gate scripts, or treat constraint-shadow as session rule authority. Residual projection/audit alignment stays under other blocked residual faces if needed."
     },
     {
       "id": "proposition.adr0040-p0a",
@@ -961,7 +963,7 @@
       "authorization_status": "authorized",
       "entered": "2026-07-08",
       "review_by": "2026-07-27",
-      "current": "completed / authorized (2026-07-27 S0). dual-read audit source module `extensions/abrain/rule-injector/dualread-audit.ts` deleted; schema key `ruleInjector.dualReadAudit` removed; production rule authority remains Policy stable-view only. Historical dual-read audit.jsonl rows and evidence notes keep original bytes and remain offline cold audit only. constraint-shadow compiler + manual auto-refresh substrate retained but not session rule authority.",
+      "current": "completed / authorized (2026-07-27 S0 + residual gate cleanup). dual-read audit source module `extensions/abrain/rule-injector/dualread-audit.ts` deleted; schema key `ruleInjector.dualReadAudit` removed; compiled runtime gate dossier/smoke deleted; production rule authority remains Policy stable-view only. Historical dual-read audit.jsonl rows and evidence notes keep original bytes and remain offline cold audit only. constraint-shadow compiler + manual auto-refresh substrate retained but not session rule authority.",
       "exit": [
         "DONE: dualread-audit.ts deleted and unreachable from production hooks",
         "DONE: schema dualReadAudit removed; settings load ignores residual orphan key",
