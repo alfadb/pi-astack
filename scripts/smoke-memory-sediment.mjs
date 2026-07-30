@@ -75,6 +75,9 @@ function transpileExtensions(outRoot) {
   for (const dir of dirs) {
     const srcDir = path.join(extRoot, dir);
     for (const file of fs.readdirSync(srcDir).filter((f) => f.endsWith(".ts"))) {
+      // Production loader uses import.meta.resolve + dynamic import under jiti (ESM).
+      // CJS transpile of that tree cannot carry those semantics; stub after skip (see below).
+      if (dir === "compaction-tuner" && file === "openai-responses-shared-loader.ts") continue;
       const srcPath = path.join(srcDir, file);
       const outPath = path.join(outRoot, dir, file.replace(/\.ts$/, ".js"));
       const src = fs.readFileSync(srcPath, "utf-8");
@@ -331,10 +334,25 @@ module.exports = OpenAI;
 module.exports.default = OpenAI;
 `);
 
-  writeFile(path.join(outRoot, "compaction-tuner", "openai-responses-shared-loader.mjs"), `
-export function convertResponsesMessages(messages) {
-  return messages || [];
-}
+  writeFile(path.join(outRoot, "compaction-tuner", "openai-responses-shared-loader.js"), `
+// Lazy-load stub matching production API (no top-level deep pi-ai resolve).
+const loaded = {
+  convertResponsesMessages: function convertResponsesMessages(messages) {
+    return messages || [];
+  },
+  sourcePath: "memory-sediment-stub",
+  compatUrl: "memory-sediment-stub",
+  packageRoot: "memory-sediment-stub",
+};
+exports.TEST_ALLOW_LOCAL_PI_AI_ENV = "PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI";
+exports.loadOpenAIResponsesShared = async function loadOpenAIResponsesShared() {
+  return loaded;
+};
+exports.convertResponsesMessages = async function convertResponsesMessages() {
+  const mod = await exports.loadOpenAIResponsesShared();
+  return mod.convertResponsesMessages.apply(null, arguments);
+};
+exports.__resetOpenAIResponsesSharedLoaderForTests = function () {};
 `);
 
   // Minimal pi-ai subset for ADR 0015 memory_search LLM-path smoke. Dynamic

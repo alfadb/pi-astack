@@ -2,7 +2,7 @@
 /**
  * Smoke: current pi install target and backward-compatible peer contracts.
  *
- * Install target: 0.82.0. Peer floor: >=0.80.10 <1.0.0.
+ * Install target: 0.83.0. Peer floor: >=0.80.10 <1.0.0.
  *
  * Covers more than source-regex:
  *   1) package.json is the publish contract: pin four @earendil-works packages to
@@ -27,6 +27,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
+import {
+  hostPackageVersion,
+  resolveHostCodingAgent,
+} from "./_resolve-host-pi.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -87,98 +91,8 @@ function readPkgVersion(pkgPath) {
   }
 }
 
-/** Walk up from a resolved file (often dist/index.js) to the package root. */
-function packageRootFromResolved(resolvedUrlOrPath) {
-  let cur;
-  try {
-    cur = resolvedUrlOrPath.startsWith("file:")
-      ? fileURLToPath(resolvedUrlOrPath)
-      : path.resolve(resolvedUrlOrPath);
-  } catch {
-    return null;
-  }
-  if (fs.existsSync(cur) && fs.statSync(cur).isFile()) cur = path.dirname(cur);
-  for (let i = 0; i < 8 && cur && cur !== path.dirname(cur); i++) {
-    const pkgPath = path.join(cur, "package.json");
-    if (fs.existsSync(pkgPath)) {
-      try {
-        const name = JSON.parse(fs.readFileSync(pkgPath, "utf8")).name;
-        if (name === "@earendil-works/pi-coding-agent") return cur;
-      } catch { /* keep walking */ }
-    }
-    cur = path.dirname(cur);
-  }
-  return null;
-}
-
-/** Resolve the package root behind the active `pi` executable on PATH. */
-function activePiPackageRoot() {
-  const pathEntries = String(process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  const executableNames = process.platform === "win32" ? ["pi.cmd", "pi.exe", "pi"] : ["pi"];
-  let repoLocal = null;
-  for (const entry of pathEntries) {
-    for (const name of executableNames) {
-      const candidate = path.join(entry, name);
-      try {
-        if (!fs.statSync(candidate).isFile()) continue;
-        const real = fs.realpathSync(candidate);
-        const root = packageRootFromResolved(real);
-        if (!root) continue;
-        const resolvedRoot = path.resolve(root);
-        const isRepoLocal = resolvedRoot === repoRoot || resolvedRoot.startsWith(`${repoRoot}${path.sep}`);
-        if (!isRepoLocal) return { root, executable: candidate, real };
-        repoLocal ??= { root, executable: candidate, real };
-      } catch { /* try the next PATH entry */ }
-    }
-  }
-  return repoLocal;
-}
-
-/**
- * Prefer explicit compatibility roots, then the active pi executable. A local
- * import is only a fallback because direct Node resolution can select this
- * repository's stale node_modules instead of the process host.
- */
-function resolveHostCodingAgent() {
-  const tried = [];
-  for (const envName of ["PI_COMPAT_ROOT", "PI_08010_ROOT"]) {
-    if (!process.env[envName]) continue;
-    const root = path.resolve(process.env[envName]);
-    tried.push(`${envName}=${root}`);
-    if (fs.existsSync(path.join(root, "package.json"))) return { root, source: envName, tried };
-  }
-
-  const activePi = activePiPackageRoot();
-  tried.push(
-    activePi
-      ? `active-pi=${activePi.executable}→${activePi.real}→root=${activePi.root}`
-      : "active-pi=not found",
-  );
-  if (activePi) return { root: activePi.root, source: "active pi executable", tried };
-
-  try {
-    const resolved = import.meta.resolve("@earendil-works/pi-coding-agent");
-    const root = packageRootFromResolved(resolved);
-    tried.push(`import.meta.resolve→${resolved}→root=${root}`);
-    if (root) return { root, source: "import.meta.resolve", tried };
-  } catch (err) {
-    tried.push(`import.meta.resolve failed: ${err.message}`);
-  }
-
-  const local = path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent");
-  tried.push(`local=${local}`);
-  if (fs.existsSync(path.join(local, "package.json"))) {
-    return { root: local, source: "local node_modules", tried };
-  }
-
-  const volta =
-    "/home/worker/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent";
-  tried.push(`volta-fallback=${volta}`);
-  if (fs.existsSync(path.join(volta, "package.json"))) {
-    return { root: volta, source: "volta-fallback", tried };
-  }
-
-  return { root: null, source: null, tried };
+function resolveHostCodingAgentForRepo() {
+  return resolveHostCodingAgent(repoRoot);
 }
 
 function stripLineCommentsAndBlockComments(text) {
@@ -203,7 +117,7 @@ function walkFiles(dir, pred, out = []) {
 }
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-const TARGET = "0.82.0";
+const TARGET = "0.83.0";
 const PEER_FLOOR = ">=0.80.10 <1.0.0";
 const EAR = [
   "@earendil-works/pi-agent-core",
@@ -218,28 +132,12 @@ const PEER_EAR = [
   "@earendil-works/pi-tui",
 ];
 
-function hostPackageVersion(hostRoot, name) {
-  if (name === "@earendil-works/pi-coding-agent") {
-    return readPkgVersion(path.join(hostRoot, "package.json"));
-  }
-  const unscoped = name.slice("@earendil-works/".length);
-  const candidates = [
-    path.join(hostRoot, "node_modules", name, "package.json"),
-    path.join(path.dirname(hostRoot), unscoped, "package.json"),
-  ];
-  for (const candidate of candidates) {
-    const version = readPkgVersion(candidate);
-    if (version != null) return version;
-  }
-  return null;
-}
-
 function formatVersions(readVersion) {
   return EAR.map((name) => `${name}@${readVersion(name) ?? "not installed"}`).join(", ");
 }
 
 console.log(`Smoke: pi install target ${TARGET}; peer floor ${PEER_FLOOR}\n`);
-const initialHost = resolveHostCodingAgent();
+const initialHost = resolveHostCodingAgentForRepo();
 console.log(
   `  note  actual host via ${initialHost.source ?? "unresolved"}: ${initialHost.root ?? "not found"}`,
 );
@@ -321,7 +219,7 @@ if (fs.existsSync(lockPath)) {
 }
 
 check("host resolver prefers explicit roots / external active pi before local fallback", () => {
-  const resolved = resolveHostCodingAgent();
+  const resolved = resolveHostCodingAgentForRepo();
   if (!resolved.root) {
     throw new Error(`could not resolve host coding-agent; tried: ${resolved.tried.join(" | ")}`);
   }
@@ -339,12 +237,12 @@ check("host resolver prefers explicit roots / external active pi before local fa
   try {
     process.env.PI_COMPAT_ROOT = resolved.root;
     process.env.PI_08010_ROOT = resolved.root;
-    const preferred = resolveHostCodingAgent();
+    const preferred = resolveHostCodingAgentForRepo();
     if (preferred.source !== "PI_COMPAT_ROOT") {
       throw new Error(`PI_COMPAT_ROOT did not win precedence; source=${preferred.source}`);
     }
     delete process.env.PI_COMPAT_ROOT;
-    const legacy = resolveHostCodingAgent();
+    const legacy = resolveHostCodingAgentForRepo();
     if (legacy.source !== "PI_08010_ROOT") {
       throw new Error(`legacy PI_08010_ROOT alias did not resolve; source=${legacy.source}`);
     }
@@ -359,7 +257,7 @@ check("host resolver prefers explicit roots / external active pi before local fa
 });
 
 check(`host install meets target >=${TARGET} and peer range ${PEER_FLOOR}`, () => {
-  const { root } = resolveHostCodingAgent();
+  const { root } = resolveHostCodingAgentForRepo();
   if (!root) throw new Error("no host coding-agent root");
   const v = readPkgVersion(path.join(root, "package.json"));
   if (!versionInPeerRange(v)) {
@@ -543,7 +441,7 @@ await checkAsync("refresh awaits Promise before subsequent find (behavioral)", a
 });
 
 await checkAsync("host critical probe: ModelRegistry.refresh Promise + prepareNextTurnWithContext installer", async () => {
-  const { root: hostRoot, source, tried } = resolveHostCodingAgent();
+  const { root: hostRoot, source, tried } = resolveHostCodingAgentForRepo();
   if (!hostRoot) throw new Error(`could not resolve pi-coding-agent; tried: ${tried.join(" | ")}`);
   const hostPkg = JSON.parse(fs.readFileSync(path.join(hostRoot, "package.json"), "utf8"));
   if (!versionInPeerRange(hostPkg.version)) {
@@ -587,7 +485,7 @@ await checkAsync("host critical probe: ModelRegistry.refresh Promise + prepareNe
 });
 
 await checkAsync("parent ModelRuntime E2E: createAgentSession holds same runtime + child inherits auth", async () => {
-  const { root: hostRoot, source, tried } = resolveHostCodingAgent();
+  const { root: hostRoot, source, tried } = resolveHostCodingAgentForRepo();
   if (!hostRoot) throw new Error(`could not resolve host; tried: ${tried.join(" | ")}`);
   const hostPkg = JSON.parse(fs.readFileSync(path.join(hostRoot, "package.json"), "utf8"));
   if (!versionInPeerRange(hostPkg.version)) {

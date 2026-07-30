@@ -18,8 +18,9 @@
  *         via the `input` event handler.
  *
  * Also covers:
- *   - PI_VERSION_OK semver gate (0.75.x – 0.99.x in-range; 1.x.x and
- *     pre-0.75 out-of-range; "unknown" stays quiet).
+ *   - PI_VERSION_OK semver gate via public VERSION export (0.75.x – 0.99.x
+ *     in-range; 1.x.x and pre-0.75 out-of-range; missing VERSION → "unknown"
+ *     stays quiet).
  *   - FORCE_DISABLED env escape hatch parses 1/true/yes/on (case-insensitive).
  *   - happy path (v4): MRU dedup prevents in-memory duplication during
  *     renderInitialMessages replay; disk writes ONLY via input event.
@@ -95,8 +96,9 @@ function stageExtension({ fakePi, fakePiTui, fakePackageJson, env }) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-pih-"));
 
   // Lay out a fake @earendil-works package under tmpDir/node_modules
-  // so `createRequire(...)("@earendil-works/pi-coding-agent/package.json")`
-  // and `import { CustomEditor }` both resolve to our mocks.
+  // so `import { CustomEditor, VERSION }` resolves to our mocks.
+  // VERSION is the public root-entry export (host-aliased in production);
+  // package.json is no longer the version source of truth.
   const nm = path.join(tmpDir, "node_modules", "@earendil-works");
   fs.mkdirSync(path.join(nm, "pi-coding-agent"), { recursive: true });
   fs.mkdirSync(path.join(nm, "pi-tui"), { recursive: true });
@@ -105,13 +107,13 @@ function stageExtension({ fakePi, fakePiTui, fakePackageJson, env }) {
     path.join(nm, "pi-coding-agent", "package.json"),
     JSON.stringify(fakePackageJson),
   );
+  const versionExport =
+    typeof fakePackageJson?.version === "string"
+      ? `\nmodule.exports.VERSION = ${JSON.stringify(fakePackageJson.version)};\n`
+      : "\n// no VERSION export (simulates exotic/missing host export)\n";
   fs.writeFileSync(
     path.join(nm, "pi-coding-agent", "index.js"),
-    fakePi,
-  );
-  fs.writeFileSync(
-    path.join(nm, "pi-coding-agent", "package.json.js"),
-    "", // unused; createRequire reads .json directly
+    fakePi + versionExport,
   );
   fs.writeFileSync(
     path.join(nm, "pi-tui", "package.json"),

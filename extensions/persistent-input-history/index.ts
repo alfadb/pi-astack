@@ -36,7 +36,7 @@
  * to purge.
  */
 
-import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, isSubAgentSession } from "../_shared/pi-internals";
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import {
@@ -53,7 +53,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
   DEFAULT_PERSISTENT_INPUT_HISTORY_SETTINGS,
@@ -108,23 +107,15 @@ const CAPABILITY: Capability = (() => {
 })();
 
 /**
- * pi-coding-agent semver as reported by its package.json. Best-effort:
- * if resolution fails (alternative load layout, ESM-only package, etc.)
- * we return `"unknown"` and `PI_VERSION_OK` stays true (don't punish
- * exotic setups; only warn when we can prove the version is outside
- * the tested range).
+ * pi-coding-agent semver from the package root entry's public `VERSION`
+ * export. Production loaders alias `@earendil-works/pi-coding-agent` to the
+ * host install, so this tracks the running host rather than a local
+ * node_modules package.json. Best-effort: missing/non-string VERSION →
+ * `"unknown"` and `PI_VERSION_OK` stays true (don't punish exotic setups;
+ * only warn when we can prove the version is outside the tested range).
  */
-const PI_VERSION: string = (() => {
-  try {
-    const req = createRequire(__filename);
-    const pkg = req("@earendil-works/pi-coding-agent/package.json") as {
-      version?: unknown;
-    };
-    return typeof pkg.version === "string" ? pkg.version : "unknown";
-  } catch {
-    return "unknown";
-  }
-})();
+const PI_VERSION: string =
+  typeof VERSION === "string" && VERSION.length > 0 ? VERSION : "unknown";
 
 /**
  * Whether the running pi-coding-agent version falls in the range this

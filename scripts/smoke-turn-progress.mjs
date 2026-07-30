@@ -1042,63 +1042,71 @@ function makeFakeCtx({ subAgent = false, withUi = true, themed = true, withWidge
 // drift hits users.
 
 {
-  // Locate the installed pi runner.js — we look at the agent's known
-  // install paths. If pi isn't installed at the expected location,
-  // skip with a warning (smoke runs in CI without pi available).
-  const candidates = [
-    "/home/worker/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js",
-    path.join(repoRoot, "../../../../.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/runner.js"),
-  ];
-  let runnerSrc;
-  for (const candidate of candidates) {
-    try {
-      runnerSrc = fs.readFileSync(candidate, "utf8");
-      break;
-    } catch {
-      // try next
+  // Locate the installed pi runner.js via the shared active-host resolver
+  // (PATH `pi` / PI_COMPAT_ROOT / etc.). Volta-only hardcodes miss the
+  // current ~/.local/npm-global install. G must not soft-skip.
+  // note: this smoke's check(name, cond) takes a boolean, not a callback.
+  const { resolveHostCodingAgent } = await import("./_resolve-host-pi.mjs");
+  const host = resolveHostCodingAgent(repoRoot);
+  let runnerSrc = "";
+  let runnerPath = "";
+  let hostError = "";
+  if (!host.root) {
+    hostError = `could not resolve host pi-coding-agent; tried: ${(host.tried || []).join(" | ")}`;
+  } else {
+    runnerPath = path.join(host.root, "dist/core/extensions/runner.js");
+    if (!fs.existsSync(runnerPath)) {
+      hostError = `host runner.js missing at ${runnerPath} (via ${host.source})`;
+    } else {
+      try {
+        runnerSrc = fs.readFileSync(runnerPath, "utf8");
+      } catch (err) {
+        hostError = `failed reading ${runnerPath}: ${err.message}`;
+      }
+      if (!hostError && !runnerSrc) hostError = `host runner.js empty at ${runnerPath}`;
     }
   }
+  check("G. host pi runner.js locatable (no skip)", !hostError && !!runnerSrc, hostError || undefined);
+  if (!hostError && runnerSrc) {
+    console.log(`  note  G. host runner via ${host.source}: ${runnerPath}`);
+  }
 
-  if (!runnerSrc) {
-    console.log("  skip  G. pi upstream drift sentinel (pi not installed at known path)");
-  } else {
-    // The mirror depends on these specific tokens in emitBeforeAgentStart.
-    // Each anchor maps to a behavioural assumption documented in the
-    // installEmitPatch mirror block.
-    const anchors = [
-      {
-        name: "emitBeforeAgentStart method declaration",
-        re: /async\s+emitBeforeAgentStart\s*\(\s*prompt\s*,\s*images\s*,\s*systemPrompt\s*,\s*systemPromptOptions\s*\)/,
-      },
-      {
-        name: "currentSystemPrompt initialised from systemPrompt arg",
-        re: /let\s+currentSystemPrompt\s*=\s*systemPrompt\s*;/,
-      },
-      {
-        name: "ctx built via Object.defineProperties + getOwnPropertyDescriptors(createContext)",
-        re: /Object\.defineProperties\s*\(\s*\{\s*\}\s*,\s*Object\.getOwnPropertyDescriptors\s*\(\s*this\.createContext\(\)\s*\)\s*\)/,
-      },
-      {
-        name: "ctx.getSystemPrompt closure that calls assertActive",
-        re: /ctx\.getSystemPrompt\s*=\s*\(\s*\)\s*=>\s*\{[\s\S]{0,200}this\.assertActive\(\)\s*;[\s\S]{0,200}return\s+currentSystemPrompt\s*;[\s\S]{0,30}\}\s*;/,
-      },
-      {
-        name: "per-extension loop reading handlers.get('before_agent_start')",
-        re: /for\s*\(\s*const\s+ext\s+of\s+this\.extensions\s*\)\s*\{[\s\S]{0,400}ext\.handlers\.get\(\s*"before_agent_start"\s*\)/,
-      },
-      {
-        name: "emitError call with extensionPath/event/error/stack fields",
-        re: /this\.emitError\s*\(\s*\{[\s\S]{0,200}extensionPath\s*:[\s\S]{0,200}event\s*:[\s\S]{0,200}error\s*:[\s\S]{0,200}stack\s*:/,
-      },
-      {
-        name: "return shape: {messages, systemPrompt} OR undefined",
-        re: /messages\s*:\s*messages\.length\s*>\s*0\s*\?\s*messages\s*:\s*undefined[\s\S]{0,200}systemPrompt\s*:\s*systemPromptModified\s*\?\s*currentSystemPrompt\s*:\s*undefined/,
-      },
-    ];
+  // The mirror depends on these specific tokens in emitBeforeAgentStart.
+  // Each anchor maps to a behavioural assumption documented in the
+  // installEmitPatch mirror block.
+  const anchors = [
+    {
+      name: "emitBeforeAgentStart method declaration",
+      re: /async\s+emitBeforeAgentStart\s*\(\s*prompt\s*,\s*images\s*,\s*systemPrompt\s*,\s*systemPromptOptions\s*\)/,
+    },
+    {
+      name: "currentSystemPrompt initialised from systemPrompt arg",
+      re: /let\s+currentSystemPrompt\s*=\s*systemPrompt\s*;/,
+    },
+    {
+      name: "ctx built via Object.defineProperties + getOwnPropertyDescriptors(createContext)",
+      re: /Object\.defineProperties\s*\(\s*\{\s*\}\s*,\s*Object\.getOwnPropertyDescriptors\s*\(\s*this\.createContext\(\)\s*\)\s*\)/,
+    },
+    {
+      name: "ctx.getSystemPrompt closure that calls assertActive",
+      re: /ctx\.getSystemPrompt\s*=\s*\(\s*\)\s*=>\s*\{[\s\S]{0,200}this\.assertActive\(\)\s*;[\s\S]{0,200}return\s+currentSystemPrompt\s*;[\s\S]{0,30}\}\s*;/,
+    },
+    {
+      name: "per-extension loop reading handlers.get('before_agent_start')",
+      re: /for\s*\(\s*const\s+ext\s+of\s+this\.extensions\s*\)\s*\{[\s\S]{0,400}ext\.handlers\.get\(\s*"before_agent_start"\s*\)/,
+    },
+    {
+      name: "emitError call with extensionPath/event/error/stack fields",
+      re: /this\.emitError\s*\(\s*\{[\s\S]{0,200}extensionPath\s*:[\s\S]{0,200}event\s*:[\s\S]{0,200}error\s*:[\s\S]{0,200}stack\s*:/,
+    },
+    {
+      name: "return shape: {messages, systemPrompt} OR undefined",
+      re: /messages\s*:\s*messages\.length\s*>\s*0\s*\?\s*messages\s*:\s*undefined[\s\S]{0,200}systemPrompt\s*:\s*systemPromptModified\s*\?\s*currentSystemPrompt\s*:\s*undefined/,
+    },
+  ];
 
-    for (const a of anchors) {
-      check(`G. pi upstream anchor present: ${a.name}`, a.re.test(runnerSrc));
-    }
+  for (const a of anchors) {
+    check(`G. pi upstream anchor present: ${a.name}`, !!runnerSrc && a.re.test(runnerSrc));
   }
 }
 

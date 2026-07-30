@@ -15,20 +15,48 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  hostPackageRoot,
+  hostPackageVersion,
+  isRepoLocalPath,
+  resolveExternalHostCodingAgent,
+  resolveHostCodingAgent,
+} from "./_resolve-host-pi.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const jiti = createJiti(import.meta.url);
+const TARGET = "0.83.0";
+const localCodingAgent = path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent");
+const externalHost = resolveExternalHostCodingAgent(repoRoot);
+const aliasHost = externalHost.external
+  ? externalHost
+  : resolveHostCodingAgent(repoRoot);
+const aliasHostRoot = aliasHost.root && fs.existsSync(path.join(aliasHost.root, "package.json"))
+  ? aliasHost.root
+  : localCodingAgent;
+const aliasHostIsExternal = Boolean(
+  aliasHostRoot && !isRepoLocalPath(aliasHostRoot, repoRoot),
+);
 
-function loaderLikeAliases() {
+function packageDist(root, name, file) {
+  if (name === "@earendil-works/pi-coding-agent") {
+    return path.join(root, "dist", file);
+  }
+  const nested = hostPackageRoot(root, name);
+  if (nested) return path.join(nested, "dist", file);
+  return path.join(repoRoot, "node_modules", name, "dist", file);
+}
+
+function loaderLikeAliases(hostRoot = aliasHostRoot) {
   return {
-    "@earendil-works/pi-ai": path.join(repoRoot, "node_modules/@earendil-works/pi-ai/dist/compat.js"),
-    "@earendil-works/pi-ai/compat": path.join(repoRoot, "node_modules/@earendil-works/pi-ai/dist/compat.js"),
-    "@earendil-works/pi-ai/oauth": path.join(repoRoot, "node_modules/@earendil-works/pi-ai/dist/oauth.js"),
-    "@earendil-works/pi-coding-agent": path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent/dist/index.js"),
-    "@earendil-works/pi-agent-core": path.join(repoRoot, "node_modules/@earendil-works/pi-agent-core/dist/index.js"),
-    "@earendil-works/pi-tui": path.join(repoRoot, "node_modules/@earendil-works/pi-tui/dist/index.js"),
+    "@earendil-works/pi-ai": packageDist(hostRoot, "@earendil-works/pi-ai", "compat.js"),
+    "@earendil-works/pi-ai/compat": packageDist(hostRoot, "@earendil-works/pi-ai", "compat.js"),
+    "@earendil-works/pi-ai/oauth": packageDist(hostRoot, "@earendil-works/pi-ai", "oauth.js"),
+    "@earendil-works/pi-coding-agent": packageDist(hostRoot, "@earendil-works/pi-coding-agent", "index.js"),
+    "@earendil-works/pi-agent-core": packageDist(hostRoot, "@earendil-works/pi-agent-core", "index.js"),
+    "@earendil-works/pi-tui": packageDist(hostRoot, "@earendil-works/pi-tui", "index.js"),
     typebox: path.join(repoRoot, "node_modules/typebox/build/cjs/index.js"),
     "typebox/compile": path.join(repoRoot, "node_modules/typebox/compile/index.cjs"),
     "typebox/value": path.join(repoRoot, "node_modules/typebox/value/index.cjs"),
@@ -82,11 +110,22 @@ console.log("Smoke: compaction-tuner OpenAI remote compact\n");
 const indexSrc = readRel("extensions/compaction-tuner/index.ts");
 const settingsSrc = readRel("extensions/compaction-tuner/settings.ts");
 const helperSrc = readRel("extensions/compaction-tuner/openai-remote-compact.ts");
-const responsesBridgeSrc = readRel("extensions/compaction-tuner/openai-responses-shared-loader.mjs");
+const responsesLoaderSrc = readRel("extensions/compaction-tuner/openai-responses-shared-loader.ts");
 const schemaSrc = readRel("pi-astack-settings.schema.json");
 const packageSrc = readRel("package.json");
 
 console.log("source anchors:");
+console.log(
+  `  note  pi-like alias host via ${aliasHost.source ?? "unresolved"}: ${aliasHostRoot}` +
+    ` (external=${aliasHostIsExternal}, coding-agent@${hostPackageVersion(aliasHostRoot, "@earendil-works/pi-coding-agent") ?? "?"}` +
+    `, pi-ai@${hostPackageVersion(aliasHostRoot, "@earendil-works/pi-ai") ?? "?"})`,
+);
+if (!aliasHostIsExternal) {
+  console.log(
+    `  note  no external host for pi-like alias; falling back to ${aliasHostRoot}` +
+      `; tried: ${(externalHost.tried || []).join(" | ")}`,
+  );
+}
 
 check("remote helper is wired into session_before_compact and before_provider_request", () => {
   if (!indexSrc.includes('pi.on("session_before_compact"')) throw new Error("session_before_compact hook missing");
@@ -137,22 +176,70 @@ check("runtime keeps remote compact payload audit in a sidecar", () => {
   if (!indexSrc.includes("payload_sha256")) throw new Error("main audit hash missing");
 });
 
-check("helper bypasses pi loader root alias through an ESM bridge", () => {
+check("helper resolves deep convertResponsesMessages via lazy jiti-managed import.meta.resolve loader", () => {
   if (helperSrc.includes("@earendil-works/pi-ai/api/openai-responses-shared")) {
     throw new Error("public pi-ai api subpath import is rewritten incorrectly by pi's extension loader alias");
   }
   if (helperSrc.includes("node_modules/@earendil-works/pi-ai/dist/api/openai-responses-shared.js")) {
     throw new Error("helper should not depend on a concrete node_modules layout");
   }
-  if (!helperSrc.includes("./openai-responses-shared-loader.mjs")) {
-    throw new Error("ESM bridge import missing");
+  if (helperSrc.includes("openai-responses-shared-loader.mjs")) {
+    throw new Error("legacy native .mjs bridge import must be removed");
   }
-  if (!responsesBridgeSrc.includes('from "@earendil-works/pi-ai/api/openai-responses-shared"')) {
-    throw new Error("ESM bridge should use the package public api export");
+  if (!helperSrc.includes("./openai-responses-shared-loader")) {
+    throw new Error("jiti-managed openai-responses-shared-loader import missing");
+  }
+  if (fs.existsSync(path.join(repoRoot, "extensions/compaction-tuner/openai-responses-shared-loader.mjs"))) {
+    throw new Error("legacy openai-responses-shared-loader.mjs must be deleted");
+  }
+  if (!responsesLoaderSrc.includes("import.meta.resolve(COMPAT_SPEC)") &&
+      !responsesLoaderSrc.includes('import.meta.resolve("@earendil-works/pi-ai/compat")') &&
+      !responsesLoaderSrc.includes("import.meta.resolve(`${PI_AI_NAME}/compat`)")) {
+    throw new Error("loader must resolve @earendil-works/pi-ai/compat via import.meta.resolve");
+  }
+  if (!responsesLoaderSrc.includes("openai-responses-shared.js")) {
+    throw new Error("loader must target openai-responses-shared.js next to compat");
+  }
+  if (!responsesLoaderSrc.includes("await import(") && !responsesLoaderSrc.includes("await import (")) {
+    throw new Error("loader must dynamic-import the shared helper");
+  }
+  if (!responsesLoaderSrc.includes("loadOpenAIResponsesShared")) {
+    throw new Error("loader must export lazy loadOpenAIResponsesShared API");
+  }
+  if (/^const loaded = await /m.test(responsesLoaderSrc) || /^export const convertResponsesMessages = loaded\./m.test(responsesLoaderSrc)) {
+    throw new Error("loader must not top-level-await / statically bind convertResponsesMessages");
+  }
+  if (!responsesLoaderSrc.includes("loadPromise")) {
+    throw new Error("loader must cache the load Promise");
+  }
+  if (!responsesLoaderSrc.includes("@alfadb/pi-astack") || !responsesLoaderSrc.includes("refusing local")) {
+    throw new Error("loader must reject package-local node_modules pi-ai by default");
+  }
+  if (!responsesLoaderSrc.includes("PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI") &&
+      !responsesLoaderSrc.includes("TEST_ALLOW_LOCAL_PI_AI_ENV")) {
+    throw new Error("loader must document a clear test-only local override env");
+  }
+  if (!responsesLoaderSrc.includes("ConvertResponsesMessages")) {
+    throw new Error("loader must export accurate ConvertResponsesMessages type");
+  }
+  if (!responsesLoaderSrc.includes("@earendil-works/pi-ai")) {
+    throw new Error("loader must validate package name @earendil-works/pi-ai");
+  }
+  if (/["'`][^"'`]*npm-global[^"'`]*["'`]|process\.env\.NODE_PATH|process\.cwd\s*\(/.test(responsesLoaderSrc)) {
+    throw new Error("loader must not hardcode global npm paths, NODE_PATH, or cwd");
+  }
+  if (/["'`][^"'`]*node_modules\/@earendil-works\/pi-ai[^"'`]*["'`]/.test(responsesLoaderSrc)) {
+    throw new Error("loader must not fall back to repository node_modules");
+  }
+  if (!/export async function compactInputMessages/.test(helperSrc)) {
+    throw new Error("compactInputMessages must be async (awaits lazy convert)");
+  }
+  if (!/async function buildCompactBody/.test(helperSrc)) {
+    throw new Error("buildCompactBody must be async");
   }
 });
 
-await checkAsync("extension loads under pi-like jiti aliases", async () => {
+await checkAsync("extension loads under pi-like jiti aliases without resolving deep helper", async () => {
   const loaderLikeJiti = createJiti(import.meta.url, {
     moduleCache: false,
     alias: loaderLikeAliases(),
@@ -161,6 +248,208 @@ await checkAsync("extension loads under pi-like jiti aliases", async () => {
   if (typeof factory !== "function") throw new Error(`expected extension factory, got ${typeof factory}`);
 });
 
+await checkAsync("no-alias import loads extension while remote conversion fails closed on repo-local pi-ai", async () => {
+  // Plain jiti (no host alias): module graph must load; actual conversion must
+  // refuse this package's local node_modules pi-ai unless test override is set.
+  const plainJiti = createJiti(import.meta.url, { moduleCache: false });
+  const factory = await plainJiti.import(
+    path.join(repoRoot, "extensions/compaction-tuner/index.ts"),
+    { default: true },
+  );
+  if (typeof factory !== "function") {
+    throw new Error(`plain import expected extension factory, got ${typeof factory}`);
+  }
+  const plainLoader = await plainJiti.import(
+    path.join(repoRoot, "extensions/compaction-tuner/openai-responses-shared-loader.ts"),
+  );
+  if (typeof plainLoader.__resetOpenAIResponsesSharedLoaderForTests === "function") {
+    plainLoader.__resetOpenAIResponsesSharedLoaderForTests();
+  }
+  const prevOverride = process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+  const prevNodeEnv = process.env.NODE_ENV;
+  delete process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+  delete process.env.NODE_ENV;
+  try {
+    let rejected = false;
+    let detail = "";
+    try {
+      await plainLoader.loadOpenAIResponsesShared();
+    } catch (err) {
+      rejected = true;
+      detail = err instanceof Error ? err.message : String(err);
+    }
+    if (!rejected) {
+      throw new Error("expected fail-closed reject of repo-local pi-ai without alias/override");
+    }
+    if (!/refusing local|failed to resolve|@alfadb\/pi-astack|NODE_ENV/i.test(detail)) {
+      throw new Error(`unexpected reject detail: ${detail}`);
+    }
+    console.log(`  note  no-alias fail-closed: ${detail.split("\n")[0]}`);
+  } finally {
+    if (prevOverride === undefined) delete process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+    else process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI = prevOverride;
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = prevNodeEnv;
+    if (typeof plainLoader.__resetOpenAIResponsesSharedLoaderForTests === "function") {
+      plainLoader.__resetOpenAIResponsesSharedLoaderForTests();
+    }
+  }
+});
+
+await checkAsync("host-aliased loader loads convertResponsesMessages from host pi-ai and converts a minimal fixture", async () => {
+  if (!aliasHostIsExternal) {
+    // Generic/dev layout without external host: test-only local override only.
+    // Mark clearly — this is NOT production host acceptance.
+    console.log(
+      "  note  TEST-ONLY local path (no external host): NODE_ENV=test + PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI=1;" +
+        " NOT a production host acceptance",
+    );
+    const prevOverride = process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+    const prevNodeEnv = process.env.NODE_ENV;
+    process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI = "1";
+    process.env.NODE_ENV = "test";
+    try {
+      const localJiti = createJiti(import.meta.url, {
+        moduleCache: false,
+        alias: loaderLikeAliases(localCodingAgent),
+      });
+      const localLoader = await localJiti.import(
+        path.join(repoRoot, "extensions/compaction-tuner/openai-responses-shared-loader.ts"),
+      );
+      if (typeof localLoader.__resetOpenAIResponsesSharedLoaderForTests === "function") {
+        localLoader.__resetOpenAIResponsesSharedLoaderForTests();
+      }
+      const loaded = await localLoader.loadOpenAIResponsesShared();
+      if (typeof loaded.convertResponsesMessages !== "function") {
+        throw new Error("test-only local loader did not export convertResponsesMessages");
+      }
+      if (!String(loaded.sourcePath || "").includes(`${path.sep}node_modules${path.sep}@earendil-works${path.sep}pi-ai${path.sep}`)) {
+        throw new Error(`unexpected test-only local shared source: ${loaded.sourcePath}`);
+      }
+      console.log(`  note  TEST-ONLY deep helper source: ${loaded.sourcePath}`);
+    } finally {
+      if (prevOverride === undefined) delete process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+      else process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI = prevOverride;
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+    }
+    return;
+  }
+
+  const hostAiVersion = hostPackageVersion(aliasHostRoot, "@earendil-works/pi-ai");
+  const hostAgentVersion = hostPackageVersion(aliasHostRoot, "@earendil-works/pi-coding-agent");
+  if (hostAgentVersion !== TARGET && !(hostAgentVersion && hostAgentVersion.startsWith("0.83."))) {
+    throw new Error(`external host pi-coding-agent@${hostAgentVersion} is not 0.83.x at ${aliasHostRoot}`);
+  }
+  if (hostAiVersion !== TARGET && !(hostAiVersion && hostAiVersion.startsWith("0.83."))) {
+    throw new Error(`external host pi-ai@${hostAiVersion} is not 0.83.x under ${aliasHostRoot}`);
+  }
+
+  const hostJiti = createJiti(import.meta.url, {
+    moduleCache: false,
+    alias: loaderLikeAliases(aliasHostRoot),
+  });
+  const hostLoader = await hostJiti.import(
+    path.join(repoRoot, "extensions/compaction-tuner/openai-responses-shared-loader.ts"),
+  );
+  if (typeof hostLoader.__resetOpenAIResponsesSharedLoaderForTests === "function") {
+    hostLoader.__resetOpenAIResponsesSharedLoaderForTests();
+  }
+  const loaded = await hostLoader.loadOpenAIResponsesShared();
+  if (typeof loaded.convertResponsesMessages !== "function") {
+    throw new Error("host-aliased loader did not export convertResponsesMessages");
+  }
+  const source = String(loaded.sourcePath || "");
+  const repoLocalAi = path.join(repoRoot, "node_modules/@earendil-works/pi-ai");
+  const repoLocalAiReal = fs.existsSync(repoLocalAi) ? fs.realpathSync(repoLocalAi) : repoLocalAi;
+  if (source === repoLocalAiReal || source.startsWith(repoLocalAiReal + path.sep) ||
+      source === repoLocalAi || source.startsWith(repoLocalAi + path.sep)) {
+    throw new Error(`helper resolved to repo local pi-ai, expected host: ${source}`);
+  }
+  if (!source.includes(`${path.sep}@earendil-works${path.sep}pi-ai${path.sep}`) || !source.endsWith(`${path.sep}openai-responses-shared.js`)) {
+    throw new Error(`unexpected host shared source: ${source}`);
+  }
+  const hostAiRoot = hostPackageRoot(aliasHostRoot, "@earendil-works/pi-ai");
+  if (!hostAiRoot || !(source === hostAiRoot || source.startsWith(hostAiRoot + path.sep))) {
+    throw new Error(
+      `shared source not under host pi-ai root ${hostAiRoot}: ${source}`,
+    );
+  }
+  console.log(`  note  deep helper source (host): ${source}`);
+
+  // Real convert call with a minimal fixture — not just "export is a function".
+  const converted = loaded.convertResponsesMessages(
+    {
+      id: "gpt-5.5",
+      provider: "openai",
+      api: "openai-responses",
+      baseUrl: "https://example.invalid/v1",
+      input: ["text"],
+      output: ["text"],
+      reasoning: true,
+      maxTokens: 4096,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+    {
+      systemPrompt: "system prompt",
+      messages: [
+        { role: "user", content: "hello from smoke", timestamp: 1 },
+      ],
+    },
+    new Set(["openai", "openai-codex", "opencode"]),
+  );
+  if (!Array.isArray(converted) || converted.length === 0) {
+    throw new Error(`host convertResponsesMessages returned non-array/empty: ${JSON.stringify(converted)?.slice(0, 200)}`);
+  }
+  const hasUserOrDeveloper = converted.some(
+    (item) => item && typeof item === "object" && (item.role === "user" || item.role === "developer" || item.role === "system"),
+  );
+  if (!hasUserOrDeveloper) {
+    throw new Error(`host convertResponsesMessages missing expected roles: ${JSON.stringify(converted).slice(0, 300)}`);
+  }
+  console.log(`  note  host convertResponsesMessages ok: ${converted.length} input item(s)`);
+});
+
+await checkAsync("real host loadExtensions loads compaction-tuner with 0 errors", async () => {
+  if (!aliasHostIsExternal) {
+    console.log(
+      "  note  TEST-ONLY skip of real host loadExtensions (no external host);" +
+        " NOT a production host acceptance",
+    );
+    return;
+  }
+  // loadExtensions is host-internal (not re-exported from public index).
+  const hostLoaderEntry = path.join(aliasHostRoot, "dist", "core", "extensions", "loader.js");
+  if (!fs.existsSync(hostLoaderEntry)) {
+    throw new Error(`host extension loader missing: ${hostLoaderEntry}`);
+  }
+  const hostMod = await import(pathToFileURL(hostLoaderEntry).href);
+  if (typeof hostMod.loadExtensions !== "function") {
+    throw new Error(`host loader at ${hostLoaderEntry} does not export loadExtensions`);
+  }
+  const extPath = path.join(repoRoot, "extensions/compaction-tuner/index.ts");
+  const result = await hostMod.loadExtensions([extPath], repoRoot);
+  const errors = result?.errors ?? [];
+  if (errors.length !== 0) {
+    throw new Error(
+      `host loadExtensions returned ${errors.length} error(s): ` +
+        errors.map((e) => `${e.path}: ${e.error}`).join(" | "),
+    );
+  }
+  if (!Array.isArray(result?.extensions) || result.extensions.length < 1) {
+    throw new Error(`host loadExtensions returned no extensions: ${JSON.stringify(result)}`);
+  }
+  console.log(
+    `  note  host loadExtensions ok via ${aliasHost.source}: ${result.extensions.length} extension(s), 0 errors`,
+  );
+});
+
+// Runtime helper imports: dual test-only local override so plain jiti can load
+// convert for body-shape unit tests without pretending to be host production.
+const __prevBodyShapeOverride = process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+const __prevBodyShapeNodeEnv = process.env.NODE_ENV;
+process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI = "1";
+process.env.NODE_ENV = "test";
 const remote = await jiti.import(path.join(repoRoot, "extensions/compaction-tuner/openai-remote-compact.ts"));
 const tuner = await jiti.import(path.join(repoRoot, "extensions/compaction-tuner/index.ts"));
 const {
@@ -647,8 +936,8 @@ check("injection skips unsupported API and unsupported model", () => {
   if (unsupportedModel.reason !== "unsupported_model") throw new Error(`wrong model reason ${unsupportedModel.reason}`);
 });
 
-check("OpenAI Responses keeps system prompt in input", () => {
-  const { body } = __TEST.buildCompactBody(eventFixture(), openaiModel, "system prompt", "sess-openai");
+await checkAsync("OpenAI Responses keeps system prompt in input", async () => {
+  const { body } = await __TEST.buildCompactBody(eventFixture(), openaiModel, "system prompt", "sess-openai");
   if (body.instructions !== undefined) throw new Error("OpenAI Responses body should not use instructions");
   if (!Array.isArray(body.input) || body.input.length === 0) throw new Error("input missing");
   const first = body.input[0];
@@ -656,13 +945,18 @@ check("OpenAI Responses keeps system prompt in input", () => {
   if (first.content !== "system prompt") throw new Error(`wrong system prompt content ${JSON.stringify(first)}`);
 });
 
-check("Codex Responses moves system prompt into instructions", () => {
-  const { body } = __TEST.buildCompactBody(eventFixture(), codexModel, "system prompt", "sess-codex");
+await checkAsync("Codex Responses moves system prompt into instructions", async () => {
+  const { body } = await __TEST.buildCompactBody(eventFixture(), codexModel, "system prompt", "sess-codex");
   if (body.instructions !== "system prompt") throw new Error(`wrong instructions ${body.instructions}`);
   if (!Array.isArray(body.input)) throw new Error("input missing");
   const hasSystemInInput = body.input.some((item) => item?.role === "developer" || item?.role === "system");
   if (hasSystemInInput) throw new Error(`system prompt leaked into input ${JSON.stringify(body.input[0])}`);
 });
+
+if (__prevBodyShapeOverride === undefined) delete process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI;
+else process.env.PI_ASTACK_TEST_ALLOW_LOCAL_PI_AI = __prevBodyShapeOverride;
+if (__prevBodyShapeNodeEnv === undefined) delete process.env.NODE_ENV;
+else process.env.NODE_ENV = __prevBodyShapeNodeEnv;
 
 console.log(`\nfailures: ${failures}/${total}`);
 process.exit(failures === 0 ? 0 : 1);

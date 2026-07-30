@@ -1,10 +1,11 @@
 import OpenAI from "openai";
-import { convertResponsesMessages } from "./openai-responses-shared-loader.mjs";
+import { convertResponsesMessages } from "./openai-responses-shared-loader";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
 import type { Api, Context, Model } from "@earendil-works/pi-ai";
 import type { CompactionResult, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import type { CompactedResponse, ResponseCompactParams, ResponseCompactionItemParam, ResponseInputItem } from "openai/resources/responses/responses.js";
 import type { RemoteOpenAICompactionSettings } from "./settings";
+// convertResponsesMessages is lazy: extension load does not resolve deep pi-ai.
 
 export const REMOTE_OPENAI_COMPACTION_MARKER_PREFIX = "PI_ASTACK_OPENAI_REMOTE_COMPACTION_V1:";
 
@@ -149,23 +150,28 @@ function usesInstructionsForSystemPrompt(model: RemoteOpenAIModelLike): boolean 
   return model.api === "openai-codex-responses";
 }
 
-export function compactInputMessages(event: SessionBeforeCompactEvent, model: RemoteOpenAIModelLike, systemPrompt?: string): ResponseInputItem[] {
+export async function compactInputMessages(
+  event: SessionBeforeCompactEvent,
+  model: RemoteOpenAIModelLike,
+  systemPrompt?: string,
+): Promise<ResponseInputItem[]> {
   const context = buildCompactContext(event, systemPrompt);
-  return convertResponsesMessages(
+  const input = await convertResponsesMessages(
     model as Model<Api>,
     context,
     OPENAI_TOOL_CALL_PROVIDERS,
     usesInstructionsForSystemPrompt(model) ? { includeSystemPrompt: false } : undefined,
-  ) as ResponseInputItem[];
+  );
+  return input as ResponseInputItem[];
 }
 
-function buildCompactBody(
+async function buildCompactBody(
   event: SessionBeforeCompactEvent,
   model: RemoteOpenAIModelLike & { id: string },
   systemPrompt: string | undefined,
   sessionId: string | undefined,
-): { body: ResponseCompactParams; inputItems: number } {
-  const input = compactInputMessages(event, model, systemPrompt);
+): Promise<{ body: ResponseCompactParams; inputItems: number }> {
+  const input = await compactInputMessages(event, model, systemPrompt);
   const body: ResponseCompactParams = {
     model: model.id,
     input,
@@ -257,7 +263,7 @@ export async function tryRunRemoteOpenAICompaction(options: RemoteOpenAICompacti
 
   const started = Date.now();
   try {
-    const { body, inputItems } = buildCompactBody(event, activeModel, systemPrompt, sessionId);
+    const { body, inputItems } = await buildCompactBody(event, activeModel, systemPrompt, sessionId);
     const headers = { ...(activeModel.headers ?? {}), ...(auth.headers ?? {}) };
     if (sessionId) {
       headers.session_id = sessionId;

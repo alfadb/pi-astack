@@ -52,29 +52,22 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { hostPackageRoot, resolveHostCodingAgent } from "./_resolve-host-pi.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 
-// Resolve pi-coding-agent install root via Node's normal resolution so
-// this works whether pi is installed globally via volta, npm -g, or
-// hoisted under the project.
+// Prefer the active external host (PATH `pi` / PI_COMPAT_ROOT). Repo-local
+// node_modules is only a last-resort fallback so I-3/I-4/I-5 still run in
+// pure-dev layouts; Volta-only hardcodes are no longer required.
 function resolvePiRuntimeRoot() {
-  // Try standard global locations first.
-  const candidates = [
-    "/home/worker/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent",
-    path.join(process.env.HOME || "", ".volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent"),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(path.join(c, "dist/core/agent-session.js"))) return c;
+  const host = resolveHostCodingAgent(repoRoot);
+  if (host.root && fs.existsSync(path.join(host.root, "dist/core/agent-session.js"))) {
+    console.log(`  note  pi host via ${host.source}: ${host.root}`);
+    return host.root;
   }
-  // Fallback: try require.resolve from the project root.
-  try {
-    const pkgPath = require.resolve("@earendil-works/pi-coding-agent/package.json", { paths: [repoRoot] });
-    return path.dirname(pkgPath);
-  } catch {
-    return null;
-  }
+  console.log(`  note  pi host unresolved; tried: ${(host.tried || []).join(" | ")}`);
+  return null;
 }
 
 const piRoot = resolvePiRuntimeRoot();
@@ -261,10 +254,16 @@ if (!piRoot) {
         "agent-session.js no longer delegates _isRetryableError(message) to isRetryableAssistantError(message). This looks like agent-session delegate drift.",
       );
     }
-    const retryPath = path.join(piRoot, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "retry.js");
-    if (!fs.existsSync(retryPath)) {
+    // Nested or sibling layout under host (do not hand-assemble only nested path).
+    const piAiRoot = hostPackageRoot(piRoot, "@earendil-works/pi-ai");
+    const retryPath = piAiRoot
+      ? path.join(piAiRoot, "dist", "utils", "retry.js")
+      : null;
+    if (!retryPath || !fs.existsSync(retryPath)) {
       throw new Error(
-        `pi-ai retry helper not found at ${retryPath}. This looks like pi-ai retry pattern drift or install corruption.`,
+        `pi-ai retry helper not found via hostPackageRoot under ${piRoot}` +
+          ` (resolved=${piAiRoot ?? "null"}, path=${retryPath ?? "null"}).` +
+          ` This looks like pi-ai retry pattern drift or install corruption.`,
       );
     }
     const retrySrc = fs.readFileSync(retryPath, "utf8");
