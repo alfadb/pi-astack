@@ -33,6 +33,7 @@ const publisher = jiti(path.join(repoRoot, "extensions/_shared/proposition-polic
 const p2a = jiti(path.join(repoRoot, "extensions/_shared/proposition-policy-push-shadow.ts"));
 const reader = jiti(path.join(repoRoot, "extensions/abrain/rule-injector/proposition-policy-stable-view-reader.ts"));
 const settingsMod = jiti(path.join(repoRoot, "extensions/sediment/settings.ts"));
+const mutationAuthority = jiti(path.join(repoRoot, "extensions/_shared/canonical-mutation-authority.ts"));
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-tier1-policy-bridge-"));
 const originalEnv = { HOME: process.env.HOME, ABRAIN_ROOT: process.env.ABRAIN_ROOT };
@@ -192,6 +193,71 @@ await check("idempotent content-addressed proposition id + created then identica
   const p2 = await appendProposition(bridgeHome, c1);
   assert(p2.ok && p2.status === "identical", `expected identical rerun, got ${p2.status}`);
   assert(p2.eventId === p1.eventId, "idempotent event id must match");
+});
+
+await check("store-present direct proposition rejects foreground before target parent; daemon lease allows", async () => {
+  const home = path.join(tmpRoot, "authority-proposition");
+  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+  const c = await appendConstraint(home, {
+    candidateId: "tier1-direct:authority-fence",
+    createdAtUtc: "2026-07-25T01:00:00.500Z",
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目的语义写必须持有动态 authority。" },
+    draft: { ...GLOBAL_DRAFT, body: "所有项目的语义写必须持有动态 authority。", title: "dynamic-authority-required" },
+  });
+  assert(c.append.ok, "constraint prerequisite");
+  const opts = baseConstraintOptions({
+    signal: { ...GLOBAL_SIGNAL, user_quote: "所有项目的语义写必须持有动态 authority。" },
+    draft: { ...GLOBAL_DRAFT, body: "所有项目的语义写必须持有动态 authority。", title: "dynamic-authority-required" },
+  });
+  const envelope = writer.buildTier1PolicyPropositionEnvelope({
+    abrainHome: home,
+    constraintEnvelope: c.append.envelope,
+    constraintBody: c.body,
+    signal: opts.signal,
+    draft: opts.draft,
+    sessionId: c.body.session_id,
+    turnId: c.body.turn_id,
+  });
+  const target = l1.expectedL1EventPath(home, envelope.event_id);
+  fs.mkdirSync(path.join(home, ".state", "sediment", "local-executor-authority"), {
+    recursive: true,
+    mode: 0o700,
+  });
+
+  let foregroundErr;
+  try {
+    await writer.appendTier1PolicyProposition({
+      abrainHome: home,
+      constraintEnvelope: c.append.envelope,
+      constraintBody: c.body,
+      signal: opts.signal,
+      draft: opts.draft,
+      sessionId: c.body.session_id,
+      turnId: c.body.turn_id,
+    });
+  } catch (error) {
+    foregroundErr = error;
+  }
+  assert(foregroundErr?.code === mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED, `foreground=${foregroundErr?.code || foregroundErr}`);
+  assert(mutationAuthority.isCanonicalMutationAuthorityError(foregroundErr), "foreground must rethrow authority error, not classify refused");
+  assert(!fs.existsSync(target), "foreground proposition created target");
+  assert(!fs.existsSync(path.dirname(target)), "foreground proposition created target parent");
+
+  const daemon = await mutationAuthority.withCanonicalMutationAuthority({
+    abrainHome: home,
+    role: "daemon",
+    revalidate: () => undefined,
+  }, () => writer.appendTier1PolicyProposition({
+    abrainHome: home,
+    constraintEnvelope: c.append.envelope,
+    constraintBody: c.body,
+    signal: opts.signal,
+    draft: opts.draft,
+    sessionId: c.body.session_id,
+    turnId: c.body.turn_id,
+  }));
+  assert(daemon.ok && daemon.status === "created", `daemon=${daemon.code ?? daemon.status}`);
+  assert(fs.existsSync(target), "daemon proposition target missing");
 });
 
 await check("generic preflight remains L1_SCHEMA_WRITE_DISABLED", async () => {

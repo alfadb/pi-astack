@@ -196,6 +196,12 @@ exports.commitAbrainDerivedOutputs = async () => null;
 `);
 writeFile(path.join(outRoot, "_shared", "canonical-mutation-barrier.js"), `
 exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+exports.withoutCanonicalMutationBarrierContext = (operation) => operation();
+exports.canonicalMutationBarrierHeld = () => false;
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-authority.js"), `
+exports.assertCanonicalMutationAuthorized = async () => undefined;
+exports.isCanonicalMutationAuthorityError = () => false;
 `);
 writeFile(path.join(outRoot, "_shared", "canonical-git-runtime.js"), `
 exports.canonicalGitRuntimeEnabled = () => false;

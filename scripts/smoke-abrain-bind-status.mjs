@@ -675,6 +675,330 @@ function statusPorcelain(repo) {
   );
 }
 
+// ── 9) bind-intent inventory: invalid + failed aggregates (no id/path leak) ─
+{
+  const abrainHome = initGitRepo(path.join(tmp, "inventory-abrain"), true);
+  const project = initGitRepo(path.join(tmp, "inventory-project"));
+  const plan = await bindIntent.planAbrainBind({
+    abrainHome,
+    cwd: project,
+    projectId: "inventory-project",
+    now: "2026-07-30T12:00:00.000+08:00",
+  });
+  const intent = bindIntent.intentFromPlan(plan);
+  await bindIntent.writeAbrainBindIntent(abrainHome, intent);
+
+  // Valid failed record (+ optional note) must count as failed, not invalid.
+  const failedDir = bindIntent.abrainBindIntentFailedDir(abrainHome);
+  fs.mkdirSync(failedDir, { recursive: true, mode: 0o700 });
+  const failedIntent = {
+    ...intent,
+    itemId: bindIntent.computeAbrainBindIntentItemId({
+      ...intent,
+      projectId: "failed-project",
+      message: "project: add failed-project",
+      registryRelativePath: "projects/failed-project/_project.json",
+    }),
+    projectId: "failed-project",
+    message: "project: add failed-project",
+    registryRelativePath: "projects/failed-project/_project.json",
+  };
+  // Rebuild with correct digest identity.
+  const failedBuilt = bindIntent.buildAbrainBindIntent({
+    projectId: "failed-project",
+    projectRoot: project,
+    normalizedPath: path.resolve(project),
+    registryRelativePath: "projects/failed-project/_project.json",
+    registryBytes: plan.registryBytes.replace("inventory-project", "failed-project"),
+    registryCreated: true,
+    gitignoreRelativePath: ".gitignore",
+    gitignoreBytes: plan.gitignoreToWrite,
+    gitignoreUpdated: plan.abrainGitignoreUpdated,
+    message: "project: add failed-project",
+  });
+  fs.writeFileSync(
+    path.join(failedDir, `${failedBuilt.itemId}.json`),
+    `${JSON.stringify({ ...failedBuilt, note: "historical failure" })}\n`,
+    { mode: 0o600 },
+  );
+
+  // Corrupt / wrong-name files count as invalid (listPending still skips silently).
+  const pendingDir = bindIntent.abrainBindIntentPendingDir(abrainHome);
+  fs.writeFileSync(path.join(pendingDir, "not-a-digest.json"), "{\"bad\":true}\n");
+  fs.writeFileSync(path.join(pendingDir, `${"a".repeat(64)}.json`), "{not-json\n");
+
+  const inventory = await bindIntent.inspectAbrainBindIntentInventory(abrainHome);
+  assert(inventory.pending === 1, `pending count=${inventory.pending}`);
+  assert(inventory.failed === 1, `failed count=${inventory.failed}`);
+  assert(inventory.invalid >= 2, `invalid count=${inventory.invalid}`);
+  const listed = await bindIntent.listAbrainBindIntentPending(abrainHome);
+  assert(listed.length === 1, "listPending still silently skips corrupt rows");
+  // Aggregate surface must not embed ids/paths in the returned object keys/values shape.
+  assert(
+    Object.keys(inventory).sort().join(",") === "failed,invalid,pending",
+    `inventory keys must be aggregate-only: ${Object.keys(inventory)}`,
+  );
+  void failedIntent;
+}
+
+// ── 10) strict bind-intent loader: type/key/note/symlink fail closed ─
+{
+  const abrainHome = initGitRepo(path.join(tmp, "strict-loader-abrain"), true);
+  const project = initGitRepo(path.join(tmp, "strict-loader-project"));
+  const plan = await bindIntent.planAbrainBind({
+    abrainHome,
+    cwd: project,
+    projectId: "strict-loader",
+    now: "2026-07-30T15:00:00.000+08:00",
+  });
+  const good = bindIntent.intentFromPlan(plan);
+  const pendingDir = bindIntent.abrainBindIntentPendingDir(abrainHome);
+  const failedDir = bindIntent.abrainBindIntentFailedDir(abrainHome);
+  fs.mkdirSync(pendingDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(failedDir, { recursive: true, mode: 0o700 });
+
+  function writePending(itemId, body) {
+    fs.writeFileSync(path.join(pendingDir, `${itemId}.json`), `${JSON.stringify(body)}\n`, { mode: 0o600 });
+  }
+
+  // Valid baseline pending.
+  await bindIntent.writeAbrainBindIntent(abrainHome, good);
+
+  // Numeric boolean coercion must not pass (registryCreated: 1).
+  writePending("b".repeat(64), {
+    ...good,
+    itemId: "b".repeat(64),
+    registryCreated: 1,
+    gitignoreUpdated: 0,
+  });
+  // String booleans must not pass.
+  writePending("c".repeat(64), {
+    ...good,
+    itemId: "c".repeat(64),
+    registryCreated: "true",
+    gitignoreUpdated: "false",
+  });
+  // Missing required key.
+  {
+    const { message: _drop, ...missing } = good;
+    writePending("d".repeat(64), { ...missing, itemId: "d".repeat(64) });
+  }
+  // Unknown key.
+  writePending("e".repeat(64), { ...good, itemId: "e".repeat(64), extra: "nope" });
+  // __proto__ as an own JSON key must not pass (object-literal __proto__ would not serialize).
+  {
+    const base = { ...good, itemId: "f".repeat(64) };
+    const injected = `${JSON.stringify(base).slice(0, -1)},"__proto__":{"polluted":true}}\n`;
+    fs.writeFileSync(path.join(pendingDir, `${"f".repeat(64)}.json`), injected, { mode: 0o600 });
+  }
+  // Pending must not allow note.
+  writePending("1".repeat(64), { ...good, itemId: "1".repeat(64), note: "not allowed on pending" });
+
+  // Symlink file in pending bucket → invalid (not followed).
+  const escapeFile = path.join(tmp, "escape-intent.json");
+  fs.writeFileSync(escapeFile, `${JSON.stringify({ ...good, itemId: "2".repeat(64) })}\n`);
+  fs.symlinkSync(escapeFile, path.join(pendingDir, `${"2".repeat(64)}.json`));
+
+  const inv = await bindIntent.inspectAbrainBindIntentInventory(abrainHome);
+  assert(inv.pending === 1, `strict pending valid count=${inv.pending}`);
+  assert(inv.invalid >= 7, `strict invalid count=${inv.invalid}`);
+
+  // applyAllPending must throw on invalid pending (no silent skip).
+  let applyThrew = null;
+  try {
+    await bindIntent.applyAllPendingAbrainBindIntents(abrainHome);
+  } catch (error) {
+    applyThrew = error;
+  }
+  assert(applyThrew && /bind_intent_pending_invalid/.test(applyThrew.message),
+    `strict apply must fail closed on invalid pending: ${applyThrew && applyThrew.message}`);
+
+  // Symlink pending bucket → fail closed (throw), not empty success.
+  const abrainSym = initGitRepo(path.join(tmp, "strict-symlink-bucket"), true);
+  const realPending = path.join(tmp, "real-pending-bucket");
+  fs.mkdirSync(realPending, { recursive: true, mode: 0o700 });
+  const stateAbrain = path.join(abrainSym, ".state", "abrain", "bind-intent");
+  fs.mkdirSync(stateAbrain, { recursive: true, mode: 0o700 });
+  fs.symlinkSync(realPending, path.join(stateAbrain, "pending"));
+  let bucketThrew = null;
+  try {
+    await bindIntent.inspectAbrainBindIntentInventory(abrainSym);
+  } catch (error) {
+    bucketThrew = error;
+  }
+  assert(bucketThrew && /bind_intent_(bucket|path)_/.test(bucketThrew.message),
+    `symlink bucket must fail closed: ${bucketThrew && bucketThrew.message}`);
+
+  // Failed record with optional string note remains valid failed (blocks inventory).
+  const failedBuilt = bindIntent.buildAbrainBindIntent({
+    projectId: "failed-strict",
+    projectRoot: project,
+    normalizedPath: path.resolve(project),
+    registryRelativePath: "projects/failed-strict/_project.json",
+    registryBytes: plan.registryBytes.replace("strict-loader", "failed-strict"),
+    registryCreated: true,
+    gitignoreRelativePath: ".gitignore",
+    gitignoreBytes: plan.gitignoreToWrite,
+    gitignoreUpdated: plan.abrainGitignoreUpdated,
+    message: "project: add failed-strict",
+  });
+  fs.writeFileSync(
+    path.join(failedDir, `${failedBuilt.itemId}.json`),
+    `${JSON.stringify({ ...failedBuilt, note: "historical failure" })}\n`,
+    { mode: 0o600 },
+  );
+  // Clean pending invalids so inventory reflects failed block cleanly on a fresh home.
+  const abrainFailed = initGitRepo(path.join(tmp, "strict-failed-block"), true);
+  const failedOnlyDir = bindIntent.abrainBindIntentFailedDir(abrainFailed);
+  fs.mkdirSync(failedOnlyDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(failedOnlyDir, `${failedBuilt.itemId}.json`),
+    `${JSON.stringify({ ...failedBuilt, note: "historical failure" })}\n`,
+    { mode: 0o600 },
+  );
+  const failedInv = await bindIntent.inspectAbrainBindIntentInventory(abrainFailed);
+  assert(failedInv.failed === 1 && failedInv.invalid === 0 && failedInv.pending === 0,
+    `failed+note inventory=${JSON.stringify(failedInv)}`);
+}
+
+// ── 11) bind-intent relative chain: ancestor/bucket symlink fail-closed ─
+{
+  function snapshotTree(dir) {
+    const rows = [];
+    function walk(current, rel) {
+      let entries;
+      try { entries = fs.readdirSync(current, { withFileTypes: true }); }
+      catch { return; }
+      for (const ent of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        const child = path.join(current, ent.name);
+        const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+        if (ent.isSymbolicLink()) {
+          rows.push(`${childRel} -> ${fs.readlinkSync(child)}`);
+        } else if (ent.isDirectory()) {
+          rows.push(`${childRel}/`);
+          walk(child, childRel);
+        } else {
+          const st = fs.statSync(child);
+          rows.push(`${childRel}#${st.size}`);
+        }
+      }
+    }
+    walk(dir, "");
+    return rows.join("\n");
+  }
+
+  function closedReason(err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function assertClosed(err, label) {
+    const msg = closedReason(err);
+    assert(/bind_intent_(path|bucket|root|file)_/.test(msg),
+      `${label}: closed reason=${msg}`);
+    // Public errors must not embed absolute fixture paths.
+    assert(!msg.includes(tmp), `${label}: exact path leaked in ${msg}`);
+  }
+
+  const project = initGitRepo(path.join(tmp, "chain-project"));
+  const basePlan = await bindIntent.planAbrainBind({
+    abrainHome: initGitRepo(path.join(tmp, "chain-plan-home"), true),
+    cwd: project,
+    projectId: "chain-proj",
+    now: "2026-07-30T16:00:00.000+08:00",
+  });
+  const intent = bindIntent.intentFromPlan(basePlan);
+
+  let chainSeq = 0;
+  async function withSymlinkComponent(op, component, run) {
+    chainSeq += 1;
+    const tag = `${op}-${component.replace(/\//g, "-")}-${chainSeq}`;
+    const abrainHome = initGitRepo(path.join(tmp, `chain-${tag}`), true);
+    const external = path.join(tmp, `escape-${tag}`);
+    fs.mkdirSync(external, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(external, "marker"), `escape-${tag}\n`, { mode: 0o600 });
+    // Build plain parents up to the component, then install the symlink leaf.
+    const rel = component === ".state" ? ".state"
+      : component === "bind-intent" ? path.join(".state", "abrain", "bind-intent")
+        : component === "pending" ? path.join(".state", "abrain", "bind-intent", "pending")
+          : component === "done" ? path.join(".state", "abrain", "bind-intent", "done")
+            : component === "failed" ? path.join(".state", "abrain", "bind-intent", "failed")
+              : null;
+    assert(rel, `unknown component ${component}`);
+    const abs = path.join(abrainHome, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+    if (fs.existsSync(abs)) fs.rmSync(abs, { recursive: true, force: true });
+    fs.symlinkSync(external, abs);
+    const before = snapshotTree(external);
+    await run(abrainHome, external, before);
+    assert(snapshotTree(external) === before, `${op} ${component}: external target unchanged`);
+    assert(fs.lstatSync(abs).isSymbolicLink(), `${op} ${component}: symlink preserved`);
+    // Must not leak intent/tmp artifacts into the escaped external tree.
+    const leaked = fs.readdirSync(external).some((n) => n.endsWith(".json") || n.includes(".tmp"));
+    assert(!leaked, `${op} ${component}: leaked artifacts into external target`);
+  }
+
+  // inspect fail-closed on .state / bind-intent / pending / failed symlink
+  for (const component of [".state", "bind-intent", "pending", "failed"]) {
+    await withSymlinkComponent("inspect", component, async (abrainHome) => {
+      let threw = null;
+      try {
+        await bindIntent.inspectAbrainBindIntentInventory(abrainHome);
+      } catch (error) {
+        threw = error;
+      }
+      assert(threw, `inspect ${component}: expected throw`);
+      assertClosed(threw, `inspect ${component}`);
+    });
+  }
+
+  // write fail-closed on .state / bind-intent / pending / done / failed symlink
+  for (const component of [".state", "bind-intent", "pending", "done", "failed"]) {
+    await withSymlinkComponent("write", component, async (abrainHome) => {
+      let threw = null;
+      try {
+        await bindIntent.writeAbrainBindIntent(abrainHome, intent);
+      } catch (error) {
+        threw = error;
+      }
+      assert(threw, `write ${component}: expected throw`);
+      assertClosed(threw, `write ${component}`);
+    });
+  }
+
+  // terminal fail-closed on done/failed/bind-intent/.state symlink
+  for (const component of [".state", "bind-intent", "done", "failed"]) {
+    await withSymlinkComponent("terminal", component, async (abrainHome) => {
+      let threw = null;
+      try {
+        await bindIntent.markBindIntentTerminal(
+          abrainHome,
+          intent,
+          component === "failed" ? "failed" : "done",
+          component === "failed" ? "terminal-smoke" : undefined,
+        );
+      } catch (error) {
+        threw = error;
+      }
+      assert(threw, `terminal ${component}: expected throw`);
+      assertClosed(threw, `terminal ${component}`);
+    });
+  }
+
+  // Code path: prechecked bucket concurrent delete → identity mismatch (not empty).
+  // Proven by source contract (readdir ENOENT after successful resolve throws).
+  {
+    const src = fs.readFileSync(path.join(root, "extensions/abrain/bind-intent.ts"), "utf8");
+    assert(
+      /code === "ENOENT"[\s\S]{0,120}bind_intent_bucket_identity_mismatch/.test(src),
+      "readdir ENOENT after precheck must throw identity mismatch",
+    );
+    assert(
+      !/names = await fs\.readdir\([\s\S]{0,200}code === "ENOENT"\) return \{ valid: \[\], invalid: 0 \}/.test(src),
+      "readdir ENOENT must not return empty after precheck",
+    );
+  }
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(fails === 0 ? "\n✅ ALL PASS — abrain bind/status gate" : `\n❌ ${fails} FAIL`);
 process.exit(fails === 0 ? 0 : 1);

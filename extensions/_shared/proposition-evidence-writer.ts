@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { durableAtomicCreateFile, type DurableCreateStatus } from "./durable-write";
+import { canonicalMutationBarrierHeld, withCanonicalMutationBarrier } from "./canonical-mutation-barrier";
 import {
   canonicalL1EnvelopeJson,
   defaultL1SchemaRegistryPath,
@@ -203,33 +204,50 @@ export async function durableAppendFixedProductionPropositionEvidence(options: {
 }): Promise<FixedProductionPropositionEvidenceWriteResult> {
   const abrainHome = path.resolve(options.abrainHome);
   await assertExistingAbrainHome(abrainHome);
-  const tuple = await prepareFixedProductionPropositionEvidenceTuple({ abrainHome, registryPath: options.registryPath });
-  const registry = loadL1SchemaRegistry(tuple.registry_path);
-  const before = await scanWholeL1Validated({ abrainHome, registry });
-  // A target may appear after an executor's fresh preflight in a concurrent
-  // identical run. Accept only that exact fixed event and converge no-replace.
-  assertProductionEvidenceState(before, tuple, { allowFixedEvidence: true });
-  const gate = await genericWriteGateCode(tuple, registry);
-  if (gate !== "L1_SCHEMA_WRITE_DISABLED") {
-    throw failure("PROPOSITION_P1B_GENERIC_GATE_DRIFT", "generic proposition write preflight must remain L1_SCHEMA_WRITE_DISABLED", { actual: gate });
-  }
-  await createTargetParentNoSymlink(abrainHome, tuple.target_path);
-  const status = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
-  if (status === "collision") throw failure("PROPOSITION_P1B_COLLISION", "fixed evidence target exists with different bytes", { targetPath: tuple.target_path });
-  const immediateRerunStatus = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
-  if (immediateRerunStatus !== "identical") {
-    throw failure("PROPOSITION_P1B_IDENTICAL_RERUN_FAILED", "immediate no-replace rerun was not identical", { actual: immediateRerunStatus });
-  }
-  const raw = await fs.readFile(tuple.target_path, "utf-8");
-  if (raw !== tuple.canonical_envelope_json) throw failure("PROPOSITION_P1B_READBACK_MISMATCH", "fixed evidence readback differs from canonical bytes");
-  const after = await scanWholeL1Validated({ abrainHome, registry });
-  assertProductionEvidenceState(after, tuple, { allowFixedEvidence: true, requireFixedEvidence: true });
-  return deepFreeze({
-    status,
-    immediate_rerun_status: immediateRerunStatus,
-    tuple,
-    generic_write_gate: gate,
-    readback_byte_identical: true,
+  // After existence check: prepare/registry/fresh prestate scan/gate + parent/create/
+  // readback/postscan share one barrier so store-present foreground closes before any
+  // L1 decision and concurrent creates serialize under OFD. Sandbox homes without an
+  // authority store keep legacy behavior via the barrier's store-absent posture.
+  return withCanonicalMutationBarrier(abrainHome, async () => {
+    const tuple = await prepareFixedProductionPropositionEvidenceTuple({ abrainHome, registryPath: options.registryPath });
+    const registry = loadL1SchemaRegistry(tuple.registry_path);
+    const before = await scanWholeL1Validated({
+      abrainHome,
+      registry,
+      checkpoint: options.requireFreshPrestate
+        ? () => {
+          // Cooperative probe point: fresh prestate scan must already hold the barrier.
+          if (!canonicalMutationBarrierHeld(abrainHome)) {
+            throw failure("PROPOSITION_P1B_BARRIER_REQUIRED", "fresh fixed-evidence prestate scan requires the canonical mutation barrier");
+          }
+        }
+        : undefined,
+    });
+    // A target may appear after an executor's fresh preflight in a concurrent
+    // identical run. Accept only that exact fixed event and converge no-replace.
+    assertProductionEvidenceState(before, tuple, { allowFixedEvidence: true });
+    const gate = await genericWriteGateCode(tuple, registry);
+    if (gate !== "L1_SCHEMA_WRITE_DISABLED") {
+      throw failure("PROPOSITION_P1B_GENERIC_GATE_DRIFT", "generic proposition write preflight must remain L1_SCHEMA_WRITE_DISABLED", { actual: gate });
+    }
+    await createTargetParentNoSymlink(abrainHome, tuple.target_path);
+    const status = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
+    if (status === "collision") throw failure("PROPOSITION_P1B_COLLISION", "fixed evidence target exists with different bytes", { targetPath: tuple.target_path });
+    const immediateRerunStatus = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
+    if (immediateRerunStatus !== "identical") {
+      throw failure("PROPOSITION_P1B_IDENTICAL_RERUN_FAILED", "immediate no-replace rerun was not identical", { actual: immediateRerunStatus });
+    }
+    const raw = await fs.readFile(tuple.target_path, "utf-8");
+    if (raw !== tuple.canonical_envelope_json) throw failure("PROPOSITION_P1B_READBACK_MISMATCH", "fixed evidence readback differs from canonical bytes");
+    const after = await scanWholeL1Validated({ abrainHome, registry });
+    assertProductionEvidenceState(after, tuple, { allowFixedEvidence: true, requireFixedEvidence: true });
+    return deepFreeze({
+      status,
+      immediate_rerun_status: immediateRerunStatus,
+      tuple,
+      generic_write_gate: gate,
+      readback_byte_identical: true,
+    });
   });
 }
 

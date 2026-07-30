@@ -41,6 +41,30 @@ import { checkBacklinks, formatBacklinkReport } from "./graph";
 import { normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 import { resolveActiveProject } from "../_shared/runtime";
 import { renderFoldableToolResult } from "../_shared/foldable-tool-result";
+import { classifyForegroundLocalExecutorPosture } from "../sediment/local-executor-authority";
+
+/**
+ * Store-present capture_only v1: `/memory migrate --go` is an explicit loud
+ * reject before any runMigrationGo / target write. Dry-run/lint unchanged.
+ * Store-absent legacy go remains allowed.
+ */
+export function decideMemoryMigrateGoAdmission(abrainHome: string): {
+  allowed: boolean;
+  reason: "legacy_allowed" | "store_present_capture_only";
+  message?: string;
+} {
+  if (classifyForegroundLocalExecutorPosture(abrainHome) === "capture_only") {
+    return {
+      allowed: false,
+      reason: "store_present_capture_only",
+      message:
+        "/memory migrate --go refused: store-present capture_only (DCC). "
+        + "Post-cutover v1: canonical migration writes are unavailable on ordinary foreground while the local executor authority store is present. "
+        + "Do not delete the authority store to bypass. Dry-run/lint remain available; a future daemon-owned path will own migration writes.",
+    };
+  }
+  return { allowed: true, reason: "legacy_allowed" };
+}
 
 // Ctrl+O expand/collapse is owned by pi core. This renderer only consumes
 // options.expanded/isPartial plus context.isError; wrapToolResult() still
@@ -276,6 +300,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           // assume migrate-in writes a report file.
           if (writeReport) {
             ctx.ui.notify("/memory migrate --go: --report is dry-run-only and was ignored (see `/memory migrate --dry-run --report`).", "warning");
+          }
+          // DCC: store-present capture_only → loud reject before any write.
+          const admission = decideMemoryMigrateGoAdmission(abrainHome);
+          if (!admission.allowed) {
+            ctx.ui.notify(admission.message ?? "/memory migrate --go refused: capture_only", "error");
+            return;
           }
           const result = await runMigrationGo({
             pensieveTarget: target,

@@ -78,6 +78,9 @@ try {
   commit(abrainHome, "canonical proposition fixture", "l1");
   fs.writeFileSync(settingsPath, `${JSON.stringify({
     canonicalGitRuntime: { enabled: true, mode: "local_convergence_v2" },
+    // Isolated temp settings must enable sediment so session_start schedules
+    // proposition policy stable-view recovery (default sediment.enabled=false).
+    sediment: { enabled: true },
   }, null, 2)}\n`);
   process.env.ABRAIN_ROOT = abrainHome;
   process.env.PI_ASTACK_SETTINGS_PATH = settingsPath;
@@ -334,6 +337,7 @@ try {
   commit(disabledHome, "canonical-disabled proposition fixture", "l1");
   fs.writeFileSync(settingsPath, `${JSON.stringify({
     canonicalGitRuntime: { enabled: false, mode: "local_convergence_v2" },
+    sediment: { enabled: true },
   }, null, 2)}\n`);
   process.env.ABRAIN_ROOT = disabledHome;
   await fire(sedimentPi.handlers, "session_start", { reason: "canonical-disabled" }, {

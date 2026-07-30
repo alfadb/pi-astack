@@ -231,7 +231,10 @@ for (const file of [
 }
 fs.mkdirSync(path.join(tmp, "schemas"), { recursive: true });
 fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(tmp, "schemas", "l1-schema-role-registry.json"));
-
+writeFile(path.join(tmp, "_shared", "canonical-mutation-barrier.js"), `
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+exports.withoutCanonicalMutationBarrierContext = (operation) => operation();
+`);
 const {
   appendConstraintEvidenceEvent,
 } = require(path.join(tmp, "sediment", "constraint-evidence", "append.js"));

@@ -46,6 +46,10 @@ import {
 } from "./publication-outbox";
 import { runWithWorkerBudget } from "../_shared/worker-budget-context";
 import {
+  isCanonicalMutationAuthorityError,
+  withCanonicalMutationAuthority,
+} from "../_shared/canonical-mutation-authority";
+import {
   admitLocalExecutorAuthority,
   isLocalExecutorAuthorityErrorCode,
   LOCAL_EXECUTOR_AUTHORITY_CAPABILITY,
@@ -2100,14 +2104,27 @@ export async function runSedimentWorkerTask(
 
               let passResult: SedimentWorkerPassOutcome;
               try {
-                passResult = await deps.runAgentEndPass(snapshot, {
+                passResult = await withCanonicalMutationAuthority({
+                  abrainHome,
+                  role: "daemon",
+                  revalidate: () => {
+                    admitLocalExecutorAuthority({
+                      abrainHome,
+                      expectation: {
+                        local_executor_epoch: manifest!.local_executor_epoch,
+                        local_executor_holder_nonce: manifest!.local_executor_holder_nonce,
+                      },
+                      expectedHolderKind: "daemon",
+                    });
+                  },
+                }, () => deps.runAgentEndPass(snapshot, {
                   fromRecovery: false,
                   signal: ac.signal,
                   requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
                   deadlineMs: softDeadlineMs,
                   onProgress: (ev) => emitWorkerProgress(onProgress, ev),
                   now: clock,
-                });
+                }));
               } catch (err) {
                 if (err instanceof WorkerDeadlineError) {
                   progress("pass", "aborted");
@@ -2170,6 +2187,26 @@ export async function runSedimentWorkerTask(
                   return await resolveRetryableWithReceiptCpInvariant({
                     ids,
                     code: "current_candidate_deferred",
+                    retryable: true,
+                    pass_iterations: iterations,
+                    abrainHome,
+                    projectRoot,
+                    cpSessionId,
+                    branchEntries: snapshot.branchEntries,
+                    beforeCp: beforePassCp,
+                    anyAdvanced,
+                    fatalOn: "any_advance",
+                    loadSessionCheckpoint: deps.loadSessionCheckpoint,
+                    countPublicationOutboxPending: deps.countPublicationOutboxPending,
+                    hasPublicationOutboxPending: deps.hasPublicationOutboxPending,
+                  });
+                }
+                // Mid-operation authority loss: keep the receipt/CP invariant and
+                // map to the closed LSEA revoke code (not generic pipeline_threw).
+                if (isCanonicalMutationAuthorityError(err)) {
+                  return await resolveRetryableWithReceiptCpInvariant({
+                    ids,
+                    code: "local_executor_authority_revoked",
                     retryable: true,
                     pass_iterations: iterations,
                     abrainHome,
@@ -3425,7 +3462,20 @@ export async function runSedimentWorkerMaintenance(
               now: clock,
               code: "worker_budget_exhausted",
             });
-            const result = await repairFn(abrainHome, 1);
+            const result = await withCanonicalMutationAuthority({
+              abrainHome,
+              role: "daemon",
+              revalidate: () => {
+                admitLocalExecutorAuthority({
+                  abrainHome,
+                  expectation: {
+                    local_executor_epoch: request.local_executor_epoch,
+                    local_executor_holder_nonce: request.local_executor_holder_nonce,
+                  },
+                  expectedHolderKind: "daemon",
+                });
+              },
+            }, () => repairFn(abrainHome, 1));
             throwIfWorkerDeadline({
               signal: ac.signal,
               deadlineMs: softDeadlineMs,
@@ -3439,9 +3489,21 @@ export async function runSedimentWorkerMaintenance(
         repairedCount = repair.repaired;
       } catch (error) {
         repairedCount = null;
-        const classification = classifyPublicationRepairFailure(error);
         const failedRepairPendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
         const failedRepairFailedProbe = await safeCountPublicationPending(abrainHome, countFailedFn);
+        if (isCanonicalMutationAuthorityError(error)) {
+          repairStatus = "failed";
+          return finish({
+            status: "failed",
+            retryable: true,
+            restart_child: false,
+            pending_before: pendingBefore,
+            pending_after: failedRepairPendingProbe.ok ? failedRepairPendingProbe.count : null,
+            failed: failedRepairFailedProbe.ok ? failedRepairFailedProbe.count : null,
+            error_code: "local_executor_authority_revoked",
+          });
+        }
+        const classification = classifyPublicationRepairFailure(error);
         if (classification === "busy" || classification === "budget") {
           repairStatus = classification;
           return finish({
@@ -3532,7 +3594,20 @@ export async function runSedimentWorkerMaintenance(
             now: clock,
             code: "worker_budget_exhausted",
           });
-          return normalizePublicationDrainResult(await deps.drainKnowledgePublicationOutbox(abrainHome));
+          return normalizePublicationDrainResult(await withCanonicalMutationAuthority({
+            abrainHome,
+            role: "daemon",
+            revalidate: () => {
+              admitLocalExecutorAuthority({
+                abrainHome,
+                expectation: {
+                  local_executor_epoch: request.local_executor_epoch,
+                  local_executor_holder_nonce: request.local_executor_holder_nonce,
+                },
+                expectedHolderKind: "daemon",
+              });
+            },
+          }, () => deps.drainKnowledgePublicationOutbox(abrainHome)));
         } finally {
           drainSettled = true;
         }
@@ -3672,10 +3747,21 @@ export async function runSedimentWorkerMaintenance(
       });
     };
 
-    const classifyThrow = async (): Promise<SedimentWorkerMaintenanceResult> => {
+    const classifyThrow = async (error: unknown): Promise<SedimentWorkerMaintenanceResult> => {
       const afterPendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
       const afterFailedProbe = await safeCountPublicationPending(abrainHome, countFailedFn);
       const failedAfter = afterFailedProbe.ok ? afterFailedProbe.count : null;
+      if (isCanonicalMutationAuthorityError(error)) {
+        return finish({
+          status: "failed",
+          retryable: true,
+          restart_child: false,
+          pending_before: pendingBefore,
+          pending_after: afterPendingProbe.ok ? afterPendingProbe.count : null,
+          failed: failedAfter ?? failedForDrain,
+          error_code: "local_executor_authority_revoked",
+        });
+      }
       // Historical failed residual still critical even when drain threw.
       if (failedAfter !== null && failedAfter > 0) {
         return finish({
@@ -3729,11 +3815,11 @@ export async function runSedimentWorkerMaintenance(
           }
           try {
             return await classifyDrain(await workPromise);
-          } catch {
-            return await classifyThrow();
+          } catch (settledError) {
+            return await classifyThrow(settledError);
           }
         }
-        return await classifyThrow();
+        return await classifyThrow(err);
       }
     } finally {
       await stopDeadlineFence();

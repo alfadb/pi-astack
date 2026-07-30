@@ -53,6 +53,8 @@ import {
   cleanupLegacyAdr0039PrePushHook,
   ensureAbrainStateGitignored,
   ensureBrainLayout,
+  verifyAbrainStateGitignored,
+  verifyBrainLayout,
 } from "./brain-layout";
 import activateRuleInjector from "./rule-injector";
 import {
@@ -77,9 +79,12 @@ import {
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
 import {
+  CanonicalMutationBarrierError,
+  canonicalMutationBarrierHeld,
   withCanonicalMutationBarrier,
   withoutCanonicalMutationBarrierContext,
 } from "../_shared/canonical-mutation-barrier";
+import { withCanonicalMutationAuthority } from "../_shared/canonical-mutation-authority";
 import {
   canonicalGitRuntimeEnabled,
   createProducedArtifactReceipt,
@@ -95,10 +100,18 @@ import {
 import {
   applyAllPendingAbrainBindIntents,
   applyLocalMapOnlyBind,
+  inspectAbrainBindIntentInventory,
   intentFromPlan,
   planAbrainBind,
   writeAbrainBindIntent,
 } from "./bind-intent";
+import { classifyForegroundLocalExecutorPosture } from "../sediment/local-executor-authority";
+import {
+  FOREGROUND_CANONICAL_CONVERGENCE_OBSERVATION_REASONS,
+  formatForegroundCanonicalConvergenceObservation,
+  observeForegroundCanonicalConvergence,
+  type ForegroundCanonicalConvergenceObservation,
+} from "../sediment/canonical-control";
 import { durableAtomicWriteFile } from "../_shared/durable-write";
 import { isSubAgentSession } from "../_shared/pi-internals";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
@@ -168,11 +181,70 @@ function abrainLocalSafetyStates(): Map<string, AbrainLocalSafetyStatus> {
   return created;
 }
 
+/**
+ * Three-state root presence for local safety bootstrap.
+ * - absent: only clear ENOENT — legacy ensure/bootstrap may create the root
+ * - plain: real non-symlink directory — classify posture / verify-or-ensure
+ * - invalid: symlink, non-directory, or any other lstat error — fail closed,
+ *   zero writes (never treat as legacy bootstrap; never follow into target)
+ */
+function classifyAbrainRootPresence(resolved: string): "absent" | "plain" | "invalid" {
+  try {
+    const st = fs.lstatSync(resolved);
+    if (st.isSymbolicLink() || !st.isDirectory()) return "invalid";
+    return "plain";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "absent";
+    return "invalid";
+  }
+}
+
 /** Establish the small local safety envelope synchronously, before pi can
  * expose an interactive writer. Full canonical recovery remains separate. */
 export function establishAbrainLocalSafetyPrerequisites(abrainHome = ABRAIN_HOME): AbrainLocalSafetyStatus {
   const resolved = path.resolve(abrainHome);
   try {
+    const rootPresence = classifyAbrainRootPresence(resolved);
+    // Symlink / non-dir / unreadable root: closed, no mkdir/classify follow-write.
+    if (rootPresence === "invalid") {
+      throw new Error("brain_layout_root_invalid");
+    }
+    // Root completely absent → store-absent legacy bootstrap (ensure layout + gitignore).
+    // Do not call the classifier first: missing roots fail-closed to capture_only
+    // and would incorrectly block first-boot mkdir.
+    if (rootPresence === "absent") {
+      const layout = ensureBrainLayout(resolved);
+      const ignored = ensureAbrainStateGitignored(resolved);
+      const ready: AbrainLocalSafetyStatus = Object.freeze({
+        status: "ready",
+        abrainHome: resolved,
+        gitignorePath: ignored.path,
+        layoutWarnings: Object.freeze(layout.warnings.slice()),
+      });
+      abrainLocalSafetyStates().set(resolved, ready);
+      if (layout.created.length > 0) console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
+      for (const warning of layout.warnings) console.error(`[abrain] brain layout warning: ${warning}`);
+      if (ignored.updated) console.error(`[abrain] added .state/ to ${ignored.path}`);
+      return ready;
+    }
+
+    // Root already a plain directory: classify posture before any mutation.
+    const captureOnly = classifyForegroundLocalExecutorPosture(resolved) === "capture_only";
+    if (captureOnly) {
+      // Store-present capture-only: verify-only layout + .state ignore (zero file changes).
+      verifyBrainLayout(resolved);
+      const verified = verifyAbrainStateGitignored(resolved);
+      const ready: AbrainLocalSafetyStatus = Object.freeze({
+        status: "ready",
+        abrainHome: resolved,
+        gitignorePath: verified.path,
+        layoutWarnings: Object.freeze([] as string[]),
+      });
+      abrainLocalSafetyStates().set(resolved, ready);
+      return ready;
+    }
+
+    // Store-absent legacy (root exists, no authority store): ensure layout + gitignore.
     const layout = ensureBrainLayout(resolved);
     const ignored = ensureAbrainStateGitignored(resolved);
     const ready: AbrainLocalSafetyStatus = Object.freeze({
@@ -210,15 +282,167 @@ export function getAbrainLocalSafetyStatus(abrainHome = ABRAIN_HOME): AbrainLoca
 }
 
 function assertAbrainLocalWriteSafety(abrainHome = ABRAIN_HOME): void {
-  const safety = getAbrainLocalSafetyStatus(abrainHome);
+  let safety = getAbrainLocalSafetyStatus(abrainHome);
+  if (safety.status !== "ready") {
+    // Store-present capture-only: allow verify-only refresh so a DCC-repaired
+    // layout can unblock an existing process without any writes. Store-absent
+    // legacy is unchanged (no automatic re-bootstrap on assert).
+    if (classifyForegroundLocalExecutorPosture(abrainHome) === "capture_only") {
+      safety = establishAbrainLocalSafetyPrerequisites(abrainHome);
+    }
+  }
   if (safety.status !== "ready") {
     throw new Error(`abrain local write safety blocked: ${safety.blockedReason ?? "unknown"}`);
   }
 }
 
-/** Vault slash domain: local safety only — never awaits Path A canonical startup. */
+/**
+ * Vault slash domain: local safety + (store-present) DCC six-condition
+ * observation/barrier at real write stages. Never starts Path A / whole-L1.
+ */
 function assertVaultLocalSafety(abrainHome = ABRAIN_HOME): void {
   assertAbrainLocalWriteSafety(abrainHome);
+}
+
+/** Closed short-code error for store-present foreground direct canonical writes. */
+export class ForegroundCanonicalBusinessWriteError extends Error {
+  readonly code: string;
+
+  constructor(closed: string) {
+    const code = `dcc_canonical_write_not_authorized:${closed}`;
+    super(code);
+    this.name = "ForegroundCanonicalBusinessWriteError";
+    this.code = code;
+  }
+}
+
+export interface ForegroundDirectCanonicalBusinessWriteDeps {
+  /**
+   * Gated test override for six-condition observation.
+   * Production defaults to observeForegroundCanonicalConvergence.
+   * Requires PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   * Runtime still validates reason_code against the closed observation set;
+   * free-form / malformed reasons collapse to unavailable (no path/raw leak).
+   */
+  observeConvergence?: (
+    abrainHome: string,
+  ) => Promise<ForegroundCanonicalConvergenceObservation | { status: string; reason_code: string }>
+    | ForegroundCanonicalConvergenceObservation
+    | { status: string; reason_code: string };
+  /**
+   * Gated test override for cross-process barrier.
+   * Production defaults to withCanonicalMutationBarrier.
+   * Requires PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   */
+  withBarrier?: <T>(
+    abrainHome: string,
+    operation: () => Promise<T>,
+  ) => Promise<T>;
+}
+
+function assertForegroundBusinessWriteTestHooks(
+  deps: ForegroundDirectCanonicalBusinessWriteDeps,
+): void {
+  const injected = deps.observeConvergence !== undefined || deps.withBarrier !== undefined;
+  if (injected && process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new ForegroundCanonicalBusinessWriteError("test_hooks_disabled");
+  }
+}
+
+function closedWriteDenial(observation: { status: string; reason_code: string }): string {
+  if (observation.status === "ready" && observation.reason_code === "none") return "none";
+  // Only FOREGROUND_CANONICAL_CONVERGENCE_OBSERVATION_REASONS may appear in the
+  // closed short code. Free-form / path-bearing / secret-bearing reasons collapse
+  // to unavailable so raw observation payloads cannot leak into Error.message.
+  if (
+    typeof observation.reason_code === "string"
+    && (FOREGROUND_CANONICAL_CONVERGENCE_OBSERVATION_REASONS as readonly string[]).includes(
+      observation.reason_code,
+    )
+  ) {
+    return observation.reason_code;
+  }
+  return "unavailable";
+}
+
+/**
+ * Store-present foreground direct canonical business write gate.
+ *
+ * - store absent (legacy posture): run operation as-is; no barrier/observer.
+ * - store present: never Path A; strict observeForegroundCanonicalConvergence
+ *   must be ready/none; then withCanonicalMutationBarrier; inside barrier
+ *   re-observe six conditions and only then run operation.
+ * - any observation failure / lock busy / exception → closed short code only
+ *   (`dcc_canonical_write_not_authorized:<closed>`); no path/raw error leak.
+ * - success does not kick and does not await convergence (business files are
+ *   durable; daemon periodic kick converges).
+ */
+export async function withForegroundDirectCanonicalBusinessWrite<T>(
+  abrainHome: string,
+  operation: () => Promise<T> | T,
+  deps: ForegroundDirectCanonicalBusinessWriteDeps = {},
+): Promise<T> {
+  assertForegroundBusinessWriteTestHooks(deps);
+
+  // Store-absent legacy: no new barrier/observer surface.
+  if (classifyForegroundLocalExecutorPosture(abrainHome) === "legacy") {
+    return await operation();
+  }
+
+  const observe = deps.observeConvergence
+    ?? ((home: string) => observeForegroundCanonicalConvergence(home));
+  const barrier = deps.withBarrier
+    ?? (<U>(home: string, op: () => Promise<U>) => withCanonicalMutationBarrier(home, op));
+
+  let outer: { status: string; reason_code: string };
+  try {
+    outer = await observe(abrainHome);
+  } catch {
+    throw new ForegroundCanonicalBusinessWriteError("unavailable");
+  }
+  if (outer.status !== "ready" || outer.reason_code !== "none") {
+    throw new ForegroundCanonicalBusinessWriteError(closedWriteDenial(outer));
+  }
+
+  try {
+    return await withCanonicalMutationAuthority({
+      abrainHome,
+      role: "foreground_observed",
+      revalidate: async () => {
+        const current = await observe(abrainHome);
+        if (current.status !== "ready" || current.reason_code !== "none") {
+          throw new ForegroundCanonicalBusinessWriteError(closedWriteDenial(current));
+        }
+      },
+    }, () => barrier(abrainHome, async () => {
+      // Retain the explicit inner observation for injected/degraded barrier
+      // seams; the production barrier also revalidates after OFD acquisition.
+      let inner: { status: string; reason_code: string };
+      try {
+        inner = await observe(abrainHome);
+      } catch {
+        throw new ForegroundCanonicalBusinessWriteError("unavailable");
+      }
+      if (inner.status !== "ready" || inner.reason_code !== "none") {
+        throw new ForegroundCanonicalBusinessWriteError(closedWriteDenial(inner));
+      }
+      return await operation();
+    }));
+  } catch (err: unknown) {
+    if (err instanceof ForegroundCanonicalBusinessWriteError) throw err;
+    if (err instanceof CanonicalMutationBarrierError) {
+      const closed = err.code === "CANONICAL_MUTATION_BUSY"
+        ? "canonical_mutation_busy"
+        : "unavailable";
+      throw new ForegroundCanonicalBusinessWriteError(closed);
+    }
+    throw new ForegroundCanonicalBusinessWriteError("unavailable");
+  }
+}
+
+/** Test helper: true while this process holds the OFD barrier for abrainHome. */
+export function isForegroundCanonicalBusinessWriteBarrierHeld(abrainHome: string): boolean {
+  return canonicalMutationBarrierHeld(abrainHome);
 }
 
 async function awaitAbrainCanonicalWriteBarrier(abrainHome = ABRAIN_HOME): Promise<void> {
@@ -1663,7 +1887,19 @@ export default function activate(pi: ExtensionAPI): void {
             type: "error",
           });
         }
-        if (canonicalModeEnabled) {
+        // DCC D3: store-present capture_only never schedules whole-L1, never
+        // applies bind intents, and never auto git-syncs from ordinary foreground.
+        const captureOnly = classifyForegroundLocalExecutorPosture(ABRAIN_HOME) === "capture_only";
+        if (captureOnly) {
+          if (currentSafety.status === "ready") {
+            reportCanonicalStartupConsumer({
+              runtime,
+              consumerId: ABRAIN_STARTUP_CONSUMER,
+              message: "abrain: store-present capture-only — whole-L1 / bind apply / auto git sync deferred to daemon-owned DCC worker",
+              type: "info",
+            });
+          }
+        } else if (canonicalModeEnabled) {
           await scheduleCanonicalStartupConsumer({
             runtime,
             consumerId: ABRAIN_STARTUP_CONSUMER,
@@ -2430,7 +2666,7 @@ export default function activate(pi: ExtensionAPI): void {
           case "init":
             assertVaultLocalSafety();
             await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
-            return;
+            return; // handleInit gates the real write stage only
           default:
             ctx.ui.notify(`/vault: unknown subcommand '${sub}'. Available: status, init`, "warning");
         }
@@ -2565,7 +2801,8 @@ async function handleInit(rawArgs: string, ui: { notify(message: string, type?: 
     }
   }
 
-  await runInit(backend, identity, ui);
+  // Real write stage only: preflight/idempotent/read-only checks above are ungated.
+  await withForegroundDirectCanonicalBusinessWrite(ABRAIN_HOME, () => runInit(backend, identity, ui));
 }
 
 /**
@@ -2796,13 +3033,14 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       ui.notify("/secret set: value cannot be empty", "warning");
       return;
     }
+    const secretValue: string = value;
     try {
-      const result = await writeSecret({
+      const result = await withForegroundDirectCanonicalBusinessWrite(ABRAIN_HOME, () => writeSecret({
         abrainHome: ABRAIN_HOME,
         scope: resolved.scope,
         key,
-        value,
-      });
+        value: secretValue,
+      }));
       value = null;
       ui.notify(
         `/secret set: wrote ${scopeReadableLabel(resolved.scope)}:${key} → ${path.relative(ABRAIN_HOME, result.encryptedPath)}`,
@@ -2877,7 +3115,10 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       return;
     }
     try {
-      const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
+      const result = await withForegroundDirectCanonicalBusinessWrite(
+        ABRAIN_HOME,
+        () => forgetSecret(ABRAIN_HOME, resolved.scope, key),
+      );
       const label = scopeReadableLabel(resolved.scope);
       // Round 7 P0 (gpt-5.5): forget outcome is tri-state. "absent" is a
       // no-op; "removed" is success; "removal_failed" means the encrypted
@@ -2999,6 +3240,45 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     const canonicalMsg = formatCanonicalPeekStatus(peek);
     ui.notify(`${bindingMsg}\n\n${canonicalMsg}`, current.activeProject ? "info" : "warning");
 
+    // DCC D5: closed six-condition aggregate only (no exact secrets; never starts Path A).
+    try {
+      const convergence = await observeForegroundCanonicalConvergence(ABRAIN_HOME);
+      const convergenceMsg = formatForegroundCanonicalConvergenceObservation(convergence);
+      ui.notify(
+        convergenceMsg,
+        convergence.status === "ready" || convergence.status === "legacy" ? "info" : "warning",
+      );
+    } catch {
+      // DCC aggregate surface: closed fixed log only (no raw error/path).
+      console.error("[abrain] canonical convergence observation failed");
+      ui.notify(
+        formatForegroundCanonicalConvergenceObservation({
+          status: "unavailable",
+          reason_code: "attestation_unavailable",
+        }),
+        "warning",
+      );
+    }
+
+    // Aggregate-only bind continuation inventory (no id/path/detail).
+    try {
+      const inventory = await inspectAbrainBindIntentInventory(ABRAIN_HOME);
+      const bindMsg = [
+        "Bind continuation inventory:",
+        `  pending: ${inventory.pending}`,
+        `  failed: ${inventory.failed}`,
+        `  invalid: ${inventory.invalid}`,
+      ].join("\n");
+      ui.notify(
+        bindMsg,
+        inventory.failed > 0 || inventory.invalid > 0 ? "warning" : "info",
+      );
+    } catch {
+      // DCC aggregate surface: closed fixed log only (no raw error/path).
+      console.error("[abrain] bind intent inventory failed");
+      ui.notify("Bind continuation inventory: unavailable", "warning");
+    }
+
     let syncStatus: AbrainSyncStatus | null = null;
     try {
       syncStatus = await getGitSyncStatus(ABRAIN_HOME);
@@ -3015,6 +3295,15 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     return;
   }
   if (sub === "sync") {
+    // DCC D4 v1: store-present capture-only — explicit fail-closed (no Path A / apply / gitSync).
+    if (classifyForegroundLocalExecutorPosture(ABRAIN_HOME) === "capture_only") {
+      ui.notify(
+        "abrain: /abrain sync rejected — authority store present (capture-only). "
+          + "Daemon-owned canonical convergence owns sync; ordinary foreground must not await Path A, apply bind intents, or run git sync.",
+        "warning",
+      );
+      return;
+    }
     // Manual sync mutates local Git state. In canonical mode it consumes the
     // same Path A startup promise as session_start and all canonical writers.
     await awaitAbrainCanonicalWriteBarrier();
@@ -3041,9 +3330,11 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     }
     try {
       assertAbrainLocalWriteSafety(ABRAIN_HOME);
-      // Disposition throws for invalid settings. Only explicit valid
-      // enabled=false may use the legacy synchronous tracked-write path.
+      // Disposition throws for invalid settings. Only store-absent legacy may use
+      // the synchronous tracked-write path; store-present is always capture_only
+      // durable-intent (even when canonical settings are disabled).
       const canonicalBindEnabled = canonicalGitRuntimeEnabled();
+      const captureOnly = classifyForegroundLocalExecutorPosture(ABRAIN_HOME) === "capture_only";
       const plan = await planAbrainBind({
         abrainHome: ABRAIN_HOME,
         cwd: commandCwd,
@@ -3099,8 +3390,9 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         return;
       }
 
-      // Canonical disabled: keep the previous synchronous write+commit path.
-      if (!canonicalBindEnabled) {
+      // Store-absent legacy only: keep the previous synchronous write+commit path.
+      // Store present (capture_only) never falls through here, even if canonical disabled.
+      if (!canonicalBindEnabled && !captureOnly) {
         const result = await bindAbrainProject({
           abrainHome: ABRAIN_HOME,
           cwd: commandCwd,
@@ -3161,54 +3453,59 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         return;
       }
 
-      // Opportunistic apply if canonical is already ready; never await a cold startup.
+      // Capture-only: durable intent only — no opportunistic apply, no consumer schedule.
+      // Legacy store-absent: opportunistic apply / schedule when canonical is not ready.
       const peek = peekCanonicalRuntimeDiagnostics({ abrainHome: ABRAIN_HOME });
-      if (peek.status === "ready") {
-        const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
-        const bound = refreshBootActiveProjectIfBound(commandCwd);
-        if (bound.activeProject) {
-          ui.notify([
-            `Bound current project to abrain project: ${plan.projectId}`,
-            "",
-            "Canonical registration applied from durable bind intent:",
-            `- intent: ${intent.itemId.slice(0, 12)}… (${written.status})`,
-            `- ${plan.registryPath}${plan.registryCreated ? " (created)" : " (verified)"}`,
-            `- ${plan.abrainGitignorePath}${plan.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
-            ...applied.details.map((line) => `- ${line}`),
-            "",
-            "Project repo:",
-            formatAutoCommitResult("project repo", projectCommit),
-          ].join("\n"), "info");
-          return;
+      if (!captureOnly) {
+        if (peek.status === "ready") {
+          const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+          const bound = refreshBootActiveProjectIfBound(commandCwd);
+          if (bound.activeProject) {
+            ui.notify([
+              `Bound current project to abrain project: ${plan.projectId}`,
+              "",
+              "Canonical registration applied from durable bind intent:",
+              `- intent: ${intent.itemId.slice(0, 12)}… (${written.status})`,
+              `- ${plan.registryPath}${plan.registryCreated ? " (created)" : " (verified)"}`,
+              `- ${plan.abrainGitignorePath}${plan.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
+              ...applied.details.map((line) => `- ${line}`),
+              "",
+              "Project repo:",
+              formatAutoCommitResult("project repo", projectCommit),
+            ].join("\n"), "info");
+            return;
+          }
+        } else {
+          // Schedule apply on an independent consumer so session_start continuation
+          // / reporter for ABRAIN_STARTUP_CONSUMER is never overwritten.
+          void scheduleCanonicalStartupConsumer({
+            runtime: { abrainHome: ABRAIN_HOME },
+            consumerId: ABRAIN_BIND_INTENT_CONSUMER,
+            mode: "json",
+            onReady: async () => {
+              try {
+                const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
+                if (applied.applied > 0) refreshBootActiveProjectIfBound(commandCwd);
+              } catch (error) {
+                console.error(`[abrain] bind intent deferred apply failed: ${error instanceof Error ? error.message : String(error)}`);
+              }
+            },
+            blockedMessage: (diag) => {
+              if (diag.startup === "deferred") {
+                return `abrain bind still pending: canonical startup deferred (${diag.deferredReason ?? "unknown"}); retryable via external lifecycle — ${diag.blockedReason ?? "unknown"}`;
+              }
+              return `abrain bind still pending: canonical startup blocked — ${diag.blockedReason ?? "unknown"}`;
+            },
+          });
         }
-      } else {
-        // Schedule apply on an independent consumer so session_start continuation
-        // / reporter for ABRAIN_STARTUP_CONSUMER is never overwritten.
-        void scheduleCanonicalStartupConsumer({
-          runtime: { abrainHome: ABRAIN_HOME },
-          consumerId: ABRAIN_BIND_INTENT_CONSUMER,
-          mode: "json",
-          onReady: async () => {
-            try {
-              const applied = await applyAllPendingAbrainBindIntents(ABRAIN_HOME);
-              if (applied.applied > 0) refreshBootActiveProjectIfBound(commandCwd);
-            } catch (error) {
-              console.error(`[abrain] bind intent deferred apply failed: ${error instanceof Error ? error.message : String(error)}`);
-            }
-          },
-          blockedMessage: (diag) => {
-            if (diag.startup === "deferred") {
-              return `abrain bind still pending: canonical startup deferred (${diag.deferredReason ?? "unknown"}); retryable via external lifecycle — ${diag.blockedReason ?? "unknown"}`;
-            }
-            return `abrain bind still pending: canonical startup blocked — ${diag.blockedReason ?? "unknown"}`;
-          },
-        });
       }
 
       ui.notify([
         `Queued abrain project registration: ${plan.projectId}`,
         "",
-        "Canonical registration pending:",
+        captureOnly
+          ? "Capture-only durable intent (daemon DCC worker applies after ready):"
+          : "Canonical registration pending:",
         `- durable bind intent: ${intent.itemId.slice(0, 12)}… (${written.status})`,
         plan.registryCreated
           ? `- abrain registry not written yet (avoids unowned dirty tracked files)`
@@ -3221,13 +3518,15 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         "Project repo:",
         formatAutoCommitResult("project repo", projectCommit),
         "",
-        peek.status === "deferred"
-          ? `Canonical state: deferred (${peek.deferredReason ?? "unknown"}) — retryable via session_start / agent_end / /abrain sync`
-          : peek.status === "running"
-            ? "Canonical state: running — intent will apply when ready"
-            : peek.status === "blocked"
-              ? `Canonical state: blocked — ${peek.reason ?? "unknown"}`
-              : "Canonical state: not ready — intent will apply on next ready lifecycle",
+        captureOnly
+          ? "Authority store present: ordinary foreground will not apply or schedule whole-L1; wait for daemon-owned convergence."
+          : peek.status === "deferred"
+            ? `Canonical state: deferred (${peek.deferredReason ?? "unknown"}) — retryable via session_start / agent_end / /abrain sync`
+            : peek.status === "running"
+              ? "Canonical state: running — intent will apply when ready"
+              : peek.status === "blocked"
+                ? `Canonical state: blocked — ${peek.reason ?? "unknown"}`
+                : "Canonical state: not ready — intent will apply on next ready lifecycle",
       ].join("\n"), "warning");
     } catch (err: any) {
       ui.notify(`/abrain bind failed: ${err.message}`, "warning");

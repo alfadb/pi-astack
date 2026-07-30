@@ -66,7 +66,43 @@ fs.writeFileSync(path.join(sharedTarget, "causal-anchor.cjs"), `module.exports =
 fs.writeFileSync(path.join(sharedTarget, "pi-internals.cjs"), `module.exports = { isSubAgentSession: () => false };\n`);
 fs.writeFileSync(path.join(sharedTarget, "llm-audit.cjs"), `module.exports = { auditStreamSimple: async () => ({ stopReason: "error", content: [] }) };\n`);
 fs.writeFileSync(path.join(sharedTarget, "git-singleflight.cjs"), transpile(path.join(repoRoot, "extensions/_shared/git-singleflight.ts")));
-fs.writeFileSync(path.join(sharedTarget, "canonical-mutation-barrier.cjs"), "exports.withCanonicalMutationBarrier = async (_repo, operation) => operation(); exports.withoutCanonicalMutationBarrierContext = (operation) => operation();\n");
+fs.writeFileSync(path.join(sharedTarget, "canonical-mutation-authority.cjs"), `
+exports.withCanonicalMutationAuthority = async (_options, operation) => operation();
+`);
+fs.writeFileSync(path.join(sharedTarget, "canonical-mutation-barrier.cjs"), `
+class CanonicalMutationBarrierError extends Error {
+  constructor(code, message, detail) {
+    super(code + ': ' + message);
+    this.name = 'CanonicalMutationBarrierError';
+    this.code = code;
+    this.detail = detail;
+  }
+}
+exports.CanonicalMutationBarrierError = CanonicalMutationBarrierError;
+exports.canonicalMutationBarrierHeld = () => false;
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+exports.withoutCanonicalMutationBarrierContext = (operation) => operation();
+exports.tryWithCanonicalMutationBarrier = async (_repo, operation) => ({ status: 'acquired', value: await operation() });
+exports.assertCanonicalMutationBarrierHeld = () => {};
+`);
+// DCC: abrain/index.ts imports classifier + six-condition observer from sediment.
+fs.mkdirSync(path.join(tmpDir, "sediment"), { recursive: true });
+fs.writeFileSync(path.join(tmpDir, "sediment", "local-executor-authority.cjs"), `
+exports.classifyForegroundLocalExecutorPosture = () => 'legacy';
+`);
+fs.writeFileSync(path.join(tmpDir, "sediment", "local-executor-authority.js"), `
+exports.classifyForegroundLocalExecutorPosture = () => 'legacy';
+`);
+fs.writeFileSync(path.join(tmpDir, "sediment", "canonical-control.cjs"), `
+exports.observeForegroundCanonicalConvergence = async () => ({ status: 'legacy', reason_code: 'not_authorized' });
+exports.formatForegroundCanonicalConvergenceObservation = () => 'Canonical convergence: legacy';
+exports.sanitizeForegroundCanonicalConvergenceObservation = (v) => v;
+`);
+fs.writeFileSync(path.join(tmpDir, "sediment", "canonical-control.js"), `
+exports.observeForegroundCanonicalConvergence = async () => ({ status: 'legacy', reason_code: 'not_authorized' });
+exports.formatForegroundCanonicalConvergenceObservation = () => 'Canonical convergence: legacy';
+exports.sanitizeForegroundCanonicalConvergenceObservation = (v) => v;
+`);
 fs.writeFileSync(path.join(sharedTarget, "durable-write.cjs"), "exports.durableAtomicWriteFile = async () => {}; exports.durableAtomicCreateFile = async () => 'created';\n");
 fs.writeFileSync(path.join(sharedTarget, "device-join-coordinator.cjs"), "exports.recoverDeviceJoinJournal = async () => {}; exports.prepareDeviceJoinForSync = async () => ({}); exports.publishPreparedDeviceJoinForSync = async () => ({ status: 'ok' });\n");
 fs.writeFileSync(path.join(sharedTarget, "canonical-git-runtime.cjs"), `
@@ -148,9 +184,12 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\.\/_shared\/causal-anchor"\)/g, 'require("./_shared/causal-anchor.cjs")')
   .replace(/require\("\.\.\/_shared\/git-singleflight"\)/g, 'require("./_shared/git-singleflight.cjs")')
   .replace(/require\("\.\.\/_shared\/canonical-mutation-barrier"\)/g, 'require("./_shared/canonical-mutation-barrier.cjs")')
+  .replace(/require\("\.\.\/_shared\/canonical-mutation-authority"\)/g, 'require("./_shared/canonical-mutation-authority.cjs")')
   .replace(/require\("\.\.\/_shared\/canonical-git-runtime"\)/g, 'require("./_shared/canonical-git-runtime.cjs")')
   .replace(/require\("\.\.\/_shared\/durable-write"\)/g, 'require("./_shared/durable-write.cjs")')
-  .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")');
+  .replace(/require\("\.\.\/_shared\/pi-internals"\)/g, 'require("./_shared/pi-internals.cjs")')
+  .replace(/require\("\.\.\/sediment\/local-executor-authority"\)/g, 'require("./sediment/local-executor-authority.cjs")')
+  .replace(/require\("\.\.\/sediment\/canonical-control"\)/g, 'require("./sediment/canonical-control.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 
 const indexModule = require(path.join(tmpDir, "index.cjs"));
@@ -283,9 +322,9 @@ check("__resetBootActiveProjectForTests round-trips an active project value", ()
   if (indexModule.getBootActiveProject() !== null) throw new Error("reset to null failed");
 });
 
-// Vault execution-domain AST: slash writes use local safety only, never Path A
-// canonical startup barriers (awaitAbrainCanonicalWriteBarrier etc.).
-check("vault slash execution domain uses local safety only (AST)", () => {
+// Vault execution-domain AST: local safety + DCC business write gate at real
+// write stages; never Path A (awaitAbrainCanonicalWriteBarrier / getCanonicalStartupPromise).
+check("vault slash execution domain uses local safety + DCC write gate (AST)", () => {
   const srcPath = path.join(repoRoot, "extensions/abrain/index.ts");
   const src = fs.readFileSync(srcPath, "utf-8");
   const sf = ts.createSourceFile(srcPath, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -361,16 +400,16 @@ check("vault slash execution domain uses local safety only (AST)", () => {
     return found;
   }
 
-  const forbidden = [
+  // Path A is still forbidden on vault slash surfaces.
+  const forbiddenPathA = [
     "awaitAbrainCanonicalWriteBarrier",
     "getCanonicalStartupPromise",
-    "withCanonicalMutationBarrier",
   ];
 
-  function assertNoCanonical(label, node) {
+  function assertNoPathA(label, node) {
     if (!node) throw new Error(`${label}: not found`);
     const body = textOf(node);
-    for (const name of forbidden) {
+    for (const name of forbiddenPathA) {
       if (body.includes(name)) throw new Error(`${label}: must not reference ${name}`);
     }
   }
@@ -381,7 +420,7 @@ check("vault slash execution domain uses local safety only (AST)", () => {
   if (!guardText.includes("assertAbrainLocalWriteSafety")) {
     throw new Error("assertVaultLocalSafety must call assertAbrainLocalWriteSafety");
   }
-  assertNoCanonical("assertVaultLocalSafety", localGuard);
+  assertNoPathA("assertVaultLocalSafety", localGuard);
 
   const handleSecret = findFunction("handleSecret");
   if (!handleSecret) throw new Error("handleSecret not found");
@@ -389,7 +428,18 @@ check("vault slash execution domain uses local safety only (AST)", () => {
   if (!secretText.includes("assertVaultLocalSafety")) {
     throw new Error("handleSecret must call assertVaultLocalSafety");
   }
-  assertNoCanonical("handleSecret", handleSecret);
+  if (!secretText.includes("withForegroundDirectCanonicalBusinessWrite")) {
+    throw new Error("handleSecret must gate real writes with withForegroundDirectCanonicalBusinessWrite");
+  }
+  assertNoPathA("handleSecret", handleSecret);
+
+  const handleInit = findFunction("handleInit");
+  if (!handleInit) throw new Error("handleInit not found");
+  const initText = textOf(handleInit);
+  if (!initText.includes("withForegroundDirectCanonicalBusinessWrite")) {
+    throw new Error("handleInit must gate runInit with withForegroundDirectCanonicalBusinessWrite");
+  }
+  assertNoPathA("handleInit", handleInit);
 
   const vaultHandler = findRegisterCommandHandler("vault");
   if (!vaultHandler) throw new Error('registerCommand("vault") handler not found');
@@ -397,7 +447,17 @@ check("vault slash execution domain uses local safety only (AST)", () => {
   if (!vaultText.includes("assertVaultLocalSafety")) {
     throw new Error("vault handler must call assertVaultLocalSafety");
   }
-  assertNoCanonical('registerCommand("vault") handler', vaultHandler);
+  assertNoPathA('registerCommand("vault") handler', vaultHandler);
+
+  const gate = findFunction("withForegroundDirectCanonicalBusinessWrite");
+  if (!gate) throw new Error("withForegroundDirectCanonicalBusinessWrite not found");
+  const gateText = textOf(gate);
+  if (!gateText.includes("withCanonicalMutationBarrier") && !gateText.includes("barrier(")) {
+    throw new Error("gate must use withCanonicalMutationBarrier under store-present");
+  }
+  if (gateText.includes("getCanonicalStartupPromise") || gateText.includes("kickCanonical")) {
+    throw new Error("gate must not start Path A / kick");
+  }
 });
 
 await Promise.all(pendingChecks);

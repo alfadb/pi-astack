@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CURRENT_CONSTRAINT_L2 } from "../../_shared/canonical-l2-contract";
+import { withCanonicalMutationBarrier } from "../../_shared/canonical-mutation-barrier";
 import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { canonicalJson, canonicalJsonValue } from "../constraint-evidence/canonical-json";
 import { constraintEvidenceEventPath, sha256Hex } from "../constraint-evidence/hash-envelope";
@@ -130,31 +131,35 @@ export async function appendConstraintProjectionEvent(abrainHome: string, body: 
   // l1/events-only path guard (rejects canonical rules/knowledge/projects roots).
   const guard = guardConstraintEvidencePath({ abrainHome, targetPath: filePath });
   if (!guard.ok) return { ok: false, status: "path_violation", eventId, filePath };
-  // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
-  // check plus lstat+realpath symlink-escape validation before durable write.
-  try {
-    await validateL1WritePreflight({
-      abrainHome,
-      envelope,
-      targetPath: filePath,
-      expected: { domain: "constraint", role: "canonical" },
-    });
-  } catch {
-    return { ok: false, status: "path_violation", eventId, filePath };
-  }
-  const content = constraintProjectionEnvelopeJson(envelope);
-  try {
-    const existing = await fs.readFile(filePath, "utf-8");
-    return existing === content
-      ? { ok: true, status: "idempotent_duplicate", eventId, filePath }
-      : { ok: false, status: "collision", eventId, filePath };
-  } catch (err) {
-    if (!(err && typeof err === "object" && (err as NodeJS.ErrnoException).code === "ENOENT")) {
-      return { ok: false, status: "write_failed", eventId, filePath };
+  // Self-contained barrier: preflight + read-CAS + write as one OFD section.
+  // Nested under fixate's L1+L2 barrier remains non-deadlocking.
+  return withCanonicalMutationBarrier(abrainHome, async () => {
+    // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
+    // check plus lstat+realpath symlink-escape validation before durable write.
+    try {
+      await validateL1WritePreflight({
+        abrainHome,
+        envelope,
+        targetPath: filePath,
+        expected: { domain: "constraint", role: "canonical" },
+      });
+    } catch {
+      return { ok: false, status: "path_violation" as const, eventId, filePath };
     }
-  }
-  const wrote = await writeFileAtomic(filePath, content);
-  return wrote ? { ok: true, status: "appended", eventId, filePath } : { ok: false, status: "write_failed", eventId, filePath };
+    const content = constraintProjectionEnvelopeJson(envelope);
+    try {
+      const existing = await fs.readFile(filePath, "utf-8");
+      return existing === content
+        ? { ok: true, status: "idempotent_duplicate" as const, eventId, filePath }
+        : { ok: false, status: "collision" as const, eventId, filePath };
+    } catch (err) {
+      if (!(err && typeof err === "object" && (err as NodeJS.ErrnoException).code === "ENOENT")) {
+        return { ok: false, status: "write_failed" as const, eventId, filePath };
+      }
+    }
+    const wrote = await writeFileAtomic(filePath, content);
+    return wrote ? { ok: true, status: "appended" as const, eventId, filePath } : { ok: false, status: "write_failed" as const, eventId, filePath };
+  });
 }
 
 // ADR0039 Constraint L2 (4×T0 v3 bundle-a, deepseek comparator): among a set of
@@ -211,30 +216,34 @@ export async function fixateConstraintDecisionAndRenderL2(options: FixateConstra
   const l2Root = path.resolve(options.abrainHome, "l2", "views", "constraint");
   if (!isPathInside(l2Root, l2Path)) return { ok: false, status: "l2_path_violation", l2RelativePath, decisionHash };
 
-  const existingL2 = await fs.readFile(l2Path, "utf-8").catch(() => null);
-  if (existingL2 && existingL2.includes(`decision_hash: ${decisionHash}\n`)) {
-    return { ok: true, status: "unchanged", l2RelativePath, decisionHash };
-  }
+  // OFD covers the L1 projection append + L2 render as one consistent section.
+  // Nested appendConstraintProjectionEvent reuses the held barrier (no deadlock).
+  return withCanonicalMutationBarrier(options.abrainHome, async () => {
+    const existingL2 = await fs.readFile(l2Path, "utf-8").catch(() => null);
+    if (existingL2 && existingL2.includes(`decision_hash: ${decisionHash}\n`)) {
+      return { ok: true, status: "unchanged" as const, l2RelativePath, decisionHash };
+    }
 
-  const body: ConstraintProjectionEventBodyV1 = {
-    event_schema_version: CONSTRAINT_PROJECTION_EVENT_SCHEMA_VERSION,
-    event_type: "constraint_compiled_view_produced",
-    created_at_utc: options.createdAtUtc,
-    device_id: options.deviceId,
-    producer_nonce: options.decision.inputRootHash,
-    causal_parents: [...options.inputEventIds].sort(),
-    producer: { name: "sediment.constraint-compiler", version: options.producerVersion },
-    template_version: CONSTRAINT_L2_RENDER_TEMPLATE_VERSION,
-    input_root_hash: options.decision.inputRootHash,
-    input_event_ids: [...options.inputEventIds].sort(),
-    provenance: options.provenance,
-    validated_decision: normalizedDecision,
-  };
-  const append = await appendConstraintProjectionEvent(options.abrainHome, body);
-  if (!append.ok) return { ok: false, status: "append_failed", eventId: append.eventId, l2RelativePath, decisionHash, append };
+    const body: ConstraintProjectionEventBodyV1 = {
+      event_schema_version: CONSTRAINT_PROJECTION_EVENT_SCHEMA_VERSION,
+      event_type: "constraint_compiled_view_produced",
+      created_at_utc: options.createdAtUtc,
+      device_id: options.deviceId,
+      producer_nonce: options.decision.inputRootHash,
+      causal_parents: [...options.inputEventIds].sort(),
+      producer: { name: "sediment.constraint-compiler", version: options.producerVersion },
+      template_version: CONSTRAINT_L2_RENDER_TEMPLATE_VERSION,
+      input_root_hash: options.decision.inputRootHash,
+      input_event_ids: [...options.inputEventIds].sort(),
+      provenance: options.provenance,
+      validated_decision: normalizedDecision,
+    };
+    const append = await appendConstraintProjectionEvent(options.abrainHome, body);
+    if (!append.ok) return { ok: false, status: "append_failed" as const, eventId: append.eventId, l2RelativePath, decisionHash, append };
 
-  const view = renderConstraintL2View(typedNormalized, append.eventId);
-  const wrote = await writeFileAtomic(l2Path, view.markdown);
-  if (!wrote) return { ok: false, status: "l2_write_failed", eventId: append.eventId, l2RelativePath, decisionHash, append, view };
-  return { ok: true, status: "written", eventId: append.eventId, l2RelativePath, decisionHash, append, view };
+    const view = renderConstraintL2View(typedNormalized, append.eventId);
+    const wrote = await writeFileAtomic(l2Path, view.markdown);
+    if (!wrote) return { ok: false, status: "l2_write_failed" as const, eventId: append.eventId, l2RelativePath, decisionHash, append, view };
+    return { ok: true, status: "written" as const, eventId: append.eventId, l2RelativePath, decisionHash, append, view };
+  });
 }

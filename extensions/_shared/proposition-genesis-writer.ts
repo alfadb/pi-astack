@@ -2,6 +2,7 @@ import * as os from "node:os";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, type DurableCreateStatus } from "./durable-write";
+import { canonicalMutationBarrierHeld, withCanonicalMutationBarrier } from "./canonical-mutation-barrier";
 import { canonicalizeJcs, jcsSha256Hex, sha256Hex } from "./jcs";
 import {
   canonicalL1EnvelopeJson,
@@ -245,22 +246,38 @@ export async function writeProductionPropositionGenesis(options: {
   sandboxAbrainHome: string;
   registryPath?: string;
 }): Promise<ProductionPropositionGenesisWriteResult> {
-  const tuple = await validateProductionPropositionGenesisPreflight(options);
-  const registry = loadL1SchemaRegistry(tuple.registry_path);
-  const beforeScan = await scanWholeL1Validated({ abrainHome: tuple.abrain_home, registry });
-  const before = summarizePropositionGenesisScan(beforeScan);
-  await createTargetParentNoSymlink(tuple.abrain_home, tuple.target_path);
-  const status = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
-  if (status === "collision") {
-    throw failure("PROPOSITION_GENESIS_COLLISION", "production genesis target exists with different bytes; refusing replacement", { targetPath: tuple.target_path, eventId: tuple.event_id });
-  }
-  const afterScan = await scanWholeL1Validated({ abrainHome: tuple.abrain_home, registry });
-  assertProductionGenesisEpochState(afterScan, tuple, { requirePresent: true });
-  const readBack = await readProductionPropositionGenesisEvent({ sandboxAbrainHome: tuple.sandbox_abrain_home, eventId: tuple.event_id, registryPath: tuple.registry_path });
-  if (!readBack.byte_identical) {
-    throw failure("PROPOSITION_GENESIS_BYTE_MISMATCH", "on-disk production genesis is not byte-identical to canonical JCS envelope", { targetPath: tuple.target_path });
-  }
-  return deepFreeze({ status, tuple, before, after: summarizePropositionGenesisScan(afterScan) });
+  // Sandbox ensure + fixed tuple prepare stay outside (no L1 decision). Fresh
+  // prestate scan/decision through create/readback/postscan share one barrier.
+  // Store-absent sandbox keeps legacy behavior via the barrier's store-absent posture.
+  const tuple = await prepareProductionPropositionGenesisTuple(options);
+  return withCanonicalMutationBarrier(tuple.abrain_home, async () => {
+    const registry = loadL1SchemaRegistry(tuple.registry_path);
+    validateProductionPropositionGenesisTuple(tuple, registry);
+    await assertTargetPathNoSymlinkPreflight(tuple.abrain_home, tuple.target_path);
+    const beforeScan = await scanWholeL1Validated({
+      abrainHome: tuple.abrain_home,
+      registry,
+      checkpoint: () => {
+        if (!canonicalMutationBarrierHeld(tuple.abrain_home)) {
+          throw failure("PROPOSITION_GENESIS_BARRIER_REQUIRED", "fresh production genesis prestate scan requires the canonical mutation barrier");
+        }
+      },
+    });
+    assertProductionGenesisEpochState(beforeScan, tuple, { requirePresent: false });
+    const before = summarizePropositionGenesisScan(beforeScan);
+    await createTargetParentNoSymlink(tuple.abrain_home, tuple.target_path);
+    const status = await durableAtomicCreateFile(tuple.target_path, tuple.canonical_envelope_json, { mode: 0o600 });
+    if (status === "collision") {
+      throw failure("PROPOSITION_GENESIS_COLLISION", "production genesis target exists with different bytes; refusing replacement", { targetPath: tuple.target_path, eventId: tuple.event_id });
+    }
+    const afterScan = await scanWholeL1Validated({ abrainHome: tuple.abrain_home, registry });
+    assertProductionGenesisEpochState(afterScan, tuple, { requirePresent: true });
+    const readBack = await readProductionPropositionGenesisEvent({ sandboxAbrainHome: tuple.sandbox_abrain_home, eventId: tuple.event_id, registryPath: tuple.registry_path });
+    if (!readBack.byte_identical) {
+      throw failure("PROPOSITION_GENESIS_BYTE_MISMATCH", "on-disk production genesis is not byte-identical to canonical JCS envelope", { targetPath: tuple.target_path });
+    }
+    return deepFreeze({ status, tuple, before, after: summarizePropositionGenesisScan(afterScan) });
+  });
 }
 
 export async function readProductionPropositionGenesisEvent(options: {

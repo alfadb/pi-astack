@@ -72,7 +72,14 @@ function loadKnowledgeModule() {
   stageTs(outRoot, "extensions/_shared/jcs.ts");
   stageTs(outRoot, "extensions/_shared/canonical-l2-contract.ts");
   stageTs(outRoot, "extensions/_shared/proposition.ts");
+  stageTs(outRoot, "extensions/_shared/l1-validated-scan-cache.ts");
   stageTs(outRoot, "extensions/_shared/l1-schema-registry.ts");
+  stageTs(outRoot, "extensions/_shared/canonical-mutation-authority.ts");
+  stageTs(outRoot, "extensions/_shared/canonical-mutation-barrier.ts");
+  stageTs(outRoot, "extensions/_shared/git-singleflight.ts");
+  stageTs(outRoot, "extensions/_shared/retained-directory-ofd-lock.ts");
+  stageTs(outRoot, "extensions/_shared/worker-budget-context.ts");
+  stageTs(outRoot, "extensions/sediment/local-executor-authority.ts");
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
   fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
   stageTs(outRoot, "extensions/memory/settings.ts");

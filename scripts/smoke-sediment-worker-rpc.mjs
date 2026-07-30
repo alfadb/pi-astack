@@ -143,6 +143,7 @@ await check("worker mode: zero lifecycle hooks + closed worker commands", async 
     assert(pi.commands.has("sediment-worker-run"), "missing sediment-worker-run command");
     assert(pi.commands.has("sediment-worker-maintenance"), "missing sediment-worker-maintenance command");
     assert(pi.commands.has("sediment-worker-capabilities"), "missing sediment-worker-capabilities command");
+    assert(pi.commands.has("sediment-worker-canonical-control"), "missing sediment-worker-canonical-control command");
     assert(!pi.commands.has("sediment"), "ordinary /sediment must not register in worker mode");
   } finally {
     if (prev === undefined) delete process.env.PI_ASTACK_SEDIMENT_WORKER_MODE;
@@ -167,6 +168,7 @@ await check("normal mode: lifecycle hooks still register (regression)", async ()
     assert(!pi.commands.has("sediment-worker-run"), "worker command must not register outside worker mode");
     assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance command must not register outside worker mode");
     assert(!pi.commands.has("sediment-worker-capabilities"), "capabilities command must not register outside worker mode");
+    assert(!pi.commands.has("sediment-worker-canonical-control"), "canonical control must not register outside worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
     writeSettings({ executionOwner: "daemon" });
@@ -193,6 +195,7 @@ await check("foreground daemon-owner: capture without enqueue", async () => {
     assert(!pi.commands.has("sediment-worker-run"), "worker cmd only in worker mode");
     assert(!pi.commands.has("sediment-worker-maintenance"), "maintenance cmd only in worker mode");
     assert(!pi.commands.has("sediment-worker-capabilities"), "capabilities cmd only in worker mode");
+    assert(!pi.commands.has("sediment-worker-canonical-control"), "canonical control only in worker mode");
   } finally {
     if (prev !== undefined) process.env.PI_ASTACK_SEDIMENT_WORKER_MODE = prev;
   }

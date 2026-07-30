@@ -92,6 +92,7 @@ import {
   withCanonicalMutationBarrier,
   withoutCanonicalMutationBarrierContext,
 } from "../_shared/canonical-mutation-barrier";
+import { assertCanonicalMutationAuthorized } from "../_shared/canonical-mutation-authority";
 import { assertWorkerBudgetNotExpired, getWorkerBudgetContext } from "../_shared/worker-budget-context";
 import {
   canonicalGitRuntimeEnabled,
@@ -2247,7 +2248,11 @@ async function withCanonicalWriterMutation<T>(
   // Worker budget: abort before critical IO/git when soft deadline already past.
   // Foreground never enters worker budget ALS, so the static helper is a no-op.
   assertWorkerBudgetNotExpired("writer_before");
+  // Fence before Path A consumption as well as immediately before the semantic
+  // operation. This keeps store-present foreground calls at zero canonical delta.
+  await assertCanonicalMutationAuthorized(abrainHome);
   await assertCanonicalWriterSettings(abrainHome, settings);
+  await assertCanonicalMutationAuthorized(abrainHome);
   // Writer success is retained: no post-success budget flip.
   // Soft deadline still gates entry via writer_before only.
   const run = async (): Promise<T> => operation();

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile } from "../../_shared/durable-write";
+import { withCanonicalMutationBarrier } from "../../_shared/canonical-mutation-barrier";
 import { validateL1WritePreflight } from "../../_shared/l1-schema-registry";
 import { makeConstraintEvidenceDiagnostic } from "./diagnostics";
 import {
@@ -128,92 +129,97 @@ export async function appendConstraintEvidenceEvent(options: AppendConstraintEvi
   });
   if (!validation.ok) return { ok: false, status: "invalid", eventId, filePath, envelope, diagnostics: validation.diagnostics };
 
-  // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
-  // check plus lstat+realpath symlink-escape validation before durable write.
-  try {
-    await validateL1WritePreflight({
-      abrainHome: options.abrainHome,
-      envelope,
-      targetPath: filePath,
-      expected: { domain: "constraint", role: "evidence" },
-    });
-  } catch (err) {
-    return {
-      ok: false,
-      status: "invalid",
-      eventId,
-      filePath,
-      envelope,
-      diagnostics: [makeConstraintEvidenceDiagnostic({
-        code: "CE_HASH_PATH_MISMATCH",
-        message: `central schema-role registry rejected constraint evidence write: ${err instanceof Error ? err.message : String(err)}`,
-        eventIds: [eventId],
-        data: { filePath },
-      })],
-    };
-  }
-
-  const content = constraintEvidenceEnvelopeJson(envelope);
-  try {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const createStatus = await writeDurableEvidenceFile(filePath, content);
-    if (createStatus === "identical") {
-      return {
-        ok: true,
-        status: "idempotent_duplicate",
-        eventId,
-        filePath,
+  // Self-contained barrier: append itself protects preflight + mkdir + create
+  // even when integration uses canonicalPublish=false (no outer publish barrier).
+  // Nested under an outer barrier remains non-deadlocking.
+  return withCanonicalMutationBarrier(options.abrainHome, async () => {
+    // Canonical-path R3.4.2 P1-S3 write gate: central registry role/producer
+    // check plus lstat+realpath symlink-escape validation before durable write.
+    try {
+      await validateL1WritePreflight({
+        abrainHome: options.abrainHome,
         envelope,
-        diagnostics: [makeConstraintEvidenceDiagnostic({
-          code: "CE_APPEND_IDEMPOTENT_DUPLICATE",
-          message: "constraint evidence event already exists with identical content",
-          eventIds: [eventId],
-        })],
-      };
-    }
-    if (createStatus === "collision") {
+        targetPath: filePath,
+        expected: { domain: "constraint", role: "evidence" },
+      });
+    } catch (err) {
       return {
         ok: false,
-        status: "collision",
+        status: "invalid" as const,
         eventId,
         filePath,
         envelope,
         diagnostics: [makeConstraintEvidenceDiagnostic({
-          code: "CE_HASH_PATH_COLLISION",
-          message: "constraint evidence event path already exists with different content",
+          code: "CE_HASH_PATH_MISMATCH",
+          message: `central schema-role registry rejected constraint evidence write: ${err instanceof Error ? err.message : String(err)}`,
           eventIds: [eventId],
           data: { filePath },
         })],
       };
     }
 
-    return {
-      ok: true,
-      status: "appended",
-      eventId,
-      filePath,
-      envelope,
-      diagnostics: [makeConstraintEvidenceDiagnostic({
-        code: "CE_APPEND_OK",
-        message: "constraint evidence event appended",
-        eventIds: [eventId],
-      })],
-    };
-  } catch (err) {
-    return {
-      ok: false,
-      status: "write_failed",
-      eventId,
-      filePath,
-      envelope,
-      diagnostics: [makeConstraintEvidenceDiagnostic({
-        code: "CE_APPEND_FAILED",
-        message: "constraint evidence append failed",
-        eventIds: [eventId],
-        data: { error: err instanceof Error ? err.message : String(err), ...blockedAuditData(options.body, eventId) },
-      })],
-    };
-  }
+    const content = constraintEvidenceEnvelopeJson(envelope);
+    try {
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      const createStatus = await writeDurableEvidenceFile(filePath, content);
+      if (createStatus === "identical") {
+        return {
+          ok: true,
+          status: "idempotent_duplicate" as const,
+          eventId,
+          filePath,
+          envelope,
+          diagnostics: [makeConstraintEvidenceDiagnostic({
+            code: "CE_APPEND_IDEMPOTENT_DUPLICATE",
+            message: "constraint evidence event already exists with identical content",
+            eventIds: [eventId],
+          })],
+        };
+      }
+      if (createStatus === "collision") {
+        return {
+          ok: false,
+          status: "collision" as const,
+          eventId,
+          filePath,
+          envelope,
+          diagnostics: [makeConstraintEvidenceDiagnostic({
+            code: "CE_HASH_PATH_COLLISION",
+            message: "constraint evidence event path already exists with different content",
+            eventIds: [eventId],
+            data: { filePath },
+          })],
+        };
+      }
+
+      return {
+        ok: true,
+        status: "appended" as const,
+        eventId,
+        filePath,
+        envelope,
+        diagnostics: [makeConstraintEvidenceDiagnostic({
+          code: "CE_APPEND_OK",
+          message: "constraint evidence event appended",
+          eventIds: [eventId],
+        })],
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        status: "write_failed" as const,
+        eventId,
+        filePath,
+        envelope,
+        diagnostics: [makeConstraintEvidenceDiagnostic({
+          code: "CE_APPEND_FAILED",
+          message: "constraint evidence append failed",
+          eventIds: [eventId],
+          data: { error: err instanceof Error ? err.message : String(err), ...blockedAuditData(options.body, eventId) },
+        })],
+      };
+    }
+  });
 }
 
 async function writeDurableEvidenceFile(filePath: string, content: string): Promise<"created" | "identical" | "collision"> {

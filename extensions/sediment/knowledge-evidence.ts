@@ -7,6 +7,8 @@ import {
   knowledgeProjectionEntryRelativePathV1,
   knowledgeProjectionManifestRelativePathV1,
 } from "../_shared/canonical-l2-contract";
+import { isCanonicalMutationAuthorityError } from "../_shared/canonical-mutation-authority";
+import { canonicalMutationBarrierHeld, withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined, type JcsJsonValue } from "../_shared/jcs";
 import { scanWholeL1Validated, validateL1WritePreflight } from "../_shared/l1-schema-registry";
 import { slugify } from "../memory/utils";
@@ -307,80 +309,90 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
   if (!guardEventPath(args.abrainHome, filePath)) return { ok: false, status: "path_violation", eventId, filePath, envelope };
   const validation = verifyKnowledgeEvidenceEnvelope(envelope);
   if (!validation.ok) return { ok: false, status: "write_failed", eventId, filePath, envelope, error: validation.reason };
-  // Canonical-path R3.4.2 P1-S3 write gate: registry role/producer/path and
-  // lstat+realpath symlink-escape validation before any durable L1 write.
-  try {
-    await validateL1WritePreflight({
-      abrainHome: args.abrainHome,
-      envelope,
-      targetPath: filePath,
-      expected: { domain: "knowledge", role: "canonical" },
-    });
-  } catch (err) {
-    return { ok: false, status: "write_failed", eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
-  }
+  // Tracked L1 mutation: self-contained barrier covers preflight + create-only
+  // CAS so concurrent publishers serialize under OFD and authority is closed
+  // before the first mkdir/write when the store is present without a lease.
   const content = knowledgeEvidenceEnvelopeJson(envelope);
   try {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    // Create-only CAS: concurrent publishers observe created | identical |
-    // collision. Never rename-overwrite an existing non-empty L1 event.
-    const createStatus = await durableAtomicCreateFile(filePath, content);
-    if (createStatus === "created") {
-      return {
-        ok: true,
-        status: "appended",
-        eventId,
-        filePath,
-        envelope,
-        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_OK", "knowledge evidence event appended", { eventId, filePath })],
-      };
-    }
-    if (createStatus === "identical") {
-      return {
-        ok: true,
-        status: "idempotent_duplicate",
-        eventId,
-        filePath,
-        envelope,
-        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
-      };
-    }
-    // collision: allow empty crash residue recovery only; never clobber bytes.
-    const existing = await fs.readFile(filePath, "utf-8").catch(() => null);
-    if (existing !== null && (existing === content || canonicalizeExistingEnvelopeJson(existing) === content)) {
-      return {
-        ok: true,
-        status: "idempotent_duplicate",
-        eventId,
-        filePath,
-        envelope,
-        diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
-      };
-    }
-    const stat = await fs.stat(filePath).catch(() => null);
-    if (stat && stat.size === 0) {
-      await durableAtomicWriteFile(filePath, content);
-      return {
-        ok: true,
-        status: "appended",
-        eventId,
-        filePath,
-        envelope,
-        recoveredEmptyResidue: true,
-        diagnostics: [knowledgeEvidenceDiagnostic("KE_RECOVERED_EMPTY_RESIDUE", "knowledge evidence event recovered an empty crash residue", { eventId, filePath, recovered: "recovered_empty_residue" })],
-      };
-    }
-    const reason = existing == null ? "content_mismatch" : knowledgeCollisionReason(existing, content);
-    return {
-      ok: false,
-      status: "collision",
-      eventId,
-      filePath,
-      envelope,
-      error: `knowledge evidence event path collision: ${reason}`,
-      diagnostics: [knowledgeEvidenceDiagnostic("KE_HASH_PATH_COLLISION", "knowledge evidence event path already exists with different content", { eventId, filePath, reason })],
-    };
+    return await withCanonicalMutationBarrier(args.abrainHome, async () => {
+      // Canonical-path R3.4.2 P1-S3 write gate: registry role/producer/path and
+      // lstat+realpath symlink-escape validation before any durable L1 write.
+      try {
+        await validateL1WritePreflight({
+          abrainHome: args.abrainHome,
+          envelope,
+          targetPath: filePath,
+          expected: { domain: "knowledge", role: "canonical" },
+        });
+      } catch (err) {
+        return { ok: false, status: "write_failed" as const, eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
+      }
+      try {
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        // Create-only CAS: concurrent publishers observe created | identical |
+        // collision. Never rename-overwrite an existing non-empty L1 event.
+        const createStatus = await durableAtomicCreateFile(filePath, content);
+        if (createStatus === "created") {
+          return {
+            ok: true,
+            status: "appended" as const,
+            eventId,
+            filePath,
+            envelope,
+            diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_OK", "knowledge evidence event appended", { eventId, filePath })],
+          };
+        }
+        if (createStatus === "identical") {
+          return {
+            ok: true,
+            status: "idempotent_duplicate" as const,
+            eventId,
+            filePath,
+            envelope,
+            diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
+          };
+        }
+        // collision: allow empty crash residue recovery only; never clobber bytes.
+        const existing = await fs.readFile(filePath, "utf-8").catch(() => null);
+        if (existing !== null && (existing === content || canonicalizeExistingEnvelopeJson(existing) === content)) {
+          return {
+            ok: true,
+            status: "idempotent_duplicate" as const,
+            eventId,
+            filePath,
+            envelope,
+            diagnostics: [knowledgeEvidenceDiagnostic("KE_APPEND_IDEMPOTENT_DUPLICATE", "knowledge evidence event already exists with identical content", { eventId, filePath })],
+          };
+        }
+        const stat = await fs.stat(filePath).catch(() => null);
+        if (stat && stat.size === 0) {
+          await durableAtomicWriteFile(filePath, content);
+          return {
+            ok: true,
+            status: "appended" as const,
+            eventId,
+            filePath,
+            envelope,
+            recoveredEmptyResidue: true,
+            diagnostics: [knowledgeEvidenceDiagnostic("KE_RECOVERED_EMPTY_RESIDUE", "knowledge evidence event recovered an empty crash residue", { eventId, filePath, recovered: "recovered_empty_residue" })],
+          };
+        }
+        const reason = existing == null ? "content_mismatch" : knowledgeCollisionReason(existing, content);
+        return {
+          ok: false,
+          status: "collision" as const,
+          eventId,
+          filePath,
+          envelope,
+          error: `knowledge evidence event path collision: ${reason}`,
+          diagnostics: [knowledgeEvidenceDiagnostic("KE_HASH_PATH_COLLISION", "knowledge evidence event path already exists with different content", { eventId, filePath, reason })],
+        };
+      } catch (err) {
+        return { ok: false, status: "write_failed" as const, eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
+      }
+    });
   } catch (err) {
+    if (isCanonicalMutationAuthorityError(err)) throw err;
     return { ok: false, status: "write_failed", eventId, filePath, envelope, error: err instanceof Error ? err.message : String(err) };
   }
 }
@@ -648,51 +660,62 @@ export async function syncAdr0039L3AfterKnowledgeWrite(args: {
 export async function reprojectAllKnowledge(
   { abrainHome, settings }: { abrainHome: string; settings?: { knowledgeProjector?: { l2OutputRoot?: string } } },
 ): Promise<ReprojectAllKnowledgeResult> {
-  // Whole-L1 validation completes before a single L2 byte is written; any
-  // envelope/hash/path/role/producer violation aborts the reproject closed.
-  const byIdentity = new Map<string, KnowledgeEventNode[]>();
-  const allNodes = await collectAllKnowledgeEventNodes(abrainHome);
-  for (const node of allNodes) {
-    const identity = knowledgeIdentityKey(node.body);
-    if (!byIdentity.has(identity)) byIdentity.set(identity, []);
-    byIdentity.get(identity)!.push(node);
-  }
-
   const projectionRoot = knowledgeProjectionRoot(abrainHome, settings);
   const latestDir = path.join(projectionRoot, "latest");
-  let projected = 0;
-  let removed = 0;
-  let failed = 0;
-  const failures: string[] = [];
-  const writtenPaths: string[] = [];
-  for (const [identity, nodes] of byIdentity) {
-    try {
-      const proj = renderKnowledgeProjectionFromSet(nodes);
-      const body = nodes[0]!.body;
-      const relative = knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug });
-      const outputPath = path.join(projectionRoot, ...relative.split("/"));
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      if (proj.kind === "delete") {
-        await fs.rm(outputPath, { force: true });
-        removed += 1;
-      } else {
-        await fs.writeFile(outputPath, proj.markdown!, "utf-8");
-        projected += 1;
-      }
-      writtenPaths.push(outputPath);
-    } catch (err) {
-      failed += 1;
-      failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
+  // Only tracked l2/ reproject is barrier-owned (collect/group/fold + L2 writes +
+  // manifest share one barrier). Default `.state` cache stays ungated; L3 may
+  // ride the outer tracked mutation section when present.
+  const trackedL2 = settings?.knowledgeProjector?.l2OutputRoot === "repo";
+  const writeAll = async (): Promise<ReprojectAllKnowledgeResult> => {
+    // Whole-L1 validation completes before a single L2 byte is written; any
+    // envelope/hash/path/role/producer violation aborts the reproject closed.
+    // Shared for both modes so tracked L2 cannot TOCTOU-scan outside the barrier.
+    if (trackedL2 && !canonicalMutationBarrierHeld(abrainHome)) {
+      throw new Error("reprojectAllKnowledge tracked L2 collect requires the canonical mutation barrier");
     }
-  }
-  if (allNodes.length > 0) {
-    await fs.mkdir(latestDir, { recursive: true });
-    const manifestPath = path.join(projectionRoot, ...knowledgeProjectionManifestRelativePathV1().split("/"));
-    await fs.writeFile(manifestPath, renderKnowledgeProjectionManifestFromSet(allNodes).json, "utf-8");
-    writtenPaths.push(manifestPath);
-    await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
-  }
-  return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10), writtenPaths: Array.from(new Set(writtenPaths)).sort() };
+    const byIdentity = new Map<string, KnowledgeEventNode[]>();
+    const allNodes = await collectAllKnowledgeEventNodes(abrainHome);
+    for (const node of allNodes) {
+      const identity = knowledgeIdentityKey(node.body);
+      if (!byIdentity.has(identity)) byIdentity.set(identity, []);
+      byIdentity.get(identity)!.push(node);
+    }
+    let projected = 0;
+    let removed = 0;
+    let failed = 0;
+    const failures: string[] = [];
+    const writtenPaths: string[] = [];
+    for (const [identity, nodes] of byIdentity) {
+      try {
+        const proj = renderKnowledgeProjectionFromSet(nodes);
+        const body = nodes[0]!.body;
+        const relative = knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug });
+        const outputPath = path.join(projectionRoot, ...relative.split("/"));
+        await fs.mkdir(path.dirname(outputPath), { recursive: true });
+        if (proj.kind === "delete") {
+          await fs.rm(outputPath, { force: true });
+          removed += 1;
+        } else {
+          await fs.writeFile(outputPath, proj.markdown!, "utf-8");
+          projected += 1;
+        }
+        writtenPaths.push(outputPath);
+      } catch (err) {
+        failed += 1;
+        failures.push(`${identity}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (allNodes.length > 0) {
+      await fs.mkdir(latestDir, { recursive: true });
+      const manifestPath = path.join(projectionRoot, ...knowledgeProjectionManifestRelativePathV1().split("/"));
+      await fs.writeFile(manifestPath, renderKnowledgeProjectionManifestFromSet(allNodes).json, "utf-8");
+      writtenPaths.push(manifestPath);
+      await syncAdr0039L3AfterKnowledgeWrite({ abrainHome, settings });
+    }
+    return { identities: byIdentity.size, projected, removed, failed, failures: failures.slice(0, 10), writtenPaths: Array.from(new Set(writtenPaths)).sort() };
+  };
+  if (trackedL2) return withCanonicalMutationBarrier(abrainHome, writeAll);
+  return writeAll();
 }
 
 function compareUtf16CodeUnits(left: string, right: string): number {
@@ -997,7 +1020,10 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
   const outputPath = path.join(root, ...knowledgeProjectionEntryRelativePathV1({ scopeKind: body.scope.kind, projectId: body.scope.project_id, slug: body.payload.slug }).split("/"));
   const manifestPath = path.join(root, ...knowledgeProjectionManifestRelativePathV1().split("/"));
   if (!isPathInside(root, outputPath) || !isPathInside(root, manifestPath)) return { ok: false, status: "invalid", error: "projection path escaped state root" };
-  try {
+  // Only tracked l2/ writes are fence/barrier-owned. Default `.state` projection
+  // remains ungated runtime cache and must not expand the authority surface.
+  const trackedL2 = args.settings.knowledgeProjector.l2OutputRoot === "repo";
+  const mutate = async (): Promise<ProjectKnowledgeEvidenceResult> => {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     // ADR 0039 B2: in "topo" mode the entry is the deterministic fold of ALL
     // events sharing the (scope, slug) identity; "single" keeps the per-event
@@ -1025,7 +1051,12 @@ export async function projectKnowledgeEvidenceEvent(args: { abrainHome: string; 
     );
     await fs.writeFile(manifestPath, manifest.json, "utf-8");
     return { ok: true, status: removed ? "removed" : "projected", outputPath, manifestPath };
+  };
+  try {
+    if (trackedL2) return await withCanonicalMutationBarrier(args.abrainHome, mutate);
+    return await mutate();
   } catch (err) {
+    if (isCanonicalMutationAuthorityError(err)) throw err;
     return { ok: false, status: "write_failed", error: err instanceof Error ? err.message : String(err) };
   }
 }

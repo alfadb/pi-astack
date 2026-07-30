@@ -9,6 +9,8 @@ status: active
 
 The authoritative full design is the living LSEA section of `/home/worker/work/components/pi-router/plan.md`. This repository implements only the pi-astack worker rollout slice.
 
+**Orthogonal boundary pointer — DCC**: Daemon-Owned Canonical Convergence ([ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md); pi-router `plan.md` DCC H1 + `docs/architecture/central-memory-sediment.md` §8.3.8) sits **above** LSEA and does **not** rewrite this admission contract. LSEA remains physical authority (`authority.lock` + `authority.json` v1). DCC assigns store-present canonical convergence execution to the same LSEA holder's daemon-managed long-lived worker, adds sibling convergence attestation (not a second authority lock), and removes TUI whole-L1 startup. settings=`foreground` / free / unavailable still do not authorize TUI here or under DCC.
+
 ## Contract boundary
 
 The authority store is shared per canonical ABRAIN:
@@ -69,7 +71,7 @@ For maintenance, heartbeat/progress emission and waiting for the process-local g
 
 The authority-aware daemon design must interpret any of the three codes as a **global authority pause**: stop scheduling the whole worker, roll back/no-count the current ledger attempt, and retain the backlog. It must not consume per-item retry budgets or deadletter items one by one. A permanently corrupt store therefore remains globally paused for operator repair rather than converting the backlog into permanent deadletters. This daemon behavior is a rollout contract here, not an implemented pi-astack supervisor.
 
-There are deliberately no B1-B8 authority barriers. After admission, the daemon's long-held lock and OS process-tree containment own the process-lifetime fence. Existing transaction/idempotency behavior remains responsible for already-admitted task effects.
+The LSEA baseline deliberately has no legacy B1-B8 authority barriers: after single-entry admission, the daemon's long-held lock and OS process-tree containment own the process-lifetime fence. Existing transaction/idempotency behavior remains responsible for already-admitted task effects. Separately, the DCC store-present overlay ([ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md)) revalidates on each actual canonical mutation authority frame by calling `admitLocalExecutorAuthority` again (reread record + lock observation). When `mode` is `draining` or otherwise not held, the next mutation frame is closed. That revalidation is not a second authority lock and does not invent B1-B8 labels; containment semantics for work already admitted and not yet entering a next mutation frame are unchanged.
 
 ## Capability and rollout
 
@@ -118,4 +120,4 @@ npx tsc --noEmit --skipLibCheck --moduleResolution bundler --module preserve --t
 git diff --check
 ```
 
-`smoke:lsea-worker-admission` covers every strict-record field omission, paired task/maintenance field omission, Unix non-`0600`, read-lock-read ABA, all three closed codes and retryable/no-restart shape, real Linux `flock` hold/release, Windows `EBUSY` versus ACL/unavailable classification plus symlink/non-regular rejection, store-exists foreground capture-only (including free+unlocked) versus missing-store legacy posture, task/maintenance durable zero-delta rejection, capability zero side effect, and the absence of B1-B8 authority calls. `smoke:sediment-daemon-edge-capture` covers the capture-only `session_start` boundary and candidate-only witness recovery only when sediment is enabled, plus regressions that `settings.enabled=false` does not reopen authority recovery via the edge triple gate and that `agent_end` fully-disabled returns before authority IO.
+`smoke:lsea-worker-admission` covers every strict-record field omission, paired task/maintenance field omission, Unix non-`0600`, read-lock-read ABA, all three closed codes and retryable/no-restart shape, real Linux `flock` hold/release, Windows `EBUSY` versus ACL/unavailable classification plus symlink/non-regular rejection, store-exists foreground capture-only (including free+unlocked) versus missing-store legacy posture, task/maintenance durable zero-delta rejection, capability zero side effect, entry plus DCC execution-time mutation frames that re-call `admitLocalExecutorAuthority`, and still no legacy B1-B8 authority labels. `smoke:sediment-daemon-edge-capture` covers the capture-only `session_start` boundary and candidate-only witness recovery only when sediment is enabled, plus regressions that `settings.enabled=false` does not reopen authority recovery via the edge triple gate and that `agent_end` fully-disabled returns before authority IO.

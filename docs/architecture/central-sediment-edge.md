@@ -104,7 +104,11 @@ Link 字段最小集：`owner_session_epoch` / `executor_epoch` / `launch_token`
 ## 9. 相关文档
 
 - [ADR 0044](../adr/0044-central-sediment-edge-authority.md)
+- [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md) — Stage A worker RPC 历史合同
+- [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md) — **Daemon-Owned Canonical Convergence（DCC）**：store-present 下唯一 canonical convergence executor = 同一 LSEA holder 的 daemon-managed long-lived worker；attestation / kick-observe / foreground cutover 目标合同（in progress）
+- [local-sediment-executor-authority.md](./local-sediment-executor-authority.md) — LSEA worker-first admission（physical authority；与 DCC 正交）
 - [sediment.md](./sediment.md) — 当前本地实现契约
 - [memory.md](./memory.md) — 当前读路径
 - [ADR 0027 C6](../adr/0027-coupled-stigmergic-dual-loop-agent-system.md)
-- `/home/worker/work/components/pi-router/docs/architecture/central-memory-sediment.md`
+- `/home/worker/work/components/pi-router/docs/architecture/central-memory-sediment.md`（含 §8.3.8 DCC 摘要）
+- `/home/worker/work/components/pi-router/plan.md` — DCC living plan SOT

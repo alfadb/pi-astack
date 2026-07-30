@@ -57,7 +57,7 @@ function stageTs(outRoot, src, dst = src.replace(/^extensions\//, "").replace(/\
 
 const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-l2-preflight-"));
 for (const file of [
-  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts", "extensions/_shared/jcs.ts", "extensions/_shared/canonical-l2-contract.ts", "extensions/_shared/proposition.ts", "extensions/_shared/l1-schema-registry.ts",
+  "extensions/_shared/runtime.ts", "extensions/_shared/durable-write.ts", "extensions/_shared/jcs.ts", "extensions/_shared/canonical-l2-contract.ts", "extensions/_shared/proposition.ts", "extensions/_shared/l1-validated-scan-cache.ts", "extensions/_shared/l1-schema-registry.ts", "extensions/_shared/retained-directory-ofd-lock.ts",
   "extensions/memory/settings.ts", "extensions/memory/utils.ts", "extensions/memory/direction-impact.ts", "extensions/memory/parser.ts",
   "extensions/sediment/settings.ts", "extensions/sediment/knowledge-evidence.ts", "extensions/sediment/sanitizer.ts",
   "extensions/sediment/constraint-compiler/types.ts",
@@ -73,6 +73,15 @@ for (const file of [
 }
 fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
 fs.copyFileSync(path.join(repoRoot, "schemas", "l1-schema-role-registry.json"), path.join(outRoot, "schemas", "l1-schema-role-registry.json"));
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-barrier.js"), `
+exports.withCanonicalMutationBarrier = async (_repo, operation) => operation();
+exports.withoutCanonicalMutationBarrierContext = (operation) => operation();
+exports.canonicalMutationBarrierHeld = () => false;
+`);
+writeFile(path.join(outRoot, "_shared", "canonical-mutation-authority.js"), `
+exports.assertCanonicalMutationAuthorized = async () => undefined;
+exports.isCanonicalMutationAuthorityError = () => false;
+`);
 const R = (m, f) => require(path.join(outRoot, "sediment", m, `${f}.js`));
 const { fixateConstraintDecisionAndRenderL2, selectLatestConstraintProjectionEventId, CONSTRAINT_PROJECTION_ENVELOPE_SCHEMA_VERSION } = R("constraint-compiler", "projection");
 const { renderConstraintL2View } = R("constraint-compiler", "render");

@@ -10,6 +10,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, type DurableCreateStatus } from "./durable-write";
+import { isCanonicalMutationAuthorityError } from "./canonical-mutation-authority";
+import { withCanonicalMutationBarrier } from "./canonical-mutation-barrier";
 import {
   canonicalL1EnvelopeJson,
   defaultL1SchemaRegistryPath,
@@ -377,8 +379,13 @@ export async function appendTier1PolicyProposition(
     }
 
     const canonical = canonicalL1EnvelopeJson(envelope);
-    await createTargetParentNoSymlink(abrainHome, targetPath);
-    const status = await durableAtomicCreateFile(targetPath, canonical, { mode: 0o600 });
+    // Generic gate stays outside; tracked L1 parent+create are barrier-owned so
+    // store-present foreground closes before mkdir and concurrent creates serialize.
+    // `.state` pending/audit markers remain outside this semantic boundary.
+    const status = await withCanonicalMutationBarrier(abrainHome, async () => {
+      await createTargetParentNoSymlink(abrainHome, targetPath);
+      return durableAtomicCreateFile(targetPath, canonical, { mode: 0o600 });
+    });
     if (status === "collision") {
       throw failure("PROPOSITION_TIER1_COLLISION", "proposition target exists with different bytes", { eventId: envelope.event_id });
     }
@@ -399,6 +406,9 @@ export async function appendTier1PolicyProposition(
       },
     };
   } catch (err) {
+    // Authority fence must bubble for worker-rpc → local_executor_authority_revoked
+    // and must never be classified as a terminal refused write that advances queue/CP.
+    if (isCanonicalMutationAuthorityError(err)) throw err;
     const classified = classifyTier1PolicyWriteFailure(err);
     return {
       ok: false,

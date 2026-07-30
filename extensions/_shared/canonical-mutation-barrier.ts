@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { gitSingleFlight, gitSingleFlightWithDeadline } from "./git-singleflight";
+import { assertCanonicalMutationAuthorized } from "./canonical-mutation-authority";
 import {
   acquireRetainedDirectoryOfdLock,
   type RetainedDirectoryOfdLock,
@@ -140,7 +141,10 @@ async function runWithCanonicalLease<T>(
   const lease: BarrierLease = { active: true };
   held.set(repo, lease);
   try {
-    return await heldRepositories.run(held, operation);
+    return await heldRepositories.run(held, async () => {
+      await assertCanonicalMutationAuthorized(repo);
+      return operation();
+    });
   } finally {
     // AsyncLocalStorage context propagates into detached promises. Invalidate
     // the shared lease before closing the fd so those continuations cannot
@@ -156,6 +160,7 @@ export async function withCanonicalMutationBarrierInSingleFlight<T>(
   options: CanonicalMutationBarrierOptions = {},
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
+  await assertCanonicalMutationAuthorized(repo);
   if (canonicalMutationBarrierHeld(repo)) return operation();
   const lock = await acquireWithRetry(repo, options);
   return runWithCanonicalLease(repo, lock, operation);
@@ -171,6 +176,7 @@ export async function tryWithCanonicalMutationBarrier<T>(
   operation: () => Promise<T>,
 ): Promise<TryCanonicalMutationBarrierResult<T>> {
   const repo = canonicalKey(repoInput);
+  await assertCanonicalMutationAuthorized(repo);
   if (canonicalMutationBarrierHeld(repo)) return { status: "acquired", value: await operation() };
   const lock = acquireRetainedDirectoryOfdLock(repo);
   if (lock.status === "BUSY") return { status: "busy" };
@@ -185,12 +191,13 @@ export async function tryWithCanonicalMutationBarrier<T>(
 }
 
 /** Process-local ordering is always acquired before the cross-process OFD lock. */
-export function withCanonicalMutationBarrier<T>(
+export async function withCanonicalMutationBarrier<T>(
   repoInput: string,
   operation: () => Promise<T>,
   options: CanonicalMutationBarrierOptions = {},
 ): Promise<T> {
   const repo = canonicalKey(repoInput);
+  await assertCanonicalMutationAuthorized(repo);
   if (canonicalMutationBarrierHeld(repo)) return operation();
 
   // An explicit timeout covers both the process-local queue and OFD acquisition.
@@ -218,7 +225,7 @@ export function withCanonicalMutationBarrier<T>(
   };
 
   if (deadlineBound) {
-    return gitSingleFlightWithDeadline(
+    return await gitSingleFlightWithDeadline(
       repo,
       () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged),
       {
@@ -232,7 +239,7 @@ export function withCanonicalMutationBarrier<T>(
       },
     );
   }
-  return gitSingleFlight(repo, () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged));
+  return await gitSingleFlight(repo, () => withCanonicalMutationBarrierInSingleFlight(repo, operation, merged));
 }
 
 export function withoutCanonicalMutationBarrierContext<T>(operation: () => T): T {

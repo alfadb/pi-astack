@@ -14,6 +14,8 @@ const { createJiti } = require("jiti");
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 const authority = await jiti.import(path.join(repoRoot, "extensions/sediment/local-executor-authority.ts"));
 const worker = await jiti.import(path.join(repoRoot, "extensions/sediment/worker-rpc.ts"));
+const mutationAuthority = await jiti.import(path.join(repoRoot, "extensions/_shared/canonical-mutation-authority.ts"));
+const edge = await jiti.import(path.join(repoRoot, "extensions/sediment/edge-protocol-shadow.ts"));
 
 function assert(value, message) {
   if (!value) throw new Error(message);
@@ -396,6 +398,48 @@ await check("Unix native flock observation sees holder and release without mutat
     );
     assert(strictMaintenance.status === "idle", `strict maintenance=${JSON.stringify(strictMaintenance)}`);
     assert(countCalls === 2, `strict maintenance count calls=${countCalls}`);
+
+    let pendingReads = 0;
+    let failedReads = 0;
+    let repairSawContext = false;
+    let drainSawContext = false;
+    const strictRepairDrain = await worker.runSedimentWorkerMaintenance(
+      JSON.stringify(maintenanceRequest({
+        ...expectation(),
+        request_id: hex64("strict-repair-drain-context"),
+        repair_policy: "legacy_world_project_stamp",
+        repair_limit: 1,
+      })),
+      {
+        resolveAbrainHome: () => abrain,
+        resolveEffectiveExecutionOwner: () => "daemon",
+        countPublicationOutboxPending: async () => {
+          pendingReads += 1;
+          return pendingReads === 1 ? 0 : pendingReads === 2 ? 1 : 0;
+        },
+        countPublicationOutboxFailed: async () => {
+          failedReads += 1;
+          return failedReads === 1 ? 1 : 0;
+        },
+        repairLegacyWorldProjectStampFailures: async () => {
+          await mutationAuthority.assertCanonicalMutationAuthorized(abrain);
+          repairSawContext = true;
+          return { status: "repaired", repaired: 1 };
+        },
+        drainKnowledgePublicationOutbox: async () => {
+          await mutationAuthority.assertCanonicalMutationAuthorized(abrain);
+          drainSawContext = true;
+          return { status: "completed", processed: 1, drained: 1, terminalFailed: 0, pending: 0 };
+        },
+        env: {
+          ...process.env,
+          PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT: copyStore,
+          PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS: JSON.stringify([fs.realpathSync.native(project)]),
+        },
+      },
+    );
+    assert(strictRepairDrain.status === "drained", `strict repair/drain=${JSON.stringify(strictRepairDrain)}`);
+    assert(repairSawContext && drainSawContext, "maintenance repair/drain missed mutation authority context");
   } finally {
     holder.kill("SIGKILL");
     await new Promise((resolve) => holder.once("close", resolve));
@@ -419,6 +463,129 @@ await check("Unix native flock observation sees holder and release without mutat
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert(released, "native flock did not become observable as released");
+});
+
+await check("mid-operation authority revoke maps task/maintenance to local_executor_authority_revoked", async () => {
+  writeAuthority();
+  const sessionId = "lsea-mid-revoke-session";
+  const terminal = hex64("mid-pass-authority-revoked-terminal");
+  const messages = [
+    { role: "user", content: [{ type: "text", text: "mid revoke" }] },
+    { role: "assistant", content: [{ type: "text", text: "acked" }], stopReason: "stop" },
+  ];
+  const messagesJson = JSON.stringify(messages);
+  const contentId = edge.computePayloadDigest(messagesJson);
+  const body = edge.buildEdgeSourceEnvelopeBody({
+    contentId,
+    sessionId,
+    messageCount: messages.length,
+    messagesJson,
+  });
+  const sidecarDir = path.join(copyStore, "records", terminal);
+  fs.mkdirSync(sidecarDir, { recursive: true, mode: 0o700 });
+  const sidecarPath = path.join(sidecarDir, "sidecar.bin");
+  fs.writeFileSync(sidecarPath, body, { mode: 0o600 });
+  const ownerRoot = fs.realpathSync.native(project);
+
+  const revokedMidPass = await worker.runSedimentWorkerTask(JSON.stringify({
+    ...taskManifest({
+      ...expectation(),
+      request_id: hex64("mid-pass-authority-revoked"),
+      terminal_record_id: terminal,
+      session_id: sessionId,
+      owner_project_root: ownerRoot,
+      owner_key: crypto.createHash("sha256").update(ownerRoot).digest("hex"),
+      sidecar_path: sidecarPath,
+      content_id: contentId,
+      c6: { session_id: sessionId, turn_id: 1 },
+      leaf_tip: {
+        id: "leaf-mid-revoke",
+        parentId: null,
+        type: "message",
+        timestampUtc: "2026-07-30T00:00:00.000Z",
+      },
+    }),
+  }), {
+    resolveAbrainHome: () => abrain,
+    resolveExecutionOwner: () => "daemon",
+    loadSessionCheckpoint: async () => ({}),
+    runAgentEndPass: async () => {
+      throw Object.assign(new Error(mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED), {
+        code: mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED,
+        name: "CanonicalMutationAuthorityError",
+      });
+    },
+    env: {
+      ...process.env,
+      PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT: copyStore,
+      PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS: JSON.stringify([ownerRoot]),
+    },
+  });
+  assert(revokedMidPass.error_code === "local_executor_authority_revoked", `mid-pass revoke=${JSON.stringify(revokedMidPass)}`);
+  assert(revokedMidPass.retryable === true, "mid-pass authority revoke must be retryable");
+  assert(revokedMidPass.error_code !== "pipeline_threw", "mid-pass authority revoke must not degrade to pipeline_threw");
+
+  const revokedRepair = await worker.runSedimentWorkerMaintenance(
+    JSON.stringify(maintenanceRequest({
+      ...expectation(),
+      request_id: hex64("mid-repair-authority-revoked"),
+      repair_policy: "legacy_world_project_stamp",
+      repair_limit: 1,
+    })),
+    {
+      resolveAbrainHome: () => abrain,
+      resolveEffectiveExecutionOwner: () => "daemon",
+      countPublicationOutboxPending: async () => 0,
+      countPublicationOutboxFailed: async () => 1,
+      repairLegacyWorldProjectStampFailures: async () => {
+        throw Object.assign(new Error(mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED), {
+          code: mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED,
+          name: "CanonicalMutationAuthorityError",
+        });
+      },
+      drainKnowledgePublicationOutbox: async () => {
+        throw new Error("repair revoke must not reach drain");
+      },
+      env: {
+        ...process.env,
+        PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT: copyStore,
+        PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS: JSON.stringify([ownerRoot]),
+      },
+    },
+  );
+  assert(revokedRepair.status === "failed", `repair revoke status=${revokedRepair.status}`);
+  assert(revokedRepair.error_code === "local_executor_authority_revoked", `repair revoke=${JSON.stringify(revokedRepair)}`);
+  assert(revokedRepair.retryable === true && revokedRepair.restart_child === false, "repair revoke must be retryable without child restart");
+  assert(revokedRepair.error_code !== "publication_repair_failed", "repair revoke must not map to publication_repair_failed");
+
+  const revokedDrain = await worker.runSedimentWorkerMaintenance(
+    JSON.stringify(maintenanceRequest({
+      ...expectation(),
+      request_id: hex64("mid-drain-authority-revoked"),
+      repair_policy: "none",
+    })),
+    {
+      resolveAbrainHome: () => abrain,
+      resolveEffectiveExecutionOwner: () => "daemon",
+      countPublicationOutboxPending: async () => 1,
+      countPublicationOutboxFailed: async () => 0,
+      drainKnowledgePublicationOutbox: async () => {
+        throw Object.assign(new Error(mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED), {
+          code: mutationAuthority.CANONICAL_MUTATION_NOT_AUTHORIZED,
+          name: "CanonicalMutationAuthorityError",
+        });
+      },
+      env: {
+        ...process.env,
+        PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT: copyStore,
+        PI_ASTACK_SEDIMENT_WORKER_ALLOWED_OWNER_ROOTS: JSON.stringify([ownerRoot]),
+      },
+    },
+  );
+  assert(revokedDrain.status === "failed", `drain revoke status=${revokedDrain.status}`);
+  assert(revokedDrain.error_code === "local_executor_authority_revoked", `drain revoke=${JSON.stringify(revokedDrain)}`);
+  assert(revokedDrain.retryable === true && revokedDrain.restart_child === false, "drain revoke must be retryable without child restart");
+  assert(revokedDrain.error_code !== "publication_drain_failed", "drain revoke must not map to publication_drain_failed");
 });
 
 await check("Windows observer distinguishes sharing violation from ACL/unavailable", async () => {
@@ -636,10 +803,10 @@ await check("capability command declares process-lifetime v1 with zero semantic 
   assert(gitIdentity() === beforeGit, "capability probe changed Git HEAD/tree");
 });
 
-await check("authority admission is limited to LSEA entry plus DCC control mutation frames", async () => {
+await check("authority admission is limited to entry plus execution-time mutation frames", async () => {
   const rpcSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/worker-rpc.ts"), "utf8");
   const rpcCalls = rpcSource.match(/\badmitLocalExecutorAuthority\s*\(/g) ?? [];
-  assert(rpcCalls.length === 2, `expected exactly two LSEA entry admission calls, got ${rpcCalls.length}`);
+  assert(rpcCalls.length === 5, `expected task/maintenance entry plus pass/repair/drain re-admissions, got ${rpcCalls.length}`);
   const controlSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/canonical-control.ts"), "utf8");
   const controlCalls = controlSource.match(/\badmitLocalExecutorAuthority\s*\(/g) ?? [];
   assert(controlCalls.length === 2, `expected DCC control entry plus kick-frame re-admission, got ${controlCalls.length}`);

@@ -4,6 +4,8 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, durableAtomicWriteFile } from "../_shared/durable-write";
+import { isCanonicalMutationAuthorityError } from "../_shared/canonical-mutation-authority";
+import { withCanonicalMutationBarrier } from "../_shared/canonical-mutation-barrier";
 import { canonicalizeJcs, jcsSha256Hex, normalizeJcsValueOmittingUndefined, sha256Hex } from "../_shared/jcs";
 import {
   expectedL1EventPath,
@@ -585,19 +587,24 @@ export async function appendOutcomeEvidenceEvent(abrainHome: string, body: Outco
   const validated = validateOutcomeEvidenceEnvelope(envelope);
   if (!validated.ok) return { ok: false, status: validated.error === "sanitizer_blocked" ? "blocked" : "invalid", envelope, eventId: envelope.event_id, error: validated.error };
   const filePath = expectedL1EventPath(abrainHome, envelope.event_id);
+  // Tracked L1 mutation: barrier owns preflight + mkdir + create so authority
+  // closes before the first write and concurrent CAS is OFD-serialized.
   try {
-    await validateL1WritePreflight({
-      abrainHome,
-      envelope,
-      targetPath: filePath,
-      expected: { domain: "knowledge", role: "evidence", producer: OUTCOME_EVIDENCE_PRODUCER },
+    return await withCanonicalMutationBarrier(abrainHome, async () => {
+      await validateL1WritePreflight({
+        abrainHome,
+        envelope,
+        targetPath: filePath,
+        expected: { domain: "knowledge", role: "evidence", producer: OUTCOME_EVIDENCE_PRODUCER },
+      });
+      await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+      const raw = `${canonicalizeJcs(envelope)}\n`;
+      const result = await durableAtomicCreateFile(filePath, raw);
+      if (result === "collision") return { ok: false, status: "collision" as const, eventId: envelope.event_id, filePath, envelope, error: "content_address_collision" };
+      return { ok: true, status: result === "created" ? "appended" as const : "idempotent_duplicate" as const, eventId: envelope.event_id, filePath, envelope };
     });
-    await fsp.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    const raw = `${canonicalizeJcs(envelope)}\n`;
-    const result = await durableAtomicCreateFile(filePath, raw);
-    if (result === "collision") return { ok: false, status: "collision", eventId: envelope.event_id, filePath, envelope, error: "content_address_collision" };
-    return { ok: true, status: result === "created" ? "appended" : "idempotent_duplicate", eventId: envelope.event_id, filePath, envelope };
   } catch (error) {
+    if (isCanonicalMutationAuthorityError(error)) throw error;
     return { ok: false, status: "write_failed", eventId: envelope.event_id, filePath, envelope, error: error instanceof Error ? error.message : String(error) };
   }
 }
