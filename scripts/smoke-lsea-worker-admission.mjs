@@ -636,14 +636,20 @@ await check("capability command declares process-lifetime v1 with zero semantic 
   assert(gitIdentity() === beforeGit, "capability probe changed Git HEAD/tree");
 });
 
-await check("authority admission exists only at task and maintenance entries (no B1-B8 barriers)", async () => {
+await check("authority admission is limited to LSEA entry plus DCC control mutation frames", async () => {
   const rpcSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/worker-rpc.ts"), "utf8");
-  const calls = rpcSource.match(/\badmitLocalExecutorAuthority\s*\(/g) ?? [];
-  assert(calls.length === 2, `expected exactly two entry admission calls, got ${calls.length}`);
-  const barrierLabels = rpcSource.match(/\bB[1-8]\b/g) ?? [];
+  const rpcCalls = rpcSource.match(/\badmitLocalExecutorAuthority\s*\(/g) ?? [];
+  assert(rpcCalls.length === 2, `expected exactly two LSEA entry admission calls, got ${rpcCalls.length}`);
+  const controlSource = fs.readFileSync(path.join(repoRoot, "extensions/sediment/canonical-control.ts"), "utf8");
+  const controlCalls = controlSource.match(/\badmitLocalExecutorAuthority\s*\(/g) ?? [];
+  assert(controlCalls.length === 2, `expected DCC control entry plus kick-frame re-admission, got ${controlCalls.length}`);
+  const barrierLabels = `${rpcSource}\n${controlSource}`.match(/\bB[1-8]\b/g) ?? [];
   assert(barrierLabels.length === 0, `unexpected B1-B8 barrier labels: ${barrierLabels.join(",")}`);
   const files = fs.readdirSync(path.join(repoRoot, "extensions/sediment"))
-    .filter((name) => name.endsWith(".ts") && name !== "worker-rpc.ts" && name !== "local-executor-authority.ts");
+    .filter((name) => name.endsWith(".ts")
+      && name !== "worker-rpc.ts"
+      && name !== "canonical-control.ts"
+      && name !== "local-executor-authority.ts");
   for (const name of files) {
     const source = fs.readFileSync(path.join(repoRoot, "extensions/sediment", name), "utf8");
     assert(!source.includes("admitLocalExecutorAuthority("), `authority barrier leaked into ${name}`);

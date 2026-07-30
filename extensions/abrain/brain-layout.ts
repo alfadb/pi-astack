@@ -19,7 +19,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { computeAbrainStateGitignoreNext, readOptionalRegularFileNoFollowSync } from "../_shared/runtime";
@@ -476,6 +476,515 @@ export function ensureAbrainStateGitignored(abrainHome: string): { updated: bool
   fs.writeFileSync(tmp, next, "utf-8");
   fs.renameSync(tmp, gitignorePath);
   return { updated: true, path: gitignorePath };
+}
+
+function sameDirIdentity(left: fs.BigIntStats, right: fs.BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+/**
+ * Plain non-symlink directory whose realpath equals expectedCanonical.
+ * Ancestor symlinks outside the named leaf are allowed only when the caller
+ * passes the already-canonical expected path (no leaf alias / escape).
+ */
+function assertPlainDirectoryNoFollow(
+  dirPath: string,
+  expectedCanonical: string,
+  reason: string,
+): fs.BigIntStats {
+  let named: fs.BigIntStats;
+  try {
+    named = fs.lstatSync(dirPath, { bigint: true });
+  } catch {
+    throw new Error(reason);
+  }
+  if (named.isSymbolicLink() || !named.isDirectory()) {
+    throw new Error(reason);
+  }
+  let real: string;
+  try {
+    real = fs.realpathSync.native(dirPath);
+  } catch {
+    throw new Error(reason);
+  }
+  if (real !== expectedCanonical) {
+    throw new Error(reason);
+  }
+  let after: fs.BigIntStats;
+  try {
+    after = fs.lstatSync(dirPath, { bigint: true });
+  } catch {
+    throw new Error(reason);
+  }
+  if (after.isSymbolicLink() || !after.isDirectory() || !sameDirIdentity(named, after)) {
+    throw new Error(reason);
+  }
+  return named;
+}
+
+/**
+ * Verify-only brain layout for store-present capture-only activation.
+ * Never mkdir/chmod/write. Root, all BRAIN_ZONES, rules/always, and rules/listed
+ * must already be real non-symlink directories whose realpath does not escape.
+ * Errors use closed short reasons without exact paths.
+ */
+export function verifyBrainLayout(abrainHome: string): void {
+  const resolved = path.resolve(abrainHome);
+  let rootCanonical: string;
+  try {
+    // Root may sit under ancestor symlinks (e.g. /tmp → /private/tmp); canonicalize once.
+    const rootLstat = fs.lstatSync(resolved, { bigint: true });
+    if (rootLstat.isSymbolicLink() || !rootLstat.isDirectory()) {
+      throw new Error("brain_layout_root_invalid");
+    }
+    rootCanonical = fs.realpathSync.native(resolved);
+    const rootAfter = fs.lstatSync(resolved, { bigint: true });
+    if (rootAfter.isSymbolicLink() || !rootAfter.isDirectory() || !sameDirIdentity(rootLstat, rootAfter)) {
+      throw new Error("brain_layout_root_invalid");
+    }
+    // Leaf root itself must not be a symlink; realpath of a real dir equals its canonical path.
+    const rootCanonLstat = fs.lstatSync(rootCanonical, { bigint: true });
+    if (rootCanonLstat.isSymbolicLink() || !rootCanonLstat.isDirectory()) {
+      throw new Error("brain_layout_root_invalid");
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === "brain_layout_root_invalid") throw error;
+    throw new Error("brain_layout_root_invalid");
+  }
+  for (const zone of BRAIN_ZONES) {
+    const zonePath = path.join(resolved, zone);
+    assertPlainDirectoryNoFollow(zonePath, path.join(rootCanonical, zone), "brain_layout_zone_invalid");
+  }
+  for (const mode of ["always", "listed"] as const) {
+    const modePath = path.join(resolved, "rules", mode);
+    assertPlainDirectoryNoFollow(
+      modePath,
+      path.join(rootCanonical, "rules", mode),
+      "brain_layout_rules_mode_invalid",
+    );
+  }
+}
+
+/**
+ * Verify-only `.state/` ignore check for store-present capture-only activation.
+ * Never writes tracked canonical `.gitignore`. Missing / unsafe / non-regular
+ * / symlink gitignore fails closed. Errors omit exact paths.
+ */
+export function verifyAbrainStateGitignored(abrainHome: string): { path: string } {
+  const resolved = path.resolve(abrainHome);
+  const gitignorePath = path.join(resolved, ".gitignore");
+  let raw: string;
+  try {
+    const opened = readOptionalRegularFileNoFollowSync(gitignorePath);
+    if (opened === undefined) {
+      throw new Error("gitignore_missing");
+    }
+    raw = opened;
+  } catch (error) {
+    if (error instanceof Error && error.message === "gitignore_missing") throw error;
+    throw new Error("gitignore_unreadable");
+  }
+  if (computeAbrainStateGitignoreNext(raw) !== null) {
+    throw new Error("gitignore_state_not_ignored");
+  }
+  return { path: gitignorePath };
+}
+
+/** Closed short codes for authority-executor store-present layout repair. */
+export type AuthorityExecutorBrainLayoutRepairErrorCode =
+  | "brain_layout_root_invalid"
+  | "brain_layout_zone_invalid"
+  | "brain_layout_rules_mode_invalid"
+  | "brain_layout_zone_create_failed"
+  | "brain_layout_rules_mode_create_failed"
+  | "gitignore_unreadable"
+  | "gitignore_write_failed";
+
+export class AuthorityExecutorBrainLayoutRepairError extends Error {
+  readonly code: AuthorityExecutorBrainLayoutRepairErrorCode;
+
+  constructor(code: AuthorityExecutorBrainLayoutRepairErrorCode) {
+    super(code);
+    this.name = "AuthorityExecutorBrainLayoutRepairError";
+    this.code = code;
+  }
+}
+
+function repairFail(code: AuthorityExecutorBrainLayoutRepairErrorCode): never {
+  throw new AuthorityExecutorBrainLayoutRepairError(code);
+}
+
+function fsyncDirectorySync(dirPath: string): void {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(dirPath, fs.constants.O_RDONLY);
+    fs.fsyncSync(fd);
+  } catch {
+    repairFail("gitignore_write_failed");
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best-effort */ }
+    }
+  }
+}
+
+/**
+ * Strict store-present brain layout repair for the authority-admitted DCC
+ * executor only (ADR 0046).
+ *
+ * - Accepts only an already-existing plain non-symlink ABRAIN root; never creates root.
+ * - Existing known zones / rules/{always,listed} must be plain dirs (no symlink / OOB).
+ * - Creates only missing known zones and rules modes as 0700.
+ * - Ensures `.gitignore` contains `.state/` via O_NOFOLLOW/O_EXCL atomic replace.
+ * - Errors are closed short codes only (no path / free text).
+ * - Does not change legacy ensureBrainLayout / ensureAbrainStateGitignored.
+ */
+export function repairStorePresentBrainLayoutForAuthorityExecutor(abrainHome: string): {
+  created: string[];
+  gitignoreUpdated: boolean;
+} {
+  const resolved = path.resolve(abrainHome);
+  let rootNamed: fs.BigIntStats;
+  let rootCanonical: string;
+  try {
+    rootNamed = fs.lstatSync(resolved, { bigint: true });
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+  if (rootNamed.isSymbolicLink() || !rootNamed.isDirectory()) {
+    repairFail("brain_layout_root_invalid");
+  }
+  try {
+    rootCanonical = fs.realpathSync.native(resolved);
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+  let rootAfter: fs.BigIntStats;
+  try {
+    rootAfter = fs.lstatSync(resolved, { bigint: true });
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+  if (rootAfter.isSymbolicLink() || !rootAfter.isDirectory() || !sameDirIdentity(rootNamed, rootAfter)) {
+    repairFail("brain_layout_root_invalid");
+  }
+  try {
+    const rootCanonLstat = fs.lstatSync(rootCanonical, { bigint: true });
+    if (rootCanonLstat.isSymbolicLink() || !rootCanonLstat.isDirectory()) {
+      repairFail("brain_layout_root_invalid");
+    }
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+
+  const created: string[] = [];
+
+  for (const zone of BRAIN_ZONES) {
+    const zonePath = path.join(resolved, zone);
+    const expectedCanonical = path.join(rootCanonical, zone);
+    let zoneNamed: fs.BigIntStats | undefined;
+    try {
+      zoneNamed = fs.lstatSync(zonePath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        repairFail("brain_layout_zone_invalid");
+      }
+    }
+    if (zoneNamed) {
+      if (zoneNamed.isSymbolicLink() || !zoneNamed.isDirectory()) {
+        repairFail("brain_layout_zone_invalid");
+      }
+      let zoneReal: string;
+      try {
+        zoneReal = fs.realpathSync.native(zonePath);
+      } catch {
+        repairFail("brain_layout_zone_invalid");
+      }
+      if (zoneReal !== expectedCanonical) {
+        repairFail("brain_layout_zone_invalid");
+      }
+      let zoneAfter: fs.BigIntStats;
+      try {
+        zoneAfter = fs.lstatSync(zonePath, { bigint: true });
+      } catch {
+        repairFail("brain_layout_zone_invalid");
+      }
+      if (zoneAfter.isSymbolicLink() || !zoneAfter.isDirectory() || !sameDirIdentity(zoneNamed, zoneAfter)) {
+        repairFail("brain_layout_zone_invalid");
+      }
+      continue;
+    }
+
+    try {
+      fs.mkdirSync(zonePath, { mode: 0o700 });
+      if (process.platform !== "win32") fs.chmodSync(zonePath, 0o700);
+    } catch {
+      repairFail("brain_layout_zone_create_failed");
+    }
+    try {
+      assertPlainDirectoryNoFollow(zonePath, expectedCanonical, "brain_layout_zone_create_failed");
+    } catch (error) {
+      if (error instanceof Error && error.message === "brain_layout_zone_create_failed") {
+        repairFail("brain_layout_zone_create_failed");
+      }
+      repairFail("brain_layout_zone_create_failed");
+    }
+    created.push(zone);
+  }
+
+  // Re-verify rules zone identity before creating modes.
+  const rulesPath = path.join(resolved, "rules");
+  const rulesCanonical = path.join(rootCanonical, "rules");
+  try {
+    assertPlainDirectoryNoFollow(rulesPath, rulesCanonical, "brain_layout_zone_invalid");
+  } catch (error) {
+    if (error instanceof Error && error.message === "brain_layout_zone_invalid") {
+      repairFail("brain_layout_zone_invalid");
+    }
+    repairFail("brain_layout_zone_invalid");
+  }
+
+  for (const mode of ["always", "listed"] as const) {
+    const modePath = path.join(rulesPath, mode);
+    const expectedModeCanonical = path.join(rulesCanonical, mode);
+    let modeNamed: fs.BigIntStats | undefined;
+    try {
+      modeNamed = fs.lstatSync(modePath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+    }
+    if (modeNamed) {
+      if (modeNamed.isSymbolicLink() || !modeNamed.isDirectory()) {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+      let modeReal: string;
+      try {
+        modeReal = fs.realpathSync.native(modePath);
+      } catch {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+      if (modeReal !== expectedModeCanonical) {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+      let modeAfter: fs.BigIntStats;
+      try {
+        modeAfter = fs.lstatSync(modePath, { bigint: true });
+      } catch {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+      if (modeAfter.isSymbolicLink() || !modeAfter.isDirectory() || !sameDirIdentity(modeNamed, modeAfter)) {
+        repairFail("brain_layout_rules_mode_invalid");
+      }
+      continue;
+    }
+
+    try {
+      fs.mkdirSync(modePath, { mode: 0o700 });
+      if (process.platform !== "win32") fs.chmodSync(modePath, 0o700);
+    } catch {
+      repairFail("brain_layout_rules_mode_create_failed");
+    }
+    try {
+      assertPlainDirectoryNoFollow(modePath, expectedModeCanonical, "brain_layout_rules_mode_create_failed");
+    } catch {
+      repairFail("brain_layout_rules_mode_create_failed");
+    }
+    created.push(`rules/${mode}`);
+  }
+
+  const gitignoreUpdated = ensureAbrainStateGitignoredForAuthorityExecutor(resolved, rootCanonical, rootNamed);
+  return { created, gitignoreUpdated };
+}
+
+/**
+ * Authority-executor-only `.gitignore` ensure: O_NOFOLLOW target read + identity,
+ * O_EXCL|O_NOFOLLOW temp (0600) + fsync, CAS re-check, rename + dir fsync.
+ * Never follows temp/target symlinks. Closed short codes only.
+ */
+function ensureAbrainStateGitignoredForAuthorityExecutor(
+  resolvedRoot: string,
+  rootCanonical: string,
+  rootNamedBefore: fs.BigIntStats,
+): boolean {
+  // Root identity must still match the repair admission snapshot.
+  let rootNow: fs.BigIntStats;
+  try {
+    rootNow = fs.lstatSync(resolvedRoot, { bigint: true });
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+  if (rootNow.isSymbolicLink() || !rootNow.isDirectory() || !sameDirIdentity(rootNamedBefore, rootNow)) {
+    repairFail("brain_layout_root_invalid");
+  }
+  let rootRealNow: string;
+  try {
+    rootRealNow = fs.realpathSync.native(resolvedRoot);
+  } catch {
+    repairFail("brain_layout_root_invalid");
+  }
+  if (rootRealNow !== rootCanonical) {
+    repairFail("brain_layout_root_invalid");
+  }
+
+  const gitignorePath = path.join(resolvedRoot, ".gitignore");
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+
+  let existingRaw: string | undefined;
+  let targetBefore: fs.BigIntStats | undefined;
+  try {
+    targetBefore = fs.lstatSync(gitignorePath, { bigint: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      repairFail("gitignore_unreadable");
+    }
+  }
+  if (targetBefore) {
+    if (targetBefore.isSymbolicLink() || !targetBefore.isFile()) {
+      repairFail("gitignore_unreadable");
+    }
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(gitignorePath, fs.constants.O_RDONLY | noFollow);
+      const opened = fs.fstatSync(fd, { bigint: true });
+      if (!opened.isFile() || !sameFileIdentity(opened, targetBefore)) {
+        repairFail("gitignore_unreadable");
+      }
+      const bytes = fs.readFileSync(fd);
+      const after = fs.fstatSync(fd, { bigint: true });
+      if (!sameFileSnapshot(opened, after) || BigInt(bytes.length) !== opened.size) {
+        repairFail("gitignore_unreadable");
+      }
+      existingRaw = bytes.toString("utf8");
+      if (!Buffer.from(existingRaw, "utf8").equals(bytes)) {
+        repairFail("gitignore_unreadable");
+      }
+    } catch (error) {
+      if (error instanceof AuthorityExecutorBrainLayoutRepairError) throw error;
+      repairFail("gitignore_unreadable");
+    } finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch { /* best-effort */ }
+      }
+    }
+  }
+
+  const next = computeAbrainStateGitignoreNext(existingRaw ?? "");
+  if (next === null) return false;
+
+  const tempName = `.gitignore.${process.pid}.${Date.now()}.${randomBytesHex(8)}.tmp`;
+  const tempPath = path.join(resolvedRoot, tempName);
+  if (path.dirname(tempPath) !== resolvedRoot || path.basename(tempPath) !== tempName) {
+    repairFail("gitignore_write_failed");
+  }
+
+  let tempFd: number | undefined;
+  try {
+    // Create-new temp only; never open/follow an existing symlink at temp path.
+    tempFd = fs.openSync(
+      tempPath,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow,
+      0o600,
+    );
+    const tempOpened = fs.fstatSync(tempFd, { bigint: true });
+    if (!tempOpened.isFile()) {
+      repairFail("gitignore_write_failed");
+    }
+    if (process.platform !== "win32") {
+      try { fs.fchmodSync(tempFd, 0o600); } catch { /* mode best-effort */ }
+    }
+    fs.writeFileSync(tempFd, next, "utf8");
+    fs.fsyncSync(tempFd);
+    fs.closeSync(tempFd);
+    tempFd = undefined;
+
+    // CAS: root + target identity must still match pre-write snapshot.
+    let rootCas: fs.BigIntStats;
+    try {
+      rootCas = fs.lstatSync(resolvedRoot, { bigint: true });
+    } catch {
+      repairFail("gitignore_write_failed");
+    }
+    if (rootCas.isSymbolicLink() || !rootCas.isDirectory() || !sameDirIdentity(rootNamedBefore, rootCas)) {
+      repairFail("gitignore_write_failed");
+    }
+    try {
+      if (fs.realpathSync.native(resolvedRoot) !== rootCanonical) {
+        repairFail("gitignore_write_failed");
+      }
+    } catch {
+      repairFail("gitignore_write_failed");
+    }
+
+    let targetCas: fs.BigIntStats | undefined;
+    try {
+      targetCas = fs.lstatSync(gitignorePath, { bigint: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        repairFail("gitignore_write_failed");
+      }
+    }
+    if (targetBefore) {
+      if (!targetCas || targetCas.isSymbolicLink() || !targetCas.isFile()
+        || !sameFileIdentity(targetBefore, targetCas)) {
+        repairFail("gitignore_write_failed");
+      }
+    } else if (targetCas) {
+      // Lost the create-new race: refuse to clobber.
+      repairFail("gitignore_write_failed");
+    }
+
+    // Temp must still be a plain non-symlink file we created.
+    let tempCas: fs.BigIntStats;
+    try {
+      tempCas = fs.lstatSync(tempPath, { bigint: true });
+    } catch {
+      repairFail("gitignore_write_failed");
+    }
+    if (tempCas.isSymbolicLink() || !tempCas.isFile()) {
+      repairFail("gitignore_write_failed");
+    }
+
+    try {
+      fs.renameSync(tempPath, gitignorePath);
+    } catch {
+      repairFail("gitignore_write_failed");
+    }
+    fsyncDirectorySync(resolvedRoot);
+
+    // Post-rename: target must be plain file containing next; no symlink follow.
+    try {
+      const named = fs.lstatSync(gitignorePath, { bigint: true });
+      if (named.isSymbolicLink() || !named.isFile()) repairFail("gitignore_write_failed");
+      const verifyFd = fs.openSync(gitignorePath, fs.constants.O_RDONLY | noFollow);
+      try {
+        const opened = fs.fstatSync(verifyFd, { bigint: true });
+        if (!opened.isFile() || !sameFileIdentity(named, opened)) repairFail("gitignore_write_failed");
+        const body = fs.readFileSync(verifyFd);
+        if (body.toString("utf8") !== next) repairFail("gitignore_write_failed");
+      } finally {
+        fs.closeSync(verifyFd);
+      }
+    } catch (error) {
+      if (error instanceof AuthorityExecutorBrainLayoutRepairError) throw error;
+      repairFail("gitignore_write_failed");
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof AuthorityExecutorBrainLayoutRepairError) throw error;
+    repairFail("gitignore_write_failed");
+  } finally {
+    if (tempFd !== undefined) {
+      try { fs.closeSync(tempFd); } catch { /* best-effort */ }
+    }
+    try { fs.unlinkSync(tempPath); } catch { /* temp may already be renamed */ }
+  }
+  return false;
+}
+
+function randomBytesHex(byteLength: number): string {
+  return randomBytes(byteLength).toString("hex");
 }
 
 /**

@@ -214,6 +214,7 @@ import {
   classifyForegroundLocalExecutorPosture,
   type ForegroundLocalExecutorPosture,
 } from "./local-executor-authority";
+import { registerSedimentWorkerCanonicalControlCommand } from "./canonical-control";
 import {
   effectiveCheckpointSessionId,
   runWithCheckpointSessionIdOverride,
@@ -7170,8 +7171,11 @@ sidecar 的工作：它在每轮 \`agent_end\` 后看完整上下文决定该
   sedimentAgentEndPassRunner = runSedimentAgentEndPass;
 
   if (sedimentWorkerMode) {
-    // Capability probe is registration-only and reads/writes no sediment state.
+    // Capability payload remains exact-one; DCC rollout handshakes by command presence.
     registerSedimentWorkerCapabilitiesCommand(pi);
+    registerSedimentWorkerCanonicalControlCommand(pi, {
+      resolveAbrainHome: resolveAbrainHomeForSediment,
+    });
     registerSedimentWorkerCommand(pi, {
       runAgentEndPass: runSedimentAgentEndPass,
       resolveAbrainHome: resolveAbrainHomeForSediment,

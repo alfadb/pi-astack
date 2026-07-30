@@ -417,6 +417,34 @@ function observeStableAuthority(
 }
 
 /**
+ * Read-only authority store observation for TUI/foreground DCC six-condition
+ * checks. Never acquires, never mutates, never consults daemon status.
+ */
+export type LocalExecutorAuthorityStoreObservation =
+  | { presence: "absent" }
+  | {
+      presence: "present";
+      record: LocalExecutorAuthorityRecord;
+      lock: LocalExecutorLockObservation;
+    };
+
+export function observeLocalExecutorAuthorityStore(
+  abrainHome: string,
+  observation: LocalExecutorAuthorityObservationDeps = {},
+): LocalExecutorAuthorityStoreObservation {
+  const canonicalAbrain = canonicalAbrainRoot(abrainHome);
+  if (authorityStorePresence(canonicalAbrain) === "absent") {
+    return { presence: "absent" };
+  }
+  const observed = observeStableAuthority(canonicalAbrain, observation);
+  return {
+    presence: "present",
+    record: observed.record,
+    lock: observed.lock,
+  };
+}
+
+/**
  * One process-entry admission. It is deliberately read-only and is not called
  * again at receipt/checkpoint/L1/outbox/Git/audit write sites.
  */

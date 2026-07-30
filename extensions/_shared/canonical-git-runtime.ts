@@ -361,6 +361,9 @@ interface GlobalRuntimeState {
   startupPromises: Map<string, Promise<CanonicalRuntimeDiagnostics>>;
   startupPromiseGenerations: Map<string, number>;
   startupPromiseGenerationTokens: WeakMap<Promise<CanonicalRuntimeDiagnostics>, number>;
+  /** Process-level promises that have settled ready. Kick may replace these for a
+   * fresh convergence attempt; getCanonicalStartupPromise keeps reusing them. */
+  startupPromiseReadySettled: WeakSet<Promise<CanonicalRuntimeDiagnostics>>;
   startupConsumers: Map<string, CanonicalStartupConsumerState>;
   startupFailureNotifications: Set<string>;
   startupFailureNotificationGenerations: Map<string, number>;
@@ -377,6 +380,7 @@ function globalState(): GlobalRuntimeState {
       startupPromises: new Map(),
       startupPromiseGenerations: new Map(),
       startupPromiseGenerationTokens: new WeakMap(),
+      startupPromiseReadySettled: new WeakSet(),
       startupConsumers: new Map(),
       startupFailureNotifications: new Set(),
       startupFailureNotificationGenerations: new Map(),
@@ -391,6 +395,7 @@ function globalState(): GlobalRuntimeState {
   if (!(existing.startupPromises instanceof Map)) existing.startupPromises = new Map();
   if (!(existing.startupPromiseGenerations instanceof Map)) existing.startupPromiseGenerations = new Map();
   if (!(existing.startupPromiseGenerationTokens instanceof WeakMap)) existing.startupPromiseGenerationTokens = new WeakMap();
+  if (!(existing.startupPromiseReadySettled instanceof WeakSet)) existing.startupPromiseReadySettled = new WeakSet();
   if (!(existing.startupConsumers instanceof Map)) existing.startupConsumers = new Map();
   if (!(existing.startupFailureNotifications instanceof Set)) existing.startupFailureNotifications = new Set();
   if (!(existing.startupFailureNotificationGenerations instanceof Map)) existing.startupFailureNotificationGenerations = new Map();
@@ -406,14 +411,22 @@ function peekGlobalState(): GlobalRuntimeState | null {
   return existing as GlobalRuntimeState;
 }
 
-function resolvePeekRepoKey(abrainHome?: string): string | null {
-  if (!abrainHome) return null;
+/** Align startup-key / peek / runtime map lookups when the path exists.
+ * Falls back to path.resolve when realpath is unavailable (not-yet-created
+ * roots). Async getCanonicalGitRuntime still uses repoRealpath; callers that
+ * pass pre-realpath'ed ABRAIN roots avoid the rare resolve/realpath fork. */
+function resolveCanonicalRepoKey(abrainHome: string): string {
   const resolved = path.resolve(abrainHome);
   try {
-    return fsSync.realpathSync(resolved);
+    return fsSync.realpathSync.native(resolved);
   } catch {
     return resolved;
   }
+}
+
+function resolvePeekRepoKey(abrainHome?: string): string | null {
+  if (!abrainHome) return null;
+  return resolveCanonicalRepoKey(abrainHome);
 }
 
 function lastStartupPhaseFromTail(tail: readonly Record<string, unknown>[]): string | undefined {
@@ -500,6 +513,26 @@ function sanitizedGitEnvironment(): NodeJS.ProcessEnv {
     GIT_OPTIONAL_LOCKS: "0",
     GIT_TERMINAL_PROMPT: "0",
   };
+}
+
+/** Narrow shared Git isolation for canonical repo reads (global/system config
+ * nulled, prompts off, optional locks off). Prefer this over copying env. */
+export function sanitizedCanonicalGitEnvironment(): NodeJS.ProcessEnv {
+  return sanitizedGitEnvironment();
+}
+
+/** Exact `HEAD^{commit}` under the same isolation as runtime git(). */
+export async function readCanonicalHeadOid(
+  repo: string,
+  timeoutMs: number = 10_000,
+): Promise<string> {
+  const head = (await git(repo, ["rev-parse", "--verify", "HEAD^{commit}"], timeoutMs)).trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) {
+    throw new CanonicalGitRuntimeError("CANONICAL_HEAD_INVALID", "rev-parse HEAD did not return a full Git OID", {
+      repo: path.resolve(repo),
+    });
+  }
+  return head;
 }
 
 async function git(repo: string, args: readonly string[], timeout = 30_000): Promise<string> {
@@ -1381,6 +1414,16 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
       );
     }
     return this.startupPromise;
+  }
+
+  /**
+   * Allow the next awaitStartup() to begin a new generation after a settled
+   * ready (or non-running) attempt. Used by kick fresh-after-ready only.
+   * No-op while startup is mid-flight so concurrent in-flight coalescing wins.
+   */
+  forceNextStartupAttempt(): void {
+    if (this.startupState === "running") return;
+    this.startupPromise = undefined;
   }
 
   /**
@@ -2711,7 +2754,7 @@ export function __canonicalRuntimeMapSizeForTests(): number {
 
 function canonicalStartupKey(options: CanonicalGitRuntimeOptions): string {
   return JSON.stringify([
-    path.resolve(options.abrainHome),
+    resolveCanonicalRepoKey(options.abrainHome),
     path.resolve(options.settingsPath ?? defaultSettingsPath()),
     path.resolve(options.sourceRoot ?? path.join(__dirname, "..", "..")),
     options.refName ?? "refs/heads/main",
@@ -2835,26 +2878,77 @@ function nextCanonicalStartupPromiseGeneration(
   return generation;
 }
 
-function getCanonicalStartupAttempt(options: CanonicalGitRuntimeOptions): {
+function reuseCanonicalStartupAttempt(
+  state: GlobalRuntimeState,
+  key: string,
+  existing: Promise<CanonicalRuntimeDiagnostics>,
+): { promise: Promise<CanonicalRuntimeDiagnostics>; generation: number } {
+  const generation = state.startupPromiseGenerationTokens.get(existing)
+    ?? nextCanonicalStartupPromiseGeneration(state, key, existing);
+  return { promise: existing, generation };
+}
+
+/**
+ * Process-global startup singleflight.
+ *
+ * - Default (`forceFreshAfterReady=false`): historical getCanonicalStartupPromise
+ *   semantics — reuse in-flight **or** settled-ready promise.
+ * - Kick (`forceFreshAfterReady=true`): reuse only while in-flight; after a
+ *   settled ready, CAS-replace the process promise and force the runtime into a
+ *   new awaitStartup generation (may fast-path via live last-known-ready gate).
+ * - Identity-guarded settle handlers prevent ABA: an older promise's
+ *   resolve/reject never deletes a newer replacement for the same key.
+ */
+function getCanonicalStartupAttempt(
+  options: CanonicalGitRuntimeOptions,
+  opts: { forceFreshAfterReady?: boolean } = {},
+): {
   promise: Promise<CanonicalRuntimeDiagnostics>;
   generation: number;
 } {
   const state = globalState();
   const key = canonicalStartupKey(options);
   const existing = state.startupPromises.get(key);
+  let forceRuntimeFresh = false;
   if (existing) {
-    const generation = state.startupPromiseGenerationTokens.get(existing)
-      ?? nextCanonicalStartupPromiseGeneration(state, key, existing);
-    return { promise: existing, generation };
+    const readySettled = state.startupPromiseReadySettled.has(existing);
+    if (!(opts.forceFreshAfterReady && readySettled)) {
+      return reuseCanonicalStartupAttempt(state, key, existing);
+    }
+    // CAS-style replace of a settled-ready promise so concurrent kicks coalesce
+    // on the first replacement rather than minting parallel attempts.
+    if (state.startupPromises.get(key) === existing) {
+      state.startupPromises.delete(key);
+      forceRuntimeFresh = true;
+    }
+    const raced = state.startupPromises.get(key);
+    if (raced) return reuseCanonicalStartupAttempt(state, key, raced);
   }
-  const created = (async () => (await getCanonicalGitRuntime(options)).awaitStartup())();
+
+  const created = (async () => {
+    const runtime = await getCanonicalGitRuntime(options);
+    if (forceRuntimeFresh) {
+      (runtime as CanonicalGitRuntimeImpl).forceNextStartupAttempt();
+    }
+    return runtime.awaitStartup();
+  })();
   const generation = nextCanonicalStartupPromiseGeneration(state, key, created);
   state.startupPromises.set(key, created);
   void created.then(
     (diag) => {
-      if (diag.startup === "ready") resetCanonicalStartupWarnings(diag);
+      if (diag.startup === "ready") {
+        // Mark ready only when this promise is still the installed attempt.
+        // A replaced promise must not poison the successor's ready bit.
+        if (state.startupPromises.get(key) === created) {
+          state.startupPromiseReadySettled.add(created);
+        }
+        resetCanonicalStartupWarnings(diag);
+        return;
+      }
       // Blocked and deferred results wait for an external lifecycle trigger.
       // Eviction provides that trigger a fresh freeze and retry state machine.
+      // Identity guard prevents an older settle from deleting a replacement
+      // promise installed for the same key (the promise-cache ABA race).
       if ((diag.startup === "blocked" || diag.startup === "deferred") && state.startupPromises.get(key) === created) {
         state.startupPromises.delete(key);
       }
@@ -2910,6 +3004,32 @@ export function getCanonicalStartupPromise(options: CanonicalGitRuntimeOptions):
       finish(workerBudgetStartupDeferredDiag(options, attempt.generation));
     });
   });
+}
+
+/** Explicit daemon-worker convergence kick.
+ *
+ * Always runs outside worker-budget ALS so an expired task budget cannot clamp
+ * cold startup. Semantics:
+ * - in-flight attempt for the same root → singleflight coalesce (same generation)
+ * - after settled ready → fresh process attempt + runtime generation
+ *   (may still hit live last-known-ready gate for a fast ready)
+ * - never merely reuses a fulfilled ready promise while callers bump attestation
+ *
+ * Ordinary getCanonicalStartupPromise keeps reusing settled ready.
+ */
+export function kickCanonicalStartupAttempt(options: CanonicalGitRuntimeOptions): {
+  promise: Promise<CanonicalRuntimeDiagnostics>;
+  generation: number;
+} {
+  return runOutsideWorkerBudget(() => getCanonicalStartupAttempt(options, { forceFreshAfterReady: true }));
+}
+
+/** Pure control-plane observation. Never creates a runtime, promise, timer, scan,
+ * Git operation, or mutation barrier. */
+export function observeCanonicalStartupAttempt(options: {
+  abrainHome?: string;
+} = {}): CanonicalRuntimePeek {
+  return peekCanonicalRuntimeDiagnostics(options);
 }
 
 function workerBudgetStartupDeferredDiag(
