@@ -105,7 +105,7 @@ Link 字段最小集：`owner_session_epoch` / `executor_epoch` / `launch_token`
 
 - [ADR 0044](../adr/0044-central-sediment-edge-authority.md)
 - [ADR 0045](../adr/0045-sediment-worker-safe-rpc-command.md) — Stage A worker RPC 历史合同
-- [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md) — **Daemon-Owned Canonical Convergence（DCC）**：store-present 下唯一 canonical convergence executor = 同一 LSEA holder 的 daemon-managed long-lived worker；attestation / kick-observe / foreground cutover 目标合同（in progress）
+- [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md) — **Daemon-Owned Canonical Convergence（DCC）**：store-present 下唯一 canonical convergence executor = 同一 LSEA holder 的 daemon-managed long-lived worker；attestation / kick-observe / foreground cutover；**Linux production accepted（2026-07-31）**（Windows native attestation 仍 pending）
 - [local-sediment-executor-authority.md](./local-sediment-executor-authority.md) — LSEA worker-first admission（physical authority；与 DCC 正交）
 - [sediment.md](./sediment.md) — 当前本地实现契约
 - [memory.md](./memory.md) — 当前读路径

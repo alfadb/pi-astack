@@ -116,7 +116,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 | [0043](./0043-lifecycle-convergence-and-reversible-terminal-state.md) | **Lifecycle convergence + reversible terminal state** | Accepted；有界队列 + 全文终态 + 守恒 |
 | [0044](./0044-central-sediment-edge-authority.md) | **Central sediment edge authority（T0 R4）** | Accepted（2026-07-24）；**目标** authority/edge contract；Pi 侧 capture-only protocol shadow（默认关）；完整 Stage A/B/C 与中心 authority 仍未落地；A0 前 local sediment 仍唯一 semantic primary |
 | [0045](./0045-sediment-worker-safe-rpc-command.md) | **Sediment worker-safe RPC command（Stage A 机制）** | Accepted（2026-07-25）；daemon-owned 短命 worker RPC 迁移面；`/sediment-worker-run` + continuous edge producer；**不是** formal ConsumerAck/authority/retention，**不是**并列 primary；canonical convergence ownership 迁移见 [0046](./0046-daemon-owned-canonical-convergence.md) |
-| [0046](./0046-daemon-owned-canonical-convergence.md) | **Daemon-Owned Canonical Convergence（DCC）** | Accepted target / in progress（2026-07-30）；store-present 下唯一 canonical convergence executor = 同一 LSEA holder 的 daemon-managed long-lived worker；sibling attestation + daemon kick/observe；**不**改 authority v1、**不加**第二 lock；attestation **不是** authority/ConsumerAck/Stage A readiness |
+| [0046](./0046-daemon-owned-canonical-convergence.md) | **Daemon-Owned Canonical Convergence（DCC）** | Accepted / implemented / Linux production accepted（2026-07-31）；store-present 下唯一 canonical convergence executor = 同一 LSEA holder 的 daemon-managed long-lived worker；sibling attestation + daemon kick/observe；**不**改 authority v1、**不加**第二 lock；attestation **不是** authority/ConsumerAck/Stage A readiness；Windows native protected-DACL writer/verifier **仍 pending** |
 
 → [ADR 0027 §6](./0027-coupled-stigmergic-dual-loop-agent-system.md#6-推到独立子-adr-的能力点)
 
@@ -170,6 +170,7 @@ ADR 是**架构决策记录**，只记录决策、上下文、取舍、后果、
 - **2026-07-24** ADR 0044 Central Sediment Edge Authority **accepted**（用户批准 T0 R4；目标 edge contract + 中心 authority 边界；Pi 侧 capture-only protocol shadow 已实现默认关；A0 前 local sediment 仍唯一 semantic primary；edge shadow 不得升为第二 primary）
 - **2026-07-25** ADR 0045 sediment worker-safe RPC command Stage A 机制 **accepted**（daemon `pi --mode rpc` + `PI_ASTACK_SEDIMENT_WORKER_MODE=1`；terminal_witness only；worker-local receipt 幂等；非 formal ACK；叠在 0044 capture-only 之上，不是并列 primary）
 - **2026-07-30** ADR 0046 Daemon-Owned Canonical Convergence **accepted target / in progress**（用户确认 DCC 合同；store-present 唯一 convergence executor = daemon-managed long-lived worker；sibling attestation；分阶段 worker→daemon→foreground cutover；真实验收须生产数据）
+- **2026-07-31** ADR 0046 Daemon-Owned Canonical Convergence **Linux production accepted**（aggregate-only；证据 pi-router `docs/acceptance/dcc-linux-production-acceptance.md`；Windows native attestation 仍 pending；不表示 Stage A/center primary）
 
 实施时间线请看 [`docs/current-state.md`](../current-state.md)、`docs/audits/` 与 git history，不写进 ADR 导览。
 
