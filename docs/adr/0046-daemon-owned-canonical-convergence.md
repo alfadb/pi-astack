@@ -124,7 +124,8 @@ control-result status (worker kick/observe; not outcome enum):
   authority/attestation missing-or-mismatch --> unavailable
 
 daemon status (illustrative mapping, not outcome enum):
-  idle/paused --kick/startup/periodic--> running
+  idle --kick/startup/due-probe-deep--> running
+  paused --resume--> (then startup/running only; **禁止** due 自动恢复)
   running --success--> ready
   running --fail--> failed
   * --settings/free/unavailable--> paused|unavailable
@@ -136,8 +137,8 @@ daemon status (illustrative mapping, not outcome enum):
 - **control-result `ready` ≠ 仅凭 process-local runtime-ready**：observe 在 attestation 仍 `pending` 时若 peek 到 runtime `ready`，**必须**继续映射为 control `running`（不得绕过 durable attestation CAS 发布）。
 - settings pause / authority free / unavailable → daemon status 可进入 `paused` / `unavailable`，attestation 可停在 `pending`/`blocked`；**允许停摆**，必须 loud 可观察，**禁止** TUI 接管填补。
 - corrupt attestation / epoch-nonce mismatch → fail closed；**禁止**删除 attestation/store “恢复 legacy”。
-- **D1 stale pending**：attestation 停在 `pending`（含 deferred settle）时，**不**由 observe 推进；由 daemon startup/periodic/backoff 发出的**新 kick** 推进（新 `convergence_generation` + 新 attempt）。D1 **不**实现 daemon scheduler 本身。
-- **R3 ready cheap drift probe（worker）**：observe 在 durable `outcome=ready` 上可返回 process-local control `pending`（`canonical_head_changed` / `canonical_backlog_pending` / `continuation_pending`）而不写 attestation；daemon 将 deferred pending 视为 BackoffKick → fresh kick。Rust 可接受 reason 集由 daemon 侧任务接线。
+- **D1 stale pending**：attestation 停在 `pending`（含 deferred settle）时，**不**由 observe 推进；由 daemon startup/due-probe-deep/backoff 发出的**新 kick** 推进（新 `convergence_generation` + 新 attempt）。D1 **不**实现 daemon scheduler 本身。
+- **R3 ready cheap drift probe（pi-astack worker）**：worker `observe` 在 durable `outcome=ready` 上可返回 process-local control `pending`（`canonical_head_changed` / `canonical_backlog_pending` / `continuation_pending`）而不写 attestation；**pi-router daemon** 将 deferred pending 视为 BackoffKick → fresh kick。可接受 reason 集由 daemon 调度接线（见 §2.5）。
 
 ### 2.4 Worker control 协议方向
 
@@ -160,13 +161,28 @@ daemon status (illustrative mapping, not outcome enum):
 - DCC 把 **谁有权触发与拥有 canonical convergence** 收口到 daemon kick/observe + long-lived worker；kick 的 fresh-after-settled-ready 是 DCC 对 process-level attempt 的显式控制语义
 - 0045 历史合同保留；canonical ownership 迁移指针见 ADR 0045 更新小节
 
-### 2.5 Daemon lifecycle（external trigger）
+### 2.5 Daemon lifecycle（external trigger；pi-router ownership）
 
-第一版 external lifecycle trigger **仅**：
+External lifecycle trigger 由 **pi-router daemon 调度面** 拥有（不是 worker 内 timer）：
 
 1. daemon startup
-2. periodic schedule
+2. **ready due / cheap probe / low-frequency deep**（取代 ready 态无条件 periodic full kick）
 3. backoff retry
+
+**Ready 稳态合同（R3；daemon lifecycle）**：
+
+- **禁止** settled-ready 后无条件每 300s whole-L1 kick 心跳
+- **300s** 是 ready 态 **cheap probe 与 explicit due 的 floor**（idle ready 可跨该窗口无 full kick）；**不是** full-kick 周期
+- 周期默认 **cheap zero-side-effect observe/probe**（daemon 调 worker `observe`；不写 attestation / 不 whole-L1）
+- **full kick 仅门控**：
+  - **explicit due**（task settled success、publication drained/canonical-changing、`global_maintenance` drained 或 lane ran 等）：**只置 due**，多源 coalesce，≥300s floor 后合并一次 full kick
+  - **observe-visible drift**（worker §2.3/§2.4 cheap probe 返回的 deferred reasons → daemon BackoffKick）
+  - **operator** arm（可立即 full kick，不受 300s floor）
+  - **startup / resume**
+  - **低频无条件 deep** 兜底 **6h**（覆盖 probe 不可见 drift；**不是** 300s 放大）
+- 任何 settled-ready 后的**真正 kick** 仍必须 fresh（in-flight coalesce；新 generation；可 last-known-ready 快路径）——**何时 kick** 属 daemon；**kick 协议/执行** 属 worker
+- 保留 singleflight/coalesce/backoff 与 startup observing **65min** recycle（> worker 默认 60min busy budget；到期 public `unavailable`/`timeout` + child recycle）
+- **global_maintenance 与 DCC 互斥且可 mark_due**：global in-flight 时 defer Kick/Observe（due/deep 时钟不丢）；DCC 侧仅当 phase 属于实现闭集 `Ready|FailedWait|Paused|CommandMissing` **且** `kick_in_flight=false` 时允许 global，**其它一律 block**；global 成功路径若可能改 canonical 则 mark_due（**不** mid-flight kick）
 
 **Out of scope（v1）**：TUI loopback wake endpoint。未来若需要低延迟 wake，必须新决策，不得在 cutover 时偷偷加入。
 
@@ -175,7 +191,7 @@ Daemon 职责方向：
 - first-class kick/observe 客户端
 - **command-presence handshake 未就绪** → 不宣称 healthy convergence
 - status/log/result/error aggregate only（无 exact epoch/nonce/head/path）；daemon status 映射与 attestation `outcome` / control-result `status` 解耦
-- startup/periodic/backoff 调度与可观察停摆（D2+；D1 只提供 worker 侧 kick/observe 接收面）
+- startup/due-probe-deep/backoff 调度与可观察停摆（D2+；D1 只提供 worker 侧 kick/observe 接收面）
 
 ### 2.6 Foreground direct-call audit 与 cutover
 
@@ -209,10 +225,10 @@ Cutover 前必须审计所有 foreground/TUI **direct canonical mutation** 路�
 - tracked `/abrain bind` capture_only：只写 durable intent；**不** opportunistic apply、**不** schedule foreground bind consumer。local-map-only fast path 可保留。
 - activation store-present：**verify-only** brain layout（root + 全部 zone + `rules/always|listed`，真实目录非 symlink、realpath 不逃逸）+ verify-only `.state/` ignore；**禁止** ordinary foreground mkdir/chmod/write 或补写 tracked canonical `.gitignore`。store absent legacy（含 root 完全不存在的 first-boot）仍 ensure layout + auto-ensure ignore；**不得**因 classifier fail-closed 误判 capture_only。
 - **authority-admitted kick owns strict layout repair**（store-present）：DCC kick 在 authority admission 之后、pending attestation 已发布之后、**next event-loop turn**（`setImmediate` / 等价 macrotask；**不是** Promise microtask）内、whole-L1 startup 之前调用 strict closed-error repair helper。pending attestation + control result **先**返回 awaiter，再 repair/startup——microtask 调度会在 `await kick` 恢复前同步跑 repair，破坏 immediate-return 证据。real repair（及 gated test repair hook）在 `withCanonicalMutationBarrier` 内执行，避免与已授权 TUI business write 并发；barrier busy / repair throw → 终态 attestation `blocked`/`startup_failed` retryable，**绝不** ready。**不**创建 root；existing zone/mode 必须 plain dir；仅创建缺失 known zones / `rules/{always,listed}`（0700）并安全 ensure `.gitignore` 含 `.state/`。observe **绝不** repair。TUI 保持 verify-only 零写；若 local safety 已 blocked，store-present assert 路径允许重新执行 verify-only refresh（仍零写），使 DCC 修复后现有进程可恢复。
-- **periodic ready kick 有短暂 pending failclosed 窗口**：新 kick 发布 pending attestation 后、settle 完成前，TUI 六条件观察为 not-ready（`attestation_not_ready`）；这是正确 fail-closed，不是缺陷。Linux production 最终 settled ready（见 acceptance doc）。
+- **gated ready kick 有短暂 pending failclosed 窗口**：due/deep/operator/startup 触发的新 kick 发布 pending attestation 后、settle 完成前，TUI 六条件观察为 not-ready（`attestation_not_ready`）；这是正确 fail-closed，不是缺陷。**ready 稳态不再无条件 300s full kick**（R3 due+probe+deep；见 §2.5）。Linux production 最终 settled ready（见 acceptance doc）。
 - 历史 `failed` / `invalid` bind-intent 须 **清点与人工处理**。语义精确为：每次 kick **终态**持续/重新判定 `continuation_failed`（blocked）；repair attempt 期间 attestation 可为 `running`/`pending`，但**绝不** ready，直至人工处理。**Linux production**：用户授权删除唯一 stale failed intent；final inventory `pending=0`/`failed=0`/`invalid=0`；manifest/registry bytes unchanged。
 - **Foreground direct-call audit — remaining TUI business writes（本地 tests/deploy-order gates 覆盖，含 `smoke:dcc-tui-business-write`；生产未触发 TUI business write；不表示业务 writes 全量迁移）**：
-  - **vault six-gate + context + barrier**：store-present 下 `/secret set`、`/secret forget`、`/vault init` 的**真正写阶段**走 `withForegroundDirectCanonicalBusinessWrite`：先 strict `observeForegroundCanonicalConvergence`（必须 ready/none），创建 short-lived `foreground_observed` mutation context，再进入 `withCanonicalMutationBarrier`；barrier 拿锁后 shared authority revalidate + 显式 inner 六条件观察仍 ready 才执行 operation。任一观察失败 / authority revalidate 失败 / lock busy / 异常 → 仅闭集短码 `dcc_canonical_write_not_authorized:<closed>`（不泄 path/raw error）。store absent → legacy 原样（不新增 context/barrier/observer）。list/status/参数错误/idempotent no-op preflight **不** gate；vault init 在只读/idempotent preflight 完成后、`runInit` 写事务前包裹。**写成功不 kick、不 await 同步 ready/convergence**——业务文件本身 durable，daemon periodic kick 收敛；**不**声称同步 ready。
+  - **vault six-gate + context + barrier**：store-present 下 `/secret set`、`/secret forget`、`/vault init` 的**真正写阶段**走 `withForegroundDirectCanonicalBusinessWrite`：先 strict `observeForegroundCanonicalConvergence`（必须 ready/none），创建 short-lived `foreground_observed` mutation context，再进入 `withCanonicalMutationBarrier`；barrier 拿锁后 shared authority revalidate + 显式 inner 六条件观察仍 ready 才执行 operation。任一观察失败 / authority revalidate 失败 / lock busy / 异常 → 仅闭集短码 `dcc_canonical_write_not_authorized:<closed>`（不泄 path/raw error）。store absent → legacy 原样（不新增 context/barrier/observer）。list/status/参数错误/idempotent no-op preflight **不** gate；vault init 在只读/idempotent preflight 完成后、`runInit` 写事务前包裹。**写成功不 kick、不 await 同步 ready/convergence**——业务文件本身 durable，daemon due/probe/deep 收敛；**不**声称同步 ready。
   - **`/memory migrate --go` store-present capture_only v1 = explicit loud reject**（在任何 `runMigrationGo`/目标写之前；dry-run/lint 不变；store absent legacy go 不变）。
   - **assertVaultLocalSafety** = local safety + DCC observation/barrier at writes；**never Path A**。
   - 其它 `registerCommand` TUI 路径：仅真实 tracked ABRAIN write 纳入；state audit / read-only / project plan writers 不改。
@@ -317,6 +333,7 @@ criterion ids（SOT：pi-router `plan.md` DCC section）：
 | `extensions/_shared/csj-prospective-merge.ts` | merge/cert/T1/T2/journal/NextKick |
 | `extensions/_shared/csj-blocked-memo.ts` | C2 memo |
 | `extensions/_shared/csj-closed-reason.ts` | privacy adapter |
+| `extensions/_shared/csj-artifact-binding.ts` | artifact binding（`executionArtifactDigest` + 三指纹；live CAS 紧前 exact match） |
 | `recovery-history-classifier.ts` | `certifyProspectiveRecoveryJoin` 薄封装 |
 | `canonical-git-runtime.ts` | stale-base → CSJ 接入；`statusSnapshot` 导出 |
 | `scripts/smoke-csj.mjs` | matrix smoke |
