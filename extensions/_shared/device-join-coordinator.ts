@@ -17,6 +17,7 @@ import {
   assertCanonicalMutationBarrierHeld,
   withCanonicalMutationBarrier,
 } from "./canonical-mutation-barrier";
+import { canonicalRefMovePrimitive } from "./canonical-ref-move";
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "./durable-write";
 import { fullIndexFingerprint } from "./git-exact-cohort";
 import { decodeCanonicalGitPath } from "./git-z-parser";
@@ -1219,7 +1220,14 @@ async function recoverDeviceJoinJournalUnderBarrier(repo: string, options: Devic
   // Fail-closed before CAS so unknown L2 cannot advance HEAD then wedge recovery.
   await verifyRegisteredL2Inventory(repo, before, candidate, legacyAllow);
   if (head === journal.local_head) {
-    await runGit(repo, ["update-ref", journal.ref_name, journal.candidate, journal.local_head], { timeoutMs: 10_000 });
+    await canonicalRefMovePrimitive({
+      repo,
+      abrainHome: repo,
+      refName: journal.ref_name,
+      newTip: journal.candidate,
+      expectedTip: journal.local_head,
+      purpose: "device_join",
+    });
     await options.crashHook?.("cas_published");
   }
   await materializeJournal(repo, journal, options);
@@ -1256,7 +1264,14 @@ export function publishPreparedDeviceJoin(prepared: PreparedDeviceJoin, options:
     await writeJournal(prepared.repo, journal);
     await options.crashHook?.("journal_written");
     try {
-      await runGit(prepared.repo, ["update-ref", prepared.refName, prepared.candidate, prepared.localHead], { timeoutMs: 10_000 });
+      await canonicalRefMovePrimitive({
+        repo: prepared.repo,
+        abrainHome: prepared.repo,
+        refName: prepared.refName,
+        newTip: prepared.candidate,
+        expectedTip: prepared.localHead,
+        purpose: "device_join",
+      });
     } catch (error) {
       const now = await resolveCommit(prepared.repo, "HEAD");
       if (now === prepared.candidate) {

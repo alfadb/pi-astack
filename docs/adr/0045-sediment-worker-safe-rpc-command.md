@@ -269,7 +269,7 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 |---|---|
 | `request_id` | 64 hex; daemon correlation only |
 | `budget_ms` | required; closed range **60_000 .. 900_000** |
-| `kind` | Stage0 admits **only** `publication_outbox` |
+| `kind` | Closed: `publication_outbox` (Stage0) **or** `global_maintenance` (R6 additive). Unknown kind → `kind_rejected` fail-closed |
 | `repair_policy` | optional closed `none\|legacy_world_project_stamp`; absent defaults to `none` |
 | `repair_limit` | optional integer `0\|1`; absent defaults to `0`; non-`none` policy requires exactly `1`; `none` with `1` is invalid |
 | `local_executor_epoch` | paired LSEA field; canonical nonzero u64 decimal string; required once authority store exists |
@@ -281,7 +281,15 @@ Command `/sediment-worker-maintenance` — local publication-outbox maintenance 
 
 **Serialization**: the complete gate/count/drain body enters the same process-wide `withGlobalPassSerial` as terminal tasks, so publication maintenance cannot overlap a task pass. Serial wait is bounded by the maintenance soft deadline. Timeout while waiting means this invocation never entered its drain body: return retryable `pending` + `maintenance_worker_busy`, `restart_child=false`, before/after `unknown`; do not poison, restart, or kill the healthy serial owner. Task-run `global_serial_deadline` semantics are unchanged.
 
-**Body**: directly awaits production `drainKnowledgePublicationOutbox`, which returns the real `PublicationOutboxDrainResult`; it does not discard `status`, `processed`, `terminalFailed`, or `lastError`. The direct path performs a one-shot nonblocking canonical OFD probe **before** scheduling/reading a batch. Contention returns real `status=busy` immediately, without retrying against or consuming the maintenance budget. After acquisition, every candidate Knowledge item must resolve and validate its exact L1 event before selection. Missing L1 is held/not-ready (same pending item/event identity); other independent ready groups still drain, and the result closes with `lastError=publication_l1_pending`, `pending>0`, `terminalFailed=0`. After selection it checks worker `AbortSignal`/remaining budget at frozen-batch cutpoints and retains the existing fixed git subprocess timeouts. The foreground one-shot remains unchanged: canonical contention is represented as `completed` with retryable `lastError`. The outer worker fence remains authoritative for a drain started by this invocation that cannot be reaped. **Does not** run agent-end / other maintenance lanes; **does not** touch checkpoint / receipt / ledger / source.
+**Body (`kind=publication_outbox`)**: directly awaits production `drainKnowledgePublicationOutbox`, which returns the real `PublicationOutboxDrainResult`; it does not discard `status`, `processed`, `terminalFailed`, or `lastError`. The direct path performs a one-shot nonblocking canonical OFD probe **before** scheduling/reading a batch. Contention returns real `status=busy` immediately, without retrying against or consuming the maintenance budget. After acquisition, every candidate Knowledge item must resolve and validate its exact L1 event before selection. Missing L1 is held/not-ready (same pending item/event identity); other independent ready groups still drain, and the result closes with `lastError=publication_l1_pending`, `pending>0`, `terminalFailed=0`. After selection it checks worker `AbortSignal`/remaining budget at frozen-batch cutpoints and retains the existing fixed git subprocess timeouts. The foreground one-shot remains unchanged: canonical contention is represented as `completed` with retryable `lastError`. The outer worker fence remains authoritative for a drain started by this invocation that cannot be reaped. **Does not** run agent-end / other maintenance lanes; **does not** touch checkpoint / receipt / ledger / source. Repair fields are publication-only; `global_maintenance` rejects non-default repair fields.
+
+**Body (`kind=global_maintenance`, R6 additive)**: under the same LSEA admission + canonical mutation authority frame + `withGlobalPassSerial`, runs the original **7 agent_end global lanes** that task-scoped worker tasks skip — closed `lanes` keys only: `forgetting` | `aggregator` | `staging_resolver` | `staging_ageout` | `staging_promotion` | `multiview_replay` | `archive_reactivation` — via their existing `IfDue` implementations across allowed owner roots (bound via `activeProject.projectRoot`). Independent budget/cancel/progress (`stage=global_maintenance` in the closed progress-stage set). **Does not** open taskScoped, **does not** restore foreground execution, **does not** invent project/session identity on the request. Result adds closed optional aggregates only:
+- `maintenance_kind` closed: `publication_outbox` | `global_maintenance`
+- `lanes` closed map: each of the 7 keys → closed status `idle|ran|skipped|failed|budget|unknown`
+- count buckets (`lanes_ran_bucket` / `lanes_failed_bucket` / `lanes_skipped_bucket` / `lanes_idle_bucket` / `owners_visited_bucket`) share the outbox residual closed set: `unknown` | `0` | `1` | `2-4` | `5-9` | `10-49` | `50+`
+- `error_code` (when present) is the maintenance closed enum only (see below); free-text / unknown codes fail sanitize and are mapped at emit
+
+Pending publication buckets are honestly `unknown` for this kind. Old daemons that only send `publication_outbox` are unchanged.
 
 **Before/after pending + failed residual**: production metadata-only counts. Pending count does not deserialize item bodies. Failed residual count validates legal item filename + schema/identity and **fail-closes** on symlink/corrupt/illegal entries (throw → unread). Closed buckets for both: `unknown` / `0` / `1` / `2-4` / `5-9` / `10-49` / `50+`. Owner/security/poison failures and any count that was not successfully read are `unknown`, never invented `0`. Optional result field `failed_bucket` is forward-compatible (old readers ignore; absent still accepted).
 
@@ -309,9 +317,24 @@ Canonical-barrier contention and repair budget expiry return retryable pending w
 
 Soft budget expiry before drain leaves pending_before known and pending_after `unknown` (failed_bucket keeps the successfully read before residual when available). Cleanup unreaped after this invocation started a drain → `cancel_cleanup_unreaped` + poison + `restart_child=true`; `workPromise` always has a rejection observer even when cleanup reserve is zero, preventing late unhandled rejection.
 
-**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `failed_bucket`, optional `repaired_bucket=unknown|0|1`, optional `repair_status=repaired|already_repaired|not_eligible|busy|budget|failed`, optional `error_code`, optional `elapsed_bucket`. `repaired_bucket` and `repair_status` appear only when the request policy is non-`none`; absent/default `none` preserves the pre-repair maintenance result keys. Final `failed_bucket` is re-read after repair/drain. Resolved history count is not added to this protocol. **No** item/event id / path / URL / free-text error.
+**Result notify** prefix `sediment-worker-maintenance-result:` + schema `pi-astack/sediment-worker-maintenance-result/v1`. Closed keys only: `request_id`, `status`, `retryable`, `restart_child`, `pending_before_bucket`, `pending_after_bucket`, optional `failed_bucket`, optional `repaired_bucket=unknown|0|1`, optional `repair_status=repaired|already_repaired|not_eligible|busy|budget|failed`, optional `error_code` (**closed enum**), optional `elapsed_bucket`, and R6 optional `maintenance_kind` / `lanes` / `lanes_*_bucket` / `owners_visited_bucket`. `repaired_bucket` and `repair_status` appear only when the request policy is non-`none`; absent/default `none` preserves the pre-repair maintenance result keys. Final `failed_bucket` is re-read after repair/drain. Resolved history count is not added to this protocol. **No** item/event id / path / URL / free-text error.
 
-**Progress**: reuses `pi-astack/sediment-worker-progress/v1` with stage `publication` (no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running.
+**Closed `error_code` (maintenance result, strict sanitizer)**:
+`effective_owner_not_daemon` | `worker_configuration_invalid` | `worker_security_gate_failed` | `manifest_invalid` | `kind_rejected` | `repair_policy_rejected` | `repair_limit_required` | `repair_limit_rejected` | `repair_limit_without_policy` | `invalid_request_id` | `budget_ms_invalid` | `budget_ms_out_of_range` | `unsupported_integer` | `schema_mismatch` | `args_too_large` | `args_not_json` | `args_not_base64url` | `empty_args` | `multiline_args` | `manifest_not_object` | `unknown_field` | `local_executor_authority_unavailable` | `local_executor_authority_revoked` | `local_executor_authority_stale` | `worker_budget_exhausted` | `cancel_cleanup_unreaped` | `maintenance_worker_busy` | `worker_process_poisoned` | `worker_internal_error` | `publication_outbox_count_failed` | `publication_outbox_failed_count_failed` | `publication_terminal_failed` | `publication_terminal_failed_present` | `publication_drain_busy` | `publication_l1_pending` | `publication_drain_failed` | `publication_remaining` | `publication_repair_busy` | `publication_repair_budget` | `publication_repair_failed` | `global_maintenance_failed` | `global_maintenance_budget` | `global_maintenance_lane_failed`. Sanitizer rejects any other string; producers map free/unknown codes into this set before emit.
+
+**Global maintenance status→error_code mapping (closed)**:
+| condition | status | retryable | `error_code` |
+|---|---|---|---|
+| all lanes idle/skipped, no error | `idle` | false | absent |
+| at least one lane `ran`, none failed/budget | `drained` | false | absent |
+| any lane `budget` (soft deadline) | `pending` | true | `global_maintenance_budget` |
+| any lane `failed` | `failed` | true | `global_maintenance_lane_failed` |
+| owner-binding / config invalid (no owners) | `idle` or `failed` per aggregate | — | `worker_configuration_invalid` when forced |
+| authority revoked mid-run | `failed` | true | `local_executor_authority_revoked` |
+| unreaped hang after cancel | `failed` | true | `cancel_cleanup_unreaped` (`restart_child=true`) |
+| uncaught throw in global body | `failed` | true | `global_maintenance_failed` |
+
+**Progress**: reuses `pi-astack/sediment-worker-progress/v1` with closed stage `publication` (Stage0 outbox) **or** `global_maintenance` (R6; no identity), emitting a heartbeat every 5 seconds while valid maintenance is waiting/running. Progress stage closed set includes both; unknown stage fails sanitize.
 
 ### 2.8c LSEA worker-first minimum admission (2026-07-27)
 
@@ -345,7 +368,7 @@ All flags are real Pi CLI flags（`pi --help`）. Settings must set `sediment.ex
 - Authority store creation/mutation, epoch allocation, holder acquisition/handoff, or central primary cutover
 - Daemon lifecycle, process-tree containment, spawn gate, and supervisor（owned by pi-router）
 - Recursive edge shadow from worker
-- Memory decision/write counter telemetry completeness（reported 0 until pipeline surfaces counts）
+- Memory decision/write counter telemetry completeness（Stage0 reported 0; **R7** adds optional attempt-local `knowledge_l1_events_created` + `telemetry_semantics=legacy_unknown|attempt_instrumented`; counters cover Knowledge L1 create only — not whole L1, not publication/outbox, not terminal lifetime / cross-attempt; pre-R7 or fail receipts missing the field remain **unknown**, never backfilled or forged as attempt_instrumented zero）
 - Receipt/claim GC
 - Non-Linux OFD claim portability
 - Edge-protocol-shadow delete / retention watermark advance from capture receipt

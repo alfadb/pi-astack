@@ -12,6 +12,7 @@ import {
 import {
   cohortPlanSemanticRoot,
   convergeExactCohortIndex,
+  isAncestor,
   LOCAL_DRAIN_METADATA_CHECKPOINT_PROTOCOL_V1,
   LOCAL_DRAIN_PROTOCOL_V3,
   prepareExactCohortCommit,
@@ -46,6 +47,20 @@ import {
   classifyRecoveryHistory,
   type CombinedRecoveryHistoryResult,
 } from "./recovery-history-classifier";
+import {
+  decideCsjNextKick,
+  readCsjJournal,
+  runCsjInBarrier,
+} from "./csj-prospective-merge";
+import {
+  buildCanonicalBlockedMemo,
+  clearCanonicalBlockedMemo,
+  writeCanonicalBlockedMemo,
+} from "./csj-blocked-memo";
+import {
+  adaptCsjClosedReason,
+  type CsjClosedReason,
+} from "./csj-closed-reason";
 import {
   computeL1InventoryFingerprint,
   loadL1SchemaRegistry,
@@ -96,6 +111,29 @@ function isTypedStartupDomainError(error: unknown): error is Error & { code: str
   return error instanceof Error
     && STARTUP_DOMAIN_ERROR_NAMES.has(error.name)
     && typeof (error as { code?: unknown }).code === "string";
+}
+
+/**
+ * Diagnostic reason surface: keep machine domain codes and CSJ closed codes;
+ * strip path/OID-looking free text. Never invent t2_budget_exhausted from
+ * unrelated owner_alert messages.
+ */
+function redactDiagnosticReason(reason: string, code?: string): string {
+  const trimmed = reason.trim();
+  if (!trimmed) return code && code.trim() ? code.trim() : "internal_error";
+  const closed = adaptCsjClosedReason({ reason: trimmed, code });
+  // Prefer closed-set only when the input itself was already a closed code.
+  if (closed.reason_code !== "internal_error" && (trimmed === closed.reason_code || trimmed.endsWith(`: ${closed.reason_code}`))) {
+    return closed.reason_code;
+  }
+  // Domain messages look like "CODE: detail" — keep the whole message but drop
+  // absolute paths and bare git OIDs so diagnostics stay closed on ids.
+  let out = trimmed
+    .replace(/(?:^|[\s"'`=])(\/[A-Za-z0-9._\-\/]+)/g, " <path>")
+    .replace(/\b[0-9a-f]{40}\b/gi, "<oid>")
+    .replace(/\b[0-9a-f]{64}\b/gi, "<oid>");
+  if (code && !out.includes(code)) out = `${code}: ${out}`;
+  return out;
 }
 
 export interface CanonicalGitRuntimeSettings {
@@ -331,6 +369,12 @@ export interface CanonicalGitRuntimeOptions {
    * Used to leave a prepared episode without publication (not_published rollback path).
    */
   drainPrePublishTestHook?: () => void | Promise<void>;
+  /**
+   * Test-only: force AncOpen T2 budget exhausted on first NextKick evaluation so
+   * runtime ownerAlert + startupState=blocked is exercised (not pure decideCsjNextKick).
+   * Dual-gated by PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   */
+  csjForceT2BudgetExhausted?: boolean;
 }
 
 export interface CanonicalGitRuntime {
@@ -765,7 +809,8 @@ async function gitBuffer(repo: string, args: readonly string[], timeout = 30_000
   return stdout as Buffer;
 }
 
-async function statusSnapshot(repo: string): Promise<{ raw: Buffer; hash: string; rows: GitPorcelainV1Record[] }> {
+/** Exported for CSJ/C2 statusHash bit-exact homology (spec §4.3 / A19). */
+export async function statusSnapshot(repo: string): Promise<{ raw: Buffer; hash: string; rows: GitPorcelainV1Record[] }> {
   const raw = await gitBuffer(repo, ["status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules=none"]);
   return { raw, hash: sha256Hex(raw), rows: parseGitStatusPorcelainV1Z(raw) };
 }
@@ -785,6 +830,11 @@ async function assertRepoMutationPreflight(repo: string, refName: string): Promi
     }
   }
   if ((await git(repo, ["ls-files", "-u"], 5_000)).trim()) throw new CanonicalGitRuntimeError("UNMERGED_INDEX", "index contains unmerged entries");
+}
+
+/** CSJ eligibility E18–E23 preflight surface (same semantics as internal mutation preflight). */
+export async function assertRepoMutationPreflightForCsj(repo: string, refName: string): Promise<void> {
+  await assertRepoMutationPreflight(repo, refName);
 }
 
 async function readArtifactBytes(repo: string, receipt: ProducedArtifact): Promise<Buffer | undefined> {
@@ -1201,8 +1251,26 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
   }
 
   private record(row: Record<string, unknown>): void {
-    this.tail.push(Object.freeze({ at: new Date().toISOString(), ...row }));
+    // Privacy: strip episodeId/OID/path/detail; keep domain codes + CSJ closed reasons (no free-form ids).
+    const sanitized: Record<string, unknown> = { at: new Date().toISOString() };
+    for (const [key, value] of Object.entries(row)) {
+      if (key === "episodeId" || key === "path" || key === "candidate" || key === "head" || key === "oid" || key === "detail") continue;
+      if (typeof value === "string" && /^[0-9a-f]{40,64}$/i.test(value) && key !== "statusHash" && key !== "reason") continue;
+      if (key === "reason" && typeof value === "string") {
+        sanitized.reason = redactDiagnosticReason(value, typeof row.code === "string" ? row.code : undefined);
+        continue;
+      }
+      sanitized[key] = value;
+    }
+    this.tail.push(Object.freeze(sanitized));
     if (this.tail.length > MAX_DIAGNOSTIC_TAIL) this.tail.splice(0, this.tail.length - MAX_DIAGNOSTIC_TAIL);
+  }
+
+  private setBlockedClosed(reason: CsjClosedReason | string, opts?: { ownerAlert?: boolean; code?: string }): void {
+    this.startupState = "blocked";
+    // CSJ closed codes stay closed; domain codes (RECOVERY_V3_*, L1_*) preserve machine-readable text.
+    this.blockedReason = redactDiagnosticReason(String(reason), opts?.code);
+    if (opts?.ownerAlert) this.ownerAlert = true;
   }
 
   private async classifyHistoricalRecoveryCached(
@@ -1885,6 +1953,8 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         );
       }
       this.startupState = "ready";
+      // Clear blocked-memo on ready (orthogonal to ready fingerprint / attestation).
+      await clearCanonicalBlockedMemo(this.repo).catch(() => undefined);
       this.record({ operation: "startup_phase", phase: "publish_ready", status: "tuple_stable", driftAttempt, busyRetry });
       this.record({ operation: "startup", status: "local_ready", attempt: driftAttempt, busyRetry });
       // Persist fail-closed last-known-ready fingerprint for future session_start
@@ -2104,16 +2174,29 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
         }
 
         if (isTypedStartupDomainError(error)) {
+          // Outer catch must not clobber ownerAlert already set true (W2'/NextKick).
+          // Do NOT collapse every owner_alert=true message into t2_budget_exhausted
+          // (terminal content also carries owner_alert=true).
+          const detailOwnerAlert = !!(error.detail && typeof error.detail === "object" && (error.detail as { owner_alert?: unknown }).owner_alert === true);
+          const isT2BudgetExhausted = error.code === "RECOVERY_V3_LIVENESS"
+            && (error.message === "t2_budget_exhausted" || /(?:^|:\s*)t2_budget_exhausted(?:\s|$)/.test(error.message));
+          const messageOwnerAlert = error.message.includes("owner_alert=true") || isT2BudgetExhausted;
+          if (this.ownerAlert || detailOwnerAlert || messageOwnerAlert) this.ownerAlert = true;
           this.startupState = "blocked";
-          this.blockedReason = error.message;
-          this.ownerAlert = this.blockedReason.includes("owner_alert=true");
+          // Preserve domain machine codes (L1_*, RECOVERY_V3_*, STARTUP_*). Only pure
+          // CSJ closed surfaces use the closed-set reason alone.
+          this.blockedReason = isT2BudgetExhausted
+            ? "t2_budget_exhausted"
+            : redactDiagnosticReason(error.message, error.code);
           this.record({ operation: "startup", status: "blocked", code: error.code, reason: this.blockedReason, attempt: driftAttempt, busyRetry, ...(this.ownerAlert ? { ownerAlert: true } : {}) });
           return this.diagnostics();
         }
 
+        // Preserve ownerAlert=true; never overwrite to false on fail-closed rethrow path.
         this.startupState = "blocked";
-        this.blockedReason = error instanceof Error ? error.message : String(error);
-        this.record({ operation: "startup", status: "rejected_fail_closed", reason: this.blockedReason, attempt: driftAttempt, busyRetry });
+        const raw = error instanceof Error ? error.message : String(error);
+        this.blockedReason = redactDiagnosticReason(raw);
+        this.record({ operation: "startup", status: "rejected_fail_closed", reason: this.blockedReason, attempt: driftAttempt, busyRetry, ...(this.ownerAlert ? { ownerAlert: true } : {}) });
         throw error;
       }
     }
@@ -2145,6 +2228,7 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
     if (recovered.quarantined.length) throw new CanonicalGitRuntimeError("RECOVERY_QUARANTINED", `active v3 recovery classification failed: ${quarantineReason("v3", recovered.quarantined)}`, { protocol: "v3", quarantined: recovered.quarantined });
     for (const initial of recovered.open) {
       let settled = false;
+      let postCasRecoverFailure = false;
       for (let step = 0; step < RECOVERY_LANE_BUDGETS.drain * 2 + 2; step += 1) {
         const cursor = recoveryEpisodeCursorV3(initial.episodeId, initial.operation, await readRecoveryEventsV3(this.repo, initial.episodeId));
         if (cursor.complete || cursor.terminal) { settled = true; break; }
@@ -2155,19 +2239,149 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
           slot = claim.slot;
         }
         if (slot === null) throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "startup recovery claim returned no executable slot");
-        const action = await recoverDrainSlotV3({
-          abrainHome: this.repo,
-          repo: this.repo,
-          operation: cursor.operation,
-          slot,
-          prePublishCheck: () => this.mutationPreflight(),
-          preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+
+        // W2/W2': identify prepared-candidate ancestor / open FIRST (exclude terminal/complete).
+        // True deadlock = open prepared + unpublished + neither side is ancestor (siblings).
+        // Fresh prepared (HEAD ancestor of candidate / HEAD==base) is NOT deadlock → existing recover.
+        const folded = foldRecoveryEventsV3(await readRecoveryEventsV3(this.repo, cursor.episodeId)).get(slot);
+        const candidate = typeof folded?.prepared?.body?.candidate === "string" ? String(folded.prepared.body.candidate) : "";
+        const published = !!folded?.published;
+        const openPrepared = !!folded?.prepared && !folded.converged && !folded.aborted && !folded.terminal;
+        const headNow = await resolveRef(this.repo, this.options.refName);
+        const candidateAncestor = candidate ? await isAncestor(this.repo, candidate, headNow) : false;
+        const headAncestorOfCandidate = candidate ? await isAncestor(this.repo, headNow, candidate) : false;
+        const t2BudgetExhausted =
+          step >= RECOVERY_LANE_BUDGETS.drain * 2
+          || (process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1" && this.options.csjForceT2BudgetExhausted === true);
+
+        // Journal is diagnostic-only shortcut (non-authority).
+        const journal = await readCsjJournal(this.repo).catch(() => null);
+        if (journal?.phase === "failed_post_cas_recover" && candidateAncestor) {
+          postCasRecoverFailure = true;
+        }
+
+        const decision = decideCsjNextKick({
+          candidateIsAncestorOfHead: candidateAncestor,
+          openPrepared,
+          t2BudgetExhausted,
+          published,
+          deadlockEligible: !published && openPrepared && !candidateAncestor && !headAncestorOfCandidate,
         });
-        this.record({ operation: "recover_drain_v3", episodeId: cursor.episodeId, slot, action });
+
+        // NextKick order: exhausted → ownerAlert BEFORE bounded T2.
+        if (decision.action === "owner_alert_blocked") {
+          this.ownerAlert = true;
+          this.setBlockedClosed("t2_budget_exhausted", { ownerAlert: true, code: "RECOVERY_V3_LIVENESS" });
+          this.record({ operation: "recover_drain_v3", slot, status: "blocked", reason: "t2_budget_exhausted", ownerAlert: true });
+          throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "t2_budget_exhausted", { owner_alert: true });
+        }
+
+        let action: Awaited<ReturnType<typeof recoverDrainSlotV3>>;
+        if (decision.action === "bounded_t2_recover" || (postCasRecoverFailure && candidateAncestor && !t2BudgetExhausted)) {
+          // W2/W2': ancestry-open → bounded T2 only; never second CSJ CAS.
+          // postCAS recover failure does NOT rethrow stale-base.
+          try {
+            action = await recoverDrainSlotV3({
+              abrainHome: this.repo,
+              repo: this.repo,
+              operation: cursor.operation,
+              slot,
+              prePublishCheck: () => this.mutationPreflight(),
+              preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+            });
+          } catch (error) {
+            const code = error && typeof error === "object" && "code" in error ? String((error as { code: string }).code) : "";
+            // Never rethrow RECOVERY_V3_STALE_BASE after CAS ancestry; treat as post_cas_recover_failed.
+            if (code === "RECOVERY_V3_STALE_BASE" || postCasRecoverFailure) {
+              this.record({ operation: "recover_drain_v3", slot, status: "failed", reason: "post_cas_recover_failed" });
+              // Stay in loop for bounded retry; do not cover ownerAlert=false.
+              if (this.ownerAlert) {
+                this.setBlockedClosed("t2_budget_exhausted", { ownerAlert: true });
+                throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "t2_budget_exhausted", { owner_alert: true });
+              }
+              continue;
+            }
+            throw error;
+          }
+        } else if (decision.action === "run_csj") {
+          const csj = await runCsjInBarrier({
+            abrainHome: this.repo,
+            repo: this.repo,
+            refName: this.options.refName,
+            requireArtifactBinding: true,
+            sourceRoot: this.sourceRoot,
+            implementationFingerprint: this.implementationFingerprint,
+            validatorFingerprint: L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT,
+            registryHash: registryContentHash(loadL1SchemaRegistry()),
+          });
+          // Privacy: record only closed reason_code (no episodeId/OID/path).
+          this.record({ operation: "csj_v1", slot, status: csj.status, reason: csj.closed.reason_code });
+          if (csj.status === "joined" || csj.status === "recover_only") {
+            await clearCanonicalBlockedMemo(this.repo).catch(() => undefined);
+            action = csj.recoverAction ?? "index_converged";
+            if (csj.journalPhase === "failed_post_cas_recover") {
+              postCasRecoverFailure = true;
+              // CAS succeeded but T2 failed — do not rethrow stale; next step is bounded T2.
+              this.record({ operation: "csj_v1", slot, status: "failed", reason: "post_cas_recover_failed" });
+              continue;
+            }
+          } else if (csj.status === "ineligible") {
+            // Memo ONLY on eligibility failure (not postCAS / cert / cas_race).
+            try {
+              const status = await statusSnapshot(this.repo);
+              const inventoryFingerprint = await computeL1InventoryFingerprint({ abrainHome: this.repo });
+              await writeCanonicalBlockedMemo(this.repo, buildCanonicalBlockedMemo({
+                head: headNow,
+                statusHash: status.hash,
+                inventoryFingerprint,
+                implementationFingerprint: this.implementationFingerprint,
+                validatorFingerprint: L1_VALIDATED_SCAN_VALIDATOR_FINGERPRINT,
+                registryHash: registryContentHash(loadL1SchemaRegistry()),
+              }, {
+                reason_code: csj.closed.reason_code,
+                eligibility_false: true,
+              }));
+            } catch {
+              // memo is diagnostic only
+            }
+            this.setBlockedClosed(csj.closed.reason_code);
+            throw new CanonicalGitRuntimeError("RECOVERY_V3_STALE_BASE", csj.closed.reason_code);
+          } else {
+            // cert/cas/artifact failure: zero mutation path; do NOT write prehead memo after failed CAS attempt with no move.
+            // If CAS already moved (post_cas_recover_failed), do not rethrow stale.
+            if (csj.closed.reason_code === "post_cas_recover_failed" || csj.journalPhase === "failed_post_cas_recover") {
+              postCasRecoverFailure = true;
+              this.record({ operation: "csj_v1", slot, status: "failed", reason: "post_cas_recover_failed" });
+              continue;
+            }
+            this.setBlockedClosed(csj.closed.reason_code);
+            throw new CanonicalGitRuntimeError("RECOVERY_V3_STALE_BASE", csj.closed.reason_code);
+          }
+        } else if (decision.action === "published_nonancestor_blocked") {
+          this.setBlockedClosed("published_nonzero", { ownerAlert: true });
+          throw new CanonicalGitRuntimeError("RECOVERY_PUBLISHED_REF_DIVERGED", "published_nonzero", { owner_alert: true });
+        } else {
+          // existing recover path (fresh-base / normal)
+          action = await recoverDrainSlotV3({
+            abrainHome: this.repo,
+            repo: this.repo,
+            operation: cursor.operation,
+            slot,
+            prePublishCheck: () => this.mutationPreflight(),
+            preConvergeCheck: () => preflightSharedIndexLock(this.repo),
+          });
+        }
+        this.record({ operation: "recover_drain_v3", slot, action });
       }
       const final = recoveryEpisodeCursorV3(initial.episodeId, initial.operation, await readRecoveryEventsV3(this.repo, initial.episodeId));
       if (!settled && !final.complete && !final.terminal) {
-        throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", "startup could not settle an open v3 episode within its fixed slot budget", { episodeId: initial.episodeId, lastClaimedSlot: final.lastClaimedSlot });
+        // Prefer ownerAlert when budget exhausted with ancestry open.
+        if (this.ownerAlert) {
+          this.setBlockedClosed("t2_budget_exhausted", { ownerAlert: true });
+        }
+        throw new CanonicalGitRuntimeError("RECOVERY_V3_LIVENESS", this.ownerAlert ? "t2_budget_exhausted" : "recovery_liveness", {
+          ...(this.ownerAlert ? { owner_alert: true } : {}),
+        });
       }
     }
   }
@@ -2340,9 +2554,11 @@ class CanonicalGitRuntimeImpl implements CanonicalGitRuntime {
 
     const published = await publishExactCohortCommit({
       repo: this.repo,
+      abrainHome: this.repo,
       refName: this.options.refName,
       candidate: prepared.candidate,
       frozenCommit: prepared.frozenCommit,
+      purpose: "exact_cohort_publish",
     });
     if ((published.status !== "published" && published.status !== "already_published") || published.currentRef !== prepared.candidate) {
       throw new CanonicalGitRuntimeError("DEVICE_JOIN_METADATA_CAS_CONFLICT", "metadata checkpoint lost its local ref CAS", { published });

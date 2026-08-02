@@ -13,6 +13,7 @@ import {
   type CanonicalRuntimeDiagnostics,
   type CanonicalRuntimePeek,
 } from "../_shared/canonical-git-runtime";
+import { parseGitStatusPorcelainV1Z } from "../_shared/git-z-parser";
 import { fsyncDirectory } from "../_shared/durable-write";
 import {
   assertCanonicalMutationAuthorized,
@@ -22,6 +23,13 @@ import {
 import {
   withCanonicalMutationBarrier,
 } from "../_shared/canonical-mutation-barrier";
+import {
+  convergeExactCohortIndex,
+  prepareExactCohortCommit,
+  publishExactCohortCommit,
+  resolveRef,
+  snapshotIndexEntries,
+} from "../_shared/git-exact-cohort";
 import {
   repairStorePresentBrainLayoutForAuthorityExecutor,
 } from "../abrain/brain-layout";
@@ -68,6 +76,8 @@ export const CANONICAL_CONTROL_REASON_CODES = [
   "canonical_scan_busy",
   "canonical_scan_lock_failed",
   "continuation_pending",
+  "canonical_head_changed",
+  "canonical_backlog_pending",
   "owner_intervention_required",
   "startup_blocked",
   "startup_failed",
@@ -130,6 +140,9 @@ const PENDING_ATTESTATION_REASONS = new Set<CanonicalControlReasonCode>([
   "canonical_scan_busy",
   "canonical_scan_lock_failed",
   "continuation_pending",
+  // Ready-state cheap drift probe (observe-only; daemon BackoffKick → fresh kick).
+  "canonical_head_changed",
+  "canonical_backlog_pending",
 ]);
 const BLOCKED_ATTESTATION_REASONS = new Set<CanonicalControlReasonCode>([
   "owner_intervention_required",
@@ -239,6 +252,11 @@ export interface CanonicalControlTestHooks {
     pending: number;
     failed: number;
   }>;
+  /**
+   * Gated test override for ready-state cheap canonical backlog/worktree probe.
+   * Production defaults to porcelain v1 status on l1/l2 only (no whole-L1).
+   */
+  probeCanonicalBacklog?: (abrainHome: string) => Promise<"none" | "pending">;
   /**
    * Gated test override for store-present layout repair.
    * Production defaults to real authority-executor repair.
@@ -1067,6 +1085,165 @@ async function defaultApplyBindIntents(abrainHome: string): Promise<{
 }
 
 /**
+ * Cheap ready-state backlog/worktree probe (observe only).
+ *
+ * - Read-only porcelain v1 status under the shared Git isolation env
+ *   (GIT_OPTIONAL_LOCKS=0, prompts off, no global/system config).
+ * - Touches only path presence under l1/ or l2/ — never whole-L1 validate,
+ *   never mutate, never network.
+ * - Closed result only: "none" | "pending". Never returns path/count/OID.
+ */
+function defaultProbeCanonicalBacklog(abrainHome: string): "none" | "pending" {
+  let root: string;
+  try {
+    root = fsSync.realpathSync.native(path.resolve(abrainHome));
+  } catch {
+    return "pending";
+  }
+  let raw: Buffer;
+  try {
+    raw = execFileSync(
+      "git",
+      [
+        "-C",
+        root,
+        "--literal-pathspecs",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "-uall",
+        "--ignore-submodules=none",
+      ],
+      {
+        encoding: "buffer",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: sanitizedCanonicalGitEnvironment(),
+        timeout: 10_000,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    ) as Buffer;
+  } catch {
+    // Fail closed: surface retryable drift so daemon can fresh-kick.
+    return "pending";
+  }
+  let rows: ReturnType<typeof parseGitStatusPorcelainV1Z>;
+  try {
+    rows = parseGitStatusPorcelainV1Z(raw);
+  } catch {
+    return "pending";
+  }
+  for (const row of rows) {
+    if (row.paths.some((item) => item.startsWith("l1/") || item.startsWith("l2/"))) {
+      return "pending";
+    }
+  }
+  return "none";
+}
+
+/**
+ * Ready attestation cheap zero-side-effect drift probe for observe.
+ * Compares live HEAD, bind inventory, and l1/l2 porcelain backlog.
+ * Never writes attestation/runtime, never kicks, never applies continuation,
+ * never runs whole-L1, never networks. Closed aggregate only (no exact
+ * head/path/count leak).
+ */
+async function observeReadyDrift(
+  root: string,
+  manifest: SedimentWorkerCanonicalControlManifest,
+  attestation: CanonicalConvergenceAttestation,
+  hooks: CanonicalControlTestHooks | undefined,
+): Promise<SedimentWorkerCanonicalControlResult> {
+  const generation = attestation.convergence_generation;
+
+  // 1) live HEAD vs private attestation canonical_head (exact; never expose OID).
+  try {
+    const head = await (hooks?.readCanonicalHead?.(root) ?? readExactCanonicalHead(root));
+    if (typeof head !== "string" || !GIT_OID_RE.test(head) || head !== attestation.canonical_head) {
+      return result({
+        request_id: manifest.request_id,
+        operation: "observe",
+        status: "pending",
+        reason_code: "canonical_head_changed",
+        convergence_generation: generation,
+        retryable: true,
+      });
+    }
+  } catch {
+    return result({
+      request_id: manifest.request_id,
+      operation: "observe",
+      status: "pending",
+      reason_code: "canonical_head_changed",
+      convergence_generation: generation,
+      retryable: true,
+    });
+  }
+
+  // 2) bind-intent inventory (inspect only — never apply).
+  try {
+    const inspect = hooks?.inspectBindIntentInventory ?? defaultInspectBindIntentInventory;
+    const inventory = await inspect(root);
+    if (inventory.failed > 0 || inventory.invalid > 0) {
+      return result({
+        request_id: manifest.request_id,
+        operation: "observe",
+        status: "blocked",
+        reason_code: "continuation_failed",
+        convergence_generation: generation,
+        retryable: false,
+      });
+    }
+    if (inventory.pending > 0) {
+      return result({
+        request_id: manifest.request_id,
+        operation: "observe",
+        status: "pending",
+        reason_code: "continuation_pending",
+        convergence_generation: generation,
+        retryable: true,
+      });
+    }
+  } catch {
+    return result({
+      request_id: manifest.request_id,
+      operation: "observe",
+      status: "pending",
+      reason_code: "continuation_pending",
+      convergence_generation: generation,
+      retryable: true,
+    });
+  }
+
+  // 3) cheap canonical backlog / worktree drift under l1|l2 only.
+  try {
+    const backlog = hooks?.probeCanonicalBacklog
+      ? await hooks.probeCanonicalBacklog(root)
+      : defaultProbeCanonicalBacklog(root);
+    if (backlog === "pending") {
+      return result({
+        request_id: manifest.request_id,
+        operation: "observe",
+        status: "pending",
+        reason_code: "canonical_backlog_pending",
+        convergence_generation: generation,
+        retryable: true,
+      });
+    }
+  } catch {
+    return result({
+      request_id: manifest.request_id,
+      operation: "observe",
+      status: "pending",
+      reason_code: "canonical_backlog_pending",
+      convergence_generation: generation,
+      retryable: true,
+    });
+  }
+
+  return resultFromAttestation(manifest, attestation);
+}
+
+/**
  * After whole-L1 diagnostics are ready and before final HEAD / ready attestation:
  * authority-admitted DCC worker replays durable abrain bind intents.
  * failed/invalid inventory blocks (continuation_failed); residual pending or
@@ -1202,13 +1379,15 @@ async function settleActiveKick(
 }
 
 /**
- * Commit authority-executor layout-repair updates to tracked `.gitignore`.
- * Closed short code only on failure (no path/raw stderr leak to callers).
- * No-op when staged `.gitignore` already matches HEAD. Non-git / toplevel
- * mismatch / other git failures throw `layout_gitignore_commit_failed`
- * (caller settles blocked/startup_failed — never ready).
+ * Commit authority-executor layout-repair updates to tracked `.gitignore` via
+ * the unified CanonicalRefMovePrimitive CAS path (prepareExactCohortCommit +
+ * publishExactCohortCommit purpose=exact_cohort_publish). Bare `git commit`
+ * tip movers are forbidden. Open/quarantined recovery episodes block the move
+ * (OpenQuarantineGate). Failures throw closed short code only.
+ *
+ * Must already be inside withCanonicalMutationAuthority ∘ barrier.
  */
-function commitAuthorityLayoutGitignore(abrainHome: string): void {
+async function commitAuthorityLayoutGitignore(abrainHome: string): Promise<void> {
   let root: string;
   try {
     root = fsSync.realpathSync.native(path.resolve(abrainHome));
@@ -1216,8 +1395,6 @@ function commitAuthorityLayoutGitignore(abrainHome: string): void {
     throw new Error("layout_gitignore_commit_failed");
   }
 
-  // Shared isolation: strip arbitrary GIT_* (incl. GIT_INDEX_FILE / GIT_DIR),
-  // null global/system config, prompts off. Never inherit process GIT_*.
   const env = sanitizedCanonicalGitEnvironment();
   const gitBase = {
     encoding: "utf8" as const,
@@ -1225,7 +1402,6 @@ function commitAuthorityLayoutGitignore(abrainHome: string): void {
     env,
   };
 
-  // Before any add/commit: worktree root must realpath-equal the abrain root.
   let toplevel: string;
   try {
     toplevel = execFileSync(
@@ -1246,55 +1422,72 @@ function commitAuthorityLayoutGitignore(abrainHome: string): void {
     throw new Error("layout_gitignore_commit_failed");
   }
 
+  let refName: string;
   try {
-    execFileSync(
+    refName = execFileSync(
       "git",
-      ["-C", root, "--literal-pathspecs", "add", "--", ".gitignore"],
-      { ...gitBase, timeout: 5_000 },
-    );
+      ["-C", root, "--literal-pathspecs", "symbolic-ref", "-q", "HEAD"],
+      { ...gitBase, timeout: 3_000 },
+    ).replace(/\r?\n$/, "");
+  } catch {
+    throw new Error("layout_gitignore_commit_failed");
+  }
+  if (!/^refs\/heads\//.test(refName)) {
+    throw new Error("layout_gitignore_commit_failed");
+  }
+
+  let gitignoreBytes: Buffer;
+  try {
+    gitignoreBytes = fsSync.readFileSync(path.join(root, ".gitignore"));
+  } catch {
+    throw new Error("layout_gitignore_commit_failed");
+  }
+
+  try {
+    const frozenCommit = await resolveRef(root, refName);
+    // No-op when HEAD:.gitignore already equals worktree bytes.
     try {
-      execFileSync(
+      const headBytes = execFileSync(
         "git",
-        ["-C", root, "--literal-pathspecs", "diff", "--cached", "--quiet", "--", ".gitignore"],
-        { ...gitBase, timeout: 5_000 },
-      );
-      return; // no staged delta vs HEAD
-    } catch (error) {
-      // git diff --quiet: exit 1 = differences present; any other status is failure.
-      const status = (error as { status?: unknown } | null)?.status;
-      if (status !== 1) {
-        throw new Error("layout_gitignore_commit_failed");
-      }
+        ["-C", root, "--literal-pathspecs", "show", `${frozenCommit}:.gitignore`],
+        { encoding: "buffer", maxBuffer: 4 * 1024 * 1024, env, stdio: ["ignore", "pipe", "pipe"], timeout: 5_000 },
+      ) as Buffer;
+      if (Buffer.compare(headBytes, gitignoreBytes) === 0) return;
+    } catch {
+      // missing HEAD path → proceed with put
     }
-    // Commit only `.gitignore`: hooks off, gpg off, fixed automation identity,
-    // leave any other pre-staged paths staged (do not swallow / unstage them).
-    execFileSync(
-      "git",
-      [
-        "-C",
-        root,
-        "--literal-pathspecs",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "commit.gpgSign=false",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "user.name=pi-astack-layout-repair",
-        "-c",
-        "user.email=layout-repair@pi-astack.invalid",
-        "commit",
-        "--no-verify",
-        "--no-gpg-sign",
-        "--only",
-        "-m",
-        "chore: ensure .state/ in .gitignore (DCC layout repair)",
-        "--",
-        ".gitignore",
-      ],
-      { ...gitBase, timeout: 20_000 },
-    );
+
+    // Freeze shared-index snapshot before prepare so post-publish converge can
+    // detect owned-path conflicts and leave non-cohort staged entries intact.
+    const frozenIndexSnapshot = await snapshotIndexEntries(root, [".gitignore"]);
+    const prepared = await prepareExactCohortCommit({
+      repo: root,
+      refName,
+      frozenCommit,
+      plan: [{ path: ".gitignore", op: "put", mode: "100644", content: gitignoreBytes }],
+      message: "layout-gitignore-repair",
+      protocolVersion: "local-drain-recovery/v3",
+    });
+    // Open episode ⇒ exact_cohort_publish blocked by primitive OpenQuarantineGate.
+    const result = await publishExactCohortCommit({
+      repo: root,
+      abrainHome: root,
+      refName,
+      candidate: prepared.candidate,
+      frozenCommit,
+      purpose: "exact_cohort_publish",
+    });
+    if (result.status !== "published" && result.status !== "already_published") {
+      throw new Error("layout_gitignore_commit_failed");
+    }
+    // Ref publish alone leaves shared index at preimage → porcelain MM .gitignore.
+    // Converge cohort index to published HEAD (worktree already holds repair bytes).
+    await convergeExactCohortIndex({
+      repo: root,
+      refName,
+      cohortPaths: [".gitignore"],
+      frozenIndexSnapshot,
+    });
   } catch (error) {
     if (error instanceof Error && error.message === "layout_gitignore_commit_failed") throw error;
     throw new Error("layout_gitignore_commit_failed");
@@ -1369,7 +1562,7 @@ async function launchActiveKick(
             // must advance HEAD so ready attestation publishes a tip whose tree
             // actually contains the ignore. Worktree-only ensure is insufficient.
             if (repaired.gitignoreUpdated) {
-              commitAuthorityLayoutGitignore(active.root);
+              await commitAuthorityLayoutGitignore(active.root);
             }
           }
         });
@@ -1538,11 +1731,11 @@ function resultFromAttestation(
   });
 }
 
-function observeCanonicalControl(
+async function observeCanonicalControl(
   root: string,
   manifest: SedimentWorkerCanonicalControlManifest,
   hooks: CanonicalControlTestHooks | undefined,
-): SedimentWorkerCanonicalControlResult {
+): Promise<SedimentWorkerCanonicalControlResult> {
   let snapshot: CanonicalAttestationSnapshot | null;
   try {
     snapshot = readAttestationSnapshot(root);
@@ -1574,6 +1767,11 @@ function observeCanonicalControl(
       reason_code: "attestation_unavailable",
       retryable: true,
     });
+  }
+  // Ready: cheap zero-side-effect drift probe so daemon can fresh-kick without
+  // unconditional whole-L1. Blocked still returns durable attestation as-is.
+  if (attestation.outcome === "ready") {
+    return observeReadyDrift(root, manifest, attestation, hooks);
   }
   if (attestation.outcome !== "pending") return resultFromAttestation(manifest, attestation);
 

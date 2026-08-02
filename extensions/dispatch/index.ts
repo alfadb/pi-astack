@@ -109,6 +109,18 @@ import {
   resolveParentContextFilesSnapshot,
   type ParentContextFilesSnapshot,
 } from "./parent-context-files";
+import {
+  computeDispatchRunId,
+  createDispatchTraceSink,
+  dispatchTraceFieldsFromResult,
+  dispatchTraceSummaryFields,
+  getSharedParentAppendQueue,
+  resolveParentSessionNamespace,
+  type DispatchTraceLiveTail,
+  type DispatchTraceSink,
+  type DispatchTraceStatusSummary,
+  type DispatchTraceTerminalStatus,
+} from "./dispatch-trace";
 
 export type { ParentContextFile, ParentContextFilesSnapshot } from "./parent-context-files";
 export {
@@ -122,6 +134,26 @@ export {
   resolveParentContextFilesSnapshot,
   _resetParentContextFilesForTests,
 } from "./parent-context-files";
+export {
+  DISPATCH_TRACE_CUSTOM_TYPE,
+  DISPATCH_TRACE_LIVE_TAIL_MAX_BYTES,
+  DISPATCH_TRACE_MAX_FRAGMENT_BYTES,
+  DISPATCH_TRACE_MAX_RUN_BYTES,
+  computeDispatchRunId,
+  createDispatchTraceSink,
+  dispatchTraceFieldsFromResult,
+  dispatchTraceSummaryFields,
+  getSharedParentAppendQueue,
+  normalizeSessionEvent,
+  resolveParentSessionNamespace,
+  splitUtf8ByMaxBytes,
+  utf8ByteLength,
+  _resetSharedParentAppendQueueForTests,
+  type DispatchTraceLiveTail,
+  type DispatchTraceSink,
+  type DispatchTraceStatusSummary,
+  type DispatchTraceTerminalStatus,
+} from "./dispatch-trace";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -291,6 +323,12 @@ export interface DispatchProgressTask {
   model: string;
   thinking: string;
   state: DispatchProgressTaskState;
+  /** Stable dispatch-trace run id (assigned before queued/preflight). */
+  runId?: string;
+  /** Bounded non-authoritative live trajectory snapshot (≤16KiB). */
+  liveTail?: DispatchTraceLiveTail;
+  /** Final durable/live trace terminal status from AgentResult (readable in ToolResult). */
+  traceStatus?: DispatchTraceTerminalStatus;
   startedAt?: number;
   endedAt?: number;
   durationMs?: number;
@@ -402,6 +440,10 @@ function updateProgressTaskFromResult(task: DispatchProgressTask, result: AgentR
   if (typeof heartbeatMs === "number" && Number.isFinite(heartbeatMs)) {
     task.heartbeatMs = Math.max(0, heartbeatMs);
   }
+  // Final progress is readable from ToolResult details.dispatchProgress.tasks[].
+  if (result.dispatch_run_id) task.runId = result.dispatch_run_id;
+  if (result.dispatch_trace_status) task.traceStatus = result.dispatch_trace_status;
+  if (result.liveTail) task.liveTail = result.liveTail;
 }
 
 interface DispatchRunProgress {
@@ -586,6 +628,25 @@ export function renderDispatchProgressLines(snapshot: DispatchProgressSnapshot, 
   return lines;
 }
 
+function cloneLiveTail(tail: DispatchTraceLiveTail | undefined): DispatchTraceLiveTail | undefined {
+  if (!tail) return undefined;
+  return {
+    runId: tail.runId,
+    revision: tail.revision,
+    baseEventSeq: tail.baseEventSeq,
+    events: tail.events.map((event) => ({
+      eventSeq: event.eventSeq,
+      kind: event.kind,
+      payload: { ...event.payload },
+      createdAt: event.createdAt,
+    })),
+    ...(tail.currentBlock
+      ? { currentBlock: { ...tail.currentBlock } }
+      : {}),
+    live: tail.live,
+  };
+}
+
 function cloneDispatchProgressSnapshot(snapshot: DispatchProgressSnapshot): DispatchProgressSnapshot {
   return {
     title: snapshot.title,
@@ -594,7 +655,10 @@ function cloneDispatchProgressSnapshot(snapshot: DispatchProgressSnapshot): Disp
     ...(snapshot.durationMs !== undefined ? { durationMs: snapshot.durationMs } : {}),
     ...(snapshot.counts ? { counts: { ...snapshot.counts } } : {}),
     ...(snapshot.countsLabel ? { countsLabel: snapshot.countsLabel } : {}),
-    tasks: snapshot.tasks.map((task) => ({ ...task })),
+    tasks: snapshot.tasks.map((task) => ({
+      ...task,
+      ...(task.liveTail ? { liveTail: cloneLiveTail(task.liveTail) } : {}),
+    })),
   };
 }
 
@@ -1165,6 +1229,15 @@ export interface AgentResult {
   reasoning_trace_status?: "complete" | "forced_incomplete" | "write_failed";
   reasoning_trace_error_code?: string;
   reasoning_trace_bytes?: number;
+  /** Dispatch-trace run identity + durable persist status (additive). */
+  dispatch_run_id?: string;
+  dispatch_trace_status?: DispatchTraceStatusSummary["traceStatus"];
+  dispatch_trace_last_event_seq?: number;
+  dispatch_trace_dropped_events?: number;
+  dispatch_trace_dropped_fragments?: number;
+  dispatch_trace_persisted_bytes?: number;
+  /** Final bounded liveTail snapshot retained after terminal (live=false). */
+  liveTail?: DispatchTraceLiveTail;
   /** Stage 1c heartbeat consumer assessment captured at run settlement. */
   heartbeat_liveness?: ReturnType<typeof assessLivenessForAnchor>;
   /** Retry history from pi's auto_retry_start / auto_retry_end events.
@@ -1270,6 +1343,64 @@ export function enrichResultAttribution(
     terminationSource,
     ...(opts.toolSnapshot ? { toolSnapshot: opts.toolSnapshot } : result.toolSnapshot ? { toolSnapshot: result.toolSnapshot } : {}),
   };
+}
+
+export function dispatchTraceResultFields(result: unknown): Record<string, unknown> {
+  return dispatchTraceFieldsFromResult(result);
+}
+
+function attachDispatchTraceSummary(
+  result: AgentResult,
+  summary: DispatchTraceStatusSummary | undefined,
+  liveTail?: DispatchTraceLiveTail,
+): AgentResult {
+  if (!summary) return result;
+  return {
+    ...result,
+    dispatch_run_id: summary.runId,
+    dispatch_trace_status: summary.traceStatus,
+    dispatch_trace_last_event_seq: summary.lastPersistedEventSeq,
+    dispatch_trace_dropped_events: summary.droppedEventCount,
+    dispatch_trace_dropped_fragments: summary.droppedFragmentCount,
+    dispatch_trace_persisted_bytes: summary.persistedBytes,
+    ...(liveTail ? { liveTail } : {}),
+  };
+}
+
+async function finalizeDispatchTrace(
+  result: AgentResult,
+  sink: DispatchTraceSink | undefined,
+  opts: { interrupted?: boolean; reason?: string; terminalState?: string } = {},
+): Promise<AgentResult> {
+  if (!sink) return result;
+  try {
+    const interrupted = opts.interrupted === true ||
+      result.failureType === "aborted" ||
+      result.failureType === "timeout" ||
+      result.failureType === "timeout_partial" ||
+      result.failureType === "guardrail_stop";
+    // Emit a terminal lifecycle marker before durable close.
+    try {
+      sink.emitLifecycle("terminal", {
+        failureType: result.failureType,
+        stopReason: result.stopReason,
+        ...(result.error ? { error: String(result.error).slice(0, 500) } : {}),
+        ...(opts.terminalState ? { terminalState: opts.terminalState } : {}),
+      });
+    } catch { /* never throw */ }
+    const summary = await sink.end({
+      interrupted,
+      reason: opts.reason ?? result.error,
+      terminalState: opts.terminalState,
+    });
+    return attachDispatchTraceSummary(result, summary, sink.getLiveTail());
+  } catch {
+    return {
+      ...result,
+      dispatch_run_id: sink.runId,
+      dispatch_trace_status: "persist_failed",
+    };
+  }
 }
 
 export function dispatchReasoningTraceFields(result: unknown): Record<string, unknown> {
@@ -1641,6 +1772,8 @@ export type SubAgentExecutionContext = {
     workflowRunId?: string;
     workflowStageId?: string;
   };
+  /** Optional parent-session trajectory sink (fail-open; never throws into child). */
+  dispatchTrace?: DispatchTraceSink;
   /**
    * Parent session contextFiles snapshot. Required at the TS call layer;
    * runtime still rejects when missing/malformed (JS/any). Empty array is legal.
@@ -1691,6 +1824,8 @@ export async function runInProcess(
   });
   let reasoningTrace: DispatchReasoningTraceWriter | undefined;
   let reasoningTraceEnded = false;
+  const dispatchTrace = executionContext?.dispatchTrace;
+  let dispatchTraceEnded = false;
 
   // R8 P1 fix (Opus P0-A + GPT-5.5 P1-1 + DeepSeek P1-2 unanimous):
   // wrap the entire body in try/finally so heartbeat.stop() fires on
@@ -1721,26 +1856,40 @@ export async function runInProcess(
     result: AgentResult,
     opts: { forceIncomplete?: boolean; runSettled?: boolean } = {},
   ): Promise<AgentResult> => {
-    if (!reasoningTrace) return result;
-    const summary = await reasoningTrace.end({
-      stopReason: result.stopReason ?? (result.failureType === "aborted" ? "aborted" : undefined),
-      error: result.error,
-      usage: result.usage,
-      forceIncomplete: opts.forceIncomplete === true,
-      runSettled: opts.runSettled === true,
-    });
-    reasoningTraceEnded = true;
-    return {
-      ...result,
-      reasoning_trace_path: summary.reasoning_trace_path,
-      reasoning_chars: summary.reasoning_chars,
-      reasoning_chunks: summary.reasoning_chunks,
-      reasoning_truncated: summary.reasoning_truncated,
-      reasoning_sha256: summary.reasoning_sha256,
-      reasoning_trace_status: summary.reasoning_trace_status,
-      reasoning_trace_bytes: summary.reasoning_trace_bytes,
-      ...(summary.reasoning_trace_error_code ? { reasoning_trace_error_code: summary.reasoning_trace_error_code } : {}),
-    };
+    // P1-3: claim dispatch-trace finalize ownership BEFORE any await so the
+    // surrounding finally cannot race-claim the same sink as interrupted while
+    // this successful path is still draining reasoningTrace.end().
+    const shouldFinalizeDispatch = !!(dispatchTrace && !dispatchTraceEnded);
+    if (shouldFinalizeDispatch) dispatchTraceEnded = true;
+
+    let next = result;
+    if (reasoningTrace) {
+      const summary = await reasoningTrace.end({
+        stopReason: result.stopReason ?? (result.failureType === "aborted" ? "aborted" : undefined),
+        error: result.error,
+        usage: result.usage,
+        forceIncomplete: opts.forceIncomplete === true,
+        runSettled: opts.runSettled === true,
+      });
+      reasoningTraceEnded = true;
+      next = {
+        ...next,
+        reasoning_trace_path: summary.reasoning_trace_path,
+        reasoning_chars: summary.reasoning_chars,
+        reasoning_chunks: summary.reasoning_chunks,
+        reasoning_truncated: summary.reasoning_truncated,
+        reasoning_sha256: summary.reasoning_sha256,
+        reasoning_trace_status: summary.reasoning_trace_status,
+        reasoning_trace_bytes: summary.reasoning_trace_bytes,
+        ...(summary.reasoning_trace_error_code ? { reasoning_trace_error_code: summary.reasoning_trace_error_code } : {}),
+      };
+    }
+    if (shouldFinalizeDispatch) {
+      next = await finalizeDispatchTrace(next, dispatchTrace, {
+        interrupted: opts.forceIncomplete === true,
+      });
+    }
+    return next;
   };
 
   const enrichHeartbeat = (result: AgentResult): AgentResult => {
@@ -1768,6 +1917,11 @@ export async function runInProcess(
   // Runtime guard: TS requires parentContextFiles, but JS/any may omit it.
   const parentContextFiles = executionContext?.parentContextFiles;
   if (!isParentContextFilesSnapshot(parentContextFiles)) {
+    try {
+      dispatchTrace?.emitLifecycle("preflight_failure", {
+        failureType: "context_files_snapshot_missing",
+      });
+    } catch { /* never throw */ }
     return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error:
@@ -1782,6 +1936,12 @@ export async function runInProcess(
 
   const directToolCheck = validateTools(toolAllowlist);
   if (!directToolCheck.ok) {
+    try {
+      dispatchTrace?.emitLifecycle("preflight_failure", {
+        failureType: "tool_rejected",
+        reason: directToolCheck.reason,
+      });
+    } catch { /* never throw */ }
     return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error: `tool_rejected: ${directToolCheck.reason}`,
@@ -1797,6 +1957,12 @@ export async function runInProcess(
   // Resolve model against the awaited-refreshed parent registry.
   const model = resolveModel(modelStr, refreshedModelRegistry);
   if (!model) {
+    try {
+      dispatchTrace?.emitLifecycle("preflight_failure", {
+        failureType: "model_not_found",
+        model: modelStr,
+      });
+    } catch { /* never throw */ }
     return finalizeReasoningTrace(enrichResultAttribution({
       output: "",
       error: `Model not found: ${modelStr}`,
@@ -1850,6 +2016,16 @@ export async function runInProcess(
   const emitWorkerRunDecision = (decision: WorkerRunGovernorDecision | undefined): void => {
     if (!decision) return;
     const trace = executionContext?.reasoningTrace;
+    try {
+      dispatchTrace?.emitGovernor({
+        signal: decision.signal,
+        action: decision.action,
+        mode: decision.mode,
+        ...(decision.failureType ? { failureType: decision.failureType } : {}),
+        ...(typeof decision.count === "number" ? { count: decision.count } : {}),
+        ...(typeof decision.limit === "number" ? { limit: decision.limit } : {}),
+      });
+    } catch { /* never throw into governor path */ }
     void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, buildWorkerRunAuditEvent(decision, {
       ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
       ...(trace?.taskIndex !== undefined ? { taskIndex: trace.taskIndex } : {}),
@@ -1970,6 +2146,12 @@ export async function runInProcess(
 
   if (signal.aborted) {
     const preEvidence = abortEvidenceFromSignal(signal) ?? "parent";
+    try {
+      dispatchTrace?.emitLifecycle("never_started", {
+        reason: "aborted_before_start",
+        abortEvidence: preEvidence,
+      });
+    } catch { /* never throw */ }
     return finalizeReasoningTrace(
       enrichResultAttribution(
         { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount },
@@ -2145,6 +2327,7 @@ export async function runInProcess(
       // concurrent invocations — so retryHistory.entries.push is safe.
       const unsub = session.subscribe((event: any) => {
         reasoningTrace?.handleSessionEvent(event);
+        try { dispatchTrace?.handleSessionEvent(event); } catch { /* never throw into child */ }
         const eventType = String(event?.type ?? "unknown");
 
         if (eventType === "message_start" && event.message?.role === "assistant") {
@@ -2497,6 +2680,10 @@ export async function runInProcess(
   });
   } catch (error) {
     let thrown = error;
+    // Claim dispatch-trace ownership before any await (same P1-3 invariant as
+    // finalizeReasoningTrace) so finally cannot double-finalize as interrupted.
+    const shouldFinalizeDispatchOnThrow = !!(dispatchTrace && !dispatchTraceEnded);
+    if (shouldFinalizeDispatchOnThrow) dispatchTraceEnded = true;
     if (reasoningTrace && !reasoningTraceEnded) {
       const summary = await reasoningTrace.end({ error, forceIncomplete: true, runSettled: false });
       reasoningTraceEnded = true;
@@ -2523,6 +2710,23 @@ export async function runInProcess(
         thrown = wrapped;
       }
     }
+    if (shouldFinalizeDispatchOnThrow) {
+      try {
+        const summary = await finalizeDispatchTrace(
+          { output: "", durationMs: Date.now() - start, error: error instanceof Error ? error.message : String(error) },
+          dispatchTrace,
+          { interrupted: true, reason: "runInProcess threw" },
+        );
+        if (thrown && typeof thrown === "object") {
+          try {
+            Object.assign(thrown, {
+              dispatch_run_id: summary.dispatch_run_id,
+              dispatch_trace_status: summary.dispatch_trace_status,
+            });
+          } catch { /* ignore */ }
+        }
+      } catch { /* never block throw path */ }
+    }
     throw thrown;
   } finally {
     // ADR 0027 §C2' Stage 1b R8 P1 fix: heartbeat.stop() in finally
@@ -2541,6 +2745,16 @@ export async function runInProcess(
         runSettled: false,
       });
       reasoningTraceEnded = true;
+    }
+    if (dispatchTrace && !dispatchTraceEnded) {
+      dispatchTraceEnded = true;
+      try {
+        await finalizeDispatchTrace(
+          { output: "", durationMs: Date.now() - start, error: "run terminated before a dispatch result was produced" },
+          dispatchTrace,
+          { interrupted: true, reason: "run terminated before a dispatch result was produced" },
+        );
+      } catch { /* best-effort */ }
     }
     heartbeat.stop();
   }
@@ -2766,13 +2980,46 @@ export default function (pi: ExtensionAPI) {
         // this path returned without writing audit, missing the row for
         // dispatch_agent while dispatch_parallel.task did emit it. Add
         // the audit row here so dispatch_agent has parity.
-        const rejectResult: AgentResult = {
-          output: "",
-          error: `tool_rejected: ${toolCheck.reason}`,
+        const parentAnchorEarly = getCurrentAnchor();
+        const parentSessionNs = resolveParentSessionNamespace({
+          anchorSessionId: parentAnchorEarly?.session_id,
+          sessionManager: (ctx as { sessionManager?: { getSessionId?(): string | null | undefined } })?.sessionManager,
+        });
+        const rejectRunId = computeDispatchRunId(parentSessionNs, toolCallId, 0);
+        const rejectTrace = createDispatchTraceSink({
+          runId: rejectRunId,
+          parentSessionId: parentSessionNs,
+          parentToolCallId: toolCallId,
+          taskIndex: 0,
+          appendEntry: (customType, data) => { pi.appendEntry(customType, data); },
+          writer: getSharedParentAppendQueue(),
+        });
+        rejectTrace.emitLifecycle("queued", { preflight: true });
+        rejectTrace.emitLifecycle("preflight_failure", {
           failureType: "tool_rejected",
-          durationMs: 0,
-        };
-        const rejectAnchor = deriveSubAgentAnchor(getCurrentAnchor(), "dispatch_agent");
+          reason: toolCheck.reason,
+        });
+        // Symmetric with success path: terminal lifecycle + final liveTail via finalizeDispatchTrace.
+        const rejectResult: AgentResult = await finalizeDispatchTrace(
+          {
+            output: "",
+            error: `tool_rejected: ${toolCheck.reason}`,
+            failureType: "tool_rejected",
+            durationMs: 0,
+          },
+          rejectTrace,
+          { reason: toolCheck.reason, terminalState: "failed" },
+        );
+        const rejectTraceSummary = {
+          runId: rejectResult.dispatch_run_id ?? rejectRunId,
+          traceStatus: rejectResult.dispatch_trace_status ?? "persist_failed",
+          lastPersistedEventSeq: rejectResult.dispatch_trace_last_event_seq ?? 0,
+          droppedEventCount: rejectResult.dispatch_trace_dropped_events ?? 0,
+          droppedFragmentCount: rejectResult.dispatch_trace_dropped_fragments ?? 0,
+          persistedBytes: rejectResult.dispatch_trace_persisted_bytes ?? 0,
+          persistEnabled: true,
+        } satisfies DispatchTraceStatusSummary;
+        const rejectAnchor = deriveSubAgentAnchor(parentAnchorEarly, "dispatch_agent");
         const rejectTsFields = buildTerminalStateFields(rejectResult);
         void appendDispatchAudit(ctx.cwd || process.cwd(), rejectAnchor, {
           operation: "dispatch_agent",
@@ -2781,6 +3028,7 @@ export default function (pi: ExtensionAPI) {
           // jq queries filtering by row_kind catch both.
           row_kind: "task",
           dispatch_tool_call_id: toolCallId,
+          run_id: rejectRunId,
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -2791,6 +3039,21 @@ export default function (pi: ExtensionAPI) {
           failure_type: "tool_rejected",
           output_chars: 0,
         });
+        const rejectProgressTask = progressTaskFromSpec(params, "dispatch");
+        updateProgressTaskFromResult(rejectProgressTask, rejectResult);
+        rejectProgressTask.runId = rejectResult.dispatch_run_id ?? rejectRunId;
+        if (rejectResult.liveTail) rejectProgressTask.liveTail = rejectResult.liveTail;
+        if (rejectResult.dispatch_trace_status) {
+          rejectProgressTask.traceStatus = rejectResult.dispatch_trace_status;
+        }
+        const rejectProgressSnapshot: DispatchProgressSnapshot = {
+          title: "agent",
+          state: "failed",
+          startedAt: Date.now(),
+          durationMs: 0,
+          counts: { running: 0, failed: 1, success: 0, total: 1 },
+          tasks: [rejectProgressTask],
+        };
         return {
           content: [{ type: "text" as const, text: `❌ ${toolCheck.reason}` }],
           // pi SDK 0.75: AgentToolResult.details is required. Carry the
@@ -2801,6 +3064,9 @@ export default function (pi: ExtensionAPI) {
             reason: toolCheck.reason,
             terminalState: rejectTsFields.terminal_state,
             dispatch_tool_call_id: toolCallId,
+            runId: rejectRunId,
+            ...dispatchProgressDetails(rejectProgressSnapshot),
+            ...dispatchTraceSummaryFields(rejectTraceSummary),
             ...(rejectAnchor ? { anchor: rejectAnchor } : {}),
           },
           // isError is a pi-SDK excess property (not in AgentToolResult<T>
@@ -2813,19 +3079,6 @@ export default function (pi: ExtensionAPI) {
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
       const startedAt = Date.now();
-      const progressTask = progressTaskFromSpec(params, "dispatch");
-      progressTask.state = "running";
-      progressTask.startedAt = startedAt;
-      markProgressTask(progressTask, "started", startedAt);
-      const progressSnapshot: DispatchProgressSnapshot = {
-        title: "agent",
-        state: "running",
-        startedAt,
-        counts: { running: 1, failed: 0, success: 0, total: 1 },
-        tasks: [progressTask],
-      };
-      const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
-
       // ADR 0027 C6a: derive sub-agent anchor from main-session parent anchor.
       // - parentAnchor / parent contextFiles snapshot missing fail closed:
       //   resolveParentContextFilesSnapshot returns undefined without a valid
@@ -2836,6 +3089,45 @@ export default function (pi: ExtensionAPI) {
       //   prompt so the sub-agent LLM knows its position in the trace tree
       //   (per C6 "L2 must know its anchor").
       const parentAnchor = getCurrentAnchor();
+      const parentSessionNs = resolveParentSessionNamespace({
+        anchorSessionId: parentAnchor?.session_id,
+        sessionManager: (ctx as { sessionManager?: { getSessionId?(): string | null | undefined } })?.sessionManager,
+      });
+      const runId = computeDispatchRunId(parentSessionNs, toolCallId, 0);
+      const progressTask = progressTaskFromSpec(params, "dispatch");
+      progressTask.runId = runId;
+      progressTask.state = "queued";
+      markProgressTask(progressTask, "queued", startedAt);
+      const progressSnapshot: DispatchProgressSnapshot = {
+        title: "agent",
+        state: "running",
+        startedAt,
+        counts: { running: 1, failed: 0, success: 0, total: 1 },
+        tasks: [progressTask],
+      };
+      const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
+
+      const dispatchTrace = createDispatchTraceSink({
+        runId,
+        parentSessionId: parentSessionNs,
+        parentToolCallId: toolCallId,
+        taskIndex: 0,
+        appendEntry: (customType, data) => { pi.appendEntry(customType, data); },
+        writer: getSharedParentAppendQueue(),
+        onLiveTail: (tail) => {
+          progressTask.liveTail = tail;
+          progressTask.runId = runId;
+        },
+      });
+      // Stable runId is assigned and lifecycle queued is written *before*
+      // preflight/session work so progress + durable history always correlate.
+      dispatchTrace.emitLifecycle("queued", { model: params.model, thinking: params.thinking });
+      progressTask.liveTail = dispatchTrace.getLiveTail();
+      progressTask.state = "running";
+      progressTask.startedAt = startedAt;
+      markProgressTask(progressTask, "started", startedAt);
+      emitDispatchProgress(onUpdate, progressSnapshot);
+
       const subAnchor = deriveSubAgentAnchor(parentAnchor, "dispatch_agent");
       // Same immutable parent contextFiles snapshot for this (session, turn).
       // Missing is rejected inside runInProcess; empty array is legal.
@@ -2879,7 +3171,11 @@ export default function (pi: ExtensionAPI) {
                 taskIndex: 0,
                 taskCount: 1,
               },
-              onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
+              dispatchTrace,
+              onProgress: (progress) => {
+                applyRunProgressToTask(progressTask, progress);
+                try { progressTask.liveTail = dispatchTrace.getLiveTail(); } catch { /* best-effort */ }
+              },
             },
           ),
         );
@@ -2893,13 +3189,20 @@ export default function (pi: ExtensionAPI) {
         // No retryHistory exists at this scope, so classifyError (not
         // classifyWithRetry) is the correct call.
         const rawMsg = err?.message ?? String(err);
-        result = {
+        const crashed: AgentResult = {
           output: "",
           error: `dispatch crashed: ${rawMsg}`,
           failureType: classifyError(rawMsg, "crash"),
           durationMs: Date.now() - startedAt,
           ...dispatchReasoningTraceFields(err as AgentResult),
+          ...dispatchTraceResultFields(err),
         };
+        // Best-effort: if runInProcess rethrew before attaching a terminal
+        // marker, close the sink here so tool details still expose traceStatus.
+        result = await finalizeDispatchTrace(crashed, dispatchTrace, {
+          interrupted: true,
+          reason: rawMsg,
+        });
       }
 
       const durationMs = Date.now() - startedAt;
@@ -2920,6 +3223,11 @@ export default function (pi: ExtensionAPI) {
       progressSnapshot.durationMs = durationMs;
       progressSnapshot.counts = finalCounts;
       updateProgressTaskFromResult(progressTask, result);
+      progressTask.runId = result.dispatch_run_id ?? runId;
+      // Terminal: keep last bounded liveTail for result sync when result has none.
+      if (!progressTask.liveTail) {
+        try { progressTask.liveTail = dispatchTrace.getLiveTail(); } catch { /* best-effort */ }
+      }
       stopProgressTicker();
       emitDispatchProgress(onUpdate, progressSnapshot, !!result.error);
 
@@ -2944,6 +3252,8 @@ export default function (pi: ExtensionAPI) {
           // R7 NIT fix (DeepSeek NIT-1): symmetry with dispatch_parallel.task.
           row_kind: "task",
           dispatch_tool_call_id: toolCallId,
+          run_id: result.dispatch_run_id ?? runId,
+          ...(result.dispatch_trace_status ? { dispatch_trace_status: result.dispatch_trace_status } : {}),
           model: params.model,
           thinking: params.thinking,
           tools: params.tools ?? null,
@@ -2984,6 +3294,8 @@ export default function (pi: ExtensionAPI) {
           durationMs,
           ok: !result.error,
           dispatch_tool_call_id: toolCallId,
+          runId: result.dispatch_run_id ?? runId,
+          ...dispatchTraceResultFields(result),
           ...(result.workerRunGovernance ? { workerRunGovernance: result.workerRunGovernance } : {}),
           ...dispatchReasoningTraceFields(result),
           // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
@@ -3124,9 +3436,19 @@ export default function (pi: ExtensionAPI) {
       const parentAnchor = getCurrentAnchor();
       const parentContextFiles = resolveParentContextFilesSnapshot(parentAnchor);
       const projectRoot = ctx.cwd || process.cwd();
+      const parentSessionNs = resolveParentSessionNamespace({
+        anchorSessionId: parentAnchor?.session_id,
+        sessionManager: (ctx as { sessionManager?: { getSessionId?(): string | null | undefined } })?.sessionManager,
+      });
+      // Single parent SessionManager writer for all parallel tasks.
+      const parentTraceWriter = getSharedParentAppendQueue();
+      const parentAppendEntry = (customType: string, data: unknown) => {
+        pi.appendEntry(customType, data);
+      };
 
       const results: AgentResult[] = new Array(tasks.length);
       const taskAnchors: Array<CausalAnchor | undefined> = new Array(tasks.length);
+      const taskTraces: Array<DispatchTraceSink | undefined> = new Array(tasks.length);
       let running = 0;
       let success = 0;
       let failed = 0;
@@ -3136,9 +3458,39 @@ export default function (pi: ExtensionAPI) {
         state: "running",
         startedAt: dispatchStart,
         counts: { running, failed, success, total },
-        tasks: tasks.map((t: Record<string, unknown>, i: number) => progressTaskFromSpec(t, `task ${i + 1}`)),
+        tasks: tasks.map((t: Record<string, unknown>, i: number) => {
+          const task = progressTaskFromSpec(t, `task ${i + 1}`);
+          const runId = computeDispatchRunId(parentSessionNs, toolCallId, i);
+          task.runId = runId;
+          task.state = "queued";
+          const sink = createDispatchTraceSink({
+            runId,
+            parentSessionId: parentSessionNs,
+            parentToolCallId: toolCallId,
+            taskIndex: i,
+            appendEntry: parentAppendEntry,
+            writer: parentTraceWriter,
+            onLiveTail: (tail) => {
+              task.liveTail = tail;
+              task.runId = runId;
+            },
+          });
+          taskTraces[i] = sink;
+          // Assign stable runId + lifecycle queued before any worker claim/preflight.
+          sink.emitLifecycle("queued", {
+            model: compactOneLine(t.model),
+            thinking: compactOneLine(t.thinking || "off"),
+            taskIndex: i,
+          });
+          task.liveTail = sink.getLiveTail();
+          return task;
+        }),
       };
       const stopProgressTicker = startDispatchProgressTicker(onUpdate, progressSnapshot);
+
+      // Any exception after sinks are opened must still terminal-close them as
+      // interrupted (end is idempotent; already-finalized sinks are skipped).
+      try {
 
       const updateRunning = () => {
         const counts = { running, failed, success, total };
@@ -3176,6 +3528,7 @@ export default function (pi: ExtensionAPI) {
           if (i === undefined) return;
           const t = tasks[i];
           const progressTask = progressSnapshot.tasks[i]!;
+          const taskTrace = taskTraces[i];
           const taskStart = Date.now();
           progressTask.state = "running";
           progressTask.startedAt = taskStart;
@@ -3193,13 +3546,25 @@ export default function (pi: ExtensionAPI) {
           try {
             const toolCheck = validateTools(t.tools);
             if (!toolCheck.ok) {
-              res = {
-                output: "",
-                error: `task[${i}] rejected: ${toolCheck.reason}`,
-                failureType: "tool_rejected",
-                durationMs: 0,
-              };
+              try {
+                taskTrace?.emitLifecycle("preflight_failure", {
+                  failureType: "tool_rejected",
+                  reason: toolCheck.reason,
+                });
+              } catch { /* never throw */ }
+              const preflight = await finalizeDispatchTrace(
+                {
+                  output: "",
+                  error: `task[${i}] rejected: ${toolCheck.reason}`,
+                  failureType: "tool_rejected",
+                  durationMs: 0,
+                },
+                taskTrace,
+                { reason: toolCheck.reason, terminalState: "failed" },
+              );
+              res = preflight;
               updateProgressTaskFromResult(progressTask, res);
+              progressTask.runId = res.dispatch_run_id ?? progressTask.runId;
               results[i] = res;
               releaseProvider(i);
               running--;
@@ -3214,6 +3579,7 @@ export default function (pi: ExtensionAPI) {
                 operation: "dispatch_parallel.task",
                 row_kind: "task",
                 dispatch_tool_call_id: toolCallId,
+                run_id: res.dispatch_run_id ?? progressTask.runId,
                 task_index: i,
                 task_count: total,
                 model: t.model,
@@ -3261,7 +3627,11 @@ export default function (pi: ExtensionAPI) {
                     taskIndex: i,
                     taskCount: total,
                   },
-                  onProgress: (progress) => applyRunProgressToTask(progressTask, progress),
+                  dispatchTrace: taskTrace,
+                  onProgress: (progress) => {
+                    applyRunProgressToTask(progressTask, progress);
+                    try { progressTask.liveTail = taskTrace?.getLiveTail(); } catch { /* best-effort */ }
+                  },
                 },
               ),
             );
@@ -3271,15 +3641,21 @@ export default function (pi: ExtensionAPI) {
             // session/retry failures are caught inside runInProcess. No
             // retryHistory at this scope, classifyError is correct.
             const rawMsg = err?.message ?? String(err);
-            res = {
+            const crashed: AgentResult = {
               output: "",
               error: `dispatch crashed: ${rawMsg}`,
               failureType: classifyError(rawMsg, "crash"),
               durationMs: 0,
               ...dispatchReasoningTraceFields(err as AgentResult),
+              ...dispatchTraceResultFields(err),
             };
+            res = await finalizeDispatchTrace(crashed, taskTrace, {
+              interrupted: true,
+              reason: rawMsg,
+            });
           }
           updateProgressTaskFromResult(progressTask, res);
+          progressTask.runId = res.dispatch_run_id ?? progressTask.runId;
           results[i] = res;
           releaseProvider(i);
           running--;
@@ -3301,6 +3677,8 @@ export default function (pi: ExtensionAPI) {
             operation: "dispatch_parallel.task",
             row_kind: "task",
             dispatch_tool_call_id: toolCallId,
+            run_id: res.dispatch_run_id ?? progressTask.runId,
+            ...(res.dispatch_trace_status ? { dispatch_trace_status: res.dispatch_trace_status } : {}),
             task_index: i,
             task_count: total,
             model: t.model,
@@ -3361,17 +3739,33 @@ export default function (pi: ExtensionAPI) {
       // parent abort itself. Settled per-task results already carry their
       // own cancelSource/terminationSource from runInProcess.
       const parallelSignalEvidence = abortEvidenceFromSignal(signal);
-      const materializedResults: AgentResult[] = tasks.map((_t: any, i: number) => {
+      const materializedResults: AgentResult[] = [];
+      for (let i = 0; i < tasks.length; i++) {
         const r = results[i];
-        if (r) return r;
+        if (r) {
+          materializedResults.push(r);
+          continue;
+        }
         // Hole = parent abort before worker claim (structured parent evidence).
-        return enrichResultAttribution({
+        const holeBase = enrichResultAttribution({
           output: "",
           error: "task did not start (parent abort before worker claim)",
           failureType: "aborted",
           durationMs: 0,
         }, { abortEvidence: parallelSignalEvidence ?? "parent" });
-      });
+        try {
+          taskTraces[i]?.emitLifecycle("never_started", {
+            reason: "parent_abort_before_worker_claim",
+          });
+        } catch { /* never throw */ }
+        materializedResults.push(
+          await finalizeDispatchTrace(holeBase, taskTraces[i], {
+            interrupted: true,
+            reason: "task did not start (parent abort before worker claim)",
+            terminalState: "cancelled",
+          }),
+        );
+      }
 
       // taskSummaries now derives from the dense array — single source of
       // truth, no duplicated hole-materialization logic.
@@ -3404,7 +3798,10 @@ export default function (pi: ExtensionAPI) {
       progressSnapshot.durationMs = totalWallMs;
       progressSnapshot.counts = finalCounts;
       for (let i = 0; i < materializedResults.length; i++) {
-        updateProgressTaskFromResult(progressSnapshot.tasks[i]!, materializedResults[i]!);
+        const r = materializedResults[i]!;
+        const task = progressSnapshot.tasks[i]!;
+        updateProgressTaskFromResult(task, r);
+        task.runId = r.dispatch_run_id ?? task.runId;
       }
       stopProgressTicker();
       emitDispatchProgress(onUpdate, progressSnapshot, hasErrors);
@@ -3570,6 +3967,10 @@ export default function (pi: ExtensionAPI) {
               model: t.model,
               durationMs: r.durationMs,
               ok: !r.error,
+              runId: r.dispatch_run_id ?? progressSnapshot.tasks[i]?.runId,
+              // liveTail stays only under dispatchProgress.tasks[].liveTail
+              // (not duplicated on details.tasks[]).
+              ...dispatchTraceResultFields(r),
               ...(r.error ? { error: r.error, failureType: r.failureType } : {}),
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),
@@ -3585,6 +3986,18 @@ export default function (pi: ExtensionAPI) {
         },
         ...(hasErrors ? { isError: true } : {}),
       };
+      } finally {
+        // Close any sink that never reached a normal terminal (exception / early exit).
+        await Promise.all(taskTraces.map(async (sink) => {
+          if (!sink || sink.isEnded()) return;
+          try {
+            await sink.end({
+              interrupted: true,
+              reason: "parallel execute exception cleanup",
+            });
+          } catch { /* best-effort */ }
+        }));
+      }
     },
   });
 }

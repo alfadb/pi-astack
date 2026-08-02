@@ -9086,8 +9086,13 @@ async function tryAutoWriteLane(args: {
     // archive/delete/merge ops pin expected_status and abort (instead of
     // silently clobbering) on a concurrent reactivation/status change.
     const neighborStatusBySlug: Record<string, EntryStatus> = {};
+    // R6: real neighbor kinds for conflict lifecycle evidence (no invent).
+    const neighborKindBySlug: Record<string, string> = {};
     for (const n of curated.audit.neighbors) {
       if (n.status) neighborStatusBySlug[n.slug] = n.status as EntryStatus;
+      if (n.kind && String(n.kind).trim() && String(n.kind).trim() !== "unknown") {
+        neighborKindBySlug[n.slug] = String(n.kind).trim();
+      }
     }
     emitAutoWriteStageProgress(autoWriteOnProgress, "auto_write_writer", "start");
     try {
@@ -9104,6 +9109,7 @@ async function tryAutoWriteLane(args: {
         auditContext,
         sessionId,
         neighborStatusBySlug,
+        neighborKindBySlug,
         createTimelineNote: "captured from LLM auto-write extractor",
         updateTimelineNote: curated.decision.rationale || "updated by sediment curator",
         mergeTimelineNote: curated.decision.rationale || "merged by sediment curator",

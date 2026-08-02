@@ -149,7 +149,8 @@ check("dispatch tools render progress inside default boxed tool blocks", () => {
 });
 
 check("dispatch_agent and dispatch_parallel both wire progress callbacks", () => {
-  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*applyRunProgressToTask\(progressTask,\s*progress\)/g) ?? [];
+  // onProgress may be a block body (liveTail sync) or a concise arrow.
+  const matches = dispatchSrc.match(/onProgress:\s*\(progress\)\s*=>\s*(?:applyRunProgressToTask\(progressTask,\s*progress\)|\{[\s\S]*?applyRunProgressToTask\(progressTask,\s*progress\))/g) ?? [];
   if (matches.length < 2) {
     throw new Error(`expected at least 2 progress callbacks, found ${matches.length}`);
   }

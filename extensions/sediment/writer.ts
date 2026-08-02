@@ -1359,9 +1359,11 @@ async function runFrozenKnowledgePublicationBatch(
       });
       const published = await publishExactCohortCommit({
         repo,
+        abrainHome: repo,
         refName,
         candidate: prepared.candidate,
         frozenCommit,
+        purpose: "exact_cohort_publish",
       });
       if (published.status === "cas_conflict") {
         return { processed, failedItems, lastError: "ref CAS conflict during frozen publication batch" };

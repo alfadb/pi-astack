@@ -143,7 +143,8 @@ check("runInProcess surfaces the model-derived budget on AgentResult", () => {
   if (/heartbeatCtx\?\.maxOutputTokens/.test(dispatchSrc)) {
     throw new Error("heartbeatCtx must not carry caller output budget");
   }
-  if (!/const resultWithBudget:\s*AgentResult\s*=\s*\{[\s\S]{0,240}?\.\.\.result,[\s\S]{0,180}?maxOutputTokens:\s*effectiveMaxOutputTokens/.test(dispatchSrc)) {
+  // Settlement path enriches attribution first, then stamps the model-derived budget.
+  if (!/const resultWithBudget:\s*AgentResult\s*=\s*\{[\s\S]{0,240}?\.\.\.(?:result|attributed),[\s\S]{0,220}?maxOutputTokens:\s*effectiveMaxOutputTokens/.test(dispatchSrc)) {
     throw new Error("effective budget not added to AgentResult");
   }
   if (!/const resultWithHeartbeat\s*=\s*enrichHeartbeat\(resultWithBudget\);[\s\S]{0,180}?return finalizeReasoningTrace\(resultWithHeartbeat/.test(dispatchSrc)) {

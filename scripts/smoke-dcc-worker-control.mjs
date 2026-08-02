@@ -290,6 +290,8 @@ await check("request manifest is strict, exact-keyed, duplicate-safe, and base64
     "canonical_scan_busy",
     "canonical_scan_lock_failed",
     "continuation_pending",
+    "canonical_head_changed",
+    "canonical_backlog_pending",
     "owner_intervention_required",
     "startup_blocked",
     "startup_failed",
@@ -582,7 +584,7 @@ await check("deferred settle stays pending and next external kick advances durab
   assert(deferredTwo.convergence_generation === "2" && deferredTwo.canonical_head === null, JSON.stringify(deferredTwo));
 });
 
-await check("observe is strict read-only with zero filesystem, Git-head, kick, and runtime creation delta", async () => {
+await check("observe ready without drift stays ready; zero kick/runtime/tree delta", async () => {
   const abrain = createAbrain("observe-zero");
   writeAttestation(abrain, attestation({
     outcome: "ready",
@@ -596,18 +598,142 @@ await check("observe is strict read-only with zero filesystem, Git-head, kick, a
   ];
   let kicks = 0;
   let headReads = 0;
+  let inventoryCalls = 0;
+  let backlogCalls = 0;
+  let applyCalls = 0;
   const observed = await run(abrain, request("observe", "observe-zero"), {
     kickStartup() { kicks += 1; return { promise: Promise.resolve(diagnostics("ready")) }; },
     readCanonicalHead: async () => { headReads += 1; return goodHead; },
+    async inspectBindIntentInventory() {
+      inventoryCalls += 1;
+      return { pending: 0, failed: 0, invalid: 0 };
+    },
+    async applyBindIntents() { applyCalls += 1; return { applied: 0, pending: 0, failed: 0 }; },
+    async probeCanonicalBacklog() { backlogCalls += 1; return "none"; },
   });
   const afterRuntime = [
     runtime.__canonicalRuntimeMapSizeForTests(),
     runtime.__canonicalStartupPromiseMapSizeForTests(),
   ];
   assert(observed.status === "ready" && observed.reason_code === "none", JSON.stringify(observed));
-  assert(kicks === 0 && headReads === 0, "observe entered startup or Git HEAD read");
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(observed), "ready no-drift shape illegal");
+  assert(kicks === 0, "observe entered kick/startup");
+  assert(applyCalls === 0, "observe applied bind intents");
+  assert(headReads === 1 && inventoryCalls === 1 && backlogCalls === 1,
+    `ready probe reads head=${headReads} inv=${inventoryCalls} backlog=${backlogCalls}`);
   assert(JSON.stringify(afterRuntime) === JSON.stringify(beforeRuntime), `runtime delta ${beforeRuntime} -> ${afterRuntime}`);
   assert(snapshotTree(abrain) === beforeTree, "observe changed filesystem");
+});
+
+await check("observe ready HEAD/backlog/bind drift returns closed due without tree delta", async () => {
+  const abrain = createAbrain("observe-ready-drift");
+  writeAttestation(abrain, attestation({
+    outcome: "ready",
+    reason_code: "none",
+    canonical_head: goodHead,
+    convergence_generation: "9",
+  }));
+  const beforeTree = snapshotTree(abrain);
+  let kicks = 0;
+  let applyCalls = 0;
+
+  const headDrift = await run(abrain, request("observe", "observe-head-drift"), {
+    kickStartup() { kicks += 1; return { promise: Promise.resolve(diagnostics("ready")) }; },
+    readCanonicalHead: async () => hex40("other-live-head"),
+    async inspectBindIntentInventory() { return { pending: 0, failed: 0, invalid: 0 }; },
+    async applyBindIntents() { applyCalls += 1; return { applied: 0, pending: 0, failed: 0 }; },
+    async probeCanonicalBacklog() { return "none"; },
+  });
+  assert(headDrift.status === "pending" && headDrift.reason_code === "canonical_head_changed",
+    JSON.stringify(headDrift));
+  assert(headDrift.retryable === true && headDrift.convergence_generation === "9", JSON.stringify(headDrift));
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(headDrift), "head drift shape illegal");
+
+  const backlogDrift = await run(abrain, request("observe", "observe-backlog-drift"), {
+    kickStartup() { kicks += 1; return { promise: Promise.resolve(diagnostics("ready")) }; },
+    readCanonicalHead: async () => goodHead,
+    async inspectBindIntentInventory() { return { pending: 0, failed: 0, invalid: 0 }; },
+    async applyBindIntents() { applyCalls += 1; return { applied: 0, pending: 0, failed: 0 }; },
+    async probeCanonicalBacklog() { return "pending"; },
+  });
+  assert(backlogDrift.status === "pending" && backlogDrift.reason_code === "canonical_backlog_pending",
+    JSON.stringify(backlogDrift));
+  assert(backlogDrift.retryable === true && backlogDrift.convergence_generation === "9", JSON.stringify(backlogDrift));
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(backlogDrift), "backlog drift shape illegal");
+
+  const bindPending = await run(abrain, request("observe", "observe-bind-pending"), {
+    kickStartup() { kicks += 1; return { promise: Promise.resolve(diagnostics("ready")) }; },
+    readCanonicalHead: async () => goodHead,
+    async inspectBindIntentInventory() { return { pending: 1, failed: 0, invalid: 0 }; },
+    async applyBindIntents() { applyCalls += 1; return { applied: 0, pending: 0, failed: 0 }; },
+    async probeCanonicalBacklog() { return "none"; },
+  });
+  assert(bindPending.status === "pending" && bindPending.reason_code === "continuation_pending",
+    JSON.stringify(bindPending));
+  assert(bindPending.retryable === true, JSON.stringify(bindPending));
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(bindPending), "bind pending shape illegal");
+
+  const bindFailed = await run(abrain, request("observe", "observe-bind-failed"), {
+    kickStartup() { kicks += 1; return { promise: Promise.resolve(diagnostics("ready")) }; },
+    readCanonicalHead: async () => goodHead,
+    async inspectBindIntentInventory() { return { pending: 0, failed: 1, invalid: 0 }; },
+    async applyBindIntents() { applyCalls += 1; return { applied: 0, pending: 0, failed: 0 }; },
+    async probeCanonicalBacklog() { return "none"; },
+  });
+  assert(bindFailed.status === "blocked" && bindFailed.reason_code === "continuation_failed",
+    JSON.stringify(bindFailed));
+  assert(bindFailed.retryable === false, JSON.stringify(bindFailed));
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(bindFailed), "bind failed shape illegal");
+
+  // Privacy: closed aggregate only — no exact head/path/count leakage.
+  for (const sample of [headDrift, backlogDrift, bindPending, bindFailed]) {
+    const text = JSON.stringify(sample);
+    assert(!text.includes(goodHead), "leaked goodHead");
+    assert(!text.includes(hex40("other-live-head")), "leaked other head");
+    assert(!/"pending":\s*1/.test(text), "leaked inventory count");
+    assert(!text.includes(abrain), "leaked abrain path");
+  }
+
+  // Durable ready attestation must remain untouched (observe never rewrites).
+  const durable = control.readCanonicalConvergenceAttestation(abrain);
+  assert(durable?.outcome === "ready" && durable.reason_code === "none"
+    && durable.canonical_head === goodHead && durable.convergence_generation === "9",
+    JSON.stringify(durable));
+  assert(kicks === 0 && applyCalls === 0, `kicks=${kicks} apply=${applyCalls}`);
+  assert(snapshotTree(abrain) === beforeTree, "observe drift path mutated tree");
+});
+
+await check("observe ready real porcelain l1 backlog surfaces canonical_backlog_pending", async () => {
+  const abrain = createAbrain("observe-real-backlog");
+  initBareAbrainGit(abrain);
+  const head = spawnSync("git", ["-C", abrain, "rev-parse", "HEAD"], { encoding: "utf8" });
+  assert(head.status === 0, `rev-parse failed: ${head.stderr}`);
+  const liveHead = head.stdout.trim();
+  writeAttestation(abrain, attestation({
+    outcome: "ready",
+    reason_code: "none",
+    canonical_head: liveHead,
+    convergence_generation: "3",
+  }));
+  const l1Dir = path.join(abrain, "l1", "events", "sha256");
+  fs.mkdirSync(l1Dir, { recursive: true });
+  fs.writeFileSync(path.join(l1Dir, "drift-probe-only.json"), "{\"probe\":true}\n");
+  const beforeTree = snapshotTree(abrain);
+  const observed = await run(abrain, request("observe", "observe-real-backlog"), {
+    // Real HEAD + real porcelain; only suppress bind inventory apply/path noise.
+    async inspectBindIntentInventory() { return { pending: 0, failed: 0, invalid: 0 }; },
+    async applyBindIntents() { throw new Error("observe must not apply"); },
+  });
+  assert(observed.status === "pending" && observed.reason_code === "canonical_backlog_pending",
+    JSON.stringify(observed));
+  assert(observed.retryable === true && observed.convergence_generation === "3", JSON.stringify(observed));
+  assert(control.sanitizeSedimentWorkerCanonicalControlResult(observed), "real backlog shape illegal");
+  const text = JSON.stringify(observed);
+  assert(!text.includes(liveHead), "leaked live head");
+  assert(!text.includes("drift-probe-only"), "leaked backlog path");
+  assert(snapshotTree(abrain) === beforeTree, "real backlog observe mutated tree");
+  const durable = control.readCanonicalConvergenceAttestation(abrain);
+  assert(durable?.outcome === "ready" && durable.canonical_head === liveHead, JSON.stringify(durable));
 });
 
 await check("attestation reader rejects unknown/duplicate fields, symlink, non-private modes, and invalid fields", async () => {
@@ -747,6 +873,8 @@ await check("sanitize/parse/format enforce cross-field control-result invariants
     { status: "pending", reason_code: "canonical_scan_busy", convergence_generation: "3", retryable: true },
     { status: "pending", reason_code: "canonical_scan_lock_failed", convergence_generation: "3", retryable: true },
     { status: "pending", reason_code: "continuation_pending", convergence_generation: "3", retryable: true },
+    { status: "pending", reason_code: "canonical_head_changed", convergence_generation: "3", retryable: true },
+    { status: "pending", reason_code: "canonical_backlog_pending", convergence_generation: "3", retryable: true },
     { status: "running", reason_code: "startup_running", convergence_generation: "4", retryable: true },
     { status: "blocked", reason_code: "owner_intervention_required", convergence_generation: "5", retryable: false },
     { status: "blocked", reason_code: "startup_blocked", convergence_generation: "5", retryable: false },
@@ -1682,6 +1810,9 @@ await check("old-generation settle cannot overwrite newer active aggregate (toke
 
   const observed = await run(abrain, request("observe", "race-observe"), {
     repairStorePresentBrainLayout() {},
+    readCanonicalHead: async () => goodHead,
+    async inspectBindIntentInventory() { return { pending: 0, failed: 0, invalid: 0 }; },
+    async probeCanonicalBacklog() { return "none"; },
   });
   assert(observed.status === "ready" && observed.convergence_generation === "2", JSON.stringify(observed));
 });

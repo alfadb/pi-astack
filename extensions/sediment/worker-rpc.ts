@@ -56,6 +56,21 @@ import {
   LocalExecutorAuthorityAdmissionError,
   validateLocalExecutorAuthorityManifestExpectation,
 } from "./local-executor-authority";
+import {
+  bucketLaneCount,
+  rememberVerifiedWorkerTaskWindow,
+  runGlobalMaintenanceLanes,
+  sanitizeGlobalMaintenanceLanes,
+  type GlobalMaintenanceAggregate,
+  type GlobalMaintenanceLaneMap,
+} from "./global-maintenance";
+import {
+  readWorkerTelemetryFields,
+  runWithPassTelemetryAsync,
+  snapshotPassTelemetry,
+  telemetryFieldsFromPass,
+  type WorkerTelemetryFields,
+} from "./pass-telemetry";
 
 export const SEDIMENT_WORKER_MODE_ENV = "PI_ASTACK_SEDIMENT_WORKER_MODE" as const;
 export const SEDIMENT_WORKER_COPY_STORE_ROOT_ENV = "PI_ASTACK_SEDIMENT_WORKER_COPY_STORE_ROOT" as const;
@@ -134,6 +149,7 @@ export const SEDIMENT_WORKER_PROGRESS_STAGES = [
   "detached_join",
   "receipt",
   "publication",
+  "global_maintenance",
   "auto_write_preflight",
   "auto_write_extractor",
   "auto_write_curator",
@@ -289,6 +305,10 @@ export interface SedimentWorkerResult {
   settled: boolean;
   /** True when daemon/caller may safely retry (no success receipt written). */
   retryable: boolean;
+  /**
+   * Compatibility counters. Pre-R7 always 0; when telemetry_semantics is
+   * legacy_unknown these MUST NOT be interpreted as real zero work.
+   */
   memory_decisions: number;
   memory_writes: number;
   error_code?: string;
@@ -304,6 +324,15 @@ export interface SedimentWorkerResult {
    * Worker task does NOT drain publication in-task; independent maintenance owns it.
    */
   publication_pending?: boolean;
+  /**
+   * R7 additive telemetry. Absent = unknown (pre-R7 / fail; never invent zeros).
+   * legacy_unknown: memory_* are compatibility placeholders only.
+   * attempt_instrumented: Knowledge L1 / memory counters for this attempt only
+   * (more-loop may sum inside one attempt; NOT terminal lifetime / cross-attempt).
+   */
+  telemetry_semantics?: WorkerTelemetryFields["telemetry_semantics"];
+  /** Present only when telemetry_semantics=attempt_instrumented. Knowledge L1 only. */
+  knowledge_l1_events_created?: number;
 }
 
 /** Worker-only runtime opts injected into runSedimentAgentEndPass. */
@@ -1258,6 +1287,10 @@ interface WorkerReceipt {
   memory_decisions: number;
   memory_writes: number;
   created_at: string;
+  /** R7 optional; absent on pre-R7 receipts = unknown (do not backfill). */
+  telemetry_semantics?: WorkerTelemetryFields["telemetry_semantics"];
+  /** Present only when telemetry_semantics=attempt_instrumented. Knowledge L1 only. */
+  knowledge_l1_events_created?: number;
 }
 
 function isValidProcessedReceipt(raw: unknown, terminalRecordId: string): raw is WorkerReceipt {
@@ -1270,6 +1303,18 @@ function isValidProcessedReceipt(raw: unknown, terminalRecordId: string): raw is
   if (typeof r.request_id !== "string" || !HEX64_RE.test(r.request_id)) return false;
   if (typeof r.memory_decisions !== "number" || typeof r.memory_writes !== "number") return false;
   if (typeof r.created_at !== "string") return false;
+  // Optional telemetry: when present must be closed set; absent is valid (unknown).
+  if (r.telemetry_semantics !== undefined) {
+    const tel = readWorkerTelemetryFields(r);
+    if (!tel.telemetry_semantics) return false;
+  }
+  if (r.knowledge_l1_events_created !== undefined) {
+    if (
+      typeof r.knowledge_l1_events_created !== "number"
+      || !Number.isSafeInteger(r.knowledge_l1_events_created)
+      || r.knowledge_l1_events_created < 0
+    ) return false;
+  }
   return true;
 }
 
@@ -1317,6 +1362,7 @@ async function writeProcessedReceipt(
 }
 
 function resultFromProcessedReceipt(receipt: WorkerReceipt, requestId: string): SedimentWorkerResult {
+  const tel = readWorkerTelemetryFields(receipt as unknown as Record<string, unknown>);
   return {
     schema: SEDIMENT_WORKER_RESULT_SCHEMA,
     request_id: requestId,
@@ -1326,6 +1372,12 @@ function resultFromProcessedReceipt(receipt: WorkerReceipt, requestId: string): 
     retryable: false,
     memory_decisions: receipt.memory_decisions,
     memory_writes: receipt.memory_writes,
+    // Pass through optional telemetry only when present on the durable receipt.
+    // Never invent attempt_instrumented zeros for pre-R7 receipts (missing = unknown).
+    ...(tel.telemetry_semantics ? { telemetry_semantics: tel.telemetry_semantics } : {}),
+    ...(tel.knowledge_l1_events_created !== undefined
+      ? { knowledge_l1_events_created: tel.knowledge_l1_events_created }
+      : {}),
   };
 }
 
@@ -1388,6 +1440,7 @@ function failResult(
     retryable: opts?.retryable ?? (deadline ? true : !settled),
     memory_decisions: 0,
     memory_writes: 0,
+    // Fail paths: omit telemetry_semantics entirely (unknown, not forged).
     error_code: code,
     ...(opts?.pass_iterations !== undefined ? { pass_iterations: opts.pass_iterations } : {}),
     ...(restartChild !== undefined ? { restart_child: restartChild } : {}),
@@ -1499,7 +1552,7 @@ function currentFenceSliceMs(): number {
   return Math.max(1, Math.min(SEDIMENT_WORKER_FENCE_SLICE_MS, raw));
 }
 
-function throwIfWorkerDeadline(opts?: {
+export function throwIfWorkerDeadline(opts?: {
   signal?: AbortSignal;
   deadlineMs?: number;
   now?: () => number;
@@ -2054,6 +2107,13 @@ export async function runSedimentWorkerTask(
           messages: verified.messages,
           modelRegistry: deps.modelRegistry,
         });
+        // Process-local owner window for R6 global_maintenance LLM lanes.
+        // Only after verified sidecar; no protocol identity stored.
+        rememberVerifiedWorkerTaskWindow({
+          ownerRoot: manifest.owner_project_root,
+          branchEntries: snapshot.branchEntries,
+          nowMs: clock(),
+        });
         // Worker snapshots always pin a daemon-worker CP slot (buildWorkerPassSnapshot).
         const cpSessionId = snapshot.checkpointSessionId
           ?? workerCheckpointSessionId(manifest.session_id);
@@ -2082,6 +2142,14 @@ export async function runSedimentWorkerTask(
             let iterations = 0;
             let lastMore = false;
             let anyAdvanced = false;
+            // R7 attempt-local telemetry (more-loop may sum inside THIS attempt).
+            // Not terminal lifetime; not cross-attempt. seen=false until a pass store merges.
+            const attemptTelemetry = {
+              seen: false,
+              knowledge_l1_events_created: 0,
+              memory_decisions: 0,
+              memory_writes: 0,
+            };
 
             while (iterations < SEDIMENT_WORKER_MORE_BUDGET) {
               throwIfWorkerDeadline({
@@ -2104,27 +2172,39 @@ export async function runSedimentWorkerTask(
 
               let passResult: SedimentWorkerPassOutcome;
               try {
-                passResult = await withCanonicalMutationAuthority({
-                  abrainHome,
-                  role: "daemon",
-                  revalidate: () => {
-                    admitLocalExecutorAuthority({
-                      abrainHome,
-                      expectation: {
-                        local_executor_epoch: manifest!.local_executor_epoch,
-                        local_executor_holder_nonce: manifest!.local_executor_holder_nonce,
-                      },
-                      expectedHolderKind: "daemon",
-                    });
-                  },
-                }, () => deps.runAgentEndPass(snapshot, {
-                  fromRecovery: false,
-                  signal: ac.signal,
-                  requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
-                  deadlineMs: softDeadlineMs,
-                  onProgress: (ev) => emitWorkerProgress(onProgress, ev),
-                  now: clock,
-                }));
+                // R7: each pass iteration runs under pass-local telemetry ALS.
+                // Counters accumulate into attemptTelemetry (never backfilled).
+                passResult = await runWithPassTelemetryAsync(async () => {
+                  const outcome = await withCanonicalMutationAuthority({
+                    abrainHome,
+                    role: "daemon",
+                    revalidate: () => {
+                      admitLocalExecutorAuthority({
+                        abrainHome,
+                        expectation: {
+                          local_executor_epoch: manifest!.local_executor_epoch,
+                          local_executor_holder_nonce: manifest!.local_executor_holder_nonce,
+                        },
+                        expectedHolderKind: "daemon",
+                      });
+                    },
+                  }, () => deps.runAgentEndPass(snapshot, {
+                    fromRecovery: false,
+                    signal: ac.signal,
+                    requestAbort: () => { try { ac.abort(); } catch { /* ignore */ } },
+                    deadlineMs: softDeadlineMs,
+                    onProgress: (ev) => emitWorkerProgress(onProgress, ev),
+                    now: clock,
+                  }));
+                  const snap = snapshotPassTelemetry();
+                  if (snap) {
+                    attemptTelemetry.knowledge_l1_events_created += snap.knowledge_l1_events_created;
+                    attemptTelemetry.memory_decisions += snap.memory_decisions;
+                    attemptTelemetry.memory_writes += snap.memory_writes;
+                    attemptTelemetry.seen = true;
+                  }
+                  return outcome;
+                });
               } catch (err) {
                 if (err instanceof WorkerDeadlineError) {
                   progress("pass", "aborted");
@@ -2348,15 +2428,31 @@ export async function runSedimentWorkerTask(
               // for the create-only write. Do NOT soft-fence before receipt.
               // coversTip+no-receipt entry path remains fail-closed separately.
               progress("receipt", "start");
+              // R7: when pass telemetry was observed, stamp attempt_instrumented counters;
+              // otherwise mark legacy_unknown (compat memory_* stay 0).
+              const receiptTel = attemptTelemetry.seen
+                ? telemetryFieldsFromPass({
+                    telemetry_semantics: "attempt_instrumented",
+                    knowledge_l1_events_created: attemptTelemetry.knowledge_l1_events_created,
+                    memory_decisions: attemptTelemetry.memory_decisions,
+                    memory_writes: attemptTelemetry.memory_writes,
+                  })
+                : telemetryFieldsFromPass(null);
               const receipt: WorkerReceipt = {
                 schema: SEDIMENT_WORKER_RECEIPT_SCHEMA,
                 terminal_record_id: manifest!.terminal_record_id,
                 request_id: manifest!.request_id,
                 status: "processed",
                 settled: true,
-                memory_decisions: 0,
-                memory_writes: 0,
+                memory_decisions: attemptTelemetry.seen ? attemptTelemetry.memory_decisions : 0,
+                memory_writes: attemptTelemetry.seen ? attemptTelemetry.memory_writes : 0,
                 created_at: (deps.now?.() ?? new Date()).toISOString(),
+                ...(receiptTel.telemetry_semantics
+                  ? { telemetry_semantics: receiptTel.telemetry_semantics }
+                  : {}),
+                ...(receiptTel.knowledge_l1_events_created !== undefined
+                  ? { knowledge_l1_events_created: receiptTel.knowledge_l1_events_created }
+                  : {}),
               };
 
               // CP already advanced: receipt write failure is nonretryable +
@@ -2467,9 +2563,15 @@ export async function runSedimentWorkerTask(
                 status: "processed",
                 settled: true,
                 retryable: false,
-                memory_decisions: 0,
-                memory_writes: 0,
+                memory_decisions: receipt.memory_decisions,
+                memory_writes: receipt.memory_writes,
                 pass_iterations: iterations,
+                ...(receipt.telemetry_semantics
+                  ? { telemetry_semantics: receipt.telemetry_semantics }
+                  : {}),
+                ...(receipt.knowledge_l1_events_created !== undefined
+                  ? { knowledge_l1_events_created: receipt.knowledge_l1_events_created }
+                  : {}),
               }, abrainHome, deps.countPublicationOutboxPending, deps.hasPublicationOutboxPending);
             }
 
@@ -2865,7 +2967,106 @@ const MAINTENANCE_RESULT_KEYS = new Set([
   "repair_status",
   "error_code",
   "elapsed_bucket",
+  // R6 global_maintenance additive closed aggregates (old readers ignore).
+  "maintenance_kind",
+  "lanes",
+  "lanes_ran_bucket",
+  "lanes_failed_bucket",
+  "lanes_skipped_bucket",
+  "lanes_idle_bucket",
+  "owners_visited_bucket",
 ]);
+
+/** Closed maintenance kinds (Stage0 publication + R6 global lanes). */
+export const SEDIMENT_WORKER_MAINTENANCE_KINDS = ["publication_outbox", "global_maintenance"] as const;
+export type SedimentWorkerMaintenanceKind = (typeof SEDIMENT_WORKER_MAINTENANCE_KINDS)[number];
+const MAINTENANCE_KIND_SET = new Set<string>(SEDIMENT_WORKER_MAINTENANCE_KINDS);
+
+/**
+ * Closed maintenance result error_code set (strict).
+ * Sanitizer rejects anything outside this set; producers map free/unknown
+ * codes into the set before emit (never invent free-text errors).
+ */
+export const SEDIMENT_WORKER_MAINTENANCE_ERROR_CODES = [
+  // Gate / config / request
+  "effective_owner_not_daemon",
+  "worker_configuration_invalid",
+  "worker_security_gate_failed",
+  "manifest_invalid",
+  "kind_rejected",
+  "repair_policy_rejected",
+  "repair_limit_required",
+  "repair_limit_rejected",
+  "repair_limit_without_policy",
+  "invalid_request_id",
+  "budget_ms_invalid",
+  "budget_ms_out_of_range",
+  "unsupported_integer",
+  "schema_mismatch",
+  "args_too_large",
+  "args_not_json",
+  "args_not_base64url",
+  "empty_args",
+  "multiline_args",
+  "manifest_not_object",
+  "unknown_field",
+  // LSEA
+  "local_executor_authority_unavailable",
+  "local_executor_authority_revoked",
+  "local_executor_authority_stale",
+  // Budget / serial / poison
+  "worker_budget_exhausted",
+  "cancel_cleanup_unreaped",
+  "maintenance_worker_busy",
+  "worker_process_poisoned",
+  "worker_internal_error",
+  // Publication
+  "publication_outbox_count_failed",
+  "publication_outbox_failed_count_failed",
+  "publication_terminal_failed",
+  "publication_terminal_failed_present",
+  "publication_drain_busy",
+  "publication_l1_pending",
+  "publication_drain_failed",
+  "publication_remaining",
+  "publication_repair_busy",
+  "publication_repair_budget",
+  "publication_repair_failed",
+  // R6 global_maintenance
+  "global_maintenance_failed",
+  "global_maintenance_budget",
+  "global_maintenance_lane_failed",
+] as const;
+export type SedimentWorkerMaintenanceErrorCode =
+  (typeof SEDIMENT_WORKER_MAINTENANCE_ERROR_CODES)[number];
+const MAINTENANCE_ERROR_CODE_SET = new Set<string>(SEDIMENT_WORKER_MAINTENANCE_ERROR_CODES);
+
+export function isSedimentWorkerMaintenanceErrorCode(
+  value: unknown,
+): value is SedimentWorkerMaintenanceErrorCode {
+  return typeof value === "string" && MAINTENANCE_ERROR_CODE_SET.has(value);
+}
+
+/** Map free/unknown producer codes into the closed maintenance error set. */
+export function closeMaintenanceErrorCode(
+  code: unknown,
+  fallback: SedimentWorkerMaintenanceErrorCode = "worker_internal_error",
+): SedimentWorkerMaintenanceErrorCode | undefined {
+  if (code === undefined || code === null || code === "") return undefined;
+  if (isSedimentWorkerMaintenanceErrorCode(code)) return code;
+  // LSEA already closed via its own enum — keep if present, else unavailable.
+  if (isLocalExecutorAuthorityErrorCode(code)) return code;
+  // Security-env validation codes collapse to one closed gate failure.
+  if (typeof code === "string" && (
+    code.startsWith("copy_store_")
+    || code.startsWith("allowed_owner_")
+    || code.includes("owner_root")
+    || code === "worker_security_gate_failed"
+  )) {
+    return "worker_security_gate_failed";
+  }
+  return fallback;
+}
 
 /** Closed outbox count buckets for maintenance result (pending/failed residual; not progress pending). */
 export const SEDIMENT_WORKER_OUTBOX_PENDING_BUCKETS = ["unknown", "0", "1", "2-4", "5-9", "10-49", "50+"] as const;
@@ -2892,10 +3093,11 @@ export interface SedimentWorkerMaintenanceRequest {
   schema: typeof SEDIMENT_WORKER_MAINTENANCE_SCHEMA;
   request_id: string;
   budget_ms: number;
-  kind: "publication_outbox";
-  /** Optional on wire; absent is none. */
+  /** publication_outbox (Stage0) | global_maintenance (R6 additive). */
+  kind: SedimentWorkerMaintenanceKind;
+  /** Optional on wire; absent is none. Only valid for publication_outbox. */
   repair_policy?: SedimentWorkerMaintenanceRepairPolicy;
-  /** Optional on wire; absent is 0. */
+  /** Optional on wire; absent is 0. Only valid for publication_outbox. */
   repair_limit?: 0 | 1;
   /** Paired LSEA rollout fields. Both absent is legacy only while the store is absent. */
   local_executor_epoch?: string;
@@ -2921,6 +3123,15 @@ export interface SedimentWorkerMaintenanceResult {
   repair_status?: SedimentWorkerMaintenanceRepairStatus;
   error_code?: string;
   elapsed_bucket?: number;
+  /** R6: echo closed kind so daemon can disambiguate without request correlation alone. */
+  maintenance_kind?: SedimentWorkerMaintenanceKind;
+  /** R6 global_maintenance: closed per-lane statuses (no identity/path). */
+  lanes?: GlobalMaintenanceLaneMap;
+  lanes_ran_bucket?: SedimentWorkerOutboxPendingBucket;
+  lanes_failed_bucket?: SedimentWorkerOutboxPendingBucket;
+  lanes_skipped_bucket?: SedimentWorkerOutboxPendingBucket;
+  lanes_idle_bucket?: SedimentWorkerOutboxPendingBucket;
+  owners_visited_bucket?: SedimentWorkerOutboxPendingBucket;
 }
 
 export interface SedimentWorkerMaintenanceDeps {
@@ -2945,6 +3156,10 @@ export interface SedimentWorkerMaintenanceDeps {
     abrainHome: string,
     limit: 1,
   ) => Promise<LegacyWorldProjectStampRepairResult>;
+  /** Optional model registry for global_maintenance LLM lanes (usually undefined in headless worker). */
+  modelRegistry?: unknown;
+  /** Optional override for global lane runner (tests). */
+  runGlobalMaintenanceLanes?: typeof runGlobalMaintenanceLanes;
   onProgress?: (event: SedimentWorkerProgressEvent) => void;
   clock?: () => number;
   env?: NodeJS.ProcessEnv;
@@ -2986,9 +3201,13 @@ export function validateSedimentWorkerMaintenanceRequest(raw: unknown): Sediment
   if (typeof m.request_id !== "string" || !HEX64_RE.test(m.request_id)) {
     throw new WorkerValidationError("invalid_request_id", "request_id must be 64 lowercase hex");
   }
-  if (m.kind !== "publication_outbox") {
-    throw new WorkerValidationError("kind_rejected", "only publication_outbox maintenance is admitted");
+  if (typeof m.kind !== "string" || !MAINTENANCE_KIND_SET.has(m.kind)) {
+    throw new WorkerValidationError(
+      "kind_rejected",
+      "only publication_outbox|global_maintenance maintenance is admitted",
+    );
   }
+  const kind = m.kind as SedimentWorkerMaintenanceKind;
   const budget_ms = parseWorkerMaintenanceBudgetMs(m.budget_ms);
   const repairPolicy = m.repair_policy === undefined ? "none" : m.repair_policy;
   if (typeof repairPolicy !== "string" || !MAINTENANCE_REPAIR_POLICY_SET.has(repairPolicy)) {
@@ -3001,6 +3220,15 @@ export function validateSedimentWorkerMaintenanceRequest(raw: unknown): Sediment
       throw new WorkerValidationError("repair_limit_rejected", "repair_limit must be 0 or 1");
     }
     repairLimit = parsedLimit;
+  }
+  // Repair fields are publication_outbox-only; global_maintenance rejects non-default repair.
+  if (kind === "global_maintenance") {
+    if (repairPolicy !== "none" || repairLimit !== 0 || m.repair_policy !== undefined || m.repair_limit !== undefined) {
+      throw new WorkerValidationError(
+        "repair_policy_rejected",
+        "global_maintenance does not admit repair_policy/repair_limit",
+      );
+    }
   }
   if (repairPolicy !== "none" && repairLimit !== 1) {
     throw new WorkerValidationError("repair_limit_required", "non-none repair policy requires repair_limit=1");
@@ -3024,10 +3252,14 @@ export function validateSedimentWorkerMaintenanceRequest(raw: unknown): Sediment
     schema: SEDIMENT_WORKER_MAINTENANCE_SCHEMA,
     request_id: m.request_id,
     budget_ms,
-    kind: "publication_outbox",
+    kind,
     ...authorityExpectation,
-    ...(m.repair_policy !== undefined ? { repair_policy: repairPolicy as SedimentWorkerMaintenanceRepairPolicy } : {}),
-    ...(m.repair_limit !== undefined ? { repair_limit: repairLimit } : {}),
+    ...(kind === "publication_outbox" && m.repair_policy !== undefined
+      ? { repair_policy: repairPolicy as SedimentWorkerMaintenanceRepairPolicy }
+      : {}),
+    ...(kind === "publication_outbox" && m.repair_limit !== undefined
+      ? { repair_limit: repairLimit }
+      : {}),
   };
 }
 
@@ -3085,6 +3317,13 @@ function buildMaintenanceResult(args: {
   error_code?: string;
   startedAtMs?: number;
   nowMs?: number;
+  maintenance_kind?: SedimentWorkerMaintenanceKind;
+  lanes?: GlobalMaintenanceLaneMap;
+  lanes_ran?: number | null;
+  lanes_failed?: number | null;
+  lanes_skipped?: number | null;
+  lanes_idle?: number | null;
+  owners_visited?: number | null;
 }): SedimentWorkerMaintenanceResult {
   const result: SedimentWorkerMaintenanceResult = {
     schema: SEDIMENT_WORKER_MAINTENANCE_RESULT_SCHEMA,
@@ -3101,10 +3340,19 @@ function buildMaintenanceResult(args: {
     result.repaired_bucket = args.repaired === null ? "unknown" : args.repaired >= 1 ? "1" : "0";
   }
   if (args.repair_status !== undefined) result.repair_status = args.repair_status;
-  if (args.error_code) result.error_code = args.error_code;
+  // Global closed mapping: never emit free-text / unknown codes on the wire.
+  const closedCode = closeMaintenanceErrorCode(args.error_code);
+  if (closedCode) result.error_code = closedCode;
   if (args.startedAtMs !== undefined && args.nowMs !== undefined) {
     result.elapsed_bucket = bucketElapsedSeconds(args.nowMs - args.startedAtMs);
   }
+  if (args.maintenance_kind) result.maintenance_kind = args.maintenance_kind;
+  if (args.lanes) result.lanes = args.lanes;
+  if (args.lanes_ran !== undefined) result.lanes_ran_bucket = bucketLaneCount(args.lanes_ran);
+  if (args.lanes_failed !== undefined) result.lanes_failed_bucket = bucketLaneCount(args.lanes_failed);
+  if (args.lanes_skipped !== undefined) result.lanes_skipped_bucket = bucketLaneCount(args.lanes_skipped);
+  if (args.lanes_idle !== undefined) result.lanes_idle_bucket = bucketLaneCount(args.lanes_idle);
+  if (args.owners_visited !== undefined) result.owners_visited_bucket = bucketLaneCount(args.owners_visited);
   return result;
 }
 
@@ -3132,12 +3380,33 @@ export function sanitizeWorkerMaintenanceResult(raw: unknown): SedimentWorkerMai
   if (o.repair_status !== undefined) {
     if (typeof o.repair_status !== "string" || !MAINTENANCE_REPAIR_STATUS_SET.has(o.repair_status)) return null;
   }
-  if (o.error_code !== undefined && (typeof o.error_code !== "string" || !o.error_code || /[\s\/\\]/.test(o.error_code))) {
+  // Strict closed error_code set (R6): free-text / unknown codes fail sanitize.
+  if (o.error_code !== undefined && !isSedimentWorkerMaintenanceErrorCode(o.error_code)) {
     return null;
   }
   if (o.elapsed_bucket !== undefined) {
     if (typeof o.elapsed_bucket !== "number" || !Number.isSafeInteger(o.elapsed_bucket) || !ELAPSED_BUCKET_SET.has(o.elapsed_bucket)) {
       return null;
+    }
+  }
+  if (o.maintenance_kind !== undefined) {
+    if (typeof o.maintenance_kind !== "string" || !MAINTENANCE_KIND_SET.has(o.maintenance_kind)) return null;
+  }
+  let lanes: GlobalMaintenanceLaneMap | undefined;
+  if (o.lanes !== undefined) {
+    const sanitized = sanitizeGlobalMaintenanceLanes(o.lanes);
+    if (!sanitized) return null;
+    lanes = sanitized;
+  }
+  for (const bucketKey of [
+    "lanes_ran_bucket",
+    "lanes_failed_bucket",
+    "lanes_skipped_bucket",
+    "lanes_idle_bucket",
+    "owners_visited_bucket",
+  ] as const) {
+    if (o[bucketKey] !== undefined) {
+      if (typeof o[bucketKey] !== "string" || !OUTBOX_PENDING_BUCKET_SET.has(o[bucketKey] as string)) return null;
     }
   }
   const result: SedimentWorkerMaintenanceResult = {
@@ -3158,8 +3427,29 @@ export function sanitizeWorkerMaintenanceResult(raw: unknown): SedimentWorkerMai
   if (typeof o.repair_status === "string") {
     result.repair_status = o.repair_status as SedimentWorkerMaintenanceRepairStatus;
   }
-  if (typeof o.error_code === "string") result.error_code = o.error_code;
+  if (typeof o.error_code === "string" && isSedimentWorkerMaintenanceErrorCode(o.error_code)) {
+    result.error_code = o.error_code;
+  }
   if (typeof o.elapsed_bucket === "number") result.elapsed_bucket = o.elapsed_bucket;
+  if (typeof o.maintenance_kind === "string") {
+    result.maintenance_kind = o.maintenance_kind as SedimentWorkerMaintenanceKind;
+  }
+  if (lanes) result.lanes = lanes;
+  if (typeof o.lanes_ran_bucket === "string") {
+    result.lanes_ran_bucket = o.lanes_ran_bucket as SedimentWorkerOutboxPendingBucket;
+  }
+  if (typeof o.lanes_failed_bucket === "string") {
+    result.lanes_failed_bucket = o.lanes_failed_bucket as SedimentWorkerOutboxPendingBucket;
+  }
+  if (typeof o.lanes_skipped_bucket === "string") {
+    result.lanes_skipped_bucket = o.lanes_skipped_bucket as SedimentWorkerOutboxPendingBucket;
+  }
+  if (typeof o.lanes_idle_bucket === "string") {
+    result.lanes_idle_bucket = o.lanes_idle_bucket as SedimentWorkerOutboxPendingBucket;
+  }
+  if (typeof o.owners_visited_bucket === "string") {
+    result.owners_visited_bucket = o.owners_visited_bucket as SedimentWorkerOutboxPendingBucket;
+  }
   return result;
 }
 
@@ -3293,6 +3583,7 @@ export async function runSedimentWorkerMaintenance(
   }
 
   const requestId = request.request_id;
+  const maintenanceKind = request.kind;
   const repairPolicy = request.repair_policy ?? "none";
   const repairRequested = repairPolicy !== "none";
   let repairStatus: SedimentWorkerMaintenanceRepairStatus = "failed";
@@ -3306,9 +3597,16 @@ export async function runSedimentWorkerMaintenance(
     /** null/undefined → failed_bucket unknown. */
     failed?: number | null;
     error_code?: string;
+    lanes?: GlobalMaintenanceLaneMap;
+    lanes_ran?: number | null;
+    lanes_failed?: number | null;
+    lanes_skipped?: number | null;
+    lanes_idle?: number | null;
+    owners_visited?: number | null;
   }): SedimentWorkerMaintenanceResult => buildMaintenanceResult({
     request_id: requestId,
     ...args,
+    maintenance_kind: maintenanceKind,
     ...(repairRequested ? { repaired: repairedCount, repair_status: repairStatus } : {}),
     startedAtMs,
     nowMs: clock(),
@@ -3328,9 +3626,11 @@ export async function runSedimentWorkerMaintenance(
   const absoluteDeadlineMs = startedAtMs + request.budget_ms;
   const softDeadlineMs = computeWorkerSoftDeadlineMs({ startedAtMs, budgetMs: request.budget_ms });
   const ac = new AbortController();
+  const progressStage: SedimentWorkerProgressStage =
+    maintenanceKind === "global_maintenance" ? "global_maintenance" : "publication";
   const progress = (phase: SedimentWorkerProgressPhase) => {
     emitWorkerProgress(deps.onProgress, buildWorkerProgressEvent({
-      stage: "publication",
+      stage: progressStage,
       phase,
       startedAtMs,
       nowMs: clock(),
@@ -3342,6 +3642,7 @@ export async function runSedimentWorkerMaintenance(
   heartbeat.unref?.();
 
   const runExclusive = async (): Promise<SedimentWorkerMaintenanceResult> => {
+    let security: ReturnType<typeof resolveWorkerSecurityEnv>;
     try {
       if (deps.resolveEffectiveExecutionOwner() !== "daemon") {
         return finish({
@@ -3355,7 +3656,7 @@ export async function runSedimentWorkerMaintenance(
       }
       // Maintenance carries no record identity, but it must still pass the same
       // worker copy-store + non-empty realpath owner allowlist validation.
-      resolveWorkerSecurityEnv(deps.env ?? process.env);
+      security = resolveWorkerSecurityEnv(deps.env ?? process.env);
     } catch (err) {
       const code = err instanceof WorkerValidationError ? err.code : "worker_security_gate_failed";
       return finish({
@@ -3404,6 +3705,183 @@ export async function runSedimentWorkerMaintenance(
         failed: null,
         error_code: code,
       });
+    }
+
+    // R6: global_maintenance — run original 7 agent_end global lanes under the
+    // same LSEA admission + mutation authority + process serial. Does not open
+    // taskScoped and does not restore foreground. Publication path is unchanged.
+    // Deadline race / cancel cleanup / unreaped poison match publication_outbox
+    // (not cooperative-only soft checks).
+    if (maintenanceKind === "global_maintenance") {
+      const ownerRoots = Array.from(security.allowedOwnerRoots);
+      const runLanes = deps.runGlobalMaintenanceLanes ?? runGlobalMaintenanceLanes;
+
+      if (softDeadlineMs <= clock()) {
+        if (!ac.signal.aborted) ac.abort();
+        return finish({
+          status: "pending",
+          retryable: true,
+          restart_child: false,
+          pending_before: null,
+          pending_after: null,
+          failed: null,
+          error_code: "worker_budget_exhausted",
+        });
+      }
+
+      let workSettled = false;
+      const workPromise = runWithWorkerBudget(
+        { deadlineMs: softDeadlineMs, signal: ac.signal, now: clock },
+        async (): Promise<GlobalMaintenanceAggregate> => {
+          try {
+            throwIfWorkerDeadline({
+              signal: ac.signal,
+              deadlineMs: softDeadlineMs,
+              now: clock,
+              code: "worker_budget_exhausted",
+            });
+            return await withCanonicalMutationAuthority({
+              abrainHome,
+              role: "daemon",
+              revalidate: () => {
+                admitLocalExecutorAuthority({
+                  abrainHome,
+                  expectation: {
+                    local_executor_epoch: request.local_executor_epoch,
+                    local_executor_holder_nonce: request.local_executor_holder_nonce,
+                  },
+                  expectedHolderKind: "daemon",
+                });
+              },
+            }, () => runLanes({
+              ownerRoots,
+              abrainHome,
+              signal: ac.signal,
+              deadlineMs: softDeadlineMs,
+              now: clock,
+              modelRegistry: deps.modelRegistry,
+            }));
+          } finally {
+            workSettled = true;
+          }
+        },
+      );
+      // Keep a rejection observer even when deadline cleanup has zero milliseconds.
+      void workPromise.catch(() => undefined);
+
+      const fenceStop = new AbortController();
+      activeDeadlineFenceCount += 1;
+      const deadlineFence = (async (): Promise<never> => {
+        try {
+          for (;;) {
+            if (fenceStop.signal.aborted) throw FENCE_STOPPED;
+            const remaining = softDeadlineMs - clock();
+            if (remaining <= 0 || ac.signal.aborted) {
+              if (!ac.signal.aborted) ac.abort();
+              throw new WorkerDeadlineError("worker_budget_exhausted", "global_maintenance soft deadline elapsed");
+            }
+            await sleepMs(Math.min(currentFenceSliceMs(), Math.max(1, remaining)), fenceStop.signal);
+          }
+        } finally {
+          activeDeadlineFenceCount = Math.max(0, activeDeadlineFenceCount - 1);
+        }
+      })();
+
+      const stopDeadlineFence = async (): Promise<void> => {
+        if (!fenceStop.signal.aborted) fenceStop.abort();
+        try { await deadlineFence; } catch { /* settle fence frame */ }
+      };
+
+      const finishFromAggregate = (aggregate: GlobalMaintenanceAggregate): SedimentWorkerMaintenanceResult => finish({
+        status: aggregate.status,
+        retryable: aggregate.retryable,
+        restart_child: false,
+        // Publication buckets honestly unknown for this kind.
+        pending_before: null,
+        pending_after: null,
+        failed: null,
+        ...(aggregate.error_code ? { error_code: aggregate.error_code } : {}),
+        lanes: aggregate.lanes,
+        lanes_ran: aggregate.lanes_ran,
+        lanes_failed: aggregate.lanes_failed,
+        lanes_skipped: aggregate.lanes_skipped,
+        lanes_idle: aggregate.lanes_idle,
+        owners_visited: aggregate.owners_visited,
+      });
+
+      const classifyThrow = (error: unknown): SedimentWorkerMaintenanceResult => {
+        if (isCanonicalMutationAuthorityError(error)) {
+          return finish({
+            status: "failed",
+            retryable: true,
+            restart_child: false,
+            pending_before: null,
+            pending_after: null,
+            failed: null,
+            error_code: "local_executor_authority_revoked",
+          });
+        }
+        return finish({
+          status: "failed",
+          retryable: true,
+          restart_child: false,
+          pending_before: null,
+          pending_after: null,
+          failed: null,
+          error_code: "global_maintenance_failed",
+        });
+      };
+
+      try {
+        try {
+          return finishFromAggregate(await Promise.race([workPromise, deadlineFence]));
+        } catch (err) {
+          if (err instanceof WorkerDeadlineError) {
+            if (!ac.signal.aborted) ac.abort();
+            const cleanupMs = Math.max(0, Math.min(
+              SEDIMENT_WORKER_CLEANUP_RESERVE_MS,
+              absoluteDeadlineMs - clock(),
+            ));
+            if (!workSettled && cleanupMs > 0) {
+              await Promise.race([
+                workPromise.then(() => undefined, () => undefined),
+                sleepMs(cleanupMs),
+              ]);
+            }
+            if (!workSettled) {
+              poisonIfSerialOrUnreaped("cancel_cleanup_unreaped");
+              return finish({
+                status: "failed",
+                retryable: true,
+                restart_child: true,
+                pending_before: null,
+                pending_after: null,
+                failed: null,
+                error_code: "cancel_cleanup_unreaped",
+              });
+            }
+            try {
+              return finishFromAggregate(await workPromise);
+            } catch (settledError) {
+              if (settledError instanceof WorkerDeadlineError) {
+                return finish({
+                  status: "pending",
+                  retryable: true,
+                  restart_child: false,
+                  pending_before: null,
+                  pending_after: null,
+                  failed: null,
+                  error_code: "global_maintenance_budget",
+                });
+              }
+              return classifyThrow(settledError);
+            }
+          }
+          return classifyThrow(err);
+        }
+      } finally {
+        await stopDeadlineFence();
+      }
     }
 
     const beforePendingProbe = await safeCountPublicationPending(abrainHome, deps.countPublicationOutboxPending);
@@ -3871,6 +4349,7 @@ export function registerSedimentWorkerMaintenanceCommand(
         description?: string;
         handler: (args: string, ctx: {
           ui?: { notify?(message: string, type?: string): void };
+          modelRegistry?: unknown;
         }) => Promise<void>;
       },
     ) => void;
@@ -3897,8 +4376,10 @@ export function registerSedimentWorkerMaintenanceCommand(
 
       let result: SedimentWorkerMaintenanceResult;
       try {
+        // modelRegistry: deps override, else live Pi ctx (TS index registration).
         result = await runSedimentWorkerMaintenance(args, {
           ...deps,
+          modelRegistry: deps.modelRegistry ?? ctx.modelRegistry,
           onProgress: deps.onProgress ?? onProgress,
         });
       } catch (err) {

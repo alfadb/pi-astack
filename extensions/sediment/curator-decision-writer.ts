@@ -1,4 +1,9 @@
 import type { CuratorDecision } from "./curator";
+import { appendCuratorConflictProposals } from "./entry-lifecycle-proposals";
+import {
+  notePassMemoryDecision,
+  notePassMemoryWrite,
+} from "./pass-telemetry";
 import {
   archiveProjectEntry,
   deleteProjectEntry,
@@ -58,6 +63,9 @@ export async function executeCuratorDecisionToBrain(args: {
    *  concurrent reactivation/status change aborts the write instead of being
    *  silently clobbered. Undefined → CAS skipped (legacy/backward-compatible). */
   neighborStatusBySlug?: Record<string, EntryStatus>;
+  /** R6: real neighbor kinds for conflict lifecycle evidence (never invent).
+   *  Missing/unknown kinds keep proposals deferred — no fake execution_ready. */
+  neighborKindBySlug?: Record<string, string>;
   createTimelineNote?: string;
   updateTimelineNote?: string;
   mergeTimelineNote?: string;
@@ -77,6 +85,9 @@ export async function executeCuratorDecisionToBrain(args: {
     sessionId,
   } = args;
 
+  // R7: count every curator decision considered (including skip).
+  notePassMemoryDecision(1);
+
   if (decision.op === "skip") {
     return [{
       slug: draft.title,
@@ -89,6 +100,54 @@ export async function executeCuratorDecisionToBrain(args: {
       candidateId: auditContext?.candidateId,
     }];
   }
+
+  /**
+   * After successful writes, emit R6 contradicted lifecycle evidence (no L1 rewrite).
+   * Must bind the real Knowledge L1 event id(s) from this write as
+   * independent_evidence_event_ids so proposals can enter lifecycle/forgetting.
+   * Event id is taken only when append.ok (never bare eventId on failed append).
+   * Real neighbor kindBySlug is required for execution_ready; missing kind → defer.
+   */
+  const emitConflictEvidence = (writeResults: WriteProjectEntryResult[]) => {
+    if (decision.op !== "create" && decision.op !== "update") return;
+    const stale = decision.stale_neighbors;
+    const supersedes = decision.supersedes;
+    if ((!stale || stale.length === 0) && (!supersedes || supersedes.length === 0)) return;
+    const independentEvidenceEventIds = [...new Set(
+      writeResults
+        .map((r) => {
+          const append = r.knowledgeEvidenceEvent?.append;
+          // Strict: append.ok is the only authority to treat eventId as durable evidence.
+          if (!append || append.ok !== true) return undefined;
+          return typeof append.eventId === "string" && /^[0-9a-f]{64}$/.test(append.eventId)
+            ? append.eventId
+            : undefined;
+        })
+        .filter((id): id is string => !!id),
+    )];
+    // Prefer observed neighbor kinds; never invent. Empty map → append path defers.
+    const kindBySlug: Record<string, string> = {};
+    for (const slug of [...(stale ?? []), ...(supersedes ?? [])]) {
+      const kind = args.neighborKindBySlug?.[slug];
+      if (typeof kind === "string" && kind.trim() && kind.trim() !== "unknown") {
+        kindBySlug[slug] = kind.trim();
+      }
+    }
+    try {
+      appendCuratorConflictProposals({
+        projectRoot,
+        staleNeighbors: stale,
+        supersedes,
+        candidateSlug: decision.op === "update" ? decision.slug : draft.preferredSlug ?? draft.title,
+        kindBySlug,
+        ...(independentEvidenceEventIds.length
+          ? { independentEvidenceEventIds }
+          : {}),
+      });
+    } catch {
+      /* lifecycle sidecar is best-effort; never fail the brain write */
+    }
+  };
 
   // ADR 0023 W2: route rules-zone ops to the rule writers (writeAbrainRule /
   // archiveAbrainRule / deleteAbrainRule) instead of the entries writer. CREATE
@@ -164,7 +223,13 @@ export async function executeCuratorDecisionToBrain(args: {
         injectMode,
       },
     });
-    return [ruleResult(r)];
+    const adaptedCreate = ruleResult(r);
+    if (adaptedCreate.status === "created" || adaptedCreate.status === "updated") {
+      notePassMemoryWrite(1);
+      // Rules-zone creates rarely emit Knowledge L1; still attempt bind (may defer).
+      emitConflictEvidence([adaptedCreate]);
+    }
+    return [adaptedCreate];
   }
   if (decision.op === "archive" || decision.op === "delete") {
     const ruleScope = resolveRuleLifecycleScope(decision.slug);
@@ -194,7 +259,11 @@ export async function executeCuratorDecisionToBrain(args: {
             slug: decision.slug,
           },
         });
-      return [ruleResult(r)];
+      const adaptedRule = ruleResult(r);
+      if (adaptedRule.status === "archived" || adaptedRule.status === "deleted" || adaptedRule.status === "updated") {
+        notePassMemoryWrite(1);
+      }
+      return [adaptedRule];
     }
   }
 
@@ -208,6 +277,7 @@ export async function executeCuratorDecisionToBrain(args: {
     auditContext,
   });
 
+  let results: WriteProjectEntryResult[];
   switch (decision.op) {
     case "update": {
       const result = await updateProjectEntry(
@@ -224,11 +294,12 @@ export async function executeCuratorDecisionToBrain(args: {
         writerOpts(decision.scope),
       );
       assertNoGitCommitFailure([result], settings);
-      return [result];
+      results = [result];
+      break;
     }
 
     case "merge": {
-      const results = await mergeProjectEntries(
+      results = await mergeProjectEntries(
         decision.target,
         decision.sources,
         {
@@ -244,7 +315,7 @@ export async function executeCuratorDecisionToBrain(args: {
         { ...writerOpts(decision.scope), sourceExpectedStatus: args.neighborStatusBySlug },
       );
       assertNoGitCommitFailure(results, settings);
-      return results;
+      break;
     }
 
     case "archive": {
@@ -259,7 +330,8 @@ export async function executeCuratorDecisionToBrain(args: {
         expected_status: args.neighborStatusBySlug?.[decision.slug],
       });
       assertNoGitCommitFailure([result], settings);
-      return [result];
+      results = [result];
+      break;
     }
 
     case "supersede": {
@@ -274,7 +346,8 @@ export async function executeCuratorDecisionToBrain(args: {
         sessionId,
       });
       assertNoGitCommitFailure([result], settings);
-      return [result];
+      results = [result];
+      break;
     }
 
     case "delete": {
@@ -290,7 +363,8 @@ export async function executeCuratorDecisionToBrain(args: {
         expected_status: args.neighborStatusBySlug?.[decision.slug],
       });
       assertNoGitCommitFailure([result], settings);
-      return [result];
+      results = [result];
+      break;
     }
 
     case "create": {
@@ -307,7 +381,22 @@ export async function executeCuratorDecisionToBrain(args: {
         writerOpts(decision.scope),
       );
       assertNoGitCommitFailure([result], settings);
-      return [result];
+      results = [result];
+      break;
     }
+
+    default:
+      results = [];
+      break;
   }
+
+  const writeStatuses = new Set([
+    "created", "updated", "merged", "archived", "superseded", "deleted",
+  ]);
+  const writeCount = results.filter((r) => writeStatuses.has(r.status)).length;
+  if (writeCount > 0) {
+    notePassMemoryWrite(writeCount);
+    emitConflictEvidence(results);
+  }
+  return results;
 }

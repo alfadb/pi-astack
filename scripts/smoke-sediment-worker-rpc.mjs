@@ -3829,7 +3829,9 @@ await check("maintenance: config gate; deadline/restart unreaped", async () => {
     countPublicationOutboxPending: () => outbox.countPublicationOutboxPending(abrainHome),
     env: {},
   });
-  assert(security.status === "failed" && security.error_code === "copy_store_root_missing", `security=${JSON.stringify(security)}`);
+  // Security-env failures collapse into the closed maintenance error enum
+  // (copy_store_* / allowed_owner_* → worker_security_gate_failed).
+  assert(security.status === "failed" && security.error_code === "worker_security_gate_failed", `security=${JSON.stringify(security)}`);
   assert(security.pending_before_bucket === "unknown" && security.pending_after_bucket === "unknown", "security failure count unknown");
   assert(drainCalls === 0, "security env failure must be zero-write");
 

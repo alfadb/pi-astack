@@ -137,6 +137,7 @@ daemon status (illustrative mapping, not outcome enum):
 - settings pause / authority free / unavailable → daemon status 可进入 `paused` / `unavailable`，attestation 可停在 `pending`/`blocked`；**允许停摆**，必须 loud 可观察，**禁止** TUI 接管填补。
 - corrupt attestation / epoch-nonce mismatch → fail closed；**禁止**删除 attestation/store “恢复 legacy”。
 - **D1 stale pending**：attestation 停在 `pending`（含 deferred settle）时，**不**由 observe 推进；由 daemon startup/periodic/backoff 发出的**新 kick** 推进（新 `convergence_generation` + 新 attempt）。D1 **不**实现 daemon scheduler 本身。
+- **R3 ready cheap drift probe（worker）**：observe 在 durable `outcome=ready` 上可返回 process-local control `pending`（`canonical_head_changed` / `canonical_backlog_pending` / `continuation_pending`）而不写 attestation；daemon 将 deferred pending 视为 BackoffKick → fresh kick。Rust 可接受 reason 集由 daemon 侧任务接线。
 
 ### 2.4 Worker control 协议方向
 
@@ -145,7 +146,7 @@ daemon status (illustrative mapping, not outcome enum):
 | 命令语义 | 要求 |
 | --- | --- |
 | `kick` | 请求一次 **真实、可验证的新鲜** convergence attempt；**立即返回**；始终在 **worker-budget task ALS 外** 驱动；同 root **in-flight singleflight/coalesce**；**settled ready 后**下一 kick **不得**只复用 fulfilled ready promise 虚增 attestation generation，必须驱动 runtime 新一轮 startup/convergence（可命中实时 last-known-ready gate 快速 ready）；普通 `getCanonicalStartupPromise` 历史 ready-reuse 语义保持 |
-| `observe` | 只读报告 attestation/control aggregate；**zero side-effect**（不 kick、不写 attestation、不创建 runtime/promise/timer、不触发 Git/文件 mutation/pipeline）；**不**凭 process-local runtime-ready 越权发布 durable ready |
+| `observe` | 只读报告 attestation/control aggregate；**zero side-effect**（不 kick、不写 attestation、不创建 runtime/promise/timer、不触发 Git/文件 mutation/pipeline）；**不**凭 process-local runtime-ready 越权发布 durable ready。**ready 稳态 cheap drift probe（R3）**：attestation `outcome=ready` 时只读比较 live HEAD 与 `canonical_head`、inspect bind inventory、porcelain l1/l2 backlog（**禁止** whole-L1 / 写 / 网络）；无 drift → control `ready`/`none`；drift → closed retryable reason（`canonical_head_changed` / `canonical_backlog_pending` / `continuation_pending`）或 non-retryable `continuation_failed`，供 daemon fresh kick；**不**改 durable attestation，**不**泄 exact head/path/count |
 
 握手（D1）：
 
@@ -197,7 +198,7 @@ Cutover 前必须审计所有 foreground/TUI **direct canonical mutation** 路�
 - shared `canonical-mutation-authority` 使用独立 `AsyncLocalStorage`（**不得**复用 worker-budget ALS），以 global symbol + version 跨 jiti 多实例共享；context 绑定 canonical ABRAIN root、role（`daemon|foreground_observed`）与 closed revalidate callback。store absent 保留 legacy；store present 仅 active same-root lease 且本次 revalidate 成功才允许，否则统一 `canonical_mutation_not_authorized`，error 不含 path/raw detail。
 - context 是**短 lease**：只覆盖 authorized callback 的完整 `await` 生命周期；callback settle 后先 invalidate lease。ALS 可能传播到 detached Promise / timer，但 inherited context 在 lease 失效后不得继续写，防止后台 continuation 借旧授权跨越 cutover/revocation。
 - `canonical-mutation-barrier` 的 outer / in-singleflight / try / nested-held 路径都执行 dynamic assert；至少在排队/取锁前与拿到 OFD 锁后、进入 operation 前复核。project repo 若无 authority store 仍走 legacy barrier，不因 ABRAIN DCC gate 误阻断。
-- daemon context 范围：worker RPC 每次 `runAgentEndPass` iteration；maintenance 真正 repair/drain；DCC kick 的 next-turn repair → whole-L1 startup promise → bind continuation settle（使用 initial admission 同一 observation seam、exact epoch/nonce、holder daemon）。kick handler 仍立即返回；后台 frame 必须 await full startup/settle 后才失效，authority revoke 导致 blocked/`startup_failed`，不得 ready。
+- daemon context 范围：worker RPC 每次 `runAgentEndPass` iteration；maintenance 真正 repair/drain **以及** R6 `kind=global_maintenance` 的 7 条全局 lane 执行；DCC kick 的 next-turn repair → whole-L1 startup promise → bind continuation settle（使用 initial admission 同一 observation seam、exact epoch/nonce、holder daemon）。kick handler 仍立即返回；后台 frame 必须 await full startup/settle 后才失效，authority revoke 导致 blocked/`startup_failed`，不得 ready。global_maintenance **不**恢复 foreground、**不**在 taskScoped 放开；与 publication_outbox 共享 LSEA admission + mutation authority + process-global serial，独立 budget/backoff/status。
 - foreground vault 在 outer six-condition ready 后创建 `foreground_observed` context，revalidate 仍为 strict six-condition ready/none，并覆盖 barrier + operation；store absent 不创建 context/barrier。semantic writer 即使 `gitCommit=false` 也在 operation 前 assert；tracked canonical writers（knowledge/outcome/constraint evidence、Tier-1 proposition、constraint projection L1/L2、production proposition L1）在真正 L1/L2 mutation 段自包含 `withCanonicalMutationBarrier`（preflight/read-CAS/write 整体 OFD；nested 不死锁；store absent legacy）。**不**把 `.state/sediment/proposition-policy-stable-view` recovery child 当作 canonical fence 对象。`.state` pending marker/audit/sequence/L3 sync 不属于 canonical semantic authority，不因此阻断；offline output/project files 不扩大 gate。
 
 **D3/D4 local implementation notes（2026-07-30 local；生产仅部署顺序 + readonly aggregate 终态，行为子路径未触发）**：
@@ -287,6 +288,41 @@ criterion ids（SOT：pi-router `plan.md` DCC section）：
 
 真实验收 **必须** 使用生产数据（aggregate-only）；合成不得作为唯一证据。**Linux production acceptance 已完成（2026-07-31）**：pi-router `docs/acceptance/dcc-linux-production-acceptance.md` 记录 strict deploy order、recovery aggregate、exact observer/wrapper stdout、readonly invariants 与 Windows/Stage 边界；全部 `(dcc-*)` 已勾。证据组合 = 文档合同 + 本地 behavior tests/gates + 真实 staged deployment + 真实 readonly aggregate-only final state。**生产未触发** vault set/forget/init write、`/memory migrate --go`、foreground business write、dynamic mutation fence mutation、新 pending bind continuation apply（唯一 stale failed intent 是用户授权删除）。installed-full smokes 另验证 control/authority/admission/foreground-cutover。行为子路径由本地 tests/deploy-order gates 覆盖。整体仍 **accepted**。**Windows native attestation writer/verifier 仍 pending**；**不**表示 formal Stage A / ConsumerAck / center primary / retention 完成。
 
+### 2.11 Candidate Sibling Join（CSJ v1）— prepared stale-base 自动修复
+
+**Status（2026-08-02）**：本地实现 + matrix smoke（`npm run smoke:csj`）通过；**production live CAS / DCC kick 未执行**。生产是否 eligible 须在 live artifact binding + full classify 下重算；本 ADR **不**预写 production 解除死锁成功。
+
+**问题**：`recoverDrainSlotV3` 在 `!published ∧ HEAD≠base ∧ ¬isAncestor(candidate,HEAD)` 时抛 `RECOVERY_V3_STALE_BASE`，startup fail-closed 形成永久 blocked 窗口。
+
+**决策（冻结规格 Round6 `/tmp/pi-router-csj-final-spec.md`）**：
+
+- 在同一 `withCanonicalMutationAuthority ∘ withCanonicalMutationBarrierInSingleFlight` 帧内，对 **v2∪v3 open exact count=1** 的 pure recovery v3（+0\|1 bind）prepared episode：
+  1. `CsjEligibility` 全合取（E1–E30+E16b；E24 all-put regular non-symlink bytes==blob mode=100644；¬clean absent）
+  2. 确定性两父 merge `M=parents(HEAD,candidate)` + Cert.A/B + `certifyProspectiveRecoveryJoin`（复用私有 `findCertifiedJoin`/SnapshotCache/`validateWholeL1AndL2`）+ Cert.C2 complete residual pairs + Cert.F
+  3. **唯一** CAS via `CanonicalRefMovePrimitive(purpose=csj_v1)`
+  4. 同帧 `recoverDrainSlotV3` ancestry 分支写 `commit_published`/`index_converged`（**不**发 candidate CAS；**不**物化 worktree）
+- **C1**：新建 `CanonicalRefMovePrimitive`；闭集 `RefMovePurpose`（purpose **显式必填无默认**）；迁移既有 3 处 update-ref（`git-exact-cohort.publishExactCohortCommit`、`device-join` journal recover、`device-join` prepared publish）；`recoverDrainSlotV3` 透传 `purpose=recover_v3`；open/quarantined 时普通 purpose blocked
+- **C2**：blocked-memo 独占 `.state/sediment/canonical-blocked-memo/v1/blocked-memo.json`（schema `pi-astack/canonical-blocked-memo/v1`；六键；与 ready/attestation **完全解耦**；diagnostic only）
+- **C5**：NextKick 先 `AncOpen∧T2BudgetExhausted→ownerAlert blocked`，再 bounded T2；**绝不**二次 CSJ CAS；journal 非 authority；owner alert **不**写 L1 terminal
+- **C6**：`CsjClosedReason` 闭集 adapter；对外仅 reason_code+counts/bools；artifact binding（`executionArtifactDigest` + 三指纹）live CAS 紧前 exact match
+
+**硬非目标（摘）**：新 L1 schema；手改 production abrain；业务 cohort stale-base 自动 CSJ（N16）；published∧¬ancestor 的 CSJ；分叉第二套 certified join。
+
+**实现落点**：
+
+| 模块 | 职责 |
+| --- | --- |
+| `extensions/_shared/canonical-ref-move.ts` | Primitive + open/quarantine gate |
+| `extensions/_shared/csj-eligibility.ts` | CsjEligibility |
+| `extensions/_shared/csj-prospective-merge.ts` | merge/cert/T1/T2/journal/NextKick |
+| `extensions/_shared/csj-blocked-memo.ts` | C2 memo |
+| `extensions/_shared/csj-closed-reason.ts` | privacy adapter |
+| `recovery-history-classifier.ts` | `certifyProspectiveRecoveryJoin` 薄封装 |
+| `canonical-git-runtime.ts` | stale-base → CSJ 接入；`statusSnapshot` 导出 |
+| `scripts/smoke-csj.mjs` | matrix smoke |
+
+**生产注意**：live mutation 仅在 eligibility + artifact binding 全过时允许；否则诚实 blocked + memo，**零** ref 移动。
+
 ## 3. Non-goals
 
 - 修改 LSEA `authority.json` v1 或增加第二 authority lock
@@ -295,6 +331,8 @@ criterion ids（SOT：pi-router `plan.md` DCC section）：
 - center Stage B/C primary cutover
 - 用删除 store/attestation 恢复 legacy TUI whole-L1
 - 把 DCC 宣称为 center memory authority 或 formal readiness
+- 用 CSJ 修复业务 cohort stale-base（仅 pure recovery v3 + 0\|1 bind）
+- 将 CSJ journal / blocked-memo 升格为 L1 authority / ConsumerAck
 
 ## 4. Consequences
 

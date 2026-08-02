@@ -174,6 +174,61 @@ await check("boundary probe status shared: dispatch sets ok, sediment reads ok",
   }
 });
 
+// ── csj witness mint: cross-extension capability share ─────────
+
+console.log("\n  csj-witness-mint:");
+
+await check("memory+sediment dual jiti load shares mint capability (no already-installed throw)", async () => {
+  const memoryPath = `${repoRoot}/extensions/memory/index.ts`;
+  const sedimentPath = `${repoRoot}/extensions/sediment/index.ts`;
+  const memoryMod = await loadFresh(memoryPath);
+  const sedimentMod = await loadFresh(sedimentPath);
+  if (typeof memoryMod?.default !== "function") {
+    throw new Error(`memory factory missing: ${typeof memoryMod?.default}`);
+  }
+  if (typeof sedimentMod?.default !== "function") {
+    throw new Error(`sediment factory missing: ${typeof sedimentMod?.default}`);
+  }
+  // Third prospective-merge instance (would previously throw already installed).
+  const mergePath = `${repoRoot}/extensions/_shared/csj-prospective-merge.ts`;
+  const mergeMod = await loadFresh(mergePath);
+  if (!mergeMod || typeof mergeMod !== "object") {
+    throw new Error("csj-prospective-merge third instance failed to load");
+  }
+});
+
+await check("same-version mint reinstall returns shared fn; bad nonce / shape conflict fail closed", async () => {
+  const refPath = `${repoRoot}/extensions/_shared/canonical-ref-move.ts`;
+  const refMove = await loadFresh(refPath);
+  const nonce = Symbol.for("pi-astack/csj-witness-mint-install-nonce");
+  const mintA = refMove.installCsjWitnessMintCapability(nonce);
+  const mintB = refMove.installCsjWitnessMintCapability(nonce);
+  if (typeof mintA !== "function" || mintA !== mintB) {
+    throw new Error("same-version reinstall did not return shared mint");
+  }
+  let badNonce = false;
+  try {
+    refMove.installCsjWitnessMintCapability(Symbol("not-install-nonce"));
+  } catch (err) {
+    badNonce = /CAPABILITY|nonce invalid/i.test(String(err?.code || err?.message || err));
+  }
+  if (!badNonce) throw new Error("invalid nonce must fail closed");
+  const capKey = Symbol.for("pi-astack/csj-witness-mint-capability/v1");
+  const saved = globalThis[capKey];
+  try {
+    globalThis[capKey] = Object.freeze({ version: 999, shape: "foreign", mint: () => null });
+    let conflict = false;
+    try {
+      refMove.installCsjWitnessMintCapability(nonce);
+    } catch (err) {
+      conflict = /version\/shape conflict|CAPABILITY/i.test(String(err?.message || err));
+    }
+    if (!conflict) throw new Error("version/shape conflict must fail closed");
+  } finally {
+    globalThis[capKey] = saved;
+  }
+});
+
 // ── Summary ────────────────────────────────────────────────────
 
 console.log();

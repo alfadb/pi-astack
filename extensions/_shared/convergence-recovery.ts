@@ -585,7 +585,15 @@ export async function recoverDrainSlot(options: {
     let outcome: "published" | "absorbed" | "conflict" = "conflict";
     if (current === prepared.frozenCommit) {
       await options.prePublishCheck?.();
-      const result = await publishExactCohortCommit({ repo: prepared.repo, refName: prepared.refName, candidate: prepared.candidate, frozenCommit: prepared.frozenCommit });
+      const result = await publishExactCohortCommit({
+        repo: prepared.repo,
+        abrainHome: options.abrainHome,
+        refName: prepared.refName,
+        candidate: prepared.candidate,
+        frozenCommit: prepared.frozenCommit,
+        purpose: "recover_v3",
+        expectedEpisodeId: options.episodeId,
+      });
       outcome = result.status === "cas_conflict" ? "conflict" : result.status === "published" ? "published" : "absorbed";
     } else if (await currentContainsPrepared(prepared)) outcome = "absorbed";
     if (outcome === "conflict") {
@@ -946,7 +954,15 @@ export async function recoverDrainSlotV3(options: {
     const current = await resolveRef(prepared.repo, prepared.refName);
     if (current === options.operation.base_commit) {
       await options.prePublishCheck?.();
-      const result = await publishExactCohortCommit({ repo: prepared.repo, refName: prepared.refName, candidate: prepared.candidate, frozenCommit: options.operation.base_commit });
+      const result = await publishExactCohortCommit({
+        repo: prepared.repo,
+        abrainHome: options.abrainHome,
+        refName: prepared.refName,
+        candidate: prepared.candidate,
+        frozenCommit: options.operation.base_commit,
+        purpose: "recover_v3",
+        expectedEpisodeId: episodeId,
+      });
       if (result.status === "cas_conflict" && !await isAncestor(prepared.repo, prepared.candidate, result.currentRef)) {
         throw new ConvergenceRecoveryError("RECOVERY_V3_STALE_BASE", "concurrent canonical path publication has no certified semantic join", { episodeId, baseCommit: options.operation.base_commit, current: result.currentRef });
       }

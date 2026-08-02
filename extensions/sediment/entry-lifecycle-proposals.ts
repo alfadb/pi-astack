@@ -42,7 +42,11 @@ export type LifecycleProposalReason = LifecycleProposal["reason"] | "superseded_
 export type LifecycleProposalStatus = "pending" | "executed" | "failed" | "deferred_until_new_evidence";
 export type LifecycleProposalDisposition = "execution_ready" | "defer_until_new_evidence";
 export type LifecycleProposalExpectedStatus = "active" | "superseded";
-export type LifecycleProposalEvidenceSource = "aggregator_promoted_advisory" | "frontmatter_superseded" | "decay";
+export type LifecycleProposalEvidenceSource =
+  | "aggregator_promoted_advisory"
+  | "frontmatter_superseded"
+  | "decay"
+  | "curator_conflict";
 export type DurableKindSource = "canonical_frontmatter" | "project_frontmatter" | "project_root_frontmatter";
 export type DurableKindResolutionReason = "missing_durable_entry" | "missing_durable_kind" | "invalid_durable_kind" | "ambiguous_durable_kind";
 
@@ -363,23 +367,37 @@ export function normalizeLifecycleProposalRow(row: unknown): EntryLifecyclePropo
       ? "aggregator_promoted_advisory"
       : r.evidence_source === "decay"
         ? "decay"
-        : undefined;
+        : r.evidence_source === "curator_conflict"
+          ? "curator_conflict"
+          : undefined;
   const kindResolution = normalizeKindResolution(r.kind_resolution);
   const slug = typeof r.slug === "string" && r.slug ? r.slug : undefined;
-  // LLM/aggregator-derived sources (including legacy undefined + decay) require
-  // independently verified attributed L1 outcome evidence. Durable frontmatter
-  // E1 keeps its deterministic execution_ready semantics.
+  // LLM/aggregator/curator-conflict sources (including legacy undefined + decay)
+  // require independently verified attributed L1 evidence. Durable
+  // frontmatter E1 keeps its deterministic execution_ready semantics.
+  // curator_conflict binds the real Knowledge L1 event id of the contradicting
+  // create/update write (not outcome-index); without that id it stays deferred.
   const requiresIndependentEvidence = reason === "superseded_no_successor"
     || source === "aggregator_promoted_advisory"
     || source === "decay"
+    || source === "curator_conflict"
     || source === undefined;
   const verifiedEvidenceIds = requiresIndependentEvidence
-    ? resolveIndependentOutcomeEvidenceEventIds(r.independent_evidence_event_ids, projectRoot, { targetSlug: slug, requireReliableAttribution: true })
+    ? source === "curator_conflict"
+      ? [...new Set(
+          (Array.isArray(r.independent_evidence_event_ids) ? r.independent_evidence_event_ids : [])
+            .filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)),
+        )].sort()
+      : resolveIndependentOutcomeEvidenceEventIds(r.independent_evidence_event_ids, projectRoot, { targetSlug: slug, requireReliableAttribution: true })
     : Array.isArray(r.independent_evidence_event_ids)
       ? [...new Set(r.independent_evidence_event_ids.filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)))].sort()
       : [];
+  const kind = typeof r.kind === "string" && r.kind.trim() ? r.kind.trim() : "unknown";
+  // curator_conflict: event ids alone are insufficient — missing/unknown kind must
+  // stay deferred (never promote unknown+eventId to execution_ready on re-read).
+  const curatorConflictKindReady = source !== "curator_conflict" || (kind !== "" && kind !== "unknown");
   const executionReady = requiresIndependentEvidence
-    ? op === "archive" && !!slug && verifiedEvidenceIds.length > 0
+    ? op === "archive" && !!slug && verifiedEvidenceIds.length > 0 && curatorConflictKindReady
     : requestedDisposition === "execution_ready";
   const disposition: LifecycleProposalDisposition = executionReady ? "execution_ready" : "defer_until_new_evidence";
   const terminalStatus = r.status === "executed" || r.status === "failed" ? r.status : undefined;
@@ -388,7 +406,7 @@ export function normalizeLifecycleProposalRow(row: unknown): EntryLifecyclePropo
     ts: typeof r.ts === "string" ? r.ts : formatLocalIsoTimestamp(),
     project_root: projectRoot,
     ...(slug ? { slug } : {}),
-    kind: typeof r.kind === "string" ? r.kind : "unknown",
+    kind,
     op,
     reason,
     independent_evidence: typeof r.independent_evidence === "string" ? r.independent_evidence : "",
@@ -1168,6 +1186,109 @@ export function appendLifecycleProposals(options: AppendLifecycleProposalsOption
     };
   });
   return lifecycleAppendResult(appendRows(projectRoot, rows));
+}
+
+export type CuratorConflictEvidenceSource = "curator_stale_neighbors" | "curator_supersedes";
+
+export interface AppendCuratorConflictProposalsOptions {
+  projectRoot: string;
+  /** Validated neighbor slugs from curator stale_neighbors (strict). */
+  staleNeighbors?: readonly string[];
+  /** Validated neighbor slugs from curator supersedes (strict). */
+  supersedes?: readonly string[];
+  /** Optional candidate slug that produced the conflict (for message only; not identity). */
+  candidateSlug?: string;
+  /** Optional kind map for targets; defaults to "unknown". */
+  kindBySlug?: ReadonlyMap<string, string> | Record<string, string>;
+  /**
+   * Real Knowledge L1 event ids from the successful contradicting create/update
+   * write. Required to enter execution_ready / forgetting; absent → defer only
+   * (no fake progress).
+   */
+  independentEvidenceEventIds?: readonly string[];
+  now?: Date;
+}
+
+/**
+ * R6: write contradicted lifecycle evidence from curator structured conflict fields.
+ * Only accepts already-validated neighbor slugs — never free-text parsing.
+ * Does NOT mutate historical L1 events or entry markdown; forgetting-executor consumes.
+ * Binds the current write's real Knowledge L1 event ids when provided; without
+ * them proposals stay deferred_until_new_evidence (no fake execution_ready).
+ */
+export function appendCuratorConflictProposals(
+  options: AppendCuratorConflictProposalsOptions,
+): AppendLifecycleProposalsResult {
+  const projectRoot = normalizeProjectRoot(options.projectRoot);
+  const ts = formatLocalIsoTimestamp(options.now ?? new Date());
+  const evidenceEventIds = [...new Set(
+    (options.independentEvidenceEventIds ?? [])
+      .filter((id): id is string => typeof id === "string" && /^[0-9a-f]{64}$/.test(id)),
+  )].sort();
+  const kindLookup = (slug: string): string => {
+    if (!options.kindBySlug) return "unknown";
+    if (options.kindBySlug instanceof Map) {
+      const v = options.kindBySlug.get(slug);
+      return typeof v === "string" && v.trim() ? v.trim() : "unknown";
+    }
+    const v = (options.kindBySlug as Record<string, string>)[slug];
+    return typeof v === "string" && v.trim() ? v.trim() : "unknown";
+  };
+  const rows: EntryLifecycleProposalRow[] = [];
+  const seen = new Set<string>();
+  const push = (
+    slug: string,
+    source: CuratorConflictEvidenceSource,
+    evidenceType: "contradicted" | "superseded_by",
+    reason: LifecycleProposalReason,
+  ) => {
+    const normalized = String(slug || "").trim();
+    if (!normalized || seen.has(`${source}:${normalized}`)) return;
+    seen.add(`${source}:${normalized}`);
+    const kind = kindLookup(normalized);
+    // Kind evidence is required for execution_ready. Missing/unknown kind stays
+    // deferred — never fake progress as unknown+execution_ready (executor gate
+    // would only lane_required-skip, and invents a false ready signal).
+    const hasKindEvidence = kind !== "unknown";
+    const executionReady = evidenceEventIds.length > 0 && hasKindEvidence;
+    rows.push({
+      schema_version: 1,
+      ts,
+      project_root: projectRoot,
+      slug: normalized,
+      kind,
+      op: "archive",
+      reason,
+      independent_evidence: clip(
+        source === "curator_supersedes"
+          ? `curator structured supersedes for neighbor ${normalized}`
+            + (options.candidateSlug ? ` by candidate ${options.candidateSlug}` : "")
+          : `curator structured stale_neighbors for neighbor ${normalized}`
+            + (options.candidateSlug ? ` by candidate ${options.candidateSlug}` : ""),
+      ),
+      falsifier: clip(
+        "newer curator decision retracts the conflict or the neighbor is revalidated as current",
+      ),
+      message: clip(`curator-conflict ${source} → ${normalized}`),
+      expected_status: "active",
+      disposition: executionReady ? "execution_ready" : "defer_until_new_evidence",
+      evidence_source: "curator_conflict",
+      evidence_key: `${source}:${normalized}:${options.candidateSlug ?? ""}`,
+      evidence_type: evidenceType,
+      ...(evidenceEventIds.length ? { independent_evidence_event_ids: evidenceEventIds } : {}),
+      status: executionReady ? "pending" : "deferred_until_new_evidence",
+    });
+  };
+  for (const slug of options.staleNeighbors ?? []) {
+    push(slug, "curator_stale_neighbors", "contradicted", "affirm_stale");
+  }
+  for (const slug of options.supersedes ?? []) {
+    push(slug, "curator_supersedes", "superseded_by", "affirm_superseded");
+  }
+  if (rows.length === 0) {
+    return { ok: true, written: false, proposals_appended: 0, rows_total: 0 };
+  }
+  return lifecycleAppendResult(appendRows(projectRoot, rows, { dedupeArchiveBySlug: true }));
 }
 
 function decayReason(a: EntryDecayAssessment): LifecycleProposalReason {

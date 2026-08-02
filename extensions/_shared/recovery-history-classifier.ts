@@ -146,8 +146,12 @@ type ParsedEpisode = {
   closures: AcceptedV2Closure[];
 };
 
-function compareCodeUnits(left: string, right: string): number {
+export function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export function sortCodeUnits(values: readonly string[]): string[] {
+  return [...values].sort(compareCodeUnits);
 }
 
 function failure(code: string, message: string, detail?: Record<string, unknown>): RecoveryHistoryClassificationError {
@@ -1229,6 +1233,91 @@ export async function classifyRecoveryHistory(options: { repo: string; scan?: Wh
       });
     }
     return Object.freeze({ status: "accepted", head, v2, v3, quarantined: Object.freeze([]) });
+  } finally {
+    await snapshots.dispose();
+  }
+}
+
+/**
+ * Thin prospective recovery join certifier (CSJ Cert.C).
+ * Reuses private findCertifiedJoin / SnapshotCache / validateWholeL1AndL2 — no forked join logic.
+ */
+export async function certifyProspectiveRecoveryJoin(options: {
+  repo: string;
+  scan: WholeL1ScanResult;
+  head: string;
+  episodeId: string;
+  slot: number;
+  labels: readonly string[];
+  expectedMerge: string;
+  acceptedV2: V2RecoveryHistoryResult;
+  acceptedV3: V3RecoveryHistoryResult;
+}): Promise<CertifiedSemanticJoin> {
+  if (options.acceptedV2.status !== "accepted") {
+    fail("RECOVERY_HISTORY_NOT_ACCEPTED", "acceptedV2 is required for prospective join cert", { episodeId: options.episodeId });
+  }
+  if (options.acceptedV3.status !== "accepted") {
+    fail("RECOVERY_HISTORY_NOT_ACCEPTED", "acceptedV3 is required for prospective join cert", { episodeId: options.episodeId });
+  }
+  const labels = sortCodeUnits(options.labels);
+  const repo = path.resolve(options.repo);
+  const head = await resolveCommit(repo, options.head);
+  // Spec Cert.C: at tip=M, really reclassify v2→v3 on the same scan, then explicit join.
+  // classify* itself does NOT auto-certify open joins — findCertifiedJoin must hit expectedMerge=M.
+  const reV2 = await classifyV2RecoveryHistory({ repo, scan: options.scan, head });
+  if (reV2.status !== "accepted") {
+    fail("RECOVERY_HISTORY_NOT_ACCEPTED", "prospective tip=M v2 reclassify not accepted", {
+      episodeId: options.episodeId,
+      status: reV2.status,
+    });
+  }
+  const reV3 = await classifyV3RecoveryHistory({
+    repo,
+    scan: options.scan,
+    head,
+    acceptedV2: reV2,
+  });
+  if (reV3.status !== "accepted") {
+    fail("RECOVERY_HISTORY_NOT_ACCEPTED", "prospective tip=M v3 reclassify not accepted", {
+      episodeId: options.episodeId,
+      status: reV3.status,
+    });
+  }
+  // Caller-provided acceptedV2/V3 remain contract inputs; reclassified pair must also be accepted.
+  void options.acceptedV2;
+  void options.acceptedV3;
+
+  const snapshots = new SnapshotCache(repo);
+  try {
+    // Direct private findCertifiedJoin + SnapshotCache + validateWholeL1AndL2 (no forked logic).
+    const join = await findCertifiedJoin(repo, head, options.episodeId, options.slot, labels, snapshots);
+    if (join.mergeCommit !== options.expectedMerge) {
+      fail("RECOVERY_SEMANTIC_JOIN_MISSING", "certified join mergeCommit does not match expectedMerge", {
+        episodeId: options.episodeId,
+        slot: options.slot,
+        expectedMerge: options.expectedMerge,
+        mergeCommit: join.mergeCommit,
+      });
+    }
+    // Proof must belong to tip=M (head).
+    if (head !== options.expectedMerge && join.mergeCommit !== head) {
+      // expectedMerge is M and head is M; join.mergeCommit must equal M.
+      fail("RECOVERY_SEMANTIC_JOIN_MISSING", "certified join does not prove tip=M", {
+        episodeId: options.episodeId,
+        head,
+        mergeCommit: join.mergeCommit,
+        expectedMerge: options.expectedMerge,
+      });
+    }
+    if (join.branchLabels.length !== labels.length || join.branchLabels.some((label, i) => label !== labels[i])) {
+      fail("RECOVERY_SEMANTIC_JOIN_MISSING", "certified join branchLabels do not cover expected labels", {
+        episodeId: options.episodeId,
+        expectedLabels: labels,
+        branchLabels: join.branchLabels,
+      });
+    }
+    await snapshots.validateWholeL1AndL2(head);
+    return join;
   } finally {
     await snapshots.dispose();
   }

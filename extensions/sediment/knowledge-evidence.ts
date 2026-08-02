@@ -14,6 +14,7 @@ import { scanWholeL1Validated, validateL1WritePreflight } from "../_shared/l1-sc
 import { slugify } from "../memory/utils";
 import type { ProjectEntryDraft, WriteProjectEntryResult, WriterAuditContext } from "./writer";
 import type { SedimentSettings } from "./settings";
+import { notePassKnowledgeL1EventCreated } from "./pass-telemetry";
 
 type JsonValue = JcsJsonValue;
 
@@ -333,6 +334,8 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
         // collision. Never rename-overwrite an existing non-empty L1 event.
         const createStatus = await durableAtomicCreateFile(filePath, content);
         if (createStatus === "created") {
+          // R7: real Knowledge L1 create only (not idempotent / collision).
+          notePassKnowledgeL1EventCreated(1);
           return {
             ok: true,
             status: "appended" as const,
@@ -367,6 +370,8 @@ export async function appendKnowledgeEvidenceEvent(args: { abrainHome: string; b
         const stat = await fs.stat(filePath).catch(() => null);
         if (stat && stat.size === 0) {
           await durableAtomicWriteFile(filePath, content);
+          // R7: empty-residue recovery is still a brand-new durable L1 create.
+          notePassKnowledgeL1EventCreated(1);
           return {
             ok: true,
             status: "appended" as const,
@@ -1219,6 +1224,9 @@ export async function appendPreparedKnowledgeEvidenceForWrite(
   const append = prepared.replay
     ?? await appendKnowledgeEvidenceEvent({ abrainHome: args.abrainHome, body: prepared.body });
   const body = append.envelope?.body ?? prepared.body;
+  // R7 counters: Knowledge L1 create is noted inside appendKnowledgeEvidenceEvent
+  // on status=appended only. prepared.replay (idempotent) never double-counts.
+  // Publication/outbox is NOT claimed here (no projection-undefined / idempotent miscount).
   const wantProject = append.ok && append.envelope && args.projectEvent !== false && args.settings.knowledgeProjector.projectOnWrite;
   if (wantProject && args.deferPublication === true) {
     // Accepted durability stops at create-only L1 (+ caller's outbox). Do not

@@ -200,6 +200,7 @@
     "smoke:canonical-session-start": "node scripts/smoke-canonical-session-start.mjs",
     "smoke:sediment-agent-end-queue": "node scripts/smoke-sediment-agent-end-queue.mjs",
     "smoke:sediment-worker-rpc": "node scripts/smoke-sediment-worker-rpc.mjs",
+    "smoke:sediment-global-maintenance-telemetry": "node scripts/smoke-sediment-global-maintenance-telemetry.mjs",
     "smoke:lsea-worker-admission": "node scripts/smoke-lsea-worker-admission.mjs",
     "smoke:dcc-worker-control": "node scripts/smoke-dcc-worker-control.mjs",
     "smoke:dcc-foreground-cutover": "node scripts/smoke-dcc-foreground-cutover.mjs",
@@ -223,6 +224,7 @@
     "smoke:production-runtime-restart": "node scripts/smoke-production-runtime-restart.mjs",
     "smoke:canonical-path-shadow": "node scripts/smoke-canonical-path-shadow.mjs",
     "smoke:convergence-recovery": "node scripts/smoke-convergence-recovery.mjs",
+    "smoke:csj": "node scripts/smoke-csj.mjs",
     "smoke:recovery-u-star-production-readonly": "node scripts/smoke-recovery-u-star-production-readonly.mjs",
     "smoke:script-registry-drift": "node scripts/smoke-script-registry-drift.mjs",
     "smoke:constraint-shadow-compiler": "node scripts/smoke-constraint-shadow-compiler.mjs",
@@ -310,7 +312,9 @@
     "gate:adr0039-flip-coverage": "node scripts/adr0039-flip-coverage-gate.mjs --abrain ~/.abrain",
     "smoke:sediment-extractor-budget": "node scripts/smoke-sediment-extractor-budget.mjs",
     "dossier:sediment-extractor-budget-production-readonly": "node scripts/dossier-sediment-extractor-budget-production-readonly.mjs",
-    "recover:edge-unreferenced-sources": "node scripts/recover-edge-unreferenced-sources.mjs"
+    "recover:edge-unreferenced-sources": "node scripts/recover-edge-unreferenced-sources.mjs",
+    "csj:rehearse-production": "node scripts/csj-rehearse-production.mjs",
+    "csj:rehearse-production:dry-run": "node scripts/csj-rehearse-production.mjs --dry-run"
   },
   "pi": {
     "extensions": [

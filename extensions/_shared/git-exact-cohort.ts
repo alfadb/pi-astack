@@ -6,6 +6,11 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import { jcsSha256Hex, sha256Hex } from "./jcs";
 import { isCanonicalCohortPath } from "./l1-schema-registry";
+import { canonicalRefMovePrimitive, type RefMovePurpose } from "./canonical-ref-move";
+import {
+  canonicalMutationBarrierHeld,
+  withCanonicalMutationBarrier,
+} from "./canonical-mutation-barrier";
 
 const execFileAsync = promisify(execFile);
 
@@ -374,34 +379,63 @@ export async function prepareExactCohortCommit(options: {
   }
 }
 
-/** `update-ref <ref> <candidate> <frozen>` optimistic CAS. On failure the ref
- *  and worktree are untouched; the candidate object simply stays unreachable. */
+/** `update-ref <ref> <candidate> <frozen>` optimistic CAS via CanonicalRefMovePrimitive.
+ *  On failure the ref and worktree are untouched; the candidate object simply stays unreachable.
+ *  purpose is required (no default): exact_cohort_publish or recover_v3. */
 export async function publishExactCohortCommit(options: {
   repo: string;
+  /** Real abrain home for assertCanonicalMutationAuthorized; required. */
+  abrainHome: string;
   refName: string;
   candidate: string;
   frozenCommit: string;
+  /** Explicit required purpose — no default. */
+  purpose: Extract<RefMovePurpose, "exact_cohort_publish" | "recover_v3">;
+  expectedEpisodeId?: string;
+  /** Test-only; production callers must not skip the open gate. */
+  skipOpenGate?: boolean;
 }): Promise<PublishResult> {
-  try {
-    await git(options.repo, ["update-ref", options.refName, options.candidate, options.frozenCommit]);
-    return { status: "published", currentRef: options.candidate };
-  } catch (updateError) {
-    let currentRef: string;
-    try {
-      currentRef = await resolveRef(options.repo, options.refName);
-    } catch {
-      throw updateError;
-    }
-    if (currentRef === options.candidate) return { status: "already_published", currentRef };
-    try {
-      await git(options.repo, ["merge-base", "--is-ancestor", options.candidate, currentRef]);
-      return { status: "remote_contained", currentRef };
-    } catch (ancestryError) {
-      if (gitExitCode(ancestryError) !== 1) throw ancestryError;
-      if (currentRef !== options.frozenCommit) return { status: "cas_conflict", currentRef };
-      throw updateError;
-    }
+  if (!options.purpose) {
+    throw new GitExactCohortError("REF_MOVE_PURPOSE_INVALID", "publishExactCohortCommit requires explicit purpose");
   }
+  if (!options.abrainHome) {
+    throw new GitExactCohortError("REF_MOVE_ABRAIN_HOME_REQUIRED", "publishExactCohortCommit requires abrainHome");
+  }
+  const move = async (): Promise<PublishResult> => {
+    try {
+      await canonicalRefMovePrimitive({
+        repo: options.repo,
+        abrainHome: options.abrainHome,
+        refName: options.refName,
+        newTip: options.candidate,
+        expectedTip: options.frozenCommit,
+        purpose: options.purpose,
+        expectedEpisodeId: options.expectedEpisodeId,
+        skipOpenGate: options.skipOpenGate,
+      });
+      return { status: "published", currentRef: options.candidate };
+    } catch (updateError) {
+      let currentRef: string;
+      try {
+        currentRef = await resolveRef(options.repo, options.refName);
+      } catch {
+        throw updateError;
+      }
+      if (currentRef === options.candidate) return { status: "already_published", currentRef };
+      try {
+        await git(options.repo, ["merge-base", "--is-ancestor", options.candidate, currentRef]);
+        return { status: "remote_contained", currentRef };
+      } catch (ancestryError) {
+        if (gitExitCode(ancestryError) !== 1) throw ancestryError;
+        if (currentRef !== options.frozenCommit) return { status: "cas_conflict", currentRef };
+        throw updateError;
+      }
+    }
+  };
+  // Spec C1: every CanonicalRefMove must hold the OFD barrier. Callers already
+  // inside the barrier re-enter cheaply; bare recover/unit paths acquire here.
+  if (canonicalMutationBarrierHeld(options.repo)) return move();
+  return withCanonicalMutationBarrier(options.repo, move);
 }
 
 export interface IndexConvergenceResult {

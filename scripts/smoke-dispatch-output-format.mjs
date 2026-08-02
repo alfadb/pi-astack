@@ -156,6 +156,60 @@ fs.writeFileSync(
 };\n`,
 );
 
+// Stub dispatch-trace (runId / liveTail / parent append). formatResult does not
+// write traces; only module-load resolve is required for this smoke.
+fs.writeFileSync(
+  path.join(tmpDir, "dispatch-trace.js"),
+  `module.exports = {
+  DISPATCH_TRACE_CUSTOM_TYPE: "pi-astack/dispatch-trace/v1",
+  DISPATCH_TRACE_LIVE_TAIL_MAX_BYTES: 16 * 1024,
+  DISPATCH_TRACE_MAX_FRAGMENT_BYTES: 240 * 1024,
+  DISPATCH_TRACE_MAX_RUN_BYTES: 8 * 1024 * 1024,
+  computeDispatchRunId: (ns, tool, idx) => "dtr_stub_" + String(idx),
+  createDispatchTraceSink: () => ({
+    runId: "dtr_stub",
+    isEnded: () => false,
+    emitLifecycle: () => {},
+    emitGovernor: () => {},
+    handleSessionEvent: () => {},
+    getLiveTail: () => ({ runId: "dtr_stub", revision: 0, baseEventSeq: 0, events: [], live: false }),
+    end: async () => ({
+      runId: "dtr_stub",
+      traceStatus: "complete",
+      lastPersistedEventSeq: 0,
+      droppedEventCount: 0,
+      droppedFragmentCount: 0,
+      persistedBytes: 0,
+      persistEnabled: false,
+    }),
+  }),
+  dispatchTraceFieldsFromResult: () => ({}),
+  dispatchTraceSummaryFields: () => ({}),
+  getSharedParentAppendQueue: () => ({ enqueue: async (fn) => fn() }),
+  resolveParentSessionNamespace: () => "stub-session",
+  normalizeSessionEvent: () => [],
+  splitUtf8ByMaxBytes: (s) => [s],
+  utf8ByteLength: (s) => Buffer.byteLength(String(s), "utf8"),
+  _resetSharedParentAppendQueueForTests: () => {},
+};\n`,
+);
+
+// Stub tool-run-snapshot (safe metadata tracker). formatResult does not use it.
+fs.writeFileSync(
+  path.join(tmpDir, "tool-run-snapshot.js"),
+  `class ToolRunTracker {
+  onStart() {}
+  onUpdate() {}
+  onEnd() {}
+  snapshot() { return { activeToolCount: 0, activeTools: [], lastTool: null }; }
+}
+module.exports = {
+  ToolRunTracker,
+  toolSnapshotAuditFields: () => ({}),
+  toolSnapshotDetailsFields: () => ({}),
+};\n`,
+);
+
 // Stub `typebox` (dispatch/index.ts: `import { Type } from "typebox"`).
 // It is needed because the file's default export `function (pi) { pi.registerTool(...) }`
 // body runs Type.Object at registration site — but registerTool itself is only

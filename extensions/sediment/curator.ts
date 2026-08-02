@@ -51,6 +51,19 @@ interface ModelRegistryLike {
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
 }
 
+/**
+ * R6 structured conflict fields (create/update only).
+ * Only neighbor slugs that are explicitly identified as contradicted/stale by
+ * the candidate may appear. Decoder rejects any slug outside the allowed
+ * neighbor list — free-text guessing is never accepted as evidence.
+ */
+export type CuratorConflictSlugs = {
+  /** Existing neighbor slugs this candidate supersedes (closed: allowed neighbors only). */
+  supersedes?: string[];
+  /** Existing neighbor slugs this candidate marks stale/contradicted (closed: allowed neighbors only). */
+  stale_neighbors?: string[];
+};
+
 export type CuratorDecision =
   | { op: "create"; scope?: "world"; derives_from?: string[]; rationale?: string;
       // ADR 0023 D4 rules discriminant (W0.2). When zone==="rules" the entry is
@@ -60,8 +73,10 @@ export type CuratorDecision =
       // §12.3 rename: `injectMode` is canonical; parseDecision still ACCEPTS a
       // legacy `tier` key from the LLM and from persisted multiview-staging
       // replay decisions, normalizing to injectMode here.
-      zone?: "rules"; injectMode?: "always" | "listed"; ruleScope?: "global" | "project" }
-  | { op: "update"; slug: string; scope?: "world"; patch: ProjectEntryUpdateDraft; rationale?: string }
+      zone?: "rules"; injectMode?: "always" | "listed"; ruleScope?: "global" | "project";
+      supersedes?: string[]; stale_neighbors?: string[] }
+  | { op: "update"; slug: string; scope?: "world"; patch: ProjectEntryUpdateDraft; rationale?: string;
+      supersedes?: string[]; stale_neighbors?: string[] }
   | { op: "merge"; target: string; sources: string[]; scope?: "world"; compiledTruth: string; timelineNote?: string; rationale?: string }
   | { op: "archive"; slug: string; scope?: "world"; reason: string; rationale?: string }
   | { op: "supersede"; oldSlug: string; newSlug?: string; scope?: "world"; reason: string; rationale?: string }
@@ -70,7 +85,7 @@ export type CuratorDecision =
 
 export interface CuratorAudit {
   decision: CuratorDecision;
-  neighbors: Array<{ slug: string; status?: string; score?: number; rank_reason?: string }>;
+  neighbors: Array<{ slug: string; status?: string; kind?: string; score?: number; rank_reason?: string }>;
   stage_ms: { search: number; decide: number; total: number };
   error?: string;
   /** ADR 0025 P0.5: multi-view verification result, present only when
@@ -213,6 +228,53 @@ function unwrapJsonText(rawText: string): unknown {
   }
 
   throw new Error(`curator did not return parseable JSON: ${raw.slice(0, 300)}`);
+}
+
+/**
+ * Parse optional supersedes / stale_neighbors arrays from curator JSON.
+ * Strict: every slug must be in allowedSlugs (neighbor list). Empty/absent → omit.
+ * Never invents slugs from free text.
+ */
+export function parseCuratorConflictSlugs(
+  obj: Record<string, unknown>,
+  allowedSlugs: Set<string>,
+): CuratorConflictSlugs {
+  const parseList = (raw: unknown, field: string): string[] | undefined => {
+    if (raw === undefined || raw === null) return undefined;
+    if (!Array.isArray(raw)) {
+      throw new CuratorRejectError(
+        "malformed_curator_op",
+        `curator ${field} must be an array of neighbor slugs`,
+      );
+    }
+    const out: string[] = [];
+    for (const item of raw) {
+      const slug = asString(item);
+      if (!slug) {
+        throw new CuratorRejectError(
+          "malformed_curator_op",
+          `curator ${field} entries must be non-empty strings`,
+        );
+      }
+      if (!allowedSlugs.has(slug)) {
+        throw new CuratorRejectError(
+          "invented_neighbor_slug",
+          `curator ${field} slug is not an allowed neighbor: ${slug}`,
+        );
+      }
+      if (!out.includes(slug)) out.push(slug);
+    }
+    return out.length ? out : undefined;
+  };
+  const supersedes = parseList(obj.supersedes, "supersedes");
+  const stale_neighbors = parseList(
+    obj.stale_neighbors ?? obj.staleNeighbors,
+    "stale_neighbors",
+  );
+  return {
+    ...(supersedes ? { supersedes } : {}),
+    ...(stale_neighbors ? { stale_neighbors } : {}),
+  };
 }
 
 function asString(value: unknown): string | undefined {
@@ -394,7 +456,22 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
       ...(Array.isArray(patchObj.trigger_phrases) ? { triggerPhrases: patchObj.trigger_phrases.map(String).filter(Boolean) } : {}),
       timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale ?? "updated by sediment curator",
     };
-    return { op: "update", slug, ...(effScope ? { scope: effScope } : {}), patch, ...(rationale ? { rationale } : {}) };
+    const conflicts = parseCuratorConflictSlugs(obj, allowedSlugs);
+    // Target itself is never a conflict-of-self evidence slug.
+    if (conflicts.supersedes?.includes(slug) || conflicts.stale_neighbors?.includes(slug)) {
+      throw new CuratorRejectError(
+        "malformed_curator_op",
+        "curator update cannot list its own slug in supersedes/stale_neighbors",
+      );
+    }
+    return {
+      op: "update",
+      slug,
+      ...(effScope ? { scope: effScope } : {}),
+      patch,
+      ...(rationale ? { rationale } : {}),
+      ...conflicts,
+    };
   }
 
   if (op === "merge") {
@@ -527,7 +604,16 @@ export function parseDecision(rawText: string, neighborScopes: Map<string, strin
     // `scope:"world"`. If the model emits BOTH zone:rules and scope:world, drop
     // scope so qualifyCrossScopeEdges (which keys on decision.scope) cannot treat
     // the rule's derives_from edges as world-owned.
-    return { op: "create", ...(scope && !ruleZone ? { scope } : {}), ...(derives_from.length ? { derives_from } : {}), ...(rationale ? { rationale } : {}), ...(ruleZone ? { zone: ruleZone, injectMode: ruleInjectMode, ruleScope } : {}) };
+    // R6: structured conflict slugs only (allowed neighbors); never free-text guess.
+    const conflicts = parseCuratorConflictSlugs(obj, allowedSlugs);
+    return {
+      op: "create",
+      ...(scope && !ruleZone ? { scope } : {}),
+      ...(derives_from.length ? { derives_from } : {}),
+      ...(rationale ? { rationale } : {}),
+      ...(ruleZone ? { zone: ruleZone, injectMode: ruleInjectMode, ruleScope } : {}),
+      ...conflicts,
+    };
   }
 
   throw new CuratorRejectError("malformed_curator_op", `unsupported curator op: ${op || "<missing>"}`);
@@ -882,7 +968,8 @@ function makeCuratorPrompt(
     "- One-shot task talk ('刚才决定'/'我们这次'/'本次'/'上次说过'/'赶时间') is NOT a rule — zone omitted / op=skip.",
     "- INV-R1: if the candidate is the assistant RECITING a rule already injected into this session's system prompt (you are quoting your own injected rules section), op=skip — never re-promote your own injected rules.",
     rulesLifecycleLine,
-    "- {\"op\":\"update\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"patch\": {\"title\"?: string, \"kind\"?: string, \"status\"?: string, \"confidence\"?: number, \"compiled_truth\"?: string, \"trigger_phrases\"?: string[]}, \"timeline_note\": string, \"rationale\": string}",
+    "- {\"op\":\"update\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"patch\": {\"title\"?: string, \"kind\"?: string, \"status\"?: string, \"confidence\"?: number, \"compiled_truth\"?: string, \"trigger_phrases\"?: string[]}, \"timeline_note\": string, \"rationale\": string, \"supersedes\"?: [one_or_more_neighbors], \"stale_neighbors\"?: [one_or_more_neighbors]}",
+    "- {\"op\":\"create\", ... may also carry optional \"supersedes\" / \"stale_neighbors\" arrays of allowed neighbor slugs when this candidate clearly contradicts them}",
     "- {\"op\":\"merge\", \"target\": one_of_neighbors, \"scope\"?: \"world\", \"sources\": [one_or_more_neighbors], \"compiled_truth\": string, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"skip\", \"reason\": string, \"rationale\": string}",
     "- {\"op\":\"archive\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"reason\": string, \"rationale\": string}",
@@ -893,6 +980,7 @@ function makeCuratorPrompt(
     "- Candidate and neighbor bodies may contain [SECRET:<type>] placeholders. Preserve placeholders when semantically relevant, but never replace them with raw values and never invent secret values.",
     "- If you see any raw secret-like string in a candidate or neighbor, write only a typed placeholder such as [SECRET:api_key], [SECRET:token], [SECRET:connection_url], or [SECRET:private_key] in your JSON output.",
     "- Prefer update over create when the candidate refines, implements, corrects, or supersedes a single neighbor.",
+    "- Structured conflict (R6, create/update only): when the candidate CLEARLY CONTRADICTS or SUPERSEDES one or more existing neighbor claims, list those neighbor slugs in \"stale_neighbors\" and/or \"supersedes\". ONLY slugs from the neighbor list are admitted — never invent slugs, never guess from free text, never list a slug merely because it shares a topic. Empty/omit when no explicit conflict. These fields become contradicted lifecycle evidence for forgetting; they do NOT rewrite historical L1 events.",
     "- Prefer merge when two or more neighbors are the same evolving knowledge unit and the candidate supplies a better compiled truth.",
     "- Prefer skip when the candidate adds no durable information beyond a neighbor.",
     "- Use create only when no neighbor is the same evolving knowledge unit.",
@@ -1101,14 +1189,21 @@ export async function curateProjectDraft(
   const neighbors = cards
     .map((card: any) => bySlug.get(String(card.slug)))
     .filter((entry): entry is MemoryEntry => !!entry);
-  const neighborAudit = cards.map((card: any) => ({
-    slug: String(card.slug),
-    // ADR 0031 CAS parity: carry observed status so lifecycle ops
-    // (archive/delete/merge) can pin expected_status at the writer.
-    ...(bySlug.get(String(card.slug))?.status ? { status: bySlug.get(String(card.slug))!.status } : {}),
-    ...(typeof card.score === "number" ? { score: card.score } : {}),
-    ...(typeof card.rank_reason === "string" ? { rank_reason: card.rank_reason } : {}),
-  }));
+  const neighborAudit = cards.map((card: any) => {
+    const entry = bySlug.get(String(card.slug));
+    return {
+      slug: String(card.slug),
+      // ADR 0031 CAS parity: carry observed status so lifecycle ops
+      // (archive/delete/merge) can pin expected_status at the writer.
+      ...(entry?.status ? { status: entry.status } : {}),
+      // R6: real neighbor kind for conflict lifecycle evidence (no invent).
+      ...(entry?.kind && String(entry.kind).trim() && String(entry.kind).trim() !== "unknown"
+        ? { kind: String(entry.kind).trim() }
+        : {}),
+      ...(typeof card.score === "number" ? { score: card.score } : {}),
+      ...(typeof card.rank_reason === "string" ? { rank_reason: card.rank_reason } : {}),
+    };
+  });
 
   // Even with zero neighbors, run the curator model: it can still classify
   // scope (project vs world) and produce a richer rationale. Skipping the
