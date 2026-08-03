@@ -307,10 +307,15 @@ function parseMemoryFootnoteSlugs(branch: unknown[]): Set<string> {
     const text = contentText(item.message.content);
     let match: RegExpExecArray | null;
     while ((match = fence.exec(text)) !== null) {
-      const slugMatch = /^(?:entry|slug):\s*(\S+)\s*$/m.exec(match[1] ?? "");
-      if (!slugMatch) continue;
-      const slug = slugMatch[1]!.replace(/^project:[^:]+:/, "").replace(/^(world|workflow):/, "").replace(/:/g, "-").trim();
-      if (slug) slugs.add(slug);
+      // v1 may use several fences; v2 uses one fence with `---` records.
+      // Scan every target field so repeated entry/slug records all join to
+      // their exact exposures instead of silently retaining only the first.
+      const target = /^(?:entry|slug):\s*(\S+)\s*$/gm;
+      let slugMatch: RegExpExecArray | null;
+      while ((slugMatch = target.exec(match[1] ?? "")) !== null) {
+        const slug = slugMatch[1]!.replace(/^project:[^:]+:/, "").replace(/^(world|workflow):/, "").replace(/:/g, "-").trim();
+        if (slug) slugs.add(slug);
+      }
     }
   }
   return slugs;

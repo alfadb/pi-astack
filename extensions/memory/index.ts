@@ -78,7 +78,7 @@ function renderMemoryToolResult(toolName: string, fullOutputLabel: string) {
   ) => renderFoldableToolResult(result, options, theme, { toolName, fullOutputLabel }, context);
 }
 
-const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v1";
+const MEMORY_FOOTNOTE_PROTOCOL_VERSION = "memory-footnote-v2";
 
 // ADR 0026 cold-start fix (slug path-a-turn-0-cold-start-skips-all-memory-injection):
 // before_agent_start's ctx lacks modelRegistry on turn 0, which silently skipped
@@ -868,8 +868,9 @@ export default function (pi: ExtensionAPI) {
 ## memory-footnote：使用记忆条目的自我报告
 
 当你在回复过程中调用了 \`memory_search\` / \`abrain_get\` /
-\`memory_decide\` 并获得了记忆条目时，在回复最末尾为每条你实际
-纳入判断的条目附加一个 \`memory-footnote\` fenced block：用过就标
+\`memory_decide\` 并获得了记忆条目时，在正常回复的最末尾附加且只
+附加一个 \`memory-footnote\` fenced block。把每条进入判断范围的记忆
+写成一条 record，record 之间用独立一行 \`---\` 分隔：用过就标
 \`decisive\` / \`confirmatory\`，检索到了但最终没用就标
 \`retrieved-unused\` 并解释原因。它允许用户感知第二大脑参与了判断，
 同时给 sediment outcome-ledger 提供归因信号：
@@ -881,14 +882,20 @@ decision_brief_id: <如果来自 memory_decide 返回的 decisionBriefId，可�
 counterfactual: <如果这条记忆不在上下文里，你会做什么不同的决定？
   decisive=引用具体行为差异，confirmatory="相同决定"，
   retrieved-unused=解释为什么没用>
+---
+entry: <另一条 slug；有多条时继续按相同字段填写>
+used: confirmatory
+counterfactual: 相同决定
 \`\`\`
+
+不要为每条 record 分别打开 fence；closing fence 后不要再写正文。
 
 - \`decisive\` = 这条记忆改变了你的行为（没有它你会做不同的事）
 - \`confirmatory\` = 你本来就会做这个决定，记忆只是印证
 - \`retrieved-unused\` = 你搜到了但没用，解释原因
 - 默认偏向 \`confirmatory\`：能说清 counterfactual 才标 \`decisive\`
 - 如果某条已检索记忆进入了你的判断范围但没有被采用，写 \`retrieved-unused\`，不要静默省略
-- 只有当本轮没有任何记忆条目进入判断范围时，才不写 footnote
+- 只有当本轮没有任何记忆条目进入判断范围时，才不写 footnote fence
 
 这是给第二大脑追踪条目使用情况的内部信号，正常回复给用户，
 不用总结它。

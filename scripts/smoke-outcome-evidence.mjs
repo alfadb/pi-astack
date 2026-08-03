@@ -146,6 +146,23 @@ await check("unknown attribution forbids verified exposure ids and claimed targe
   assert(outcome.validateOutcomeEvidenceEnvelope(claimedWithLimit).ok, "unknown claimed target with limitation must validate");
 });
 
+await check("v2 one-fence self-report attributes every separated or repeated slug", async () => {
+  const multiBranch = [
+    assistantCalls([
+      toolCall("mem-multi", "memory_search", { query: "two memories" }),
+      toolCall("test-multi", "bash", { command: "npm test" }),
+    ]),
+    toolResult("mem-multi", "memory_search", JSON.stringify({ results: [{ slug: "multi-alpha" }, { slug: "multi-beta" }, { slug: "multi-gamma" }] })),
+    toolResult("test-multi", "bash", "passed", { exitCode: 0 }),
+    { role: "assistant", content: "```memory-footnote\nentry: multi-alpha\nused: decisive\ncounterfactual: changed behavior\n---\nslug: multi-beta\nused: confirmatory\ncounterfactual: same decision\nentry: multi-gamma\nused: retrieved-unused\ncounterfactual: not relevant\n```" },
+  ];
+  const result = await outcome.collectAndAppendOutcomeEvidence({ abrainHome, projectRoot, sessionId: "session-multi", turnId: "2b", branch: multiBranch });
+  assert(result.errors.length === 0 && result.exposures.length === 3 && result.outcomes.length === 1, JSON.stringify(result));
+  const row = outcome.readOutcomeEvidenceIndex(abrainHome).find((item) => item.event_id === result.outcomes[0]);
+  assert(JSON.stringify(row?.memory_entry_slugs) === JSON.stringify(["multi-alpha", "multi-beta", "multi-gamma"]), `all v2 footnote slugs must join: ${JSON.stringify(row)}`);
+  assert(row?.exposure_event_ids.length === 3 && row.attribution_status === "corroborated", `all exact exposures must be retained: ${JSON.stringify(row)}`);
+});
+
 await check("duplicate collection and restart rebuild are idempotent", async () => {
   const replay = await outcome.collectAndAppendOutcomeEvidence({ abrainHome, projectRoot, sessionId: "session-a", turnId: "1", branch });
   assert(JSON.stringify(replay.exposures) === JSON.stringify(first.exposures), "exposure IDs changed on replay");

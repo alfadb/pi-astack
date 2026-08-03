@@ -32,6 +32,8 @@
     "smoke:llm-audit-budget": "node scripts/smoke-llm-audit-budget.mjs",
     "smoke:turn-progress": "node scripts/smoke-turn-progress.mjs",
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:memory-footnote-v2": "node scripts/smoke-memory-footnote-v2.mjs",
+    "shadow:memory-footnote-v2-sessions": "node scripts/shadow-memory-footnote-v2-sessions.mjs",
     "smoke:memory-tool-rename": "node scripts/smoke-memory-tool-rename.mjs",
     "smoke:rename-entry": "node scripts/smoke-rename-entry.mjs",
     "smoke:embedding": "node scripts/smoke-memory-embedding.mjs",

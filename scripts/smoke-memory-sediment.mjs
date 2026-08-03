@@ -635,10 +635,11 @@ async function main() {
       assert(memFirst && typeof memFirst.systemPrompt === "string", "memory injector first call must return { systemPrompt }");
       assert(memFirst.systemPrompt.includes(memMarker), `memory injection missing marker: ${memFirst.systemPrompt.slice(-200)}`);
       assert(memFirst.systemPrompt.includes("memory-footnote"), "memory injection must include the protocol name 'memory-footnote'");
-      assert(memFirst.systemPrompt.includes("protocol_version: memory-footnote-v1"), "memory-footnote protocol injection must carry a version marker");
+      assert(memFirst.systemPrompt.includes("protocol_version: memory-footnote-v2"), "memory-footnote protocol injection must carry the v2 marker");
       assert(!memFirst.systemPrompt.includes("隐藏 fenced block"), "memory-footnote prompt must not claim the visible block is hidden");
       assert(memFirst.systemPrompt.includes("允许用户感知第二大脑"), "memory-footnote prompt should frame visible participation as positive feedback");
       assert(memFirst.systemPrompt.includes("retrieved-unused") && memFirst.systemPrompt.includes("不要静默省略"), "memory-footnote prompt must capture retrieved-but-unused entries instead of positive-only self-reports");
+      assert(memFirst.systemPrompt.includes("附加且只") && memFirst.systemPrompt.includes("独立一行 `---`") && memFirst.systemPrompt.includes("closing fence 后不要再写正文"), "memory-footnote v2 prompt must require one trailing fence with --- record separators");
       assert(memFirst.systemPrompt.includes("decisive") && memFirst.systemPrompt.includes("confirmatory") && memFirst.systemPrompt.includes("retrieved-unused"), "memory injection must enumerate the used taxonomy");
       assert(memFirst.systemPrompt.includes("高价值决策时可拉取") && !memFirst.systemPrompt.includes("在遇到以下场景**之前**"), "memory_decide prompt must stay Path-B advisory, not pseudo Path-A mandatory trigger");
       assert(memFirst.systemPrompt.includes("abrain_get") && !memFirst.systemPrompt.includes("memory_get"), "memory generated system prompt must advertise only abrain_get");
@@ -9249,6 +9250,19 @@ Body.
         ];
         const shiftedFootnoteOutcomes = collectOutcomes(shiftedFootnoteBranch, "session-memory-decide-smoke");
         assert(shiftedFootnoteOutcomes.rows[0].event_id === footnoteOutcomes.rows[0].event_id, `decision footnote event_id must not drift when branch index shifts: before=${JSON.stringify(footnoteOutcomes.rows[0])} after=${JSON.stringify(shiftedFootnoteOutcomes.rows[0])}`);
+
+        const v2SingleRecord = collectOutcomes([
+          { type: "message", message: { role: "assistant", content: "reply\n\n```memory-footnote\nentry: prefer-pnpm\nused: decisive\ndecision_brief_id: decision-brief-smoke-1\ncounterfactual: would have used yarn\n```" } },
+        ], "session-memory-decide-smoke");
+        assert(v2SingleRecord.rows.length === 1 && v2SingleRecord.rows[0].event_id === footnoteOutcomes.rows[0].event_id, `unchanged valid v1 record must retain its event id under v2 parsing: v1=${JSON.stringify(footnoteOutcomes.rows)} v2=${JSON.stringify(v2SingleRecord.rows)}`);
+
+        const v2MultiRecord = collectOutcomes([
+          { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: alpha-memory\nused: decisive\ncounterfactual: alpha changed behavior\n---\nentry: <slug>\nused: confirmatory\ncounterfactual: invalid sibling\n---\nslug: beta-memory\nused: confirmatory\ncounterfactual: same decision\nentry: gamma-memory\nused: retrieved-unused\ncounterfactual: not relevant\nslug: alpha-memory\nused: confirmatory\ncounterfactual: same decision\n```" } },
+        ], "session-v2-multi-footnote-smoke");
+        assert(v2MultiRecord.rows.length === 4, `v2 one-fence parsing must recover --- and repeated entry/slug records, including repeated slugs: ${JSON.stringify(v2MultiRecord)}`);
+        assert(v2MultiRecord.dropped.length === 1 && v2MultiRecord.dropped[0].reason === "invalid_slug", `bad v2 sibling must drop independently: ${JSON.stringify(v2MultiRecord.dropped)}`);
+        assert(v2MultiRecord.rows.map((row) => row.entry_slug).join(",") === "alpha-memory,beta-memory,gamma-memory,alpha-memory", `v2 record order/slug recovery drift: ${JSON.stringify(v2MultiRecord.rows)}`);
+        assert(new Set(v2MultiRecord.rows.map((row) => row.event_id)).size === 4, `independent v2 records must retain independent event ids: ${JSON.stringify(v2MultiRecord.rows)}`);
 
         const plainFootnoteBranch = [
           { type: "message", message: { role: "assistant", content: "```memory-footnote\nentry: prefer-pnpm\nused: confirmatory\ncounterfactual: same decision\n```" } },

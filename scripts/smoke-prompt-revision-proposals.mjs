@@ -72,7 +72,7 @@ const settings = {
     reasoningNormalizationPreamble: "v1",
     multiViewPass1: "v1",
     multiViewPass2: "v1",
-    outcomeSelfReport: "v0",
+    outcomeSelfReport: "v1",
     aggregator: "v1.3",
     archiveReactivationReviewer: "v1",
   },

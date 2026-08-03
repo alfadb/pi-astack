@@ -164,7 +164,36 @@ function footnoteOutcomeEventId(
  *   - Invalid `used` value (not in the 3-option taxonomy) → dropped
  *   - Both go to `dropped[]` for audit; only valid entries reach the ledger.
  */
-function parseMemoryFootnote(text: string): {
+function splitMemoryFootnoteRecords(body: string): string[] {
+  const records: string[] = [];
+  let lines: string[] = [];
+  let hasSlugField = false;
+  const flush = (): void => {
+    const record = lines.join("\n").trim();
+    if (record) records.push(record);
+    lines = [];
+    hasSlugField = false;
+  };
+
+  // Align collector with Web: normalize CRLF / bare CR to LF before record cuts.
+  const normalizedBody = body.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (const line of normalizedBody.split("\n")) {
+    if (/^\s*---\s*$/.test(line)) {
+      flush();
+      continue;
+    }
+    const startsSlugField = /^(?:entry|slug):\s*/.test(line);
+    // Compatibility for historical attempts to put several records in one
+    // fence without separators: a repeated target field starts a new record.
+    if (startsSlugField && hasSlugField) flush();
+    lines.push(line);
+    if (startsSlugField) hasSlugField = true;
+  }
+  flush();
+  return records;
+}
+
+export function parseMemoryFootnote(text: string): {
   entries: Array<{
     entry_slug: string;
     used: "decisive" | "confirmatory" | "retrieved-unused";
@@ -181,64 +210,63 @@ function parseMemoryFootnote(text: string): {
   }> = [];
   const dropped: DroppedFootnote[] = [];
 
-  // Find all ```memory-footnote blocks
+  // Keep accepting v1's multiple fences. v2 emits one trailing fence whose
+  // records are separated by `---`; repeated entry/slug fields are also
+  // treated as record boundaries for compatibility with malformed v1 output.
   const fenceRegex = /```memory-footnote\s*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
   while ((match = fenceRegex.exec(text)) !== null) {
-    const body = match[1].trim();
-    const blockPreview = sanitizeAuditText(body, 200);
+    for (const body of splitMemoryFootnoteRecords(match[1])) {
+      const blockPreview = sanitizeAuditText(body, 200);
 
-    // Parse YAML-like key: value pairs
-    const entry: Record<string, string> = {};
-    let currentKey = "";
-    let currentValue = "";
+      // Parse one YAML-like record. Validation and drop are deliberately
+      // record-local so one bad record cannot discard its valid siblings.
+      const entry: Record<string, string> = {};
+      let currentKey = "";
+      let currentValue = "";
 
-    for (const line of body.split("\n")) {
-      const kvMatch = line.match(/^(\w[\w_-]*):\s*(.*)$/);
-      if (kvMatch) {
-        // Save previous key-value
-        if (currentKey) entry[currentKey] = currentValue.trim();
-        currentKey = kvMatch[1];
-        currentValue = kvMatch[2];
-      } else if (currentKey) {
-        // Continuation line (multiline value)
-        currentValue += "\n" + line;
+      for (const line of body.split("\n")) {
+        const kvMatch = line.match(/^(\w[\w_-]*):\s*(.*)$/);
+        if (kvMatch) {
+          if (currentKey) entry[currentKey] = currentValue.trim();
+          currentKey = kvMatch[1];
+          currentValue = kvMatch[2];
+        } else if (currentKey) {
+          currentValue += "\n" + line;
+        }
       }
-    }
-    if (currentKey) entry[currentKey] = currentValue.trim();
+      if (currentKey) entry[currentKey] = currentValue.trim();
 
-    const rawSlug = (entry.entry ?? entry.slug ?? "").trim();
-    const slug = sanitizeSlug(rawSlug);
-    const usedRaw = (entry.used ?? "").toLowerCase().trim();
+      const rawSlug = (entry.entry ?? entry.slug ?? "").trim();
+      const slug = sanitizeSlug(rawSlug);
+      const usedRaw = (entry.used ?? "").toLowerCase().trim();
 
-    // Slug validation first (cheap, deterministic).
-    if (!slug) {
-      dropped.push({ reason: "empty_slug", raw_slug: rawSlug, raw_used: usedRaw, raw_block_preview: blockPreview });
-      continue;
-    }
-    if (!isValidSlug(slug)) {
-      dropped.push({ reason: "invalid_slug", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
-      continue;
-    }
+      if (!slug) {
+        dropped.push({ reason: "empty_slug", raw_slug: rawSlug, raw_used: usedRaw, raw_block_preview: blockPreview });
+        continue;
+      }
+      if (!isValidSlug(slug)) {
+        dropped.push({ reason: "invalid_slug", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
+        continue;
+      }
 
-    // Used-field validation. Per `outcome-footnote-handling-principle`:
-    // do NOT default to confirmatory — that fabricates a usage signal.
-    let used: "decisive" | "confirmatory" | "retrieved-unused";
-    if (usedRaw === "decisive" || usedRaw === "confirmatory" || usedRaw === "retrieved-unused") {
-      used = usedRaw;
-    } else {
-      dropped.push({ reason: "invalid_used", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
-      continue;
-    }
+      let used: "decisive" | "confirmatory" | "retrieved-unused";
+      if (usedRaw === "decisive" || usedRaw === "confirmatory" || usedRaw === "retrieved-unused") {
+        used = usedRaw;
+      } else {
+        dropped.push({ reason: "invalid_used", raw_slug: slug, raw_used: usedRaw, raw_block_preview: blockPreview });
+        continue;
+      }
 
-    const counterfactual = sanitizeAuditText(entry.counterfactual ?? "");
-    const decisionBriefId = (entry.decision_brief_id ?? entry.decisionBriefId ?? "").trim();
-    entries.push({
-      entry_slug: slug,
-      used,
-      counterfactual,
-      ...(decisionBriefId ? { decision_brief_id: decisionBriefId } : {}),
-    });
+      const counterfactual = sanitizeAuditText(entry.counterfactual ?? "");
+      const decisionBriefId = (entry.decision_brief_id ?? entry.decisionBriefId ?? "").trim();
+      entries.push({
+        entry_slug: slug,
+        used,
+        counterfactual,
+        ...(decisionBriefId ? { decision_brief_id: decisionBriefId } : {}),
+      });
+    }
   }
 
   return { entries, dropped };
