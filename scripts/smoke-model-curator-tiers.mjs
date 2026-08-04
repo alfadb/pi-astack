@@ -12,8 +12,9 @@
  * 4. The fixed runtime-routing authority terminates the curator snapshot;
  *    the snapshot is appended after already-composed rule injection content.
  * 5. The multi-vendor roster and per-model hints remain selectable/rendered.
- * 6. The live config recommends Grok for deterministic execution while every
- *    other curated non-GPT model remains judgment-only.
+ * 6. The live config recommends Grok for deterministic execution; deepseek-v4-flash
+ *    is a bounded mid-level execution route under precise specs + adversarial acceptance;
+ *    every other curated non-GPT model remains judgment-only.
  */
 
 import { createRequire } from "node:module";
@@ -195,7 +196,7 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
   }
 }
 
-console.log("\n[4] live responsibility hints recommend Grok execution and keep other non-GPT models judgment-only");
+console.log("\n[4] live responsibility hints recommend Grok execution, bound flash execution, and keep other non-GPT models judgment-only");
 {
   const liveHints = liveSettings.modelCurator?.hints ?? {};
   const liveTiers = liveSettings.modelCurator?.tiers ?? {};
@@ -211,8 +212,32 @@ console.log("\n[4] live responsibility hints recommend Grok execution and keep o
       grokHint.includes("judgment-oriented tasks") &&
       grokHint.includes("independent review of completed task results or final diffs"));
 
+  const flashHint = liveHints["deepseek/deepseek-v4-flash"];
+  check("live deepseek-v4-flash hint positions a disciplined mid-level execution engineer",
+    typeof flashHint === "string" &&
+      flashHint.includes("Disciplined mid-level execution engineer") &&
+      flashHint.includes("steady hands and limited system vision") &&
+      flashHint.includes("precise specs plus strong adversarial acceptance"));
+  check("live deepseek-v4-flash hint permits only clear-boundary rollbackable concrete execution",
+    typeof flashHint === "string" &&
+      flashHint.includes("Execution-capable") &&
+      flashHint.includes("clear-boundary, precisely specified, rollbackable concrete coding/implementation tasks only") &&
+      flashHint.includes("require strong adversarial independent acceptance of results"));
+  check("live deepseek-v4-flash hint forbids system-level/fuzzy work and auto hot-path fallback",
+    typeof flashHint === "string" &&
+      flashHint.includes("Not suitable for system-level architecture, cross-module global judgment") &&
+      flashHint.includes("fuzzy/underspecified requirements") &&
+      flashHint.includes("Shared Ollama Max GPU pool") &&
+      flashHint.includes("manual/explicit invocation only") &&
+      flashHint.includes("no auto hot-path or execution fallback") &&
+      !flashHint.includes("PRIMARY DEFAULT") &&
+      !flashHint.includes("preferred execution layer"));
+
   const otherNonGptHints = Object.entries(liveHints).filter(
-    ([model]) => !model.startsWith("openai/") && model !== "xai/grok-4.5",
+    ([model]) =>
+      !model.startsWith("openai/") &&
+      model !== "xai/grok-4.5" &&
+      model !== "deepseek/deepseek-v4-flash",
   );
   check("every other curated non-GPT model remains judgment-only",
     otherNonGptHints.length > 0 && otherNonGptHints.every(([, hint]) =>
