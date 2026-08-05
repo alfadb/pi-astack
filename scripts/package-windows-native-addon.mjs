@@ -5,7 +5,9 @@
  * Commands:
  *   package  — stage production .node + exact manifest LF bytes + rewrite pin.ts
  *   install  — verify pin/manifest/hash/self-identity, set package_rx, reverify
- *   unlock   — restore private_rw (prefer native; icacls.exe fallback), check writable
+ *   unlock   — restore private_rw (prefer native; icacls.exe fallback).
+ *               native: set+verify private_rw then succeed (mapped .node held until exit;
+ *               no same-process r+). icacls fallback: no .node load; r+ probe binary/manifest/pin.
  *   verify   — production zero-arg load + package_rx three-point; bounded JSON evidence
  *
  * Never downloads or compiles. package only accepts clean production build-info with
@@ -514,8 +516,10 @@ function cmdUnlock() {
   if (process.platform !== "win32" || process.arch !== "x64") {
     die("unlock requires win32-x64 host");
   }
-  let usedNative = false;
-  let method = "icacls_reset";
+
+  // Native path: load + set/verify private_rw, then succeed without same-process r+.
+  // Mapped .node remains held until process exit (open r+ would EBUSY).
+  let nativeCause = null;
   try {
     const { loaded } = loadInstalledForAcl();
     const addon = loaded.addon;
@@ -526,31 +530,40 @@ function cmdUnlock() {
     addon.verifyProtectedPath(packageDir, "directory", "private_rw");
     addon.verifyProtectedPath(manifestPath, "file", "private_rw");
     addon.verifyProtectedPath(binaryPath, "file", "private_rw");
-    usedNative = true;
-    method = "native_private_rw";
+    console.log(JSON.stringify({
+      status: "unlocked",
+      method: "native_private_rw",
+      acl_profile: "private_rw",
+      mapped_binary_release: "on_process_exit",
+      used_native: true,
+    }, null, 2));
+    return;
   } catch (error) {
-    // Fallback when no pin / bad binary / missing DLL: fixed System32 icacls.exe reset.
-    // Catch works because loadInstalledForAcl throws (never process.exit).
-    const icacls = fixedIcaclsPath();
-    if (!fs.existsSync(icacls)) {
-      die(`native unlock failed and fixed icacls missing: ${icacls}; cause: ${error instanceof Error ? error.message : error}`);
-    }
-    if (!fs.existsSync(packageDir)) {
-      die(`package directory missing: cannot unlock; cause: ${error instanceof Error ? error.message : error}`);
-    }
-    const r = spawnSync(icacls, [packageDir, "/reset", "/T", "/C", "/Q"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (r.error) die(`icacls spawn failed: ${r.error.message}`);
-    if (r.status !== 0) {
-      // Do not parse localized stdout/stderr — exit code only.
-      die(`icacls reset failed with exit ${r.status}`);
-    }
-    method = "icacls_reset";
+    // Fall through to icacls only when native load/set/verify failed.
+    // loadInstalledForAcl throws (never die/process.exit) so catch can fall back.
+    nativeCause = error;
   }
 
-  // Verify writable (no auto download/compile).
+  // Fallback: no pin / bad binary / missing DLL. Fixed System32 icacls.exe reset.
+  // Does not load .node, so binary/manifest/pin r+ can be verified immediately.
+  const icacls = fixedIcaclsPath();
+  if (!fs.existsSync(icacls)) {
+    die(`native unlock failed and fixed icacls missing: ${icacls}; cause: ${nativeCause instanceof Error ? nativeCause.message : nativeCause}`);
+  }
+  if (!fs.existsSync(packageDir)) {
+    die(`package directory missing: cannot unlock; cause: ${nativeCause instanceof Error ? nativeCause.message : nativeCause}`);
+  }
+  const r = spawnSync(icacls, [packageDir, "/reset", "/T", "/C", "/Q"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (r.error) die(`icacls spawn failed: ${r.error.message}`);
+  if (r.status !== 0) {
+    // Do not parse localized stdout/stderr — exit code only.
+    die(`icacls reset failed with exit ${r.status}`);
+  }
+
+  // Fallback only: no mapped .node in this process — probe r+ writability.
   for (const [p, label] of [
     [binaryPath, "binary"],
     [manifestPath, "manifest"],
@@ -566,9 +579,10 @@ function cmdUnlock() {
   }
   console.log(JSON.stringify({
     status: "unlocked",
-    method,
+    method: "icacls_reset",
+    mapped_binary_release: "not_mapped",
+    used_native: false,
     writable: true,
-    used_native: usedNative,
   }, null, 2));
 }
 
