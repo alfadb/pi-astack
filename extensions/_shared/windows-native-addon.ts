@@ -7,9 +7,11 @@
  * Unadvertised capabilities must not be called. Runtime manifest capabilities
  * must exact-match native self-report.
  *
- * Pure TS cannot fully close hash→dlopen TOCTOU; pre/post fd + path identity
- * checks are best-effort only (WIN-BINARY-PROVENANCE) and remain after load.
- * Same-token / admin malice is out of contract. Production package_rx on the
+ * Pure TS cannot fully close hash→dlopen TOCTOU. Held binary fd is hashed before
+ * load and re-hashed from the same fd after dlopen (exact manifest.binary_sha256),
+ * then fd/path identity + self-identity. No path re-read after open. Still no
+ * native bootstrap atomic guarantee; ancestor-delete-handles and same-token/admin
+ * malice remain residual (WIN-BINARY-PROVENANCE). Production package_rx on the
  * fixed package directory + binary + manifest closes the cross-token rewrite
  * boundary after successful dlopen + self-identity (fail-closed
  * WINDOWS_NATIVE_ADDON_PACKAGE_ACL_INVALID; no raw SID/path leak). Test options
@@ -334,6 +336,7 @@ export interface WindowsNativeAddonFs {
   realpathSync(filePath: string): string;
   openSync(filePath: string, flags: "r"): number;
   fstatSync(fd: number): WindowsNativeAddonFileIdentity;
+  /** Full-file read via fd using positional reads (must not depend on fd cursor). */
   readFileFdSync(fd: number): Buffer;
   closeSync(fd: number): void;
 }
@@ -1105,8 +1108,8 @@ function loadWindowsNativeAddonWithOptions(
     });
   }
 
-  // Best-effort hash→dlopen TOCTOU mitigation via held fd pre/post identity.
-  // Pure TS cannot fully close this race; native/package-protected load must.
+  // Held fd from pre-hash through post-dlopen same-fd rehash + identity.
+  // Pure TS still cannot fully close this race (no native bootstrap atomicity).
   let fd: number | null = null;
   let preIdentity: WindowsNativeAddonFileIdentity;
   let binaryBytes: Buffer;
@@ -1133,6 +1136,12 @@ function loadWindowsNativeAddonWithOptions(
         binaryPath: paths.binaryPath,
       });
     }
+    if (preIdentity.size > WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES) {
+      fail("WINDOWS_NATIVE_ADDON_BINARY_SIZE_MISMATCH", "binary size exceeds hard ceiling (64 MiB)", {
+        actual: preIdentity.size,
+        ceiling: WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES,
+      });
+    }
     if (preIdentity.size !== manifest.binary_bytes) {
       fail("WINDOWS_NATIVE_ADDON_BINARY_SIZE_MISMATCH", "binary size does not match manifest.binary_bytes", {
         actual: preIdentity.size,
@@ -1141,6 +1150,7 @@ function loadWindowsNativeAddonWithOptions(
     }
 
     try {
+      // Positional full read (readFileFdSync must not depend on fd cursor).
       binaryBytes = io.readFileFdSync(fd);
     } catch (error) {
       fail("WINDOWS_NATIVE_ADDON_BINARY_MISSING", "windows native addon binary could not be read", {
@@ -1176,7 +1186,8 @@ function loadWindowsNativeAddonWithOptions(
       });
     }
 
-    // Recheck identity after load. Best-effort only; not a complete TOCTOU fix.
+    // After dlopen: same-fd full rehash (no path re-read), then identity, then self-identity.
+    assertSameFdBinaryHash(io, fd, manifest.binary_sha256, manifest.binary_bytes, "after-load");
     assertBinaryIdentityUnchanged(io, fd, paths.binaryPath, preIdentity, "after-load");
 
     const addon = coerceAddonModule(loaded, manifest);
@@ -1305,7 +1316,11 @@ function defaultFs(): WindowsNativeAddonFs {
     openSync: (filePath, flags) => fs.openSync(filePath, flags),
     fstatSync: (fd) => toFileIdentity(fs.fstatSync(fd)),
     readFileFdSync: (fd) => {
+      // Always positional (pread-equivalent) so fd cursor is irrelevant across rehash.
       const st = fs.fstatSync(fd);
+      if (st.size > WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES) {
+        throw Object.assign(new Error("binary exceeds hard ceiling"), { code: "EFBIG" });
+      }
       const buf = Buffer.allocUnsafe(st.size);
       let offset = 0;
       while (offset < st.size) {
@@ -1336,6 +1351,20 @@ function defaultLoadNativeModule(packageRoot: string): (absoluteBinaryPath: stri
   return (absoluteBinaryPath: string) => requireFromPackage(absoluteBinaryPath);
 }
 
+/** Hard ceiling for native binary bytes (matches manifest validation + package). */
+const WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES = 64 * 1024 * 1024;
+
+/** Bound fs error codes for PATH_UNTRUSTED detail — never leak path/message text. */
+function fsErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code: unknown }).code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(code)) {
+      return code;
+    }
+  }
+  return "UNKNOWN";
+}
+
 function assertTrustedLeafPath(
   packageRoot: string,
   targetPath: string,
@@ -1347,8 +1376,7 @@ function assertTrustedLeafPath(
 
   if (!isPathInsideRoot(target, root)) {
     fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} path escapes package root`, {
-      packageRoot: root,
-      targetPath: target,
+      check: "inside_root",
       kind,
     });
   }
@@ -1368,21 +1396,29 @@ function assertTrustedLeafPath(
     let lst: WindowsNativeAddonLstat;
     try {
       lst = io.lstatSync(entry);
-    } catch {
-      // Missing path components: later MANIFEST_MISSING / BINARY_MISSING handle absence.
-      // Path trust only rejects observable symlink/reparse/untrusted surface when present.
-      return;
+    } catch (error) {
+      // Only absence may defer to later MANIFEST_MISSING / BINARY_MISSING.
+      // EACCES/EPERM/EBUSY/other must not fail-open as "missing".
+      const code = fsErrorCode(error);
+      if (code === "ENOENT") {
+        return;
+      }
+      fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} path component unreadable`, {
+        check: "lstat",
+        code,
+        kind,
+      });
     }
     if (lst.isSymbolicLink()) {
       fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} path contains symlink or reparse point`, {
-        entry,
+        check: "symlink_or_reparse",
         kind,
       });
     }
     const isLeaf = i === chain.length - 1;
     if (isLeaf && !lst.isFile()) {
       fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} leaf is not a regular file`, {
-        entry,
+        check: "leaf_not_file",
         kind,
       });
     }
@@ -1395,17 +1431,80 @@ function assertTrustedLeafPath(
     realTarget = path.resolve(io.realpathSync(target));
   } catch (error) {
     fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} path realpath failed`, {
-      packageRoot: root,
-      targetPath: target,
+      check: "realpath",
+      code: fsErrorCode(error),
       kind,
-      error: error instanceof Error ? error.message : String(error),
     });
   }
   if (!isPathInsideRoot(realTarget, realRoot)) {
     fail("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", `${kind} realpath escapes package root`, {
-      realRoot,
-      realTarget,
+      check: "realpath_inside_root",
       kind,
+    });
+  }
+}
+
+/**
+ * After dlopen: re-read full binary via the held fd (positional) and exact-match
+ * manifest.binary_sha256. Never re-opens/re-reads via path. Mismatch → BINARY_MUTATED.
+ */
+function assertSameFdBinaryHash(
+  io: WindowsNativeAddonFs,
+  fd: number,
+  expectedSha256: string,
+  expectedBytes: number,
+  phase: "after-load",
+): void {
+  let st: WindowsNativeAddonFileIdentity;
+  try {
+    st = io.fstatSync(fd);
+  } catch (error) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary fd unreadable for same-fd rehash ${phase}`, {
+      check: "fstat",
+      phase,
+      code: fsErrorCode(error),
+    });
+  }
+  if (st.size > WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary fd size exceeds ceiling ${phase}`, {
+      check: "ceiling",
+      phase,
+    });
+  }
+  if (st.size !== expectedBytes) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary fd size changed ${phase} (same-fd rehash)`, {
+      check: "size",
+      phase,
+      expected: expectedBytes,
+      actual: st.size,
+    });
+  }
+  let bytes: Buffer;
+  try {
+    // Must use positional reads so a prior pre-load hash read cannot leave the cursor at EOF.
+    bytes = io.readFileFdSync(fd);
+  } catch (error) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary fd unread for same-fd rehash ${phase}`, {
+      check: "read",
+      phase,
+      code: fsErrorCode(error),
+    });
+  }
+  if (bytes.byteLength !== expectedBytes) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary fd byte length changed ${phase} (same-fd rehash)`, {
+      check: "byte_length",
+      phase,
+      expected: expectedBytes,
+      actual: bytes.byteLength,
+    });
+  }
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (hash !== expectedSha256) {
+    fail("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", `binary sha256 changed ${phase} (same-fd rehash)`, {
+      check: "sha256",
+      phase,
+      actual: hash,
+      expected: expectedSha256,
     });
   }
 }

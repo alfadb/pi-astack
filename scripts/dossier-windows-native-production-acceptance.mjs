@@ -659,6 +659,15 @@ async function runWorkerMain() {
       const pin = readPinFromDisk();
       const src = fs.readFileSync(path.join(repoRoot, "extensions/_shared/windows-native-addon.ts"), "utf8");
       const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+      const loadCall = codeOnly.indexOf("loadNativeModule(paths.binaryPath)");
+      const rehashCall = codeOnly.indexOf("assertSameFdBinaryHash(");
+      const afterIdCall = codeOnly.indexOf('assertBinaryIdentityUnchanged(io, fd, paths.binaryPath, preIdentity, "after-load")');
+      const selfIdCall = codeOnly.indexOf("assertIdentityMatchesManifest(");
+      const sameFdOrderOk =
+        loadCall >= 0
+        && rehashCall > loadCall
+        && afterIdCall > rehashCall
+        && selfIdCall > afterIdCall;
       emit({
         ok: true,
         mode,
@@ -668,6 +677,7 @@ async function runWorkerMain() {
           production_arity_zero: /\bexport function loadWindowsNativeAddon\(\)/.test(src),
           no_download: !/\b(?:fetch|https?\.get|axios|got|curl|wget)\b/i.test(codeOnly),
           no_autocompile: !/\b(?:node-gyp|cmake-js|prebuild-install|node-pre-gyp)\b/i.test(codeOnly),
+          same_fd_post_dlopen_rehash: sameFdOrderOk ? "pass" : "fail",
         },
       });
       return;
@@ -729,6 +739,8 @@ async function runWorkerMain() {
         build_config_sha256: loaded.identity.build_config_sha256,
         capabilities: [...loaded.capabilities],
         package_rx,
+        // Successful production load path includes post-dlopen same-fd rehash (loader contract).
+        same_fd_post_dlopen_rehash: "pass",
       });
       return;
     }
@@ -2356,14 +2368,29 @@ async function mainController() {
   {
     const src = fs.readFileSync(path.join(repoRoot, "extensions/_shared/windows-native-addon.ts"), "utf8");
     const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    const loadCall = codeOnly.indexOf("loadNativeModule(paths.binaryPath)");
+    const rehashCall = codeOnly.indexOf("assertSameFdBinaryHash(");
+    const afterIdCall = codeOnly.indexOf('assertBinaryIdentityUnchanged(io, fd, paths.binaryPath, preIdentity, "after-load")');
+    const selfIdCall = codeOnly.indexOf("assertIdentityMatchesManifest(");
+    const sameFdOrderOk =
+      loadCall >= 0
+      && rehashCall > loadCall
+      && afterIdCall > rehashCall
+      && selfIdCall > afterIdCall;
     sections.structural = {
       status: "pass",
       production_arity_zero: /\bexport function loadWindowsNativeAddon\(\)/.test(src),
       no_runtime_download: !/\b(?:fetch|https?\.get|axios|got|curl|wget)\b/i.test(codeOnly),
       no_runtime_compile: !/\b(?:node-gyp|cmake-js|prebuild-install|node-pre-gyp)\b/i.test(codeOnly),
       controller_no_dlopen: true,
+      same_fd_post_dlopen_rehash: sameFdOrderOk ? "pass" : "fail",
     };
-    if (!sections.structural.production_arity_zero || !sections.structural.no_runtime_download || !sections.structural.no_runtime_compile) {
+    if (
+      !sections.structural.production_arity_zero
+      || !sections.structural.no_runtime_download
+      || !sections.structural.no_runtime_compile
+      || sections.structural.same_fd_post_dlopen_rehash !== "pass"
+    ) {
       sections.structural.status = "fail";
       residuals.push("structural_loader_contract");
     }
@@ -2380,8 +2407,9 @@ async function mainController() {
     && gateEval.gates.source_commit_is_head_parent
     && gateEval.gates.range_only_package_outputs;
 
-  // Real current blocker: hash→dlopen TOCTOU not fully closed. Provenance section may still
-  // pass package_rx + pin checks, but WIN-BINARY criterion must NOT auto-claim complete.
+  // TOCTOU residual remains: same-fd post-dlopen rehash + package_rx mitigate but do NOT fully close.
+  // No native bootstrap atomic guarantee; ancestor-delete-handles and same-token/admin residual open.
+  // Provenance section may still pass package_rx + pin checks; WIN-BINARY must NOT auto-claim complete.
   residuals.push("binary_hash_to_dlopen_toctou_not_fully_closed");
 
   if (!gatesReady) {
@@ -2408,7 +2436,7 @@ async function mainController() {
       residual: uniqueResiduals,
       residual_class: classifyResiduals(uniqueResiduals),
       abrain_guard,
-      note: "provenance/package_rx may pass later but WIN-BINARY remains open while binary_hash_to_dlopen_toctou_not_fully_closed; source_commit must be HEAD^ with exact 3 package outputs",
+      note: "same_fd_post_dlopen_rehash is structural/provenance evidence only; TOCTOU residual remains (no native bootstrap atomic guarantee; ancestor-delete-handles + same-token/admin open); WIN-BINARY remains open while binary_hash_to_dlopen_toctou_not_fully_closed; source_commit must be HEAD^ with exact 3 package outputs",
     });
     process.exitCode = 0;
     return;
@@ -2435,7 +2463,12 @@ async function mainController() {
       && prx.binary === "pass"
       && prx.manifest === "pass";
     if (r.status === 0 && r.json?.ok && threePoint) {
-      sections.provenance = { status: "pass", evidence: boundEvidence(r.json) };
+      // Successful zero-arg load path includes post-dlopen same-fd rehash (loader contract).
+      sections.provenance = {
+        status: "pass",
+        same_fd_post_dlopen_rehash: "pass",
+        evidence: boundEvidence(r.json),
+      };
       gateEval.gates.package_rx = true;
     } else {
       sections.provenance = sectionFail(r, "provenance-load");
@@ -2606,7 +2639,7 @@ async function mainController() {
     residual_class,
     abrain_guard,
     git_clean_after_workers: gitCleanAfter,
-    note: "exit 0 means dossier execution completed; accepted:true only when all Windows criteria covered including DCC and residuals empty; binary_hash_to_dlopen_toctou_not_fully_closed keeps accepted:false even if provenance section passes; WIN-BINARY not auto-claimed; temp fixtures are not live matrix; source_commit must be HEAD^ with exact 3 package outputs",
+    note: "exit 0 means dossier execution completed; accepted:true only when all Windows criteria covered including DCC and residuals empty; same_fd_post_dlopen_rehash may pass (loader contract + success path) but binary_hash_to_dlopen_toctou_not_fully_closed remains (no native bootstrap atomicity; ancestor-delete-handles + same-token/admin residual) so accepted:false; WIN-BINARY not auto-claimed; temp fixtures are not live matrix; source_commit must be HEAD^ with exact 3 package outputs",
   });
   process.exitCode = 0;
 }

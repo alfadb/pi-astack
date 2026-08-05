@@ -393,6 +393,18 @@ passed += 1;
   assert(/WINDOWS_NATIVE_ADDON_PACKAGE_ACL_INVALID/.test(src), "loader must define PACKAGE_ACL_INVALID");
   assert(/enforcePackageAcl/.test(src), "production path must support package ACL enforce flag");
 
+  // After-load same-fd rehash must exist and order: dlopen → rehash → identity → self identity.
+  assert(/function assertSameFdBinaryHash\(/.test(src), "loader must define assertSameFdBinaryHash");
+  const loadCall = codeOnly.indexOf("loadNativeModule(paths.binaryPath)");
+  const rehashCall = codeOnly.indexOf("assertSameFdBinaryHash(");
+  const afterIdCall = codeOnly.indexOf('assertBinaryIdentityUnchanged(io, fd, paths.binaryPath, preIdentity, "after-load")');
+  const selfIdCall = codeOnly.indexOf("assertIdentityMatchesManifest(");
+  assert(loadCall >= 0, "load flow must call loadNativeModule(paths.binaryPath)");
+  assert(rehashCall > loadCall, "same-fd rehash must run after dlopen");
+  assert(afterIdCall > rehashCall, "after-load identity must run after same-fd rehash");
+  assert(selfIdCall > rehashCall, "self identity must run after same-fd rehash");
+  assert(selfIdCall > afterIdCall, "self identity must run after after-load identity");
+
   // Grep __TEST references in code outside smoke + module itself (docs may describe the seam).
   const walkCode = (dir, acc = []) => {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -429,7 +441,7 @@ passed += 1;
     }
   }
   assert(strictOffenders.length === 0, `__TEST referenced outside smoke/module: ${strictOffenders.join(", ")}`);
-  console.log("  ok    source hygiene: no path env/download/auto-compile; production arity 0; __TEST confined");
+  console.log("  ok    source hygiene: no path env/download/auto-compile; production arity 0; __TEST confined; same-fd rehash order");
   passed += 1;
 }
 
@@ -954,7 +966,9 @@ await check("binary replaced during load is rejected by post-identity check", ()
   try {
     const binaryBytes = Buffer.from("toctou-original-bytes\n");
     const { paths, manifest, manifestSha256 } = writeFixturePackage(root, { binaryBytes });
-    expectCode("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", () => loadWin({
+    // Replace race: same-fd rehash runs before identity and may catch size/hash first;
+    // either detector must still fail closed with BINARY_MUTATED.
+    const caught = expectCode("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", () => loadWin({
       packageRoot: root,
       expectedManifestSha256: manifestSha256,
       loadNativeModule(absoluteBinaryPath) {
@@ -964,7 +978,117 @@ await check("binary replaced during load is rejected by post-identity check", ()
         fs.utimesSync(absoluteBinaryPath, now, now);
         return matchingFakeAddon(manifest);
       },
-    }), "identity changed");
+    }));
+    const msg = String(caught.message || "");
+    assert(
+      msg.includes("same-fd rehash") || msg.includes("identity changed"),
+      `replace race must be caught by rehash or identity, got ${msg}`,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check("injected lstat non-ENOENT is PATH_UNTRUSTED (no fail-open)", () => {
+  const root = tempPackageRoot("lstat-eacces");
+  try {
+    const { paths, manifestSha256 } = writeFixturePackage(root);
+    const seam = realFsSeam({
+      lstatSync: (p) => {
+        if (path.resolve(p) === path.resolve(paths.binaryPath)) {
+          const err = new Error("EACCES: permission denied (injected)");
+          err.code = "EACCES";
+          throw err;
+        }
+        const st = fs.lstatSync(p);
+        return {
+          size: st.size,
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isFile: () => st.isFile(),
+        };
+      },
+    });
+    const caught = expectCode("WINDOWS_NATIVE_ADDON_PATH_UNTRUSTED", () => loadWin({
+      packageRoot: root,
+      expectedManifestSha256: manifestSha256,
+      fs: seam.fs,
+      loadNativeModule() {
+        throw new Error("must not load when lstat non-ENOENT");
+      },
+    }), "unreadable");
+    assert(caught.detail?.check === "lstat", `detail.check=lstat, got ${caught.detail?.check}`);
+    assert(caught.detail?.code === "EACCES", `detail.code=EACCES, got ${caught.detail?.code}`);
+    const detailText = JSON.stringify(caught.detail || {});
+    assert(!detailText.includes(paths.binaryPath), "PATH_UNTRUSTED detail must not leak path");
+    assert(!detailText.includes(root), "PATH_UNTRUSTED detail must not leak package root");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check("injected lstat ENOENT still maps to BINARY_MISSING", () => {
+  const root = tempPackageRoot("lstat-enoent");
+  try {
+    const { paths, manifestSha256 } = writeFixturePackage(root);
+    // Remove binary so absence is real; inject lstat ENOENT as the observable surface.
+    fs.rmSync(paths.binaryPath, { force: true });
+    const seam = realFsSeam({
+      lstatSync: (p) => {
+        if (path.resolve(p) === path.resolve(paths.binaryPath)) {
+          const err = new Error("ENOENT: no such file (injected)");
+          err.code = "ENOENT";
+          throw err;
+        }
+        const st = fs.lstatSync(p);
+        return {
+          size: st.size,
+          isSymbolicLink: () => st.isSymbolicLink(),
+          isFile: () => st.isFile(),
+        };
+      },
+    });
+    expectCode("WINDOWS_NATIVE_ADDON_BINARY_MISSING", () => loadWin({
+      packageRoot: root,
+      expectedManifestSha256: manifestSha256,
+      fs: seam.fs,
+      loadNativeModule() {
+        throw new Error("must not load missing binary");
+      },
+    }));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+await check("in-place binary mutation after open is rejected by same-fd rehash", () => {
+  const root = tempPackageRoot("toctou-inplace");
+  try {
+    const original = Buffer.from("toctou-inplace-AAAA\n");
+    const mutated = Buffer.from("toctou-inplace-BBBB\n");
+    assert(original.byteLength === mutated.byteLength, "in-place mutation must preserve size");
+    const { paths, manifest, manifestSha256 } = writeFixturePackage(root, { binaryBytes: original });
+    const caught = expectCode("WINDOWS_NATIVE_ADDON_BINARY_MUTATED", () => loadWin({
+      packageRoot: root,
+      expectedManifestSha256: manifestSha256,
+      loadNativeModule(absoluteBinaryPath) {
+        // Overwrite through a second handle while loader holds the original fd open.
+        // Preserve size + restore mtime so identity best-effort alone would not catch content flip.
+        const before = fs.statSync(absoluteBinaryPath);
+        const fdw = fs.openSync(absoluteBinaryPath, "r+");
+        try {
+          fs.writeSync(fdw, mutated, 0, mutated.byteLength, 0);
+          fs.fsyncSync(fdw);
+        } finally {
+          fs.closeSync(fdw);
+        }
+        fs.utimesSync(absoluteBinaryPath, before.atime, before.mtime);
+        return matchingFakeAddon(manifest);
+      },
+    }), "same-fd rehash");
+    assert(caught.detail?.check === "sha256", `detail.check=sha256, got ${caught.detail?.check}`);
+    assert(caught.detail?.phase === "after-load", `detail.phase=after-load, got ${caught.detail?.phase}`);
+    // Ensure we did not fall back to path identity as the only detector for this case.
+    assert(!String(caught.message || "").includes("identity changed"), "must fail via same-fd rehash, not identity");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
