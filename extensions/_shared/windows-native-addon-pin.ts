@@ -8,5 +8,5 @@
  * .node under native/windows/win32-x64/) are build/package outputs and must never
  * enter source_tree_sha256. Do not hand-edit production values; re-run package.
  */
-export const WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256: string | null = "51601ebaf223d8a47a78c914d2e68bacbe6b149240f2846882ecb334fdb1e88e";
-export const WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT: string | null = "265ee18c3d62e435458dac390d39d2d689639a0e";
+export const WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256: string | null = "b41b07d13005ff5189c7e61a080d36ba72640624174828ce0181a9148f5bb6e7";
+export const WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT: string | null = "f0aac1737550c1a926fc73e775a1870768215320";
