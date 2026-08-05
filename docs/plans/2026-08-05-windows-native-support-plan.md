@@ -7,7 +7,7 @@ updated: 2026-08-06
 
 # pi-astack Windows 原生支持 Living Plan
 
-**状态：Active / partial；当前阶段：final package 已 commit + installed `package_rx`，pin live；partial production acceptance dossier 已固化（`accepted:false`）；P0–P3 implementation + package plumbing + loader same-fd post-dlopen rehash 已落地；TOCTOU 仍未完全闭合；DCC `not_covered`**——测试 artifact commit `8823e47f4de37156ac8ebbb9a6149bd8617ce470`（source `f0aac1737550c1a926fc73e775a1870768215320`）；runtime 切片 Node 24.18.1 / win32-x64 / Windows_NT 10.0.26100 / local NTFS；gates 全 true；manifest `b41b07d1…` / binary `f29c1e7a…` / build_id `0adb312d…` / source_tree `d38a5096…` / toolchain `b937bbda…`；dual clean + 21 native tests/clippy/sensitive scan；package smoke 15 + post-pin matrices；dossier sections provenance/retained/DACL/stable/edge pass，DCC `not_covered`；same-fd post-dlopen rehash pass；abrain aggregate unchanged；git clean after。**不得**宣称 production accepted；全部 8 criteria 保持未勾；未改 settings 合同。partial 记录见 [completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)。**
+**状态：Active / partial；execution BLOCKED on external authorization；当前阶段：final package 已 commit + installed `package_rx`，pin live；partial production acceptance dossier 已固化（`accepted:false`）；P0–P3 implementation + package plumbing + loader same-fd post-dlopen rehash 已落地；TOCTOU 仍未完全闭合；DCC `not_covered`**——测试 artifact commit `8823e47f4de37156ac8ebbb9a6149bd8617ce470`（source `f0aac1737550c1a926fc73e775a1870768215320`）；runtime 切片 Node 24.18.1 / win32-x64 / Windows_NT 10.0.26100 / local NTFS；gates 全 true；manifest `b41b07d1…` / binary `f29c1e7a…` / build_id `0adb312d…` / source_tree `d38a5096…` / toolchain `b937bbda…`；dual clean + 21 native tests/clippy/sensitive scan；package smoke 15 + post-pin matrices；dossier sections provenance/retained/DACL/stable/edge pass，DCC `not_covered`；same-fd post-dlopen rehash pass；abrain aggregate unchanged；git clean after。**2026-08-06 只读外部前提探测**：live production observe=`legacy`/`not_authorized`、attestation absent、未 kick/未写；本机仅 Node 24 车道、无 Node 22；无其他 enabled 普通本地账户；无 repo CI / Linux / Server runner 可用，WSL 不计；worktree clean。继续推进 DCC live / 第二账户 / 矩阵外证 **需用户授权或外部 host**。**不得**宣称 production accepted；全部 8 criteria 保持未勾；未改 settings 合同。partial 记录见 [completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)。**
 
 本计划是 pi-astack 生产级 Windows 原生支持的唯一 living plan。它冻结已确认决策、阶段边界与外部验收门；不宣称 Windows production acceptance 已完成。会话讨论只保留决策来源，不是执行权威。每次实施和验收必须同时核对 [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md)、[central-sediment-edge](../architecture/central-sediment-edge.md)、[local-sediment-executor-authority](../architecture/local-sediment-executor-authority.md)、[retained-directory-ofd-lock](../../extensions/_shared/retained-directory-ofd-lock.ts)、当前代码、live settings 与真实 Windows 主机证据。文档与现场冲突时，按下文 Replanning Protocol 处理。
 
@@ -79,7 +79,8 @@ updated: 2026-08-06
 
 > 本节是 living plan 的可重写热区。阶段切换、发现现场冲突或形成新阻塞时整节更新；不要在此冻结会快速过期的运行数量。
 
-- 当前阶段：**final package 已 commit + installed `package_rx`；pin live；partial production acceptance dossier 已固化（`accepted:false`）；P0–P3 implementation + package plumbing + loader same-fd post-dlopen rehash 已落地；P4 partial 外证已记录，未 accepted**。
+- 当前阶段：**final package 已 commit + installed `package_rx`；pin live；partial production acceptance dossier 已固化（`accepted:false`）；P0–P3 implementation + package plumbing + loader same-fd post-dlopen rehash 已落地；P4 partial 外证已记录，未 accepted；execution BLOCKED on external authorization**。
+- **只读外部前提探测（2026-08-06；未 kick / 未写 / 未改 settings）**：live production observe = `legacy` / `not_authorized`；attestation **absent**；本机 Node 车道 **仅 Node 24**（无 Node 22 双车道）；本地 **无** 其他 enabled 普通账户可供第二 principal 外证；**无** repo CI / Linux / Server runner 入口，WSL **不可计** production acceptance；worktree **clean**。闭合 DCC live 六条件、第二账户 DACL、Linux zero-regression、完整 OS/Node 矩阵的下一步 **依赖用户授权或外部 host**，本机只读无法自行推进。
 - **Live pin / artifact（现行）**：
   - artifact commit：`8823e47f4de37156ac8ebbb9a6149bd8617ce470`
   - source commit：`f0aac1737550c1a926fc73e775a1870768215320`
@@ -194,7 +195,7 @@ updated: 2026-08-06
 - Linux 侧：retained OFD / DCC production acceptance 继续有效；本机无 Linux zero-regression 新证据。
 - Windows 侧：pin live + package_rx installed；零参 load 正向；partial dossier `accepted:false`；DCC 仍非 ready（`not_covered`）。
 - 工具链：blocker 已解决。
-- **仍 blocking**：TOCTOU residual、DCC live 六条件、DACL 第二账户主动 tamper、stable/edge live matrix、Linux zero-regression 外证、完整 OS/Node 矩阵。
+- **仍 blocking**：TOCTOU residual、DCC live 六条件、DACL 第二账户主动 tamper、stable/edge live matrix、Linux zero-regression 外证、完整 OS/Node 矩阵、**external authorization / external host 不可得**。
 - 本文件是唯一 living plan。
 
 ## Phase Table
@@ -205,7 +206,7 @@ updated: 2026-08-06
 | P1 | native lock | **production adapter 已接线**；partial dossier retained=pass；criterion 仍 open | P0 合同可用；工具链可用 | Windows 跨进程 contention + crash release **生产路径**外证；Linux OFD zero-regression | criterion 仍因 temp fixture / 真实生产调用点或矩阵外证不足 open；禁止以 temp smoke 或 partial retained=pass 当 production acceptance |
 | P2 | atomic pointer / durable replace | durable/stable/edge **production physical 已接线**；partial pass；live matrix 与 Linux external 仍 open | P1 合同可用 | Windows durable replace / atomic pointer **生产路径**外部证据；相关 Linux 路径 zero-regression | 补 live matrix 与 Linux external 外证；进入 P3 DCC live 覆盖评估；不得以 temp fixture partial pass 关闭 |
 | P3 | protected DACL + DCC | **physical+DACL partial pass**；DCC=`not_covered`；第二账户外证 open；未 criterion close | P2 合同可用 | protected-DACL **生产**外证；DACL tamper fail-closed；DCC 不再以 `attestation_unavailable` 作为唯一终态，且仅在 DACL 验收后才允许 ready 路径 | 补第二账户 DACL 主动 tamper 外证 + live DCC 六条件；TOCTOU residual 决策；P4 不得以 partial 关闭 |
-| P4 | Windows production acceptance | **partial**（dossier 已跑；`accepted:false`；criteria 全未勾） | P3 物理接线 + live package | 第一矩阵真实主机 production acceptance dossier；全部 stable criteria 有匹配外证；`accepted:true` | 闭合 residuals（TOCTOU/DCC/第二账户 DACL/live matrix/Linux regression/完整矩阵）后再评估勾选；不得以 partial 关闭本计划 |
+| P4 | Windows production acceptance | **partial**（dossier 已跑；`accepted:false`；criteria 全未勾；**execution BLOCKED on external authorization**） | P3 物理接线 + live package | 第一矩阵真实主机 production acceptance dossier；全部 stable criteria 有匹配外证；`accepted:true` | 只读探测确认 live observe 非 authorized、本机缺第二账户/Node22/CI-Linux-Server；闭合 residuals 需用户授权或外部 host 后再评估勾选；不得以 partial 关闭本计划 |
 
 任一阶段完成**不**自动放宽 Frozen Contracts，也**不**自动勾选未获外证的 criteria。
 
@@ -229,11 +230,12 @@ updated: 2026-08-06
 - **工具链缺失：已解决** — VsDevCmd + MSVC 14.44 + rustc/cargo `x86_64-pc-windows-msvc`；production release + dual clean 已通过。
 - **final package / pin / package_rx：已解决（现行 live）** — artifact `8823e47f…` / source `f0aac173…` / pin live / installed package_rx；不再写“待 rebuild / pin null”。
 - **hash→dlopen TOCTOU（部分缓解，未完全闭合；仍 blocking）**：held fd pre-hash + **same-fd post-dlopen rehash** + fd/path identity best-effort + production package_rx 三点。**仍无** native bootstrap 原子保证；ancestor pre-open delete handles 与 same-token/admin 恶意残留。**不得**因 `same_fd_post_dlopen_rehash:"pass"` 声称 TOCTOU 已完全解决；绑定 `WIN-BINARY-PROVENANCE`。
-- **DCC live 六条件（仍 blocking）**：物理层已接；partial dossier DCC=`not_covered`。闭合需要 live daemon lock + real git + settled kick；不得为补 DCC 改生产合同或假 pass。
-- **DACL 第二账户主动 tamper（仍 open）**：system-owner / same-token deny 矩阵已观察；第二账户主动 tamper 未覆盖 → 不闭合 `WIN-DACL-TAMPER`。
+- **DCC live 六条件（仍 blocking；受 external authorization 约束）**：物理层已接；partial dossier DCC=`not_covered`。2026-08-06 只读观察 live production observe=`legacy`/`not_authorized`、attestation absent；**未** kick、**未**写。闭合需要用户授权下的 live daemon lock + real git + settled kick（或等价授权路径）；不得为补 DCC 改生产合同或假 pass。
+- **DACL 第二账户主动 tamper（仍 open；本机不可构造）**：system-owner / same-token deny 矩阵已观察；本地无其他 enabled 普通账户 → 第二账户主动 tamper 未覆盖 → 不闭合 `WIN-DACL-TAMPER`；需用户提供独立 principal 或外部 host。
 - **stable / edge live matrix（仍 open）**：partial 为 temp fixture production physical path，非 live production matrix root → 不闭合 `WIN-STABLE-VIEW-INJECTION` / `WIN-EDGE-JOURNAL`。
-- **Linux zero-regression 外证（仍 open）**：本机无 `WIN-LINUX-ZERO-REGRESSION` 证据。
-- **完整 OS/Node 矩阵（仍 open）**：仅 Node 24.18.1 + Windows_NT 10.0.26100 + win32-x64 + local NTFS 切片。
+- **Linux zero-regression 外证（仍 open；本机不可构造）**：无 repo CI / Linux / Server runner；WSL 不计；无 `WIN-LINUX-ZERO-REGRESSION` 证据 → 需外部 Linux host 或授权 CI。
+- **完整 OS/Node 矩阵（仍 open）**：仅 Node 24.18.1 + Windows_NT 10.0.26100 + win32-x64 + local NTFS 切片；**无 Node 22 车道** 于本机。
+- **External authorization / host（仍 blocking execution）**：在用户授权或外部 host 到位前，不得执行 kick、写 attestation、第二账户 tamper、跨主机矩阵；状态保持 active/partial，execution **BLOCKED**。
 - **Named mutex availability residual**：predictable Global 名同机 squat 仍可 DoS（fail-closed）；same-token malice out-of-contract。
 - **DELETE 目录 handle 方案已 supersede**：不得回退。
 - 纯 TS lockfile 禁止作为生产 fallback。
@@ -241,12 +243,13 @@ updated: 2026-08-06
 
 ## Next Probe
 
-1. **DCC live 覆盖**：在合法 live daemon lock + real git + settled kick 前提下补 DCC section；保持 fail-closed 合同；不可构造则继续 `not_covered`/`partial`。
+0. **用户授权或外部 host（前置；当前 BLOCKED）**：只读探测已确认 live observe 非 authorized、attestation absent、本机无第二普通账户 / 无 Node 22 / 无 CI·Linux·Server runner、WSL 不计、worktree clean。在获得明确授权（允许 kick / 写路径 / 第二 principal）或可访问的外部 host 之前，**不**执行下列 1–6 的写侧或跨主机动作。
+1. **DCC live 覆盖**（需授权）：在合法 live daemon lock + real git + settled kick 前提下补 DCC section；保持 fail-closed 合同；不可构造则继续 `not_covered`/`partial`。
 2. **TOCTOU residual 决策**：评估 native bootstrap 原子性是否值得做；或将 residual 明确绑定 `WIN-BINARY-PROVENANCE` 的可接受边界（需不低于原决策强度的重新确认）。
-3. **DACL 第二账户主动 tamper 外证**：独立 principal 主动改 ACL 后 native verify deny。
+3. **DACL 第二账户主动 tamper 外证**（需独立 principal 或外部 host）：独立 principal 主动改 ACL 后 native verify deny。
 4. **stable / edge live matrix**：在真实 production root（非仅 temp fixture）补联合外证。
-5. **Linux zero-regression 外证入口**：标明并运行 `WIN-LINUX-ZERO-REGRESSION` 证据。
-6. **完整第一矩阵**：Node >=22.19 与 Node 24 双车道 + 目标 OS 覆盖（按真实需要扩）。
+5. **Linux zero-regression 外证入口**（需外部 Linux/CI host）：标明并运行 `WIN-LINUX-ZERO-REGRESSION` 证据。
+6. **完整第一矩阵**（需 Node 22 车道 + 目标 OS 覆盖，按真实需要扩；本机目前仅 Node 24）。
 7. **勾选纪律**：仅当 dossier `accepted:true` 且证据与 criterion 文本匹配时才允许 `goal_check`；partial 记录不勾任何项。
 
 ## Execution Order (Planned)
@@ -284,6 +287,7 @@ updated: 2026-08-06
 - 2026-08-06：**Windows production acceptance dossier 最后封闭（不 commit、criteria 全不勾）**。(1) hardCleanup strict：成功路径 temp residual/hardRm 失败 throw；失败路径 cleanup_errors bounded 入 failure JSON；仅存活 child 才 kill。(2) retained/edge child wait 断言 code===0/signal null + bounded stderr；crash holder taskkill 单独标。(3) stable latest 仅 byte-exact `bundles/<hash>\n`；DACL tamper 加 icacls readback + native verify deny。(4) system owner probes：存在 targets 全 denied；≥1 成功拒绝；residual 非第二账户主动 tamper。(5) live ~/.abrain guard → bounded recursive aggregate（count+sha256 only；含 hidden；封顶 invalid）。(6) 全局 residual 恒加 `binary_hash_to_dlopen_toctou_not_fully_closed` ⇒ accepted false；provenance 可 pass 不宣称 WIN-BINARY 完成。(7) 6 worker 再跑确认；plan 补记不勾。
 - 2026-08-06：**loader same-fd post-dlopen rehash + trusted-leaf lstat fail-closed（不 commit、不 package/build、criteria 全不勾）**。(1) `assertTrustedLeafPath`：逐组件 lstat 仅 ENOENT 可 return 交 MISSING；EACCES/EPERM/EBUSY/其他 → `PATH_UNTRUSTED`；detail 仅 bounded check/code 不泄 path；realpath 同类不 fail-open。(2) 生产/测试共同 load：binary fd 自 hash 前持有到 load 后；dlopen 后 same-fd 全量 rehash exact `manifest.binary_sha256`（positional read + 64MiB ceiling，不从 path 重读）→ 不符 `BINARY_MUTATED` → 再 after-load identity + self identity。(3) smoke：lstat 非 ENOENT→PATH_UNTRUSTED；ENOENT→MISSING；load 内原地改内容（保 size/mtime）→ same-fd rehash BINARY_MUTATED；既有 replace race 仍过；source hygiene 静态检查 rehash 顺序。(4) dossier structural/provenance 输出 `same_fd_post_dlopen_rehash:"pass"`；TOCTOU residual **仍保留**并明确无 native bootstrap 原子保证、ancestor-delete-handles / same-token-admin 残留。(5) 既有 artifact commit 因源码变更 stale；本切片不 package/build/commit、不勾 criteria。
 - 2026-08-06：**final package + partial production acceptance 固化（criteria 全不勾；`accepted:false`；不宣称 production accepted）**。(1) source `f0aac1737550c1a926fc73e775a1870768215320` → production build dual clean + 21 native tests/clippy/sensitive scan + gates 全 true → package/install `package_rx` → artifact commit `8823e47f4de37156ac8ebbb9a6149bd8617ce470`；pin live（manifest `b41b07d1…` / binary `f29c1e7a…` / build_id `0adb312d…` / source_tree `d38a5096…` / toolchain `b937bbda…`）。(2) runtime 切片 Node 24.18.1 / win32-x64 / Windows_NT 10.0.26100 / local NTFS。(3) package smoke 15 + post-pin matrices live 正向。(4) dossier：provenance/retained/DACL/stable/edge pass；DCC `not_covered`；same-fd post-dlopen rehash pass；abrain aggregate unchanged；git clean after；overall partial / `accepted:false`。(5) residuals 明确：无 native bootstrap 原子 TOCTOU（ancestor pre-open delete handles + same-token/admin）；DCC 需 live daemon lock+real git+settled kick；DACL 第二账户主动 tamper 未覆盖；stable/edge 为 temp fixture production physical path 非 live matrix；Linux zero-regression 无本机证据；OS/Node 完整矩阵未覆盖。(6) 固化 [docs/completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)；现在时清除 pin null / 待 rebuild（历史 Decision Log 保留）；**全部 8 criteria 保持 `[ ]`**。
+- 2026-08-06：**只读外部前提探测（未 kick/未写；criteria 全不勾；execution BLOCKED on external authorization）**。live production observe=`legacy`/`not_authorized`；attestation absent；本机仅 Node 24、无 Node 22 车道；无其他 enabled 普通本地账户；无 repo CI/Linux/Server runner，WSL 不计；worktree clean。DCC live / 第二账户 DACL / Linux regression / 完整矩阵继续依赖用户授权或外部 host；状态仍 active/partial，不宣称 accepted。
 
 ## Definition of Fully Complete
 
