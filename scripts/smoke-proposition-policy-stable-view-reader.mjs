@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-/** ADR0040 production stable-view reader + runtime full-flip smoke. */
+/** ADR0040 production stable-view reader + runtime full-flip smoke.
+ *  POSIX symlink durable path. Windows native pointer path is covered by
+ *  smoke:proposition-policy-stable-view-windows.
+ */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,6 +10,11 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { preparePropositionPolicyStableViewFixture } from "./_proposition-policy-stable-view-fixture.mjs";
+
+if (process.platform === "win32") {
+  console.log("SKIP: POSIX symlink reader path; use smoke:proposition-policy-stable-view-windows");
+  process.exit(0);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
@@ -257,6 +265,28 @@ try {
     assert(result.ok && result.bundleHash === emptyBundle.bundle_hash && result.itemCount === 0, `captured result=${JSON.stringify(result)}`);
     assert(captured === emptyValue && hookCalls === 1, `captured=${captured}, hookCalls=${hookCalls}`);
     assert(fs.readlinkSync(latest(concurrentPublished)) === fullValue, "concurrent latest switch did not occur");
+  });
+
+  await check("exact publisher staging/latest temps are ignored; approximate foreign names reject", () => {
+    const home = clonePublished("publish-window-temps");
+    const root = stableRoot(home);
+    const stagingName = `.staging-${fullBundle.bundle_hash}-${process.pid}-${"a".repeat(16)}`;
+    const latestTempName = `.latest-${process.pid}-${"b".repeat(16)}`;
+    fs.mkdirSync(path.join(root, stagingName), { mode: 0o700 });
+    fs.symlinkSync(`bundles/${fullBundle.bundle_hash}`, path.join(root, latestTempName), "dir");
+    const ok = read(home);
+    assert(ok.ok && ok.bundleHash === fullBundle.bundle_hash, `exact temps must not foreign_root: ${JSON.stringify(ok)}`);
+
+    const approxHome = clonePublished("approx-foreign-temps");
+    const approxRoot = stableRoot(approxHome);
+    fs.mkdirSync(path.join(approxRoot, `.staging-not-exact-${process.pid}`), { mode: 0o700 });
+    assert(read(approxHome).reason === "foreign_root", "approximate staging name must remain foreign_root");
+
+    const badType = clonePublished("unsafe-temp-type");
+    const badRoot = stableRoot(badType);
+    const badStaging = `.staging-${fullBundle.bundle_hash}-${process.pid}-${"c".repeat(16)}`;
+    fs.symlinkSync(".", path.join(badRoot, badStaging), "dir");
+    assert(read(badType).reason === "foreign_root", "staging symlink must remain foreign_root");
   });
 
   await check("invalid latest, partial set, manifest authority and sealed provenance faults reject", () => {

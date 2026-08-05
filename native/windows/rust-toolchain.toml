@@ -1,0 +1,9 @@
+# Pin the MSVC host toolchain used for the win32-x64 N-API addon.
+# 1.97.1 is the currently installed stable compiler on the build host
+# (stable-x86_64-pc-windows-msvc → rustc 1.97.1). Using the exact version
+# channel locks the compiler; if rustup would download a second copy, the
+# build driver records the resolved rustc -Vv identity into toolchain_id.
+[toolchain]
+channel = "1.97.1"
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

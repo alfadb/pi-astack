@@ -32,10 +32,29 @@ import {
   validateTypescriptStaticDependencyGraph,
 } from "./typescript-static-dependency-graph";
 import {
-  acquireRetainedDirectoryOfdLock,
-  type RetainedDirectoryOfdLock,
-} from "./retained-directory-ofd-lock";
+  acquireRetainedDirectoryLock,
+  type RetainedDirectoryLock,
+} from "./retained-directory-lock";
 import { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
+import {
+  captureStableViewLatestPointer,
+  durableCreateProtectedFile,
+  ensureStableViewProtectedDirectory,
+  ensureStableViewProtectedDirectoryChain,
+  parseStableViewLatestPointerBytes,
+  PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PATTERN,
+  PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PREFIX,
+  publishStableViewLatestPointer,
+  PropositionPolicyStableViewWindowsNativeError,
+  readStableViewLatestPointerFile,
+  readStableViewProtectedFile,
+  resolveStableViewWindowsNativeAddon,
+  verifyStableViewProtectedDirectory,
+  verifyStableViewProtectedFile,
+  type StableViewWindowsNativeDeps,
+} from "./proposition-policy-stable-view-windows-native";
+
+type StableViewWindowsNativeAddon = NonNullable<StableViewWindowsNativeDeps["windowsNativeAddon"]>;
 
 export { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
 
@@ -331,6 +350,8 @@ export async function publishPropositionPolicyStableView(options: {
    * switching `latest` so an oversize bundle cannot become the sole authority.
    */
   runtimeMaxReadBytes?: number;
+  /** Test-only Windows native addon (temp package). Gated by PI_ASTACK_ENABLE_TEST_HOOKS=1. */
+  windowsNativeAddon?: StableViewWindowsNativeAddon;
 }): Promise<PropositionPolicyStableViewPublicationResult> {
   const sourceAbrainHome = assertExactDirectory(options.sourceAbrainHome, "source abrain home");
   const currentAbrainHome = resolvePropositionPolicyStableViewCurrentAbrainHome();
@@ -354,6 +375,7 @@ export async function publishPropositionPolicyStableView(options: {
         bundle,
         productionLockCapability: PRODUCTION_LOCK_CAPABILITY,
         runtimeMaxReadBytes: options.runtimeMaxReadBytes,
+        ...(options.windowsNativeAddon ? { windowsNativeAddon: options.windowsNativeAddon } : {}),
       });
       validateProductionPublicationResult(productionBinding, result);
       return result;
@@ -373,6 +395,7 @@ export async function publishPropositionPolicyStableView(options: {
     targetAbrainHome,
     bundle,
     runtimeMaxReadBytes: options.runtimeMaxReadBytes,
+    ...(options.windowsNativeAddon ? { windowsNativeAddon: options.windowsNativeAddon } : {}),
   });
 }
 
@@ -815,17 +838,33 @@ function assertRuntimePublicationAcceptance(
   }
 }
 
-function acquireProductionPublicationLock(lockRoot: string): RetainedDirectoryOfdLock & { status: "ACQUIRED"; fd: number } {
-  const lock = acquireRetainedDirectoryOfdLock(lockRoot);
-  if (lock.status === "BUSY" || lock.fd === null) fail("LOCK_BUSY", "another stable-view publisher holds the exclusive production lock");
-  const named = fs.lstatSync(lockRoot);
-  const opened = fs.fstatSync(lock.fd);
-  if (named.isSymbolicLink() || !named.isDirectory() || !opened.isDirectory()
-    || named.dev !== opened.dev || named.ino !== opened.ino) {
-    lock.close();
-    fail("LOCK_IDENTITY_DRIFT", "production publication lock identity changed after acquisition");
+function acquireProductionPublicationLock(lockRoot: string): RetainedDirectoryLock & { status: "ACQUIRED" } {
+  const lock = acquireRetainedDirectoryLock(lockRoot);
+  if (lock.status === "BUSY") fail("LOCK_BUSY", "another stable-view publisher holds the exclusive production lock");
+  // Linux: retain original fstat(fd) identity contract. Windows: assertIdentity; fd is null.
+  if (process.platform === "linux") {
+    if (lock.fd === null) {
+      lock.close();
+      fail("LOCK_BUSY", "another stable-view publisher holds the exclusive production lock");
+    }
+    const named = fs.lstatSync(lockRoot);
+    const opened = fs.fstatSync(lock.fd);
+    if (named.isSymbolicLink() || !named.isDirectory() || !opened.isDirectory()
+      || named.dev !== opened.dev || named.ino !== opened.ino) {
+      lock.close();
+      fail("LOCK_IDENTITY_DRIFT", "production publication lock identity changed after acquisition");
+    }
+  } else {
+    try {
+      lock.assertIdentity();
+    } catch (error) {
+      try { lock.close(); } catch { /* best-effort */ }
+      fail("LOCK_IDENTITY_DRIFT", "production publication lock identity changed after acquisition", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
-  return lock as RetainedDirectoryOfdLock & { status: "ACQUIRED"; fd: number };
+  return lock as RetainedDirectoryLock & { status: "ACQUIRED" };
 }
 
 function materializeBundle(options: {
@@ -835,6 +874,7 @@ function materializeBundle(options: {
   productionLockCapability?: symbol;
   hooks?: PublisherTestHooks;
   runtimeMaxReadBytes?: number;
+  windowsNativeAddon?: StableViewWindowsNativeAddon;
 }): PropositionPolicyStableViewPublicationResult {
   if (options.mode === "production" && options.productionLockCapability !== PRODUCTION_LOCK_CAPABILITY) {
     fail("PRODUCTION_LOCK_REQUIRED", "production materialization is reachable only inside the exclusive publisher lock");
@@ -846,6 +886,18 @@ function materializeBundle(options: {
     assertRuntimePublicationAcceptance(options.bundle, options.runtimeMaxReadBytes);
   }
   validatePropositionPolicyStableViewBundle(options.bundle);
+  if (process.platform === "win32") {
+    return materializeBundleWindows(options);
+  }
+  return materializeBundlePosix(options);
+}
+
+function materializeBundlePosix(options: {
+  mode: StableViewPublicationMode;
+  targetAbrainHome: string;
+  bundle: PropositionPolicyStableViewMvpBundle;
+  hooks?: PublisherTestHooks;
+}): PropositionPolicyStableViewPublicationResult {
   const targetRoot = path.join(options.targetAbrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"));
   ensureDirectoryChainNoSymlink(options.targetAbrainHome, targetRoot);
   cleanupAbandonedPublicationTemps(targetRoot);
@@ -924,28 +976,327 @@ function materializeBundle(options: {
     }
     fsyncDirectory(targetRoot);
   }
-  assertExactLatest(latest, latestValue);
+  assertExactLatestPosix(latest, latestValue);
   assertExactPublishedBundle(bundleDir, options.bundle.artifacts);
-  const view = JSON.parse(options.bundle.artifacts["view.json"]) as Record<string, unknown>;
-  const artifactRows = ARTIFACT_NAMES.map((name) => artifactRow(name, options.bundle.artifacts[name]));
+  return publicationResult(options.mode, status, options.bundle, targetRoot, bundleDir, latest, latestValue);
+}
+
+/**
+ * Windows durable materialization: protected DACL dirs + create-only hash dir files +
+ * regular private_rw latest pointer via native durableAtomicCreate/Replace.
+ * No symlink, no TS lockfile, no ordinary Node rename as the durable publish primitive.
+ */
+function materializeBundleWindows(options: {
+  mode: StableViewPublicationMode;
+  targetAbrainHome: string;
+  bundle: PropositionPolicyStableViewMvpBundle;
+  hooks?: PublisherTestHooks;
+  windowsNativeAddon?: StableViewWindowsNativeAddon;
+}): PropositionPolicyStableViewPublicationResult {
+  const deps: StableViewWindowsNativeDeps | undefined = options.windowsNativeAddon
+    ? { windowsNativeAddon: options.windowsNativeAddon }
+    : undefined;
+  let addon: StableViewWindowsNativeAddon;
+  try {
+    addon = resolveStableViewWindowsNativeAddon(deps);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+
+  // Intermediate .state/sediment may already exist as ordinary production dirs (weak ACL).
+  // Only the publication-specific subtree is TokenUser private_rw; pre-creating that
+  // subtree with Node mkdir then protecting parents can ACCESS_DENIED children.
+  const sedimentRoot = path.join(options.targetAbrainHome, ".state", "sediment");
+  ensureDirectoryChainNoSymlink(options.targetAbrainHome, sedimentRoot);
+  const targetRoot = path.join(options.targetAbrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_PUBLICATION_ROOT_RELATIVE.split("/"));
+  try {
+    ensureStableViewProtectedDirectoryChain(addon, sedimentRoot, targetRoot);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  try {
+    cleanupAbandonedPublicationTempsWindows(addon, targetRoot);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  const allowedRootEntries = new Set(["bundles", "latest"]);
+  for (const name of fs.readdirSync(targetRoot)) {
+    if (allowedRootEntries.has(name)) continue;
+    if (PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PATTERN.test(name)) {
+      // cleanupAbandoned should have removed exact protected latest temps under lock.
+      fail("PUBLICATION_FOREIGN_STATE", "windows publication root still has managed latest temp residue", { name });
+    }
+    fail("PUBLICATION_FOREIGN_STATE", "stable-view root contains a foreign entry", { name });
+  }
+  const bundlesRoot = path.join(targetRoot, "bundles");
+  try {
+    ensureStableViewProtectedDirectory(addon, bundlesRoot);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  for (const name of fs.readdirSync(bundlesRoot)) {
+    if (!SHA256_PATTERN.test(name)) fail("PUBLICATION_FOREIGN_STATE", "bundles root contains a non-content-addressed entry", { name });
+    const existing = path.join(bundlesRoot, name);
+    assertExactDirectory(existing, "existing content-addressed bundle");
+    try {
+      verifyStableViewProtectedDirectory(addon, existing);
+    } catch (error) {
+      mapWindowsPublisherError(error);
+    }
+  }
+
+  const bundleDir = path.join(bundlesRoot, options.bundle.bundle_hash);
+  const latest = path.join(targetRoot, "latest");
+  const latestValue = `bundles/${options.bundle.bundle_hash}`;
+  const latestTarget = inspectWindowsLatestTarget(addon, latest);
+  // Only allow safe residual completion when latest is missing or points elsewhere.
+  // Live pointer to this hash, or unreadable/unsafe latest → never repair/rm the CA dir.
+  const mayCompleteResidual = latestTarget.kind === "missing"
+    || (latestTarget.kind === "pointer" && latestTarget.bundleHash !== options.bundle.bundle_hash);
+  let status: "created" | "identical";
+  if (lstatIfPresent(bundleDir)) {
+    try {
+      verifyStableViewProtectedDirectory(addon, bundleDir);
+      assertExactPublishedBundleWindows(addon, bundleDir, options.bundle.artifacts);
+      status = "identical";
+    } catch (error) {
+      if (!mayCompleteResidual) {
+        // Live or unsafe latest: fail-closed without deleting/whitewashing the CA directory.
+        mapWindowsPublisherError(error);
+      }
+      if (error instanceof PropositionPolicyStableViewPublisherError
+        && (error.code === "PUBLICATION_PARTIAL_OR_FOREIGN" || error.code === "PUBLICATION_COLLISION")) {
+        status = completeWindowsBundleResidual(addon, bundleDir, options.bundle.artifacts, options.hooks);
+      } else {
+        mapWindowsPublisherError(error);
+      }
+    }
+  } else {
+    status = createWindowsBundleDir(addon, bundleDir, options.bundle.artifacts, options.hooks);
+  }
+
+  try {
+    assertExactPublishedBundleWindows(addon, bundleDir, options.bundle.artifacts);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  options.hooks?.atCrashPoint?.("before_latest_rename");
+  try {
+    publishStableViewLatestPointer(
+      addon,
+      latest,
+      options.bundle.bundle_hash,
+      options.mode === "production",
+    );
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  options.hooks?.atCrashPoint?.("after_latest_rename");
+  try {
+    assertExactLatestWindows(addon, latest, latestValue);
+    assertExactPublishedBundleWindows(addon, bundleDir, options.bundle.artifacts);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  return publicationResult(options.mode, status, options.bundle, targetRoot, bundleDir, latest, latestValue);
+}
+
+function createWindowsBundleDir(
+  addon: StableViewWindowsNativeAddon,
+  bundleDir: string,
+  artifacts: Readonly<Record<ArtifactName, string>>,
+  hooks?: PublisherTestHooks,
+): "created" | "identical" {
+  // Final unique hash dir + create-only files (native has no directory rename primitive).
+  // latest switches only after all files succeed and verify — hash is immutable.
+  // Never rm/recreate an existing content-addressed directory.
+  optionsHooksCrashBeforeBundle(hooks);
+  try {
+    ensureStableViewProtectedDirectory(addon, bundleDir);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  hooks?.atStagingArtifactCount?.(0);
+  let createdAny = false;
+  for (const [index, name] of ARTIFACT_NAMES.entries()) {
+    const filePath = path.join(bundleDir, name);
+    const data = Buffer.from(artifacts[name], "utf8");
+    let status: "created" | "identical" | "collision";
+    try {
+      status = durableCreateProtectedFile(addon, filePath, data);
+    } catch (error) {
+      mapWindowsPublisherError(error);
+    }
+    if (status === "collision") {
+      fail("PUBLICATION_COLLISION", "existing content-addressed bundle bytes differ", { name });
+    }
+    if (status === "created") createdAny = true;
+    hooks?.atStagingArtifactCount?.(index + 1);
+  }
+  optionsHooksCrashAfterBundle(hooks);
+  try {
+    assertExactPublishedBundleWindows(addon, bundleDir, artifacts);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  return createdAny ? "created" : "identical";
+}
+
+/**
+ * Safe completion of a non-live same-hash crash residual.
+ * Allowed only when latest does not point at this hash (or is missing):
+ * - directory must already be protected (no DACL auto-repair)
+ * - entries must be a subset of the five artifacts (any extra → fail)
+ * - each existing artifact must be protected and exact-equal expected bytes (no in-place replace)
+ * - missing artifacts are create-only; then exact all-five verify
+ */
+function completeWindowsBundleResidual(
+  addon: StableViewWindowsNativeAddon,
+  bundleDir: string,
+  artifacts: Readonly<Record<ArtifactName, string>>,
+  hooks?: PublisherTestHooks,
+): "created" | "identical" {
+  optionsHooksCrashBeforeBundle(hooks);
+  try {
+    verifyStableViewProtectedDirectory(addon, bundleDir);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  const allowed = new Set<string>(ARTIFACT_NAMES);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(bundleDir);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  for (const name of names) {
+    if (!allowed.has(name)) {
+      fail("PUBLICATION_PARTIAL_OR_FOREIGN", "stable-view residual bundle contains a foreign entry", { name });
+    }
+    const filePath = path.join(bundleDir, name);
+    const expectedBytes = Buffer.from(artifacts[name as ArtifactName], "utf8");
+    try {
+      verifyStableViewProtectedFile(addon, filePath);
+      const actual = readStableViewProtectedFile(addon, filePath, Math.max(expectedBytes.byteLength, 1));
+      if (!actual.equals(expectedBytes)) {
+        fail("PUBLICATION_COLLISION", "existing content-addressed bundle bytes differ", { name });
+      }
+    } catch (error) {
+      if (error instanceof PropositionPolicyStableViewPublisherError) throw error;
+      mapWindowsPublisherError(error);
+    }
+  }
+  const present = new Set(names);
+  hooks?.atStagingArtifactCount?.(present.size);
+  let createdAny = false;
+  for (const [index, name] of ARTIFACT_NAMES.entries()) {
+    if (present.has(name)) {
+      hooks?.atStagingArtifactCount?.(index + 1);
+      continue;
+    }
+    const filePath = path.join(bundleDir, name);
+    const data = Buffer.from(artifacts[name], "utf8");
+    let status: "created" | "identical" | "collision";
+    try {
+      status = durableCreateProtectedFile(addon, filePath, data);
+    } catch (error) {
+      mapWindowsPublisherError(error);
+    }
+    if (status === "collision") {
+      fail("PUBLICATION_COLLISION", "existing content-addressed bundle bytes differ", { name });
+    }
+    if (status === "created") createdAny = true;
+    hooks?.atStagingArtifactCount?.(index + 1);
+  }
+  optionsHooksCrashAfterBundle(hooks);
+  try {
+    assertExactPublishedBundleWindows(addon, bundleDir, artifacts);
+  } catch (error) {
+    mapWindowsPublisherError(error);
+  }
+  return createdAny ? "created" : "identical";
+}
+
+type WindowsLatestTarget =
+  | { kind: "missing" }
+  | { kind: "pointer"; bundleHash: string }
+  | { kind: "unsafe" };
+
+/** Strict latest target inspection for residual policy (no repair side effects). */
+function inspectWindowsLatestTarget(
+  addon: StableViewWindowsNativeAddon,
+  latestPath: string,
+): WindowsLatestTarget {
+  const st = lstatIfPresent(latestPath);
+  if (!st) return { kind: "missing" };
+  if (st.isSymbolicLink() || st.isDirectory() || !st.isFile()) return { kind: "unsafe" };
+  try {
+    const captured = captureStableViewLatestPointer(addon, latestPath);
+    return { kind: "pointer", bundleHash: captured.bundleHash };
+  } catch {
+    return { kind: "unsafe" };
+  }
+}
+
+function optionsHooksCrashBeforeBundle(hooks?: PublisherTestHooks): void {
+  hooks?.atCrashPoint?.("before_bundle_rename");
+}
+
+function optionsHooksCrashAfterBundle(hooks?: PublisherTestHooks): void {
+  hooks?.atCrashPoint?.("after_bundle_rename");
+}
+
+function publicationResult(
+  mode: StableViewPublicationMode,
+  status: "created" | "identical",
+  bundle: PropositionPolicyStableViewMvpBundle,
+  targetRoot: string,
+  bundleDir: string,
+  latest: string,
+  latestValue: string,
+): PropositionPolicyStableViewPublicationResult {
+  const view = JSON.parse(bundle.artifacts["view.json"]) as Record<string, unknown>;
+  const artifactRows = ARTIFACT_NAMES.map((name) => artifactRow(name, bundle.artifacts[name]));
   return deepFreeze({
-    mode: options.mode,
+    mode,
     status,
-    bundle_hash: options.bundle.bundle_hash,
+    bundle_hash: bundle.bundle_hash,
     target_root: targetRoot,
     bundle_directory: bundleDir,
     latest_symlink: latest,
     latest_value: latestValue,
     source_counts: {
-      input_events: options.bundle.source_bundle.manifest.source.input_event_ids.length,
-      candidates: options.bundle.source_bundle.manifest.result.entry_count,
-      exclusions: options.bundle.source_bundle.manifest.result.exclusion_count,
-      diagnostics: options.bundle.source_bundle.manifest.result.diagnostic_count,
+      input_events: bundle.source_bundle.manifest.source.input_event_ids.length,
+      candidates: bundle.source_bundle.manifest.result.entry_count,
+      exclusions: bundle.source_bundle.manifest.result.exclusion_count,
+      diagnostics: bundle.source_bundle.manifest.result.diagnostic_count,
     },
     stable_item_count: asArray(view.items, "view.items").length,
-    view_utf8_bytes: Buffer.byteLength(options.bundle.artifacts["view.md"]),
+    view_utf8_bytes: Buffer.byteLength(bundle.artifacts["view.md"]),
     artifact_rows: artifactRows,
   });
+}
+
+function mapWindowsPublisherError(error: unknown): never {
+  if (error instanceof PropositionPolicyStableViewPublisherError) throw error;
+  if (error instanceof PropositionPolicyStableViewWindowsNativeError) {
+    const winCode = error.code;
+    const mapped =
+      winCode === "WINDOWS_STABLE_VIEW_NATIVE_UNAVAILABLE" ? "WINDOWS_NATIVE_UNAVAILABLE"
+        : winCode === "WINDOWS_STABLE_VIEW_LATEST_UNSAFE" ? "PUBLICATION_LATEST_UNSAFE"
+          : winCode === "WINDOWS_STABLE_VIEW_POINTER_INVALID"
+            || winCode === "WINDOWS_STABLE_VIEW_POINTER_COLLISION" ? "PUBLICATION_LATEST_UNSAFE"
+            : winCode === "WINDOWS_STABLE_VIEW_PATH_ESCAPE" ? "PUBLICATION_PATH_ESCAPE"
+              : winCode === "WINDOWS_STABLE_VIEW_TOO_LARGE" ? "PUBLICATION_COLLISION"
+              : winCode === "WINDOWS_STABLE_VIEW_PROTECTED_DIR_FAILED"
+                || winCode === "WINDOWS_STABLE_VIEW_PROTECTED_FILE_FAILED"
+                || winCode === "WINDOWS_STABLE_VIEW_DURABLE_WRITE_FAILED"
+                || winCode === "WINDOWS_STABLE_VIEW_PROTECTED_READ_FAILED"
+                ? "PUBLICATION_WINDOWS_PROTECTED_IO"
+                : "PUBLICATION_WINDOWS_FAILED";
+    fail(mapped, error.message.replace(/^[^:]+:\s*/, "").slice(0, 256));
+  }
+  fail("PUBLICATION_WINDOWS_FAILED", error instanceof Error ? error.message.slice(0, 256) : String(error).slice(0, 256));
 }
 
 function cleanupAbandonedPublicationTemps(targetRoot: string): void {
@@ -977,6 +1328,38 @@ function cleanupAbandonedPublicationTemps(targetRoot: string): void {
     }
   }
   fsyncDirectory(targetRoot);
+}
+
+/**
+ * Windows stable-root temp cleanup under exclusive publisher lock.
+ * Exact native grammar for destination `latest`:
+ *   `.latest.pi-astack-tmp.<pid>-<nanos>.tmp`
+ * Only regular + private_rw files matching that grammar are removed.
+ * Unsafe type / DACL / approximate foreign names fail-closed.
+ * Bundle create-only temps live inside the hash dir, not the stable root — not invented here.
+ */
+function cleanupAbandonedPublicationTempsWindows(
+  addon: StableViewWindowsNativeAddon,
+  targetRoot: string,
+): void {
+  for (const name of fs.readdirSync(targetRoot)) {
+    if (name === "bundles" || name === "latest") continue;
+    const target = path.join(targetRoot, name);
+    if (PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PATTERN.test(name)) {
+      const stat = fs.lstatSync(target);
+      if (stat.isSymbolicLink() || stat.isDirectory() || !stat.isFile()) {
+        fail("PUBLICATION_FOREIGN_STATE", "abandoned windows latest temp has an unsafe type", { name });
+      }
+      try {
+        verifyStableViewProtectedFile(addon, target);
+      } catch (error) {
+        mapWindowsPublisherError(error);
+      }
+      fs.unlinkSync(target);
+      continue;
+    }
+    fail("PUBLICATION_FOREIGN_STATE", "windows publication root contains unmanaged foreign residue", { name });
+  }
 }
 
 function readWholeCanonicalL1Inventory(abrainHome: string) {
@@ -1045,6 +1428,21 @@ function buildProductionPublicationBinding(
   const latestValue = `bundles/${bundle.bundle_hash}`;
   const sourceProjectionBundleHash = bundle.source_bundle.manifest.bundle_hash;
   assertSha256(sourceProjectionBundleHash, "source projection bundle hash");
+  const latestRow = process.platform === "win32"
+    ? {
+      path: latestSymlink,
+      kind: "file" as const,
+      operation: "create_or_atomic_replace",
+      pointer_encoding: "bundles/<sha256>\\n",
+      pointer_value: `${latestValue}\n`,
+      bytes: Buffer.byteLength(`${latestValue}\n`),
+    }
+    : {
+      path: latestSymlink,
+      kind: "symlink" as const,
+      operation: "create_or_atomic_replace",
+      symlink_value: latestValue,
+    };
   const base = deepFreeze({
     schema_version: "proposition-policy-stable-view-production-binding/v1",
     previewed_bundle_hash: bundle.bundle_hash,
@@ -1066,10 +1464,14 @@ function buildProductionPublicationBinding(
           bytes: Buffer.byteLength(bundle.artifacts[name]),
           sha256: stableViewSha256Hex(bundle.artifacts[name]),
         })),
-        { path: latestSymlink, kind: "symlink", operation: "create_or_atomic_replace", symlink_value: latestValue },
+        latestRow,
       ],
       transient_parent: targetRoot,
-      transient_prefixes: [`.staging-${bundle.bundle_hash}-`, ".latest-"],
+      // POSIX: staging dir + latest symlink temps. Windows: exact native latest replace temp only
+      // (bundle create-only does not place temps on the stable root — do not invent prefixes).
+      transient_prefixes: process.platform === "win32"
+        ? [PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PREFIX]
+        : [`.staging-${bundle.bundle_hash}-`, ".latest-"],
       cleanup_required: true,
     },
   });
@@ -1118,10 +1520,48 @@ function assertExactPublishedBundle(bundleDir: string, expected: Readonly<Record
   }
 }
 
-function assertExactLatest(latest: string, expected: string): void {
+function assertExactPublishedBundleWindows(
+  addon: StableViewWindowsNativeAddon,
+  bundleDir: string,
+  expected: Readonly<Record<ArtifactName, string>>,
+): void {
+  assertExactDirectory(bundleDir, "stable-view bundle directory");
+  verifyStableViewProtectedDirectory(addon, bundleDir);
+  const names = fs.readdirSync(bundleDir).sort(compareCodeUnits);
+  const wanted = [...ARTIFACT_NAMES].sort(compareCodeUnits);
+  if (stableViewCanonicalizeJcs(names) !== stableViewCanonicalizeJcs(wanted)) {
+    fail("PUBLICATION_PARTIAL_OR_FOREIGN", "stable-view bundle is not exact all-five", { names });
+  }
+  for (const name of ARTIFACT_NAMES) {
+    const filePath = path.join(bundleDir, name);
+    const expectedBytes = Buffer.from(expected[name], "utf8");
+    const actual = readStableViewProtectedFile(addon, filePath, Math.max(expectedBytes.byteLength, 1));
+    if (!actual.equals(expectedBytes)) {
+      fail("PUBLICATION_COLLISION", "existing content-addressed bundle bytes differ", { name });
+    }
+  }
+}
+
+function assertExactLatestPosix(latest: string, expected: string): void {
   const stat = fs.lstatSync(latest);
   if (!stat.isSymbolicLink() || fs.readlinkSync(latest) !== expected) {
     fail("PUBLICATION_LATEST_UNSAFE", "latest symlink differs from the exact relative bundle reference");
+  }
+}
+
+function assertExactLatestWindows(
+  addon: StableViewWindowsNativeAddon,
+  latest: string,
+  expected: string,
+): void {
+  const stat = fs.lstatSync(latest);
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    fail("PUBLICATION_LATEST_UNSAFE", "latest is not a regular protected pointer file");
+  }
+  const data = readStableViewLatestPointerFile(addon, latest);
+  const parsed = parseStableViewLatestPointerBytes(data);
+  if (parsed.latestValue !== expected) {
+    fail("PUBLICATION_LATEST_UNSAFE", "latest pointer differs from the exact relative bundle reference");
   }
 }
 
@@ -1200,7 +1640,20 @@ function writeExclusiveFile(file: string, content: string): void {
 }
 
 function fsyncDirectory(directory: string): void {
-  const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  // Windows Node cannot fsync directories (EPERM). Verify the directory entry is
+  // exact; file durability is handled by native WRITE_THROUGH/FlushFileBuffers
+  // on the Windows publication path, or by file-level fsync on POSIX temps.
+  if (process.platform === "win32") {
+    const st = fs.lstatSync(directory);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      fail("UNSAFE_DIRECTORY", "fsyncDirectory target is not an exact directory", { directory });
+    }
+    return;
+  }
+  const flags = fs.constants.O_RDONLY
+    | (fs.constants.O_DIRECTORY ?? 0)
+    | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(directory, flags);
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 
@@ -1281,6 +1734,7 @@ async function publishSandboxProductionForTests(options: {
   targetAbrainHome: string;
   repoRoot: string;
   hooks?: PublisherTestHooks;
+  windowsNativeAddon?: StableViewWindowsNativeAddon;
 }): Promise<PropositionPolicyStableViewPublicationResult> {
   const targetAbrainHome = assertSandboxDirectory(options.targetAbrainHome);
   const lockRoot = path.join(targetAbrainHome, ".state", "sediment");
@@ -1298,6 +1752,7 @@ async function publishSandboxProductionForTests(options: {
       bundle,
       productionLockCapability: PRODUCTION_LOCK_CAPABILITY,
       ...(options.hooks ? { hooks: options.hooks } : {}),
+      ...(options.windowsNativeAddon ? { windowsNativeAddon: options.windowsNativeAddon } : {}),
     });
   } finally {
     lock.close();

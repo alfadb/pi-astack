@@ -7,7 +7,7 @@ import {
 } from "./proposition-policy-stable-view-contract";
 import { stableViewCanonicalizeJcs } from "./proposition-policy-stable-view";
 import { resolvePropositionPolicyStableViewCurrentAbrainHome } from "./proposition-policy-stable-view-root";
-import { acquireRetainedDirectoryOfdLock } from "./retained-directory-ofd-lock";
+import { acquireRetainedDirectoryLock } from "./retained-directory-lock";
 import { durableAtomicCreateFile, type DurableCreateStatus } from "./durable-write";
 import {
   readPropositionPolicyStableViewForRuntime,
@@ -582,12 +582,12 @@ function appendRecoveryAudit(
   abrainHome: string,
   result: Omit<PropositionPolicyStableViewRecoveryResult, "audit" | "audit_error">,
 ): { status: Exclude<PropositionPolicyStableViewRecoveryAuditStatus, "skipped">; error?: string } {
-  let lock: ReturnType<typeof acquireRetainedDirectoryOfdLock> | undefined;
+  let lock: ReturnType<typeof acquireRetainedDirectoryLock> | undefined;
   try {
     const sedimentRoot = exactDirectory(path.join(abrainHome, ".state", "sediment"), "recovery audit sediment root");
     const auditRoot = ensureExactChildDirectory(sedimentRoot, "proposition-policy-stable-view-recovery");
     const versionRoot = ensureExactChildDirectory(auditRoot, "v1");
-    lock = acquireRetainedDirectoryOfdLock(versionRoot);
+    lock = acquireRetainedDirectoryLock(versionRoot);
     if (lock.status === "BUSY") return { status: "failed", error: "RECOVERY_AUDIT_LOCK_BUSY" };
     const names = fs.readdirSync(versionRoot);
     if (names.some((name) => name !== "audit.jsonl")) {
@@ -694,7 +694,19 @@ function exactDirectory(input: string, label: string): string {
 }
 
 function fsyncDirectory(directory: string): void {
-  const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  // Windows Node cannot fsync directories (EPERM). Verify exact directory; file
+  // durability remains the caller's responsibility (file fsync / native durable).
+  if (process.platform === "win32") {
+    const st = fs.lstatSync(directory);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw recoveryFailure("RECOVERY_UNSAFE_PATH", "fsyncDirectory target is not an exact directory");
+    }
+    return;
+  }
+  const flags = fs.constants.O_RDONLY
+    | (fs.constants.O_DIRECTORY ?? 0)
+    | (fs.constants.O_NOFOLLOW ?? 0);
+  const fd = fs.openSync(directory, flags);
   try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
 }
 

@@ -4,9 +4,9 @@ import * as path from "node:path";
 import { gitSingleFlight, gitSingleFlightWithDeadline } from "./git-singleflight";
 import { assertCanonicalMutationAuthorized } from "./canonical-mutation-authority";
 import {
-  acquireRetainedDirectoryOfdLock,
-  type RetainedDirectoryOfdLock,
-} from "./retained-directory-ofd-lock";
+  acquireRetainedDirectoryLock,
+  type RetainedDirectoryLock,
+} from "./retained-directory-lock";
 import { getWorkerBudgetContext } from "./worker-budget-context";
 
 interface BarrierLease {
@@ -84,7 +84,7 @@ function boundedJitter(baseMs: number, random: () => number): number {
 async function acquireWithRetry(
   repo: string,
   options: CanonicalMutationBarrierOptions,
-): Promise<RetainedDirectoryOfdLock & { status: "ACQUIRED" }> {
+): Promise<RetainedDirectoryLock & { status: "ACQUIRED" }> {
   const timeoutMs = Math.max(0, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const retryInitialMs = Math.max(1, options.retryMs ?? DEFAULT_RETRY_INITIAL_MS);
   const retryMaxMs = Math.max(retryInitialMs, options.maxRetryMs ?? DEFAULT_RETRY_MAX_MS);
@@ -100,7 +100,7 @@ async function acquireWithRetry(
   for (;;) {
     const remainingBeforeProbeMs = deadlineMs - now();
     if (remainingBeforeProbeMs <= 0) {
-      throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository OFD mutation barrier", {
+      throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository retained-directory mutation barrier", {
         repo,
         timeoutMs,
         deadlineMs,
@@ -109,11 +109,11 @@ async function acquireWithRetry(
     }
     probe += 1;
     options.onProbe?.(probe);
-    const lock = acquireRetainedDirectoryOfdLock(repo);
-    if (lock.status === "ACQUIRED") return lock as RetainedDirectoryOfdLock & { status: "ACQUIRED" };
+    const lock = acquireRetainedDirectoryLock(repo);
+    if (lock.status === "ACQUIRED") return lock as RetainedDirectoryLock & { status: "ACQUIRED" };
     const remainingMs = deadlineMs - now();
     if (remainingMs <= 0) {
-      throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository OFD mutation barrier", {
+      throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_BUSY", "timed out waiting for the per-repository retained-directory mutation barrier", {
         repo,
         timeoutMs,
         deadlineMs,
@@ -133,25 +133,36 @@ async function acquireWithRetry(
  */
 async function runWithCanonicalLease<T>(
   repo: string,
-  lock: RetainedDirectoryOfdLock & { status: "ACQUIRED" },
+  lock: RetainedDirectoryLock & { status: "ACQUIRED" },
   operation: () => Promise<T>,
 ): Promise<T> {
   const parent = heldRepositories.getStore();
   const held = new Map(parent ?? []);
   const lease: BarrierLease = { active: true };
   held.set(repo, lease);
+  let primaryError: unknown;
+  let value: T | undefined;
   try {
-    return await heldRepositories.run(held, async () => {
+    value = await heldRepositories.run(held, async () => {
       await assertCanonicalMutationAuthorized(repo);
       return operation();
     });
+  } catch (error) {
+    primaryError = error;
   } finally {
     // AsyncLocalStorage context propagates into detached promises. Invalidate
-    // the shared lease before closing the fd so those continuations cannot
-    // mistake inherited context for ownership after this callback returns.
+    // the shared lease before closing so those continuations cannot mistake
+    // inherited context for ownership after this callback returns.
     lease.active = false;
-    lock.close();
   }
+  try {
+    lock.close();
+  } catch (closeError) {
+    // Success path: close failure must surface. With primary, keep primary.
+    if (primaryError === undefined) throw closeError;
+  }
+  if (primaryError !== undefined) throw primaryError;
+  return value as T;
 }
 
 export async function withCanonicalMutationBarrierInSingleFlight<T>(
@@ -178,19 +189,19 @@ export async function tryWithCanonicalMutationBarrier<T>(
   const repo = canonicalKey(repoInput);
   await assertCanonicalMutationAuthorized(repo);
   if (canonicalMutationBarrierHeld(repo)) return { status: "acquired", value: await operation() };
-  const lock = acquireRetainedDirectoryOfdLock(repo);
+  const lock = acquireRetainedDirectoryLock(repo);
   if (lock.status === "BUSY") return { status: "busy" };
   return {
     status: "acquired",
     value: await runWithCanonicalLease(
       repo,
-      lock as RetainedDirectoryOfdLock & { status: "ACQUIRED" },
+      lock as RetainedDirectoryLock & { status: "ACQUIRED" },
       operation,
     ),
   };
 }
 
-/** Process-local ordering is always acquired before the cross-process OFD lock. */
+/** Process-local ordering is always acquired before the cross-process retained-directory lock. */
 export async function withCanonicalMutationBarrier<T>(
   repoInput: string,
   operation: () => Promise<T>,
@@ -248,7 +259,7 @@ export function withoutCanonicalMutationBarrierContext<T>(operation: () => T): T
 
 export function assertCanonicalMutationBarrierHeld(repo: string): void {
   if (!canonicalMutationBarrierHeld(repo)) {
-    throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_LOCK_REQUIRED", "canonical repository mutation requires the OFD barrier", {
+    throw new CanonicalMutationBarrierError("CANONICAL_MUTATION_LOCK_REQUIRED", "canonical repository mutation requires the retained-directory barrier", {
       repo: canonicalKey(repo),
     });
   }

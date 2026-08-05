@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -29,6 +29,8 @@ const tmp = process.env.SMOKE_EDGE_TMP || fs.mkdtempSync(path.join(os.tmpdir(), 
 const abrainHome = process.env.SMOKE_EDGE_ABRAIN || path.join(tmp, "abrain");
 const ownerRoot = process.env.SMOKE_EDGE_OWNER || path.join(tmp, "owner-project");
 const sessionId = process.env.SMOKE_EDGE_SESSION || "sess-edge-smoke-001";
+const stagedNode = path.join(root, "native/windows/target/smoke-staging/pi-astack-windows-native.node");
+const stagedBuildInfo = path.join(root, "native/windows/target/smoke-staging/build-info.json");
 
 // Parent owns lifecycle of temp root created here.
 const ownsTmp = !process.env.SMOKE_EDGE_TMP;
@@ -45,7 +47,74 @@ function sha(s) {
   return createHash("sha256").update(s, "utf8").digest("hex");
 }
 
+/**
+ * Windows: install temp-package native addon for retained lock + edge durable path.
+ * Production pin remains null; children inherit via re-install (process override).
+ * Missing staging artifact → leave unset so pin-null fail-closed surfaces loudly.
+ */
+async function installWindowsEdgeNativeIfAvailable() {
+  if (process.platform !== "win32" || process.arch !== "x64") return null;
+  if (!fs.existsSync(stagedNode) || !fs.existsSync(stagedBuildInfo)) return null;
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+  const jiti = createJiti(import.meta.url, { interopDefault: true });
+  const nativeMod = await jiti.import(path.join(root, "extensions/_shared/windows-native-addon.ts"));
+  const retainedLock = await jiti.import(path.join(root, "extensions/_shared/retained-directory-lock.ts"));
+  const edgeWin = await jiti.import(path.join(root, "extensions/sediment/edge-protocol-shadow-windows-native.ts"));
+  const binaryBytes = fs.readFileSync(stagedNode);
+  const buildInfo = JSON.parse(fs.readFileSync(stagedBuildInfo, "utf8"));
+  const packageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-edge-smoke-pkg-"));
+  process.once("exit", () => {
+    try { fs.rmSync(packageRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+  fs.writeFileSync(path.join(packageRoot, "package.json"), `${JSON.stringify({ name: "pi-astack-edge-smoke-temp", private: true })}\n`);
+  const paths = nativeMod.resolveWindowsNativeAddonPaths(packageRoot);
+  fs.mkdirSync(path.dirname(paths.binaryPath), { recursive: true });
+  fs.writeFileSync(paths.binaryPath, binaryBytes);
+  const CAPABILITIES = ["atomic_file_tempdir_v1", "atomic_file_v1", "protected_dacl_v1", "retained_directory_lock_v1"];
+  const manifest = {
+    schema_version: "windows-native-addon-manifest/v1",
+    addon_abi: 1,
+    platform: "win32",
+    arch: "x64",
+    napi_version: 9,
+    minimum_node: "22.19.0",
+    source_commit: buildInfo.source_commit,
+    source_tree_sha256: buildInfo.source_tree_sha256,
+    toolchain: buildInfo.toolchain || "cargo+msvc (smoke)",
+    toolchain_id: buildInfo.toolchain_id,
+    target: "win32-x64",
+    binary_file: "pi-astack-windows-native.node",
+    binary_bytes: binaryBytes.byteLength,
+    binary_sha256: createHash("sha256").update(binaryBytes).digest("hex"),
+    build_id: buildInfo.build_id,
+    build_mode: buildInfo.build_mode || buildInfo.mode,
+    reproducibility: buildInfo.reproducibility,
+    native_tests: buildInfo.native_tests,
+    clippy: buildInfo.clippy,
+    build_config_sha256: buildInfo.build_config_sha256,
+    capabilities: CAPABILITIES,
+  };
+  const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+  fs.writeFileSync(paths.manifestPath, manifestText, "utf8");
+  const loaded = nativeMod.__TEST.loadWindowsNativeAddon({
+    packageRoot,
+    platform: "win32",
+    arch: "x64",
+    nodeVersion: process.versions.node,
+    expectedManifestSha256: createHash("sha256").update(manifestText).digest("hex"),
+  });
+  retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(loaded.addon);
+  edgeWin.edgeWindowsNativeTestApi.installAddonOverride(loaded.addon);
+  process.once("exit", () => {
+    try { retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(null); } catch { /* ignore */ }
+    try { edgeWin.edgeWindowsNativeTestApi.installAddonOverride(null); } catch { /* ignore */ }
+  });
+  return loaded.addon;
+}
+
 async function loadMod() {
+  // Windows children + parent share this path so retained lock / edge durable use temp package.
+  await installWindowsEdgeNativeIfAvailable();
   const jiti = createJiti(import.meta.url, { interopDefault: true });
   return jiti.import(path.join(root, "extensions/sediment/edge-protocol-shadow.ts"));
 }
@@ -172,6 +241,7 @@ if (childMode === "race-wit") {
 
 // ── child: real extension wiring (isolated process; no global C6/settings pollution)
 if (childMode === "ext-wiring") {
+  await installWindowsEdgeNativeIfAvailable();
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const mode = process.env.SMOKE_EDGE_WIRING_MODE || "edge-only";
   const work = process.env.SMOKE_EDGE_WIRING_TMP;
@@ -376,6 +446,7 @@ if (childMode === "ext-wiring") {
 
 // ── child: toolUse mid-loop must not create extra edge turn ───────────
 if (childMode === "ext-tooluse") {
+  await installWindowsEdgeNativeIfAvailable();
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const work = process.env.SMOKE_EDGE_WIRING_TMP;
   if (!work) {
@@ -558,8 +629,11 @@ await check("source-before-candidate + modes + content id", async () => {
   assert(r.source?.content_id, "missing content_id");
   assert(fs.existsSync(r.source.path), "source missing");
   assert(fs.existsSync(r.record_path), "candidate missing");
-  assert(modeOf(r.source.path) === 0o600, `source mode ${modeOf(r.source.path).toString(8)}`);
-  assert(modeOf(r.record_path) === 0o600, `record mode ${modeOf(r.record_path).toString(8)}`);
+  // POSIX mode contract is Linux-only; Windows uses protected private_rw DACL (native smoke covers it).
+  if (process.platform !== "win32") {
+    assert(modeOf(r.source.path) === 0o600, `source mode ${modeOf(r.source.path).toString(8)}`);
+    assert(modeOf(r.record_path) === 0o600, `record mode ${modeOf(r.record_path).toString(8)}`);
+  }
 
   const sessionRoot = edge.edgeSessionRoot(abrainHome, ownerRoot, sessionId);
   const edgeRoot = edge.edgeProtocolShadowRoot(abrainHome);
@@ -578,7 +652,9 @@ await check("source-before-candidate + modes + content id", async () => {
   ];
   for (const d of dirs0700) {
     assert(fs.existsSync(d), `missing edge dir`);
-    assert(modeOf(d) === 0o700, `dir mode not 0700: got ${modeOf(d).toString(8)}`);
+    if (process.platform !== "win32") {
+      assert(modeOf(d) === 0o700, `dir mode not 0700: got ${modeOf(d).toString(8)}`);
+    }
   }
   // No secondary writer-state head — producer_seq truth is record filenames only.
   const writerState = path.join(edge.edgeJournalDir(sessionRoot), "writer-state.json");
@@ -987,7 +1063,9 @@ await check("initializeEdgeProtocolShadowSession idempotent layout, no source/ca
   assert(fs.existsSync(edge.edgeSourcesDir(sessionRoot)), "sources dir");
   assert(fs.existsSync(edge.edgeJournalRecordsDir(sessionRoot)), "records dir");
   assert(fs.existsSync(edge.edgeJournalLockDir(sessionRoot)), "lock dir");
-  assert(modeOf(sessionRoot) === 0o700, "session root mode");
+  if (process.platform !== "win32") {
+    assert(modeOf(sessionRoot) === 0o700, "session root mode");
+  }
   assert(fs.readdirSync(edge.edgeSourcesDir(sessionRoot)).length === 0, "init must not write source");
   assert(fs.readdirSync(edge.edgeJournalRecordsDir(sessionRoot)).length === 0, "init must not write candidate");
   const r2 = await edge.initializeEdgeProtocolShadowSession({
@@ -1000,6 +1078,11 @@ await check("initializeEdgeProtocolShadowSession idempotent layout, no source/ca
 });
 
 await check("intermediate ancestor symlink fails closed; no escape write outside abrainHome", async () => {
+  if (process.platform === "win32") {
+    // Creating symlinks/junctions under non-elevated hosts is residual; Windows reparse
+    // rejection is covered by smoke-edge-protocol-shadow-windows.
+    return;
+  }
   // Real intermediate-layer symlink under abrainHome (.state is real; sediment → outside).
   // ensureDirOwned must walk ownershipRoot→target component-wise and fail on the symlink,
   // never follow it via lstat(full target) and create source/candidate outside the root.
@@ -1180,7 +1263,7 @@ await check("real extension wiring: edge-only / edge-off / both via isolated pro
 
 await check("terminal assistant boundary helper: toolUse is not agent_end turn", async () => {
   const { isTerminalAssistantMessage, collectMainChainFromSession } = await import(
-    path.join(root, "scripts/edge-protocol-shadow-chain.mjs"),
+    pathToFileURL(path.join(root, "scripts/edge-protocol-shadow-chain.mjs")).href,
   );
   assert(isTerminalAssistantMessage({ role: "assistant", stopReason: "stop" }) === true, "stop");
   assert(isTerminalAssistantMessage({ role: "assistant", stopReason: "length" }) === true, "length");

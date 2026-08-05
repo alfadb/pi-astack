@@ -1,0 +1,5 @@
+* text=auto eol=lf
+# Windows native production package artifacts + pin line endings.
+native/windows/win32-x64/*.node binary
+native/windows/win32-x64/manifest.json -text
+extensions/_shared/windows-native-addon-pin.ts text eol=lf

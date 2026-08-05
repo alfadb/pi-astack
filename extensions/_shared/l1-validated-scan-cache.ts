@@ -14,9 +14,9 @@ import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { sha256Hex } from "./jcs";
 import {
-  acquireRetainedDirectoryOfdLock,
-  type RetainedDirectoryOfdLock,
-} from "./retained-directory-ofd-lock";
+  acquireRetainedDirectoryLock,
+  type RetainedDirectoryLock,
+} from "./retained-directory-lock";
 import { durableAtomicWriteFile } from "./durable-write";
 import type { L1SchemaRoleRegistry, ValidatedL1Envelope } from "./l1-schema-registry";
 
@@ -168,9 +168,9 @@ export function ensureLastKnownReadyDirectory(abrainHome: string): string {
  * Nonblocking OFD lock on a dedicated `.state` directory. Distinct from the
  * abrainHome mutation barrier. Crash releases the lock with the process.
  */
-export function tryAcquireL1ScanMutex(abrainHome: string): RetainedDirectoryOfdLock {
+export function tryAcquireL1ScanMutex(abrainHome: string): RetainedDirectoryLock {
   const directory = ensureL1ScanMutexDirectory(abrainHome);
-  return acquireRetainedDirectoryOfdLock(directory);
+  return acquireRetainedDirectoryLock(directory);
 }
 
 export function registryContentHash(registry: L1SchemaRoleRegistry, registryPath?: string): string {

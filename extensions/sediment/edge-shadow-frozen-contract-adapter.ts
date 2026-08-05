@@ -23,6 +23,13 @@ import { execFileSync } from "node:child_process";
 import protobuf from "protobufjs";
 import descriptor from "protobufjs/ext/descriptor/index.js";
 import {
+  loadWindowsNativeAddon,
+  readProtectedFile,
+  verifyProtectedPath,
+  WindowsNativeAddonError,
+  type WindowsNativeAddonModuleV1,
+} from "../_shared/windows-native-addon";
+import {
   EDGE_JOURNAL_SCHEMA,
   EDGE_JOURNAL_SCHEMA_VERSION,
   EDGE_PROTOCOL_SHADOW_ROOT_NAME,
@@ -31,6 +38,24 @@ import {
   verifyEdgeSourceEnvelopeBytes,
   type EdgeJournalRecord,
 } from "./edge-protocol-shadow";
+
+/** Production zero-arg Windows addon cache for protected record/source reads (pin null → fail-closed). */
+let frozenWinAddonSingleton: WindowsNativeAddonModuleV1 | null = null;
+
+function loadFrozenWindowsProductionAddon(): WindowsNativeAddonModuleV1 {
+  if (frozenWinAddonSingleton) return frozenWinAddonSingleton;
+  try {
+    const loaded = loadWindowsNativeAddon();
+    frozenWinAddonSingleton = loaded.addon;
+    return frozenWinAddonSingleton;
+  } catch (error) {
+    const code = error instanceof WindowsNativeAddonError ? error.code : "WINDOWS_NATIVE_ADDON_FAILED";
+    throw new EdgeShadowProjectionError(
+      "scan_windows_native_unavailable",
+      `windows production native addon unavailable (${code})`,
+    );
+  }
+}
 
 /** Absolute git for env_clear child (no PATH). */
 const GIT_BIN = "/usr/bin/git";
@@ -952,6 +977,19 @@ function requireStableDirUnderRoot(dirPath: string, rootCanon: string): string {
   if (stAfter.isSymbolicLink() || !stAfter.isDirectory()) {
     throw new EdgeShadowProjectionError("scan_dir_not_stable", "directory not a stable directory");
   }
+  // Windows production: directory must be current-TokenUser private_rw (DACL fail-closed).
+  if (process.platform === "win32") {
+    try {
+      const addon = loadFrozenWindowsProductionAddon();
+      verifyProtectedPath(addon, canon, "directory", "private_rw");
+    } catch (error) {
+      if (error instanceof EdgeShadowProjectionError) throw error;
+      throw new EdgeShadowProjectionError(
+        "scan_dir_dacl_invalid",
+        "directory protected DACL verification failed",
+      );
+    }
+  }
   return canon;
 }
 
@@ -1001,6 +1039,32 @@ function readRegularFileUnderRoot(filePath: string, rootCanon: string): Buffer {
   }
   if (stAfter.isSymbolicLink() || !stAfter.isFile()) {
     throw new EdgeShadowProjectionError("scan_file_not_stable", "file not a stable regular file");
+  }
+  // Windows production: record/source bytes via zero-arg addon readProtected + DACL fail-closed.
+  // Linux keeps plain fs.readFileSync (unchanged).
+  if (process.platform === "win32") {
+    try {
+      const addon = loadFrozenWindowsProductionAddon();
+      const result = readProtectedFile(addon, canon, MAX_RECORD_BYTES);
+      return result.data;
+    } catch (error) {
+      if (error instanceof EdgeShadowProjectionError) throw error;
+      if (error instanceof WindowsNativeAddonError) {
+        if (error.code === "WINDOWS_NATIVE_ADDON_TOO_LARGE") {
+          throw new EdgeShadowProjectionError("scan_file_too_large", "file exceeds max record bytes");
+        }
+        if (error.code === "WINDOWS_NATIVE_ADDON_NOT_FOUND") {
+          throw new EdgeShadowProjectionError("scan_file_missing", "file meta unavailable");
+        }
+        if (error.code === "WINDOWS_NATIVE_ADDON_DACL_INVALID") {
+          throw new EdgeShadowProjectionError("scan_file_dacl_invalid", "file protected DACL verification failed");
+        }
+      }
+      throw new EdgeShadowProjectionError(
+        "scan_file_protected_read_failed",
+        "windows protected read failed",
+      );
+    }
   }
   return fs.readFileSync(canon);
 }

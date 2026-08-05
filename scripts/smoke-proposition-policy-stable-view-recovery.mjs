@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-/** ADR0040 automatic stable-view recovery smoke. Every mutation stays under /tmp. */
+/** ADR0040 automatic stable-view recovery smoke. Every mutation stays under /tmp.
+ *  POSIX symlink durable path. Windows native pointer path is covered by
+ *  smoke:proposition-policy-stable-view-windows.
+ */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,6 +11,11 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { preparePropositionPolicyStableViewFixture } from "./_proposition-policy-stable-view-fixture.mjs";
+
+if (process.platform === "win32") {
+  console.log("SKIP: POSIX symlink recovery path; use smoke:proposition-policy-stable-view-windows");
+  process.exit(0);
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");

@@ -1,0 +1,5 @@
+# Deterministic PE linking for win32-x64 release artifacts (repro dual clean rebuild).
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+  "-C", "link-arg=/Brepro",
+]

@@ -26,3 +26,9 @@ scripts/.goldset/
 # 可经 oracle-multivector-eval.mjs DUMP_TAILS + dispatch 重建; 方法论在 ADR §10)。
 scripts/.mv-tails.json
 scripts/.mv-q-*.json
+
+# Windows native N-API addon build artifacts under target/ (never commit).
+# Fixed production package path native/windows/win32-x64/{.node,manifest.json}
+# is intentionally trackable once packaged+pinned; pin.ts is also trackable.
+native/windows/target/
+native/windows/**/target/

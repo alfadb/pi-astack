@@ -1,5 +1,6 @@
 /// <reference types="node" />
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fsSync from "node:fs";
@@ -30,6 +31,23 @@ import {
   resolveRef,
   snapshotIndexEntries,
 } from "../_shared/git-exact-cohort";
+import {
+  acquireRetainedDirectoryLock,
+  RetainedDirectoryLockError,
+  type RetainedDirectoryLock,
+} from "../_shared/retained-directory-lock";
+import {
+  durableAtomicCreateFile,
+  durableAtomicReplaceFile,
+  ensureProtectedDirectory,
+  loadWindowsNativeAddon,
+  readProtectedFile,
+  verifyProtectedPath,
+  WindowsNativeAddonError,
+  WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1,
+  WINDOWS_NATIVE_ADDON_CAPABILITY_PROTECTED_DACL_V1,
+  type WindowsNativeAddonModuleV1,
+} from "../_shared/windows-native-addon";
 import {
   repairStorePresentBrainLayoutForAuthorityExecutor,
 } from "../abrain/brain-layout";
@@ -200,12 +218,28 @@ export class CanonicalAttestationError extends Error {
   }
 }
 
-interface CanonicalAttestationSnapshot {
+/** Linux/Unix snapshot identity: device + inode. */
+interface CanonicalAttestationSnapshotPosix {
+  readonly platform: "posix";
   readonly attestation: CanonicalConvergenceAttestation;
   readonly raw: string;
   readonly dev: number;
   readonly ino: number;
 }
+
+/** Windows snapshot identity: volume serial + file id + size (native). */
+interface CanonicalAttestationSnapshotWindows {
+  readonly platform: "win32";
+  readonly attestation: CanonicalConvergenceAttestation;
+  readonly raw: string;
+  readonly volume_serial_number: string;
+  readonly file_id: string;
+  readonly size: number;
+}
+
+type CanonicalAttestationSnapshot =
+  | CanonicalAttestationSnapshotPosix
+  | CanonicalAttestationSnapshotWindows;
 
 interface CanonicalControlAggregate {
   readonly local_executor_epoch: string;
@@ -272,19 +306,129 @@ export interface SedimentWorkerCanonicalControlDeps {
   testHooks?: CanonicalControlTestHooks;
   /** Testable platform override; production defaults to process.platform. */
   platform?: NodeJS.Platform;
+  /**
+   * Test-only Windows DCC physical-layer addon (temp package via test-only options loader).
+   * Production never accepts this seam — uses zero-arg loadWindowsNativeAddon().
+   * Gated by PI_ASTACK_ENABLE_TEST_HOOKS=1.
+   */
+  windowsDccNativeAddon?: WindowsNativeAddonModuleV1;
+}
+
+/**
+ * Production Windows DCC addon cache. Only successful loads are cached.
+ * pin=null / missing binary / missing capabilities → return null without caching
+ * unavailable (next call re-attempts). Never throws out of resolve paths.
+ */
+type ProductionWindowsDccAddonCache =
+  | { readonly state: "unset" }
+  | { readonly state: "loaded"; readonly addon: WindowsNativeAddonModuleV1 };
+
+let productionWindowsDccAddonCache: ProductionWindowsDccAddonCache = { state: "unset" };
+
+/** AsyncLocalStorage carries test-injected addon through kick/observe async trees. */
+const windowsDccAddonAls = new AsyncLocalStorage<WindowsNativeAddonModuleV1>();
+
+function getProductionWindowsDccAddon(): WindowsNativeAddonModuleV1 | null {
+  if (productionWindowsDccAddonCache.state === "loaded") {
+    return productionWindowsDccAddonCache.addon;
+  }
+  if (process.platform !== "win32") return null;
+  try {
+    const loaded = loadWindowsNativeAddon();
+    const caps = loaded.capabilities;
+    if (
+      !caps.includes(WINDOWS_NATIVE_ADDON_CAPABILITY_PROTECTED_DACL_V1)
+      || !caps.includes(WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1)
+    ) {
+      // Missing capabilities: do not cache unavailable.
+      return null;
+    }
+    productionWindowsDccAddonCache = { state: "loaded", addon: loaded.addon };
+    return loaded.addon;
+  } catch {
+    // pin null, hash mismatch, missing artifact, arch/node mismatch, etc.
+    // Do not cache failures — pin may land later in-process.
+    return null;
+  }
+}
+
+function resolveWindowsDccAddon(): WindowsNativeAddonModuleV1 | null {
+  if (process.platform !== "win32") return null;
+  const injected = windowsDccAddonAls.getStore();
+  if (injected) return injected;
+  return getProductionWindowsDccAddon();
+}
+
+function withWindowsDccAddonAsync<T>(
+  addon: WindowsNativeAddonModuleV1 | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!addon) return fn();
+  // ALS only — no process-global permanent override. setImmediate/Promise settle
+  // inherit ALS; smoke readers outside control must use withWindowsDccNativeAddonForTests.
+  return windowsDccAddonAls.run(addon, fn);
+}
+
+function assertWindowsDccTestSeamAllowed(
+  addon: WindowsNativeAddonModuleV1 | undefined,
+): WindowsNativeAddonModuleV1 | undefined {
+  if (addon === undefined) return undefined;
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") validation("test_hooks_disabled");
+  return addon;
+}
+
+/**
+ * Gated __TEST helper: run fn under ALS with a temp-package Windows DCC addon.
+ * Production must not call this. Required for smoke readers/observes that sit
+ * outside runSedimentWorkerCanonicalControl / observeForeground ALS context.
+ */
+export function withWindowsDccNativeAddonForTests<T>(
+  addon: WindowsNativeAddonModuleV1,
+  fn: () => T,
+): T {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") validation("test_hooks_disabled");
+  return windowsDccAddonAls.run(addon, fn);
+}
+
+export async function withWindowsDccNativeAddonForTestsAsync<T>(
+  addon: WindowsNativeAddonModuleV1,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") validation("test_hooks_disabled");
+  return windowsDccAddonAls.run(addon, fn);
+}
+
+/**
+ * Control-path platform gate. Non-win32 always supported.
+ * win32 requires either production native addon (protected_dacl_v1+atomic_file_v1)
+ * or a gated test-injected addon on a real win32 host.
+ */
+function isDccControlPlatformReady(
+  platform: NodeJS.Platform,
+  testAddon: WindowsNativeAddonModuleV1 | undefined,
+): boolean {
+  if (platform !== "win32") return true;
+  if (testAddon !== undefined) {
+    return process.platform === "win32" && process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1";
+  }
+  return isDccAttestationPlatformSupported("win32");
 }
 
 /**
  * DCC attestation private objects require OS-enforced confidentiality.
  * Unix: POSIX dir 0700 / file 0600 (implemented locally).
- * Windows target remains same-principal protected DACL, but Node cannot prove
- * current-primary-TokenUser protected DACL — fail closed until a native
- * writer/verifier lands. Do not silently trust inherited/default ACL.
+ * Windows: current-primary-TokenUser protected DACL via native protected_dacl_v1 +
+ * atomic_file_v1. Production zero-arg loader must succeed with both capabilities;
+ * pin=null / load failure → false (attestation_unavailable fail-closed, never throws).
+ * Do not silently trust inherited/default ACL.
  */
 export function isDccAttestationPlatformSupported(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return platform !== "win32";
+  if (platform !== "win32") return true;
+  // Simulated win32 on non-win32 hosts cannot load the production native addon.
+  if (process.platform !== "win32") return false;
+  return getProductionWindowsDccAddon() !== null;
 }
 
 function unavailableAttestation(): never {
@@ -529,7 +673,7 @@ function attestationPath(root: string): string {
   return path.join(root, CANONICAL_CONVERGENCE_RELATIVE_DIR, CANONICAL_CONVERGENCE_ATTESTATION_NAME);
 }
 
-function readAttestationSnapshot(abrainHome: string): CanonicalAttestationSnapshot | null {
+function readAttestationSnapshotPosix(abrainHome: string): CanonicalAttestationSnapshotPosix | null {
   const root = canonicalAbrainRoot(abrainHome);
   const directory = path.join(root, CANONICAL_CONVERGENCE_RELATIVE_DIR);
   try {
@@ -549,17 +693,15 @@ function readAttestationSnapshot(abrainHome: string): CanonicalAttestationSnapsh
     unavailableAttestation();
   }
   if (named.isSymbolicLink() || !named.isFile()) unavailableAttestation();
-  if (process.platform !== "win32" && (named.mode & 0o777) !== 0o600) unavailableAttestation();
+  if ((named.mode & 0o777) !== 0o600) unavailableAttestation();
   if (named.size <= 0 || named.size > MAX_ATTESTATION_BYTES) unavailableAttestation();
 
   let fd: number | undefined;
   try {
-    fd = fsSync.openSync(file, fsSync.constants.O_RDONLY | (process.platform === "win32"
-      ? 0
-      : (fsSync.constants.O_NOFOLLOW ?? 0)));
+    fd = fsSync.openSync(file, fsSync.constants.O_RDONLY | (fsSync.constants.O_NOFOLLOW ?? 0));
     const opened = fsSync.fstatSync(fd);
     if (!opened.isFile() || opened.dev !== named.dev || opened.ino !== named.ino) unavailableAttestation();
-    if (process.platform !== "win32" && (opened.mode & 0o777) !== 0o600) unavailableAttestation();
+    if ((opened.mode & 0o777) !== 0o600) unavailableAttestation();
     if (opened.size <= 0 || opened.size > MAX_ATTESTATION_BYTES) unavailableAttestation();
     const bytes = fsSync.readFileSync(fd);
     if (bytes.byteLength !== opened.size) unavailableAttestation();
@@ -567,6 +709,7 @@ function readAttestationSnapshot(abrainHome: string): CanonicalAttestationSnapsh
     if (!Buffer.from(raw, "utf8").equals(bytes)) unavailableAttestation();
     const parsed = parseStrictFlatJsonObject(raw, unavailableAttestation);
     return {
+      platform: "posix",
       attestation: validateCanonicalConvergenceAttestation(parsed),
       raw,
       dev: opened.dev,
@@ -583,6 +726,77 @@ function readAttestationSnapshot(abrainHome: string): CanonicalAttestationSnapsh
   return unavailableAttestation();
 }
 
+function readAttestationSnapshotWindows(abrainHome: string): CanonicalAttestationSnapshotWindows | null {
+  const addon = resolveWindowsDccAddon();
+  if (!addon) unavailableAttestation();
+  const root = canonicalAbrainRoot(abrainHome);
+  const directory = path.join(root, CANONICAL_CONVERGENCE_RELATIVE_DIR);
+  const file = attestationPath(root);
+
+  try {
+    const dirStat = fsSync.lstatSync(directory);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) unavailableAttestation();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    unavailableAttestation();
+  }
+
+  try {
+    verifyProtectedPath(addon, directory, "directory", "private_rw");
+  } catch (error) {
+    if (error instanceof CanonicalAttestationError) throw error;
+    unavailableAttestation();
+  }
+
+  try {
+    const named = fsSync.lstatSync(file);
+    if (named.isSymbolicLink() || !named.isFile()) unavailableAttestation();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    unavailableAttestation();
+  }
+
+  let read: ReturnType<typeof readProtectedFile>;
+  try {
+    read = readProtectedFile(addon, file, MAX_ATTESTATION_BYTES);
+  } catch (error) {
+    if (error instanceof WindowsNativeAddonError && error.code === "WINDOWS_NATIVE_ADDON_NOT_FOUND") {
+      // Parent disappearance (PATH_NOT_FOUND) must not look like clean-slate missing file.
+      // Directory still present → true missing leaf → null; otherwise fail-closed.
+      try {
+        const recheck = fsSync.lstatSync(directory);
+        if (recheck.isSymbolicLink() || !recheck.isDirectory()) unavailableAttestation();
+        return null;
+      } catch {
+        unavailableAttestation();
+      }
+    }
+    if (error instanceof CanonicalAttestationError) throw error;
+    unavailableAttestation();
+  }
+
+  if (read.data.byteLength <= 0 || read.data.byteLength > MAX_ATTESTATION_BYTES) unavailableAttestation();
+  if (read.identity.size !== read.data.byteLength) unavailableAttestation();
+  const raw = read.data.toString("utf8");
+  if (!Buffer.from(raw, "utf8").equals(read.data)) unavailableAttestation();
+  const parsed = parseStrictFlatJsonObject(raw, unavailableAttestation);
+  return {
+    platform: "win32",
+    attestation: validateCanonicalConvergenceAttestation(parsed),
+    raw,
+    volume_serial_number: read.identity.volume_serial_number,
+    file_id: read.identity.file_id,
+    size: read.identity.size,
+  };
+}
+
+function readAttestationSnapshot(abrainHome: string): CanonicalAttestationSnapshot | null {
+  if (process.platform === "win32") {
+    return readAttestationSnapshotWindows(abrainHome);
+  }
+  return readAttestationSnapshotPosix(abrainHome);
+}
+
 export function canonicalConvergenceAttestationPath(abrainHome: string): string {
   return attestationPath(path.resolve(abrainHome));
 }
@@ -590,8 +804,13 @@ export function canonicalConvergenceAttestationPath(abrainHome: string): string 
 export function readCanonicalConvergenceAttestation(
   abrainHome: string,
 ): CanonicalConvergenceAttestation | null {
-  // Real process.platform only — no deps override. Windows has no Node ACL proof.
-  if (!isDccAttestationPlatformSupported(process.platform)) unavailableAttestation();
+  // Real process.platform only — no deps override for production gate.
+  // Windows: production zero-arg addon (or ALS test inject) must be available.
+  if (process.platform === "win32") {
+    if (!resolveWindowsDccAddon()) unavailableAttestation();
+  } else if (!isDccAttestationPlatformSupported(process.platform)) {
+    unavailableAttestation();
+  }
   return readAttestationSnapshot(abrainHome)?.attestation ?? null;
 }
 
@@ -632,6 +851,11 @@ export interface ForegroundCanonicalConvergenceObservationDeps {
   readCanonicalHead?: (abrainHome: string) => Promise<string>;
   /** Gated test override; production defaults to process.platform. */
   platform?: NodeJS.Platform;
+  /**
+   * Test-only Windows DCC physical-layer addon (temp package).
+   * Production uses zero-arg loadWindowsNativeAddon(). Gated by test hooks env.
+   */
+  windowsDccNativeAddon?: WindowsNativeAddonModuleV1;
 }
 
 function observationResult(
@@ -646,7 +870,8 @@ function assertForegroundObservationTestHooks(
 ): boolean {
   const injected = deps.authorityObservation !== undefined
     || deps.readCanonicalHead !== undefined
-    || deps.platform !== undefined;
+    || deps.platform !== undefined
+    || deps.windowsDccNativeAddon !== undefined;
   if (!injected) return true;
   return process.env.PI_ASTACK_ENABLE_TEST_HOOKS === "1";
 }
@@ -684,75 +909,78 @@ export async function observeForegroundCanonicalConvergence(
   }
 
   const platform = deps.platform ?? process.platform;
-  if (!isDccAttestationPlatformSupported(platform)) {
+  const testAddon = assertWindowsDccTestSeamAllowed(deps.windowsDccNativeAddon);
+  if (!isDccControlPlatformReady(platform, testAddon)) {
     return observationResult("unavailable", "attestation_unavailable");
   }
 
-  // Stability sandwich: attestation → authority → HEAD → attestation.
-  let before: CanonicalAttestationSnapshot | null;
-  try {
-    before = readAttestationSnapshot(abrainHome);
-  } catch {
-    return observationResult("unavailable", "attestation_unavailable");
-  }
-  if (!before) {
-    return observationResult("unavailable", "attestation_unavailable");
-  }
+  return withWindowsDccAddonAsync(testAddon, async () => {
+    // Stability sandwich: attestation → authority → HEAD → attestation.
+    let before: CanonicalAttestationSnapshot | null;
+    try {
+      before = readAttestationSnapshot(abrainHome);
+    } catch {
+      return observationResult("unavailable", "attestation_unavailable");
+    }
+    if (!before) {
+      return observationResult("unavailable", "attestation_unavailable");
+    }
 
-  let authority: ReturnType<typeof observeLocalExecutorAuthorityStore>;
-  try {
-    authority = observeLocalExecutorAuthorityStore(
-      abrainHome,
-      deps.authorityObservation ?? {},
-    );
-  } catch {
-    return observationResult("unavailable", "authority_unavailable");
-  }
-  if (authority.presence === "absent") {
-    // Store disappeared mid-observation — fail closed (not legacy recovery).
-    return observationResult("unavailable", "authority_unavailable");
-  }
+    let authority: ReturnType<typeof observeLocalExecutorAuthorityStore>;
+    try {
+      authority = observeLocalExecutorAuthorityStore(
+        abrainHome,
+        deps.authorityObservation ?? {},
+      );
+    } catch {
+      return observationResult("unavailable", "authority_unavailable");
+    }
+    if (authority.presence === "absent") {
+      // Store disappeared mid-observation — fail closed (not legacy recovery).
+      return observationResult("unavailable", "authority_unavailable");
+    }
 
-  let head: string;
-  try {
-    head = deps.readCanonicalHead
-      ? await deps.readCanonicalHead(abrainHome)
-      : await readCanonicalHeadOid(abrainHome);
-    if (typeof head !== "string" || !GIT_OID_RE.test(head)) {
+    let head: string;
+    try {
+      head = deps.readCanonicalHead
+        ? await deps.readCanonicalHead(abrainHome)
+        : await readCanonicalHeadOid(abrainHome);
+      if (typeof head !== "string" || !GIT_OID_RE.test(head)) {
+        return observationResult("blocked", "head_mismatch");
+      }
+    } catch {
       return observationResult("blocked", "head_mismatch");
     }
-  } catch {
-    return observationResult("blocked", "head_mismatch");
-  }
 
-  let after: CanonicalAttestationSnapshot | null;
-  try {
-    after = readAttestationSnapshot(abrainHome);
-  } catch {
-    return observationResult("unavailable", "attestation_unavailable");
-  }
-  if (!sameSnapshot(before, after)) {
-    return observationResult("unavailable", "observation_unstable");
-  }
+    let after: CanonicalAttestationSnapshot | null;
+    try {
+      after = readAttestationSnapshot(abrainHome);
+    } catch {
+      return observationResult("unavailable", "attestation_unavailable");
+    }
+    if (!sameSnapshot(before, after)) {
+      return observationResult("unavailable", "observation_unstable");
+    }
 
-  // Condition evaluation on the stable attestation + authority snapshot.
-  if (authority.record.mode !== "held" || authority.record.holder_kind !== "daemon") {
-    return observationResult("blocked", "authority_revoked");
-  }
-  if (authority.lock !== "held") {
-    return observationResult("blocked", "authority_revoked");
-  }
-  if (before.attestation.local_executor_epoch !== authority.record.local_executor_epoch
-    || before.attestation.local_executor_holder_nonce !== authority.record.holder_nonce) {
-    return observationResult("unavailable", "authority_stale");
-  }
-  if (before.attestation.outcome !== "ready") {
-    return observationResult("blocked", "attestation_not_ready");
-  }
-  if (before.attestation.canonical_head !== head) {
-    return observationResult("blocked", "head_mismatch");
-  }
-  return observationResult("ready", "none");
+    // Condition evaluation on the stable attestation + authority snapshot.
+    if (authority.record.mode !== "held" || authority.record.holder_kind !== "daemon") {
+      return observationResult("blocked", "authority_revoked");
+    }
+    if (authority.lock !== "held") {
+      return observationResult("blocked", "authority_revoked");
+    }
+    if (before.attestation.local_executor_epoch !== authority.record.local_executor_epoch
+      || before.attestation.local_executor_holder_nonce !== authority.record.holder_nonce) {
+      return observationResult("unavailable", "authority_stale");
+    }
+    if (before.attestation.outcome !== "ready") {
+      return observationResult("blocked", "attestation_not_ready");
+    }
+    if (before.attestation.canonical_head !== head) {
+      return observationResult("blocked", "head_mismatch");
+    }
+    return observationResult("ready", "none");
+  });
 }
 
 /** Closed operator-facing lines for /abrain status. No secrets. */
@@ -815,16 +1043,14 @@ function assertExistingAttestationParent(root: string): string {
   }
 }
 
-async function ensureAttestationDirectory(root: string): Promise<string> {
-  // Defense-in-depth: never create unprotected attestation objects on Windows.
-  if (!isDccAttestationPlatformSupported(process.platform)) unavailableAttestation();
+async function ensureAttestationDirectoryPosix(root: string): Promise<string> {
   const parent = assertExistingAttestationParent(root);
   const directory = path.join(root, CANONICAL_CONVERGENCE_RELATIVE_DIR);
   let created = false;
   try {
     await fs.mkdir(directory, { mode: 0o700 });
     created = true;
-    if (process.platform !== "win32") await fs.chmod(directory, 0o700);
+    await fs.chmod(directory, 0o700);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") writeFailedAttestation();
   }
@@ -837,38 +1063,95 @@ async function ensureAttestationDirectory(root: string): Promise<string> {
   }
 }
 
+function ensureAttestationDirectoryWindows(root: string): string {
+  const addon = resolveWindowsDccAddon();
+  if (!addon) unavailableAttestation();
+  assertExistingAttestationParent(root);
+  const directory = path.join(root, CANONICAL_CONVERGENCE_RELATIVE_DIR);
+  try {
+    ensureProtectedDirectory(addon, directory);
+    verifyProtectedPath(addon, directory, "directory", "private_rw");
+    return directory;
+  } catch (error) {
+    if (error instanceof CanonicalAttestationError) throw error;
+    writeFailedAttestation();
+  }
+}
+
 function sameSnapshot(
   current: CanonicalAttestationSnapshot | null,
   expected: CanonicalAttestationSnapshot | null,
 ): boolean {
   if (current === null || expected === null) return current === expected;
-  return current.raw === expected.raw && current.dev === expected.dev && current.ino === expected.ino;
+  if (current.raw !== expected.raw) return false;
+  if (current.platform !== expected.platform) return false;
+  if (current.platform === "win32" && expected.platform === "win32") {
+    return current.volume_serial_number === expected.volume_serial_number
+      && current.file_id === expected.file_id
+      && current.size === expected.size;
+  }
+  if (current.platform === "posix" && expected.platform === "posix") {
+    return current.dev === expected.dev && current.ino === expected.ino;
+  }
+  return false;
 }
 
-async function writeCanonicalConvergenceAttestation(
+/**
+ * Cross-process CAS lock for the DCC attestation directory.
+ * Locks the attestation directory itself (not abrain root) so it cannot re-enter
+ * deadlock with the canonical root mutation barrier.
+ * Windows: native retained mutex (no TS lockfile). Linux: OFD via adapter.
+ * BUSY → attestation_write_failed. Hold across the full async write; close in finally.
+ * Primary operation error is preserved over close failure; sole close failure surfaces.
+ */
+async function withAttestationDirectoryLock<T>(
+  directory: string,
+  operation: (lock: RetainedDirectoryLock & { status: "ACQUIRED" }) => Promise<T>,
+): Promise<T> {
+  let lock: RetainedDirectoryLock;
+  try {
+    lock = acquireRetainedDirectoryLock(directory);
+  } catch (error) {
+    if (error instanceof CanonicalAttestationError) throw error;
+    if (error instanceof RetainedDirectoryLockError) writeFailedAttestation();
+    writeFailedAttestation();
+  }
+  if (lock.status === "BUSY") writeFailedAttestation();
+  const acquired = lock as RetainedDirectoryLock & { status: "ACQUIRED" };
+  let primaryError: unknown;
+  let value: T | undefined;
+  try {
+    value = await operation(acquired);
+  } catch (error) {
+    primaryError = error;
+  }
+  try {
+    acquired.close();
+  } catch (closeError) {
+    if (primaryError === undefined) {
+      if (closeError instanceof CanonicalAttestationError) throw closeError;
+      writeFailedAttestation();
+    }
+  }
+  if (primaryError !== undefined) throw primaryError;
+  return value as T;
+}
+
+async function writeCanonicalConvergenceAttestationWindows(
   root: string,
   attestation: CanonicalConvergenceAttestation,
   expected: CanonicalAttestationSnapshot | null,
 ): Promise<void> {
-  // Defense-in-depth: even if a future caller bypasses run(), refuse win32 writes.
-  if (!isDccAttestationPlatformSupported(process.platform)) unavailableAttestation();
+  const addon = resolveWindowsDccAddon();
+  if (!addon) unavailableAttestation();
   validateCanonicalConvergenceAttestation(attestation);
-  const directory = await ensureAttestationDirectory(root);
+  // Ensure directory exists before lock (lock requires an existing directory).
+  const directory = ensureAttestationDirectoryWindows(root);
   const target = attestationPath(root);
   const raw = `${JSON.stringify(attestation)}\n`;
-  const temp = path.join(
-    directory,
-    `.${CANONICAL_CONVERGENCE_ATTESTATION_NAME}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`,
-  );
-  let handle: fs.FileHandle | undefined;
-  try {
-    handle = await fs.open(temp, "wx", 0o600);
-    if (process.platform !== "win32") await handle.chmod(0o600);
-    await handle.writeFile(raw, "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
+  const data = Buffer.from(raw, "utf8");
 
+  await withAttestationDirectoryLock(directory, async () => {
     let current: CanonicalAttestationSnapshot | null;
     try {
       current = readAttestationSnapshot(root);
@@ -876,17 +1159,117 @@ async function writeCanonicalConvergenceAttestation(
       writeFailedAttestation();
     }
     if (!sameSnapshot(current, expected)) writeFailedAttestation();
-    await fs.rename(temp, target);
-    await fsyncDirectory(directory);
-    const readBack = readAttestationSnapshot(root);
+
+    try {
+      if (expected === null) {
+        // First write: no-replace native create under the same lock lease.
+        // Reconfirm absent (above) then create-only; collision → write_failed.
+        const created = durableAtomicCreateFile(addon, target, data);
+        if (!created) writeFailedAttestation();
+      } else {
+        // Parent dir is private_rw (ensured above); native replace enforces parent gate + DACL.
+        durableAtomicReplaceFile(addon, target, data);
+      }
+    } catch (error) {
+      if (error instanceof CanonicalAttestationError) throw error;
+      writeFailedAttestation();
+    }
+
+    let readBack: CanonicalAttestationSnapshot | null;
+    try {
+      readBack = readAttestationSnapshot(root);
+    } catch {
+      writeFailedAttestation();
+    }
     if (!readBack || readBack.raw !== raw) writeFailedAttestation();
-  } catch (error) {
-    if (error instanceof CanonicalAttestationError) throw error;
-    writeFailedAttestation();
-  } finally {
-    await handle?.close().catch(() => undefined);
-    await fs.rm(temp, { force: true }).catch(() => undefined);
+  });
+}
+
+async function writeCanonicalConvergenceAttestationPosix(
+  root: string,
+  attestation: CanonicalConvergenceAttestation,
+  expected: CanonicalAttestationSnapshot | null,
+): Promise<void> {
+  validateCanonicalConvergenceAttestation(attestation);
+  const directory = await ensureAttestationDirectoryPosix(root);
+  const target = attestationPath(root);
+  const raw = `${JSON.stringify(attestation)}\n`;
+  const temp = path.join(
+    directory,
+    `.${CANONICAL_CONVERGENCE_ATTESTATION_NAME}.${process.pid}.${Date.now()}.${randomBytes(8).toString("hex")}.tmp`,
+  );
+
+  // Hold retained OFD lock across the entire async write window (not just rename).
+  await withAttestationDirectoryLock(directory, async () => {
+    let handle: fs.FileHandle | undefined;
+    try {
+      // Re-check expected under the lock before publishing.
+      let current: CanonicalAttestationSnapshot | null;
+      try {
+        current = readAttestationSnapshot(root);
+      } catch {
+        writeFailedAttestation();
+      }
+      if (!sameSnapshot(current, expected)) writeFailedAttestation();
+
+      if (expected === null) {
+        // First write create-only: O_EXCL on the final path is not portable with rename;
+        // reconfirm absent under lock then temp+rename. Concurrent first writers serialize
+        // on the retained lock; the second re-read sees non-null and fails CAS.
+        if (current !== null) writeFailedAttestation();
+      }
+
+      handle = await fs.open(temp, "wx", 0o600);
+      await handle.chmod(0o600);
+      await handle.writeFile(raw, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+
+      // Second compare immediately before rename (still under lock).
+      try {
+        current = readAttestationSnapshot(root);
+      } catch {
+        writeFailedAttestation();
+      }
+      if (!sameSnapshot(current, expected)) writeFailedAttestation();
+
+      if (expected === null) {
+        // create-only: refuse replace if leaf appeared between checks.
+        try {
+          await fs.access(target);
+          writeFailedAttestation();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") writeFailedAttestation();
+        }
+      }
+
+      await fs.rename(temp, target);
+      await fsyncDirectory(directory);
+      const readBack = readAttestationSnapshot(root);
+      if (!readBack || readBack.raw !== raw) writeFailedAttestation();
+    } catch (error) {
+      if (error instanceof CanonicalAttestationError) throw error;
+      writeFailedAttestation();
+    } finally {
+      await handle?.close().catch(() => undefined);
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+    }
+  });
+}
+
+async function writeCanonicalConvergenceAttestation(
+  root: string,
+  attestation: CanonicalConvergenceAttestation,
+  expected: CanonicalAttestationSnapshot | null,
+): Promise<void> {
+  // Defense-in-depth: Windows requires native physical layer (production or test inject).
+  if (process.platform === "win32") {
+    if (!resolveWindowsDccAddon()) unavailableAttestation();
+    await writeCanonicalConvergenceAttestationWindows(root, attestation, expected);
+    return;
   }
+  await writeCanonicalConvergenceAttestationPosix(root, attestation, expected);
 }
 
 function peekControlState(): CanonicalControlProcessState | null {
@@ -909,8 +1292,15 @@ function controlState(): CanonicalControlProcessState {
   return created;
 }
 
-function assertTestHooksEnabled(hooks: CanonicalControlTestHooks | undefined): void {
-  if (hooks && process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") validation("test_hooks_disabled");
+function assertTestHooksEnabled(deps: SedimentWorkerCanonicalControlDeps): void {
+  if (deps.testHooks && process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") validation("test_hooks_disabled");
+  if (deps.windowsDccNativeAddon !== undefined && process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    validation("test_hooks_disabled");
+  }
+  // platform override is a test seam; gate the same as other hooks.
+  if (deps.platform !== undefined && process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    validation("test_hooks_disabled");
+  }
 }
 
 function result(args: {
@@ -1836,11 +2226,14 @@ export async function runSedimentWorkerCanonicalControl(
   deps: SedimentWorkerCanonicalControlDeps,
 ): Promise<SedimentWorkerCanonicalControlResult> {
   const manifest = parseSedimentWorkerCanonicalControlArgs(args);
-  assertTestHooksEnabled(deps.testHooks);
+  assertTestHooksEnabled(deps);
 
   // After strict manifest parse; before authority / attestation / runtime side effects.
-  // Windows: fail closed — Node cannot prove current-primary-TokenUser protected DACL.
-  if (!isDccAttestationPlatformSupported(deps.platform ?? process.platform)) {
+  // Windows: production zero-arg native addon with protected_dacl_v1+atomic_file_v1,
+  // or gated test-injected temp package addon. pin=null → attestation_unavailable.
+  const platform = deps.platform ?? process.platform;
+  const testAddon = assertWindowsDccTestSeamAllowed(deps.windowsDccNativeAddon);
+  if (!isDccControlPlatformReady(platform, testAddon)) {
     return result({
       request_id: manifest.request_id,
       operation: manifest.operation,
@@ -1851,40 +2244,42 @@ export async function runSedimentWorkerCanonicalControl(
     });
   }
 
-  let abrainHome: string;
-  try {
-    abrainHome = deps.resolveAbrainHome();
-    const admission = admitLocalExecutorAuthority({
-      abrainHome,
-      expectation: {
-        local_executor_epoch: manifest.local_executor_epoch,
-        local_executor_holder_nonce: manifest.local_executor_holder_nonce,
-      },
-      expectedHolderKind: "daemon",
-      observation: deps.authorityObservation,
-    });
-    if (admission.regime !== "strict") {
-      throw new LocalExecutorAuthorityAdmissionError("local_executor_authority_unavailable");
+  return withWindowsDccAddonAsync(testAddon, async () => {
+    let abrainHome: string;
+    try {
+      abrainHome = deps.resolveAbrainHome();
+      const admission = admitLocalExecutorAuthority({
+        abrainHome,
+        expectation: {
+          local_executor_epoch: manifest.local_executor_epoch,
+          local_executor_holder_nonce: manifest.local_executor_holder_nonce,
+        },
+        expectedHolderKind: "daemon",
+        observation: deps.authorityObservation,
+      });
+      if (admission.regime !== "strict") {
+        throw new LocalExecutorAuthorityAdmissionError("local_executor_authority_unavailable");
+      }
+    } catch (error) {
+      return authorityFailureResult(manifest, error);
     }
-  } catch (error) {
-    return authorityFailureResult(manifest, error);
-  }
 
-  let root: string;
-  try {
-    root = canonicalAbrainRoot(abrainHome);
-  } catch {
-    return result({
-      request_id: manifest.request_id,
-      operation: manifest.operation,
-      status: "unavailable",
-      reason_code: "attestation_unavailable",
-      retryable: true,
-    });
-  }
-  return manifest.operation === "kick"
-    ? kickCanonicalControl(root, manifest, deps.testHooks, deps.authorityObservation)
-    : observeCanonicalControl(root, manifest, deps.testHooks);
+    let root: string;
+    try {
+      root = canonicalAbrainRoot(abrainHome);
+    } catch {
+      return result({
+        request_id: manifest.request_id,
+        operation: manifest.operation,
+        status: "unavailable",
+        reason_code: "attestation_unavailable",
+        retryable: true,
+      });
+    }
+    return manifest.operation === "kick"
+      ? kickCanonicalControl(root, manifest, deps.testHooks, deps.authorityObservation)
+      : observeCanonicalControl(root, manifest, deps.testHooks);
+  });
 }
 
 /** Cross-field invariants for control-result status/reason/generation/retryable.

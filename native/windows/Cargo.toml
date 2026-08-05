@@ -1,0 +1,40 @@
+[package]
+name = "pi-astack-windows-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "pi-astack win32-x64 N-API addon (ABI v1 + atomic_file_tempdir_v1 + atomic_file_v1 + protected_dacl_v1 + retained_directory_lock_v1)"
+license = "MIT"
+
+[lib]
+# cdylib = N-API loadable binary; rlib = cargo test / clippy gate without napi link skip.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "pi-astack-mutex-squat-helper"
+path = "src/bin/mutex_squat_helper.rs"
+
+[dependencies]
+napi = { version = "=3.12.0", default-features = false, features = ["napi9"] }
+napi-derive = { version = "=3.6.2", default-features = false, features = ["strict"] }
+windows = { version = "=0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_IO",
+  "Win32_System_Threading",
+] }
+
+[build-dependencies]
+napi-build = { version = "=2.4.0" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+# Intent: trim-paths = "all" (path-free debug info / repro).
+# Cargo 1.97.1 stable rejects profile trim-paths without nightly cargo-features.
+# scripts/build-windows-native-addon.mjs injects controlled stable
+# --remap-path-prefix for native/repo/cargo/rustup/user homes after ambient strip.

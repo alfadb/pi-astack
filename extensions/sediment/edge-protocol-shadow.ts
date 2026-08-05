@@ -12,13 +12,39 @@
  * run_generation (protocol-shadow temporary) = candidate producer_seq; not a core fence.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, fsyncDirectory } from "../_shared/durable-write";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined, sha256Hex } from "../_shared/jcs";
-import { withRetainedDirectoryOfdLock } from "../_shared/retained-directory-ofd-lock";
+import { withRetainedDirectoryLock } from "../_shared/retained-directory-lock";
+import {
+  appendEdgeProtectedAuditJsonlLine,
+  classifyEdgeWindowsNotFound,
+  durableCreateEdgeProtectedFileWithTempDirectory,
+  ensureEdgeProtectedDirectory,
+  mapEdgeWindowsPhysicalError,
+  parseEdgeAuditJsonlBytesFailClosed,
+  readEdgeProtectedFileBytes,
+  resolveEdgeWindowsNativeAddon,
+  verifyEdgeProtectedFile,
+  type EdgeWindowsNativeDeps,
+} from "./edge-protocol-shadow-windows-native";
+import type { WindowsNativeAddonModuleV1 } from "../_shared/windows-native-addon";
+
+/**
+ * True while the current async chain holds the edge journal/lock retained mutex.
+ * Audit parent retained lock must never nest inside this (fixed lock order).
+ */
+const edgeJournalWriterLockAls = new AsyncLocalStorage<true>();
+
+function assertNotInsideEdgeJournalWriterLock(label: string): void {
+  if (edgeJournalWriterLockAls.getStore()) {
+    throw new Error(`EDGE_WINDOWS_LOCK_ORDER_VIOLATION:${label}`);
+  }
+}
 
 export const EDGE_PROTOCOL_SHADOW_ROOT_NAME = "edge-protocol-shadow" as const;
 export const EDGE_JOURNAL_SCHEMA = "pi-astack/edge-journal/v1" as const;
@@ -649,21 +675,29 @@ export function idHashPrefix(id: string | undefined, n = 12): string | undefined
  *  - trustRoot = realpath(abrainHome) when provided (or realpath of parent)
  *  - only descendants under trustRoot + the file itself must be non-symlink
  *  - abrainHome *ancestors* may contain symlinks (realpath resolves them)
- *  - O_NOFOLLOW|O_APPEND|O_CREAT, bounded line, fsync file + parent dir
+ *  - Linux: O_NOFOLLOW|O_APPEND|O_CREAT, bounded line, fsync file + parent dir
+ *  - Windows: protected private_rw parent + durableAtomicCreate / appendProtectedFile
+ *    (no Node O_APPEND, no POSIX chmod/fsync-dir pretenses)
  * Never swallows IO/path failures — callers decide fail-closed policy.
  */
 export async function appendEdgeAuditJsonlLine(
   auditPath: string,
   entry: unknown,
-  opts?: { trustRoot?: string },
+  opts?: { trustRoot?: string; windowsNative?: EdgeWindowsNativeDeps },
 ): Promise<void> {
   const line = `${JSON.stringify(entry)}\n`;
-  const lineBytes = Buffer.byteLength(line, "utf-8");
-  if (lineBytes > EDGE_AUDIT_MAX_LINE_BYTES) {
+  const lineBuf = Buffer.from(line, "utf-8");
+  if (lineBuf.byteLength > EDGE_AUDIT_MAX_LINE_BYTES) {
     throw new Error("audit_line_too_large");
   }
   const resolved = path.resolve(auditPath);
   const parentNamed = path.dirname(resolved);
+
+  if (process.platform === "win32") {
+    await appendEdgeAuditJsonlLineWindows(resolved, parentNamed, lineBuf, opts);
+    return;
+  }
+
   await fs.mkdir(parentNamed, { recursive: true, mode: DIR_MODE });
 
   let parentReal: string;
@@ -743,6 +777,53 @@ export async function appendEdgeAuditJsonlLine(
   await fsyncDirectory(parentReal);
 }
 
+async function appendEdgeAuditJsonlLineWindows(
+  resolved: string,
+  parentNamed: string,
+  lineBuf: Buffer,
+  opts?: { trustRoot?: string; windowsNative?: EdgeWindowsNativeDeps },
+): Promise<void> {
+  // Audit parent retained lock must not nest inside journal/lock.
+  assertNotInsideEdgeJournalWriterLock("appendEdgeAuditJsonlLineWindows");
+  try {
+    const addon = resolveEdgeWindowsNativeAddon(opts?.windowsNative);
+    const ownershipRoot = opts?.trustRoot
+      ? path.resolve(opts.trustRoot)
+      : path.resolve(parentNamed);
+    // Operator audit may live outside trustRoot — then parentNamed is the ownership root.
+    let chainRoot = ownershipRoot;
+    if (opts?.trustRoot) {
+      try {
+        const rootSt = await fs.lstat(ownershipRoot);
+        if (rootSt.isSymbolicLink() || !rootSt.isDirectory()) {
+          throw new Error("audit_trust_root_not_directory");
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("audit_")) throw err;
+        throw new Error("audit_trust_root_realpath_failed");
+      }
+      if (!isUnderOrEqual(path.resolve(parentNamed), ownershipRoot)) {
+        chainRoot = path.resolve(parentNamed);
+      }
+    }
+    const parentResolved = path.resolve(parentNamed);
+    // Reuse the same ownership boundary as layout ensure:
+    // shared ancestors (.state/sediment) exact non-reparse only; edge-owned private_rw.
+    if (parentResolved === path.resolve(chainRoot)) {
+      // Operator audit parent is the ownership root itself — private_rw leaf only.
+      ensureEdgeProtectedDirectory(addon, parentResolved);
+    } else {
+      await ensureWindowsEdgeLayoutPath(addon, chainRoot, parentResolved);
+    }
+    appendEdgeProtectedAuditJsonlLine(addon, resolved, lineBuf, parentResolved);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("audit_")) throw err;
+    if (err instanceof Error && err.message.startsWith("EDGE_WINDOWS_LOCK_ORDER_VIOLATION")) throw err;
+    const mapped = mapEdgeWindowsPhysicalError(err);
+    throw new Error(mapped.code);
+  }
+}
+
 /** Append one capture-audit JSONL row (throws on failure — capture path fail-closed). */
 export async function appendEdgeCaptureAuditEntry(
   auditPath: string,
@@ -755,10 +836,35 @@ export async function appendEdgeCaptureAuditEntry(
 /** Load capture audit entries; index by session_id + content_id for unique match. */
 export async function loadEdgeCaptureAuditIndex(
   auditPath: string,
+  opts?: { windowsNative?: EdgeWindowsNativeDeps },
 ): Promise<Map<string, EdgeCaptureAuditEntry[]>> {
   const map = new Map<string, EdgeCaptureAuditEntry[]>();
   let raw: string;
   try {
+    if (process.platform === "win32") {
+      const addon = resolveEdgeWindowsNativeAddon(opts?.windowsNative);
+      let bytes: Buffer;
+      try {
+        bytes = readEdgeProtectedFileBytes(addon, path.resolve(auditPath), EDGE_CAPTURE_AUDIT_MAX_READ_BYTES);
+      } catch (err) {
+        const mapped = mapEdgeWindowsPhysicalError(err);
+        if (mapped.code === "EDGE_WINDOWS_NOT_FOUND") {
+          // Parent must be valid private_rw; only then is leaf absence empty.
+          // Parent invalid / missing → fail-closed (do not wash as empty).
+          classifyEdgeWindowsNotFound(addon, path.resolve(auditPath));
+          return map;
+        }
+        if (mapped.code === "EDGE_WINDOWS_TOO_LARGE") throw new Error("capture_audit_too_large");
+        throw new Error(mapped.code);
+      }
+      // Windows: partial / corrupt JSONL fail-closed (no silent skip of bad lines).
+      const lines = parseEdgeAuditJsonlBytesFailClosed(bytes);
+      for (const line of lines) {
+        ingestCaptureAuditLine(map, line);
+      }
+      return map;
+    }
+
     const st = await fs.lstat(auditPath);
     if (st.isSymbolicLink() || !st.isFile()) {
       throw new Error("capture_audit_not_regular_file");
@@ -771,62 +877,70 @@ export async function loadEdgeCaptureAuditIndex(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return map;
     throw err;
   }
+  // Linux historical: skip unparseable / non-matching lines (format unchanged).
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-    const o = parsed as Record<string, unknown>;
-    if (o.schema !== EDGE_CAPTURE_AUDIT_SCHEMA || o.schema_version !== 1) continue;
-    if (typeof o.session_id !== "string" || typeof o.content_id !== "string") continue;
-    if (!/^[0-9a-f]{64}$/.test(o.content_id)) continue;
-    if (!o.c6 || typeof o.c6 !== "object" || Array.isArray(o.c6)) continue;
-    if (!o.leaf_tip || typeof o.leaf_tip !== "object" || Array.isArray(o.leaf_tip)) continue;
-    const leaf = o.leaf_tip as Record<string, unknown>;
-    if (typeof leaf.id !== "string" || !leaf.id.trim()) continue;
-    let c6: EdgeC6Identity;
-    try {
-      c6 = normalizeC6(o.c6 as EdgeC6Identity);
-    } catch {
-      continue;
-    }
-    if (c6.session_id !== o.session_id) continue;
-    let leafTip: EdgeLeafTip;
-    try {
-      leafTip = normalizeLeafTip({
-        id: leaf.id,
-        parentId: (leaf.parentId as string | null | undefined) ?? null,
-        type: resolveLeafTipType(leaf.type),
-        ...(typeof leaf.timestampUtc === "string" ? { timestampUtc: leaf.timestampUtc } : {}),
-      });
-    } catch {
-      continue;
-    }
-    const entry: EdgeCaptureAuditEntry = {
-      schema: EDGE_CAPTURE_AUDIT_SCHEMA,
-      schema_version: 1,
-      created_at: typeof o.created_at === "string" ? o.created_at : new Date(0).toISOString(),
-      session_id: o.session_id,
-      content_id: o.content_id,
-      c6,
-      leaf_tip: leafTip,
-      result: typeof o.result === "string" ? o.result : "unknown",
-      ...(typeof o.error_code === "string" ? { error_code: o.error_code } : {}),
-      ...(typeof o.candidate_record_id === "string" ? { candidate_record_id: o.candidate_record_id } : {}),
-      ...(typeof o.witness_record_id === "string" ? { witness_record_id: o.witness_record_id } : {}),
-    };
-    // terminal_identity_content_conflict rows are never recovery sources of truth for admit.
-    const key = `${entry.session_id}\0${entry.content_id}`;
-    const list = map.get(key) ?? [];
-    list.push(entry);
-    map.set(key, list);
+    ingestCaptureAuditLine(map, trimmed);
   }
   return map;
+}
+
+function ingestCaptureAuditLine(
+  map: Map<string, EdgeCaptureAuditEntry[]>,
+  line: string,
+): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const o = parsed as Record<string, unknown>;
+  if (o.schema !== EDGE_CAPTURE_AUDIT_SCHEMA || o.schema_version !== 1) return;
+  if (typeof o.session_id !== "string" || typeof o.content_id !== "string") return;
+  if (!/^[0-9a-f]{64}$/.test(o.content_id)) return;
+  if (!o.c6 || typeof o.c6 !== "object" || Array.isArray(o.c6)) return;
+  if (!o.leaf_tip || typeof o.leaf_tip !== "object" || Array.isArray(o.leaf_tip)) return;
+  const leaf = o.leaf_tip as Record<string, unknown>;
+  if (typeof leaf.id !== "string" || !leaf.id.trim()) return;
+  let c6: EdgeC6Identity;
+  try {
+    c6 = normalizeC6(o.c6 as EdgeC6Identity);
+  } catch {
+    return;
+  }
+  if (c6.session_id !== o.session_id) return;
+  let leafTip: EdgeLeafTip;
+  try {
+    leafTip = normalizeLeafTip({
+      id: leaf.id,
+      parentId: (leaf.parentId as string | null | undefined) ?? null,
+      type: resolveLeafTipType(leaf.type),
+      ...(typeof leaf.timestampUtc === "string" ? { timestampUtc: leaf.timestampUtc } : {}),
+    });
+  } catch {
+    return;
+  }
+  const entry: EdgeCaptureAuditEntry = {
+    schema: EDGE_CAPTURE_AUDIT_SCHEMA,
+    schema_version: 1,
+    created_at: typeof o.created_at === "string" ? o.created_at : new Date(0).toISOString(),
+    session_id: o.session_id,
+    content_id: o.content_id,
+    c6,
+    leaf_tip: leafTip,
+    result: typeof o.result === "string" ? o.result : "unknown",
+    ...(typeof o.error_code === "string" ? { error_code: o.error_code } : {}),
+    ...(typeof o.candidate_record_id === "string" ? { candidate_record_id: o.candidate_record_id } : {}),
+    ...(typeof o.witness_record_id === "string" ? { witness_record_id: o.witness_record_id } : {}),
+  };
+  // terminal_identity_content_conflict rows are never recovery sources of truth for admit.
+  const key = `${entry.session_id}\0${entry.content_id}`;
+  const list = map.get(key) ?? [];
+  list.push(entry);
+  map.set(key, list);
 }
 
 /**
@@ -917,10 +1031,33 @@ export function extractTerminalLeafFromSourceMessages(
   return { ok: false, reason: "no_assistant" };
 }
 
-/** Fail-closed source sidecar read: lstat + O_NOFOLLOW + 8MiB cap. */
+/** Fail-closed source sidecar read: lstat + O_NOFOLLOW + 8MiB cap (Windows: readProtectedFile). */
 export async function readEdgeSourceBytesSafe(
   sourcePath: string,
+  opts?: { windowsNative?: EdgeWindowsNativeDeps },
 ): Promise<{ ok: true; bytes: Buffer } | { ok: false; error_code: string }> {
+  if (process.platform === "win32") {
+    try {
+      const addon = resolveEdgeWindowsNativeAddon(opts?.windowsNative);
+      const bytes = readEdgeProtectedFileBytes(
+        addon,
+        path.resolve(sourcePath),
+        EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES,
+      );
+      return { ok: true, bytes };
+    } catch (err) {
+      const mapped = mapEdgeWindowsPhysicalError(err);
+      if (mapped.code === "EDGE_WINDOWS_NOT_FOUND") return { ok: false, error_code: "source_missing" };
+      if (mapped.code === "EDGE_WINDOWS_TOO_LARGE") return { ok: false, error_code: "source_too_large" };
+      if (
+        mapped.code === "EDGE_WINDOWS_PROTECTED_FILE_FAILED"
+        || mapped.code === "EDGE_WINDOWS_UNSAFE_DIRECTORY"
+      ) {
+        return { ok: false, error_code: "source_symlink_rejected" };
+      }
+      return { ok: false, error_code: "source_read_failed" };
+    }
+  }
   try {
     const st = await fs.lstat(sourcePath);
     if (st.isSymbolicLink()) return { ok: false, error_code: "source_symlink_rejected" };
@@ -1339,7 +1476,7 @@ export async function captureEdgeProtocolCandidate(args: EdgeCaptureArgs): Promi
         if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
           throw new Error("record_too_large");
         }
-        const status = await durableAtomicCreateFile(recordPath, body, {
+        const status = await edgeDurableAtomicCreateFile(recordPath, body, {
           mode: SOURCE_MODE,
           verifyCreated: false,
           tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
@@ -2937,10 +3074,28 @@ export async function listEdgeJournalRecords(sessionRoot: string): Promise<EdgeJ
     throw err;
   }
   const records: EdgeJournalRecord[] = [];
+  const winAddon = process.platform === "win32" ? resolveEdgeWindowsNativeAddon() : null;
   for (const name of names.sort()) {
     if (!name.endsWith(".json") || name.startsWith(".")) continue;
-    const raw = await fs.readFile(path.join(dir, name), "utf-8");
-    const parsed = JSON.parse(raw) as EdgeJournalRecord;
+    const full = path.join(dir, name);
+    let raw: string;
+    if (winAddon) {
+      try {
+        raw = readEdgeProtectedFileBytes(winAddon, full, EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES).toString("utf-8");
+      } catch (err) {
+        const mapped = mapEdgeWindowsPhysicalError(err);
+        throw new Error(mapped.code);
+      }
+    } else {
+      raw = await fs.readFile(full, "utf-8");
+    }
+    let parsed: EdgeJournalRecord;
+    try {
+      parsed = JSON.parse(raw) as EdgeJournalRecord;
+    } catch {
+      // Closed surface: never leak raw body / parse text into error_detail.
+      throw new Error("journal_record_corrupt");
+    }
     if (parsed?.schema !== EDGE_JOURNAL_SCHEMA) continue;
     records.push(parsed);
   }
@@ -2994,21 +3149,24 @@ async function withJournalWriter<T>(
 
   let lastBusy = false;
   for (let attempt = 0; attempt < LOCK_BUSY_RETRIES; attempt += 1) {
-    const locked = await withRetainedDirectoryOfdLock(realLock, async () => {
-      // Default: max(record filename seq)+1 under OFD lock. Pair path seeds from index.
-      let nextSeq = (await scanMaxProducerSeq(sessionRoot)) + 1;
-      const writer: JournalWriter = {
-        session_writer_epoch: PROCESS_JOURNAL_WRITER_EPOCH,
-        allocateSeq() {
-          const seq = nextSeq;
-          nextSeq += 1;
-          return seq;
-        },
-        seedSeq(next: number) {
-          if (Number.isInteger(next) && next >= 1) nextSeq = next;
-        },
-      };
-      return fn(writer);
+    const locked = await withRetainedDirectoryLock(realLock, async () => {
+      // Mark journal/lock held so audit must not nest its parent retained lock.
+      return edgeJournalWriterLockAls.run(true, async () => {
+        // Default: max(record filename seq)+1 under OFD lock. Pair path seeds from index.
+        let nextSeq = (await scanMaxProducerSeq(sessionRoot)) + 1;
+        const writer: JournalWriter = {
+          session_writer_epoch: PROCESS_JOURNAL_WRITER_EPOCH,
+          allocateSeq() {
+            const seq = nextSeq;
+            nextSeq += 1;
+            return seq;
+          },
+          seedSeq(next: number) {
+            if (Number.isInteger(next) && next >= 1) nextSeq = next;
+          },
+        };
+        return fn(writer);
+      });
     });
     if (locked.status === "ACQUIRED") return locked.value;
     lastBusy = true;
@@ -3062,6 +3220,7 @@ async function loadJournalIndex(sessionRoot: string): Promise<JournalIndex> {
   const witnessByCandidateId = new Map<string, { record: EdgeJournalRecord; path: string }>();
   let maxSeq = 0;
   const sorted = names.filter((n) => RECORD_FILENAME_RE.test(n)).sort();
+  const winAddon = process.platform === "win32" ? resolveEdgeWindowsNativeAddon() : null;
   for (const name of sorted) {
     const parsedName = parseEdgeRecordFilename(name);
     if (!parsedName) continue;
@@ -3069,8 +3228,30 @@ async function loadJournalIndex(sessionRoot: string): Promise<JournalIndex> {
     const full = path.join(dir, name);
     let record: EdgeJournalRecord;
     try {
-      record = JSON.parse(await fs.readFile(full, "utf-8")) as EdgeJournalRecord;
-    } catch {
+      let raw: string;
+      if (winAddon) {
+        raw = readEdgeProtectedFileBytes(winAddon, full, EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES).toString("utf-8");
+      } else {
+        raw = await fs.readFile(full, "utf-8");
+      }
+      try {
+        record = JSON.parse(raw) as EdgeJournalRecord;
+      } catch {
+        if (winAddon) {
+          // Closed surface: do not leak raw body into error messages.
+          throw new Error("journal_record_corrupt");
+        }
+        continue;
+      }
+    } catch (err) {
+      // Linux historical: skip unreadable / unparseable filenames.
+      // Windows: matching journal filenames must be complete protected records — fail closed
+      // (no silent wash of crash/tamper residue into a partial index).
+      if (winAddon) {
+        if (err instanceof Error && err.message === "journal_record_corrupt") throw err;
+        const mapped = mapEdgeWindowsPhysicalError(err);
+        throw new Error(mapped.code === "EDGE_WINDOWS_IO_FAILED" ? "journal_record_corrupt" : mapped.code);
+      }
       continue;
     }
     if (record.schema !== EDGE_JOURNAL_SCHEMA) continue;
@@ -3245,7 +3426,7 @@ async function admitTerminalPairUnderLock(args: {
         error_detail: sanitizeDiagnostic(`record exceeds ${EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES} bytes`),
       };
     }
-    const status = await durableAtomicCreateFile(candidatePath, body, {
+    const status = await edgeDurableAtomicCreateFile(candidatePath, body, {
       mode: SOURCE_MODE,
       verifyCreated: false,
       tmpPath: edgeStagingTmpPath(sessionRoot, "record"),
@@ -3320,7 +3501,7 @@ async function createOrVerifyEdgeSidecar(
   sourceBody: string,
 ): Promise<EdgeWriteStatus> {
   maybeThrowSourceCreateFaultForTests();
-  const status = await durableAtomicCreateFile(sourcePath, sourceBody, {
+  const status = await edgeDurableAtomicCreateFile(sourcePath, sourceBody, {
     mode: SOURCE_MODE,
     verifyCreated: false,
     tmpPath: edgeStagingTmpPath(sessionRoot, "source"),
@@ -3378,7 +3559,7 @@ async function writeWitnessRecordUnderLock(args: {
   if (Buffer.byteLength(body, "utf-8") > EDGE_PROTOCOL_SHADOW_MAX_FILE_BYTES) {
     throw new Error("record_too_large");
   }
-  const status = await durableAtomicCreateFile(recordPath, body, {
+  const status = await edgeDurableAtomicCreateFile(recordPath, body, {
     mode: SOURCE_MODE,
     verifyCreated: false,
     tmpPath: edgeStagingTmpPath(args.sessionRoot, "record"),
@@ -3487,6 +3668,36 @@ async function ensureDirOwned(target: string, abrainHome: string): Promise<void>
     throw new Error("edge layout target outside abrainHome ownership root");
   }
 
+  if (process.platform === "win32") {
+    try {
+      const addon = resolveEdgeWindowsNativeAddon();
+      if (resolvedTarget === ownershipRoot) {
+        // ownership root itself is not auto-repaired to private_rw (existing weak fail-closed
+        // only when native verify is required on a leaf we own under it).
+        const rootSt = await fs.lstat(ownershipRoot);
+        if (rootSt.isSymbolicLink()) throw new Error("symlink in edge layout path");
+        if (!rootSt.isDirectory()) throw new Error("edge layout path is not a directory");
+        return;
+      }
+      // Shared ancestors (.state / sediment) may already exist from other writers with
+      // non-private DACL. Edge owns only the edge-protocol-shadow subtree: require
+      // non-reparse directories above it, private_rw from edge root downward.
+      // Existing weak/tampered *inside* the edge-owned subtree: fail-closed (no repair).
+      await ensureWindowsEdgeLayoutPath(addon, ownershipRoot, resolvedTarget);
+      return;
+    } catch (err) {
+      if (err instanceof Error && (
+        err.message === "symlink in edge layout path"
+        || err.message === "edge layout path is not a directory"
+        || err.message === "edge layout target outside abrainHome ownership root"
+      )) {
+        throw err;
+      }
+      const mapped = mapEdgeWindowsPhysicalError(err);
+      throw new Error(mapped.code);
+    }
+  }
+
   // ownershipRoot is the trusted start: must itself be a real (non-symlink) directory.
   // Never lstat(target) first — that would follow intermediate symlinks and escape root.
   const rootSt = await fs.lstat(ownershipRoot);
@@ -3556,11 +3767,98 @@ async function ensureDirOwned(target: string, abrainHome: string): Promise<void>
 }
 
 async function assertMode(filePath: string, mode: number): Promise<void> {
+  if (process.platform === "win32") {
+    try {
+      const addon = resolveEdgeWindowsNativeAddon();
+      verifyEdgeProtectedFile(addon, path.resolve(filePath));
+    } catch (err) {
+      const mapped = mapEdgeWindowsPhysicalError(err);
+      throw new Error(mapped.code);
+    }
+    return;
+  }
   const st = await fs.stat(filePath);
   if ((st.mode & 0o777) !== mode) {
     // Attempt repair once (umask may have stripped bits on some FS).
     await fs.chmod(filePath, mode);
   }
+}
+
+/**
+ * Windows layout walk (shared with audit parent ensure — single ownership strategy):
+ * - Shared ancestors above edge-protocol-shadow (e.g. .state / sediment):
+ *   existing → exact non-reparse directory only (no private DACL requirement);
+ *   missing → ordinary Node mkdir + exact recheck (never create as protected).
+ * - From edge-protocol-shadow downward: ensureProtectedDirectory private_rw
+ *   (existing weak/tampered fail-closed; no auto-repair).
+ */
+async function ensureWindowsEdgeLayoutPath(
+  addon: WindowsNativeAddonModuleV1,
+  ownershipRoot: string,
+  resolvedTarget: string,
+): Promise<void> {
+  const rel = path.relative(ownershipRoot, resolvedTarget);
+  if (!rel || rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
+    throw new Error("edge layout target outside abrainHome ownership root");
+  }
+  const parts = rel.split(path.sep).filter((p) => p && p !== ".");
+  let cursor = ownershipRoot;
+  let edgeOwned = false;
+  for (const part of parts) {
+    cursor = path.join(cursor, part);
+    if (part === EDGE_PROTOCOL_SHADOW_ROOT_NAME) edgeOwned = true;
+    if (!edgeOwned) {
+      try {
+        const st = await fs.lstat(cursor);
+        if (st.isSymbolicLink()) throw new Error("symlink in edge layout path");
+        if (!st.isDirectory()) throw new Error("edge layout path is not a directory");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        // Missing shared ancestor: ordinary mkdir — never native protected.
+        try {
+          await fs.mkdir(cursor);
+        } catch (mkdirErr) {
+          if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+        }
+        const st2 = await fs.lstat(cursor);
+        if (st2.isSymbolicLink()) throw new Error("symlink in edge layout path");
+        if (!st2.isDirectory()) throw new Error("edge layout path is not a directory");
+      }
+      continue;
+    }
+    // Edge-owned subtree: create new private_rw or verify existing (no auto-repair).
+    ensureEdgeProtectedDirectory(addon, cursor);
+  }
+}
+
+/** Platform durable no-replace create for edge sources/records. */
+async function edgeDurableAtomicCreateFile(
+  filePath: string,
+  content: string | Uint8Array,
+  options: { mode?: number; verifyCreated?: boolean; tmpPath?: string } = {},
+): Promise<"created" | "identical" | "collision"> {
+  if (process.platform === "win32") {
+    try {
+      const addon = resolveEdgeWindowsNativeAddon();
+      const bytes = typeof content === "string" ? Buffer.from(content, "utf-8") : Buffer.from(content);
+      // Staging dirname from options.tmpPath — never leave native temps in records/sources.
+      if (!options.tmpPath) {
+        throw new Error("EDGE_WINDOWS_STAGING_REQUIRED");
+      }
+      const stagingDir = path.dirname(path.resolve(options.tmpPath));
+      return durableCreateEdgeProtectedFileWithTempDirectory(
+        addon,
+        path.resolve(filePath),
+        bytes,
+        stagingDir,
+      );
+    } catch (err) {
+      if (err instanceof Error && err.message === "EDGE_WINDOWS_STAGING_REQUIRED") throw err;
+      const mapped = mapEdgeWindowsPhysicalError(err);
+      throw new Error(mapped.code);
+    }
+  }
+  return durableAtomicCreateFile(filePath, content, options);
 }
 
 function normalizeC6(c6: EdgeC6Identity): EdgeC6Identity {

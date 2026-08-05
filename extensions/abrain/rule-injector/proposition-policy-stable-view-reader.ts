@@ -13,6 +13,18 @@ import {
   PROPOSITION_POLICY_STABLE_VIEW_MAX_STATEMENT_UTF8_BYTES,
   buildPropositionPolicyStableViewCompilerManifestBase,
 } from "../../_shared/proposition-policy-stable-view-contract";
+import {
+  captureStableViewLatestPointer,
+  PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PATTERN,
+  PropositionPolicyStableViewWindowsNativeError,
+  readStableViewProtectedFile,
+  resolveStableViewWindowsNativeAddon,
+  verifyStableViewProtectedDirectory,
+  verifyStableViewProtectedFile,
+  type StableViewWindowsNativeDeps,
+} from "../../_shared/proposition-policy-stable-view-windows-native";
+
+type StableViewWindowsNativeAddon = NonNullable<StableViewWindowsNativeDeps["windowsNativeAddon"]>;
 
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_ROOT_RELATIVE = ".state/sediment/proposition-policy-stable-view/v1" as const;
 export const PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_MANIFEST_SCHEMA = "proposition-policy-stable-view-publication-manifest/v2" as const;
@@ -131,6 +143,8 @@ export function readPropositionPolicyStableViewForRuntime(args: {
   nowMs?: number;
   /** Test-only observation point after the immutable latest target is captured. */
   hooks?: { afterLatestCapture?: (latestValue: string) => void };
+  /** Test-only Windows native addon (temp package). Gated by PI_ASTACK_ENABLE_TEST_HOOKS=1. */
+  windowsNativeAddon?: StableViewWindowsNativeAddon;
 }): PropositionPolicyStableViewRuntimeReadResult {
   const selection = selectPropositionPolicyStableViewSession({ settings: args.settings, sessionManager: args.sessionManager });
   if (!selection.selected || !selection.sessionId) {
@@ -138,30 +152,88 @@ export function readPropositionPolicyStableViewForRuntime(args: {
   }
   let diagnostic: SelectionDiagnostic = {};
   try {
-    const abrainHome = exactDirectory(args.abrainHome.replace(/^~(?=$|\/)/, os.homedir()), "abrain home");
+    const abrainHome = exactDirectory(args.abrainHome.replace(/^~(?=$|[\/])/, os.homedir()), "abrain home");
     const root = path.join(abrainHome, ...PROPOSITION_POLICY_STABLE_VIEW_RUNTIME_ROOT_RELATIVE.split("/"));
     exactDirectory(root, "stable-view root");
-    const rootNames = fs.readdirSync(root).sort(compareCodeUnits);
-    if (canonicalize(rootNames) !== canonicalize(["bundles", "latest"])) fail("foreign_root", "stable-view root is not exact bundles plus latest");
-    const bundlesRoot = path.join(root, "bundles");
-    exactDirectory(bundlesRoot, "stable-view bundles root");
 
     // Capture latest exactly once. Every subsequent read is anchored to this
     // immutable content-addressed directory even if latest advances concurrently.
     const latest = path.join(root, "latest");
-    assertAncestorsNoSymlink(latest);
-    let latestStat: fs.Stats;
-    try { latestStat = fs.lstatSync(latest); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") fail("latest_missing", "stable-view latest is missing");
-      throw error;
+    let bundleHash: string;
+    let latestValue: string;
+    let selectionPublishedAtMs: number;
+    let windowsAddon: StableViewWindowsNativeAddon | undefined;
+    let bundlesRoot: string;
+
+    if (process.platform === "win32") {
+      // Windows: resolve production/gated-test addon and verify stable root private_rw
+      // before any exact-temp ignore. Temp allowance requires native protected-file verify
+      // (regular lstat alone is not sufficient).
+      const deps: StableViewWindowsNativeDeps | undefined = args.windowsNativeAddon
+        ? { windowsNativeAddon: args.windowsNativeAddon }
+        : undefined;
+      try {
+        windowsAddon = resolveStableViewWindowsNativeAddon(deps);
+        verifyStableViewProtectedDirectory(windowsAddon, root);
+      } catch (error) {
+        mapWindowsReaderError(error);
+      }
+      const rootNames = fs.readdirSync(root).sort(compareCodeUnits);
+      for (const name of rootNames) {
+        if (name === "bundles" || name === "latest") continue;
+        try {
+          if (isExactProtectedWindowsPublisherTempEntry(windowsAddon!, root, name)) continue;
+        } catch (error) {
+          mapWindowsReaderError(error);
+        }
+        fail("foreign_root", "stable-view root is not exact bundles plus latest");
+      }
+      if (!rootNames.includes("bundles")) fail("foreign_root", "stable-view root is missing bundles");
+      if (!rootNames.includes("latest")) fail("latest_missing", "stable-view latest is missing");
+      bundlesRoot = path.join(root, "bundles");
+      exactDirectory(bundlesRoot, "stable-view bundles root");
+      try {
+        verifyStableViewProtectedDirectory(windowsAddon!, bundlesRoot);
+        const captured = captureStableViewLatestPointer(windowsAddon!, latest);
+        latestValue = captured.latestValue;
+        bundleHash = captured.bundleHash;
+        selectionPublishedAtMs = captured.selectionPublishedAtMs;
+      } catch (error) {
+        mapWindowsReaderError(error);
+      }
+    } else {
+      // Linux/POSIX: exact staging dir + latest symlink temps may appear in the publish window.
+      // Behavior unchanged — type-safe lstat only; no Windows native path.
+      const rootNames = fs.readdirSync(root).sort(compareCodeUnits);
+      for (const name of rootNames) {
+        if (name === "bundles" || name === "latest") continue;
+        // Allow only the exact in-flight publisher temp grammar + safe type for the publish window.
+        // Do not broaden acceptance beyond existing publisher temp names.
+        if (isExactAllowedPublisherTempEntry(root, name)) continue;
+        fail("foreign_root", "stable-view root is not exact bundles plus latest");
+      }
+      if (!rootNames.includes("bundles")) fail("foreign_root", "stable-view root is missing bundles");
+      if (!rootNames.includes("latest")) fail("latest_missing", "stable-view latest is missing");
+      bundlesRoot = path.join(root, "bundles");
+      exactDirectory(bundlesRoot, "stable-view bundles root");
+
+      assertAncestorsNoSymlink(latest);
+      let latestStat: fs.Stats;
+      try { latestStat = fs.lstatSync(latest); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") fail("latest_missing", "stable-view latest is missing");
+        throw error;
+      }
+      if (!latestStat.isSymbolicLink()) fail("latest_not_symlink", "stable-view latest is not a symlink");
+      latestValue = fs.readlinkSync(latest);
+      const match = /^bundles\/([0-9a-f]{64})$/.exec(latestValue);
+      if (!match || path.isAbsolute(latestValue) || latestValue.includes("..") || latestValue.includes("\\")) {
+        fail("latest_invalid", "latest is not a direct relative content-addressed reference");
+      }
+      bundleHash = match[1]!;
+      selectionPublishedAtMs = Math.max(latestStat.mtimeMs, latestStat.ctimeMs);
     }
-    if (!latestStat.isSymbolicLink()) fail("latest_not_symlink", "stable-view latest is not a symlink");
-    const latestValue = fs.readlinkSync(latest);
-    const match = /^bundles\/([0-9a-f]{64})$/.exec(latestValue);
-    if (!match || path.isAbsolute(latestValue) || latestValue.includes("..")) fail("latest_invalid", "latest is not a direct relative content-addressed reference");
+
     args.hooks?.afterLatestCapture?.(latestValue);
-    const bundleHash = match[1]!;
-    const selectionPublishedAtMs = Math.max(latestStat.mtimeMs, latestStat.ctimeMs);
     const selectionAgeMs = Math.max(0, (args.nowMs ?? Date.now()) - selectionPublishedAtMs);
     if (!Number.isFinite(selectionPublishedAtMs) || !Number.isFinite(selectionAgeMs)) fail("selection_time_invalid", "latest publication time is invalid");
     diagnostic = {
@@ -173,6 +245,13 @@ export function readPropositionPolicyStableViewForRuntime(args: {
 
     const bundleDir = path.join(bundlesRoot, bundleHash);
     exactDirectory(bundleDir, "stable-view bundle");
+    if (windowsAddon) {
+      try {
+        verifyStableViewProtectedDirectory(windowsAddon, bundleDir);
+      } catch (error) {
+        mapWindowsReaderError(error);
+      }
+    }
     const names = fs.readdirSync(bundleDir).sort(compareCodeUnits);
     if (canonicalize(names) !== canonicalize([...ARTIFACT_NAMES].sort(compareCodeUnits))) fail("partial_or_foreign", "stable-view bundle is not exact all-five");
 
@@ -180,14 +259,36 @@ export function readPropositionPolicyStableViewForRuntime(args: {
     let totalBytes = 0;
     for (const name of ARTIFACT_NAMES) {
       const file = path.join(bundleDir, name);
-      const stat = exactRegularFile(file, "stable-view artifact");
-      totalBytes += stat.size;
-      if (stat.size > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES
-        || totalBytes > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES
-        || stat.size > args.settings.maxReadBytes || totalBytes > args.settings.maxReadBytes) {
-        fail("oversize", "stable-view artifact set exceeds its hard read envelope");
+      if (windowsAddon) {
+        let data: Buffer;
+        try {
+          // Native read uses the absolute hard artifact ceiling; runtime max/total
+          // oversize is decided in TS below (native TOO_LARGE → oversize).
+          data = readStableViewProtectedFile(
+            windowsAddon,
+            file,
+            PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES,
+          );
+        } catch (error) {
+          mapWindowsReaderError(error);
+        }
+        totalBytes += data.byteLength;
+        if (data.byteLength > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES
+          || totalBytes > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES
+          || data.byteLength > args.settings.maxReadBytes || totalBytes > args.settings.maxReadBytes) {
+          fail("oversize", "stable-view artifact set exceeds its hard read envelope");
+        }
+        artifacts[name] = data.toString("utf8");
+      } else {
+        const stat = exactRegularFile(file, "stable-view artifact");
+        totalBytes += stat.size;
+        if (stat.size > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_UTF8_BYTES
+          || totalBytes > PROPOSITION_POLICY_STABLE_VIEW_MAX_ARTIFACT_SET_UTF8_BYTES
+          || stat.size > args.settings.maxReadBytes || totalBytes > args.settings.maxReadBytes) {
+          fail("oversize", "stable-view artifact set exceeds its hard read envelope");
+        }
+        artifacts[name] = fs.readFileSync(file, "utf8");
       }
-      artifacts[name] = fs.readFileSync(file, "utf8");
     }
     const manifest = parseCanonicalJson(artifacts["manifest.json"], "manifest.json");
     const view = parseCanonicalJson(artifacts["view.json"], "view.json");
@@ -219,6 +320,90 @@ export function readPropositionPolicyStableViewForRuntime(args: {
       error: controlledError(error),
     };
   }
+}
+
+/**
+ * Linux/POSIX exact publisher temp names that may appear during a live publish window.
+ * `.staging-<64 hex>-<pid>-<16 hex>` directory, `.latest-<pid>-<16 hex>` symlink.
+ * Approximate / unsafe types are still foreign_root — do not expand acceptance.
+ * Windows uses isExactProtectedWindowsPublisherTempEntry (native private_rw verify).
+ */
+function isExactAllowedPublisherTempEntry(root: string, name: string): boolean {
+  const target = path.join(root, name);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(target);
+  } catch {
+    return false;
+  }
+  if (/^\.staging-[0-9a-f]{64}-[0-9]+-[0-9a-f]{16}$/.test(name)) {
+    return !st.isSymbolicLink() && st.isDirectory();
+  }
+  if (/^\.latest-[0-9]+-[0-9a-f]{16}$/.test(name)) {
+    return st.isSymbolicLink();
+  }
+  return false;
+}
+
+/**
+ * Windows exact native latest temp that may appear during a live publish window.
+ * Grammar: `.latest.pi-astack-tmp.<pid>-<nanos>.tmp`
+ * Requires: regular file + native protected private_rw verify.
+ * Weak DACL / verify failure throws (loud zero) — never ignore on lstat alone.
+ * Non-matching grammar / unsafe type → false → foreign_root.
+ */
+function isExactProtectedWindowsPublisherTempEntry(
+  addon: StableViewWindowsNativeAddon,
+  root: string,
+  name: string,
+): boolean {
+  if (!PROPOSITION_POLICY_STABLE_VIEW_WINDOWS_LATEST_TEMP_PATTERN.test(name)) return false;
+  const target = path.join(root, name);
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(target);
+  } catch {
+    return false;
+  }
+  if (st.isSymbolicLink() || st.isDirectory() || !st.isFile()) return false;
+  // Native private_rw verify is mandatory before ignore; weak DACL must not pass.
+  verifyStableViewProtectedFile(addon, target);
+  return true;
+}
+
+/** Map Windows native errors to closed reader reason codes without leaking native strings. */
+function mapWindowsReaderError(error: unknown): never {
+  if (error instanceof PropositionPolicyStableViewReaderError) throw error;
+  if (error instanceof PropositionPolicyStableViewWindowsNativeError) {
+    switch (error.code) {
+      case "WINDOWS_STABLE_VIEW_LATEST_MISSING":
+        fail("latest_missing", "stable-view latest is missing");
+      case "WINDOWS_STABLE_VIEW_LATEST_NOT_REGULAR":
+        fail("latest_not_regular", "stable-view latest is not a regular pointer file");
+      case "WINDOWS_STABLE_VIEW_POINTER_INVALID":
+        fail("latest_invalid", "latest is not a direct relative content-addressed reference");
+      case "WINDOWS_STABLE_VIEW_SELECTION_TIME_INVALID":
+        fail("selection_time_invalid", "latest publication time is invalid");
+      case "WINDOWS_STABLE_VIEW_TOO_LARGE":
+        fail("oversize", "stable-view artifact set exceeds its hard read envelope");
+      case "WINDOWS_STABLE_VIEW_NATIVE_UNAVAILABLE":
+      case "WINDOWS_STABLE_VIEW_UNSUPPORTED_PLATFORM":
+        fail("windows_native_unavailable", "windows stable-view native path is unavailable");
+      case "WINDOWS_STABLE_VIEW_PROTECTED_DIR_FAILED":
+      case "WINDOWS_STABLE_VIEW_PROTECTED_FILE_FAILED":
+      case "WINDOWS_STABLE_VIEW_PROTECTED_READ_FAILED":
+        fail("latest_tampered", "stable-view protected object failed verification");
+      default:
+        fail("read_failed", "windows stable-view read failed closed");
+    }
+  }
+  // Missing file under protected read surfaces as NOT_FOUND → already mapped above when wrapped.
+  const message = error instanceof Error ? error.message : String(error);
+  if (/NOT_FOUND|ENOENT/i.test(message)) fail("partial_or_foreign", "stable-view bundle is not exact all-five");
+  if (/\bTOO_LARGE\b|WINDOWS_NATIVE_ADDON_TOO_LARGE|WINDOWS_STABLE_VIEW_TOO_LARGE/.test(message)) {
+    fail("oversize", "stable-view artifact set exceeds its hard read envelope");
+  }
+  fail("read_failed", "stable-view read failed closed");
 }
 
 function validateManifest(input: {

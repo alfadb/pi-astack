@@ -106,6 +106,17 @@ export async function atomicRenameWriteFile(
 }
 
 export async function fsyncDirectory(dir: string): Promise<void> {
+  // Windows: directory fsync is not supported (EPERM). Verify the path is an
+  // exact non-reparse directory and return; callers that need content durability
+  // must fsync the file handle (or use native WRITE_THROUGH) before relying on
+  // this helper for parent directory metadata.
+  if (process.platform === "win32") {
+    const st = await fs.lstat(dir);
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(`fsyncDirectory target is not an exact directory: ${dir}`);
+    }
+    return;
+  }
   let handle: fs.FileHandle | undefined;
   try {
     handle = await fs.open(dir, "r");

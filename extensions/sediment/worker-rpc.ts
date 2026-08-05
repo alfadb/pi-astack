@@ -24,7 +24,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { durableAtomicCreateFile, fsyncDirectory } from "../_shared/durable-write";
 import { CanonicalMutationBarrierError } from "../_shared/canonical-mutation-barrier";
-import { acquireRetainedDirectoryOfdLock } from "../_shared/retained-directory-ofd-lock";
+import { acquireRetainedDirectoryLock } from "../_shared/retained-directory-lock";
 import {
   EDGE_SOURCE_SCHEMA,
   computePayloadDigest,
@@ -2042,9 +2042,9 @@ export async function runSedimentWorkerTask(
     await fs.mkdir(sedimentWorkerClaimsDir(abrainHome), { recursive: true, mode: 0o700 });
     await fs.mkdir(claimDir, { recursive: true, mode: 0o700 });
 
-    let lock: ReturnType<typeof acquireRetainedDirectoryOfdLock>;
+    let lock: ReturnType<typeof acquireRetainedDirectoryLock>;
     try {
-      lock = acquireRetainedDirectoryOfdLock(claimDir);
+      lock = acquireRetainedDirectoryLock(claimDir);
     } catch {
       return failResult(ids, "claim_failed", { retryable: true });
     }

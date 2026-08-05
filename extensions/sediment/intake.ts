@@ -20,7 +20,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { durableAtomicCreateFile, durableAtomicWriteFile, fsyncDirectory } from "../_shared/durable-write";
 import { canonicalizeJcs, normalizeJcsValueOmittingUndefined } from "../_shared/jcs";
-import { acquireRetainedDirectoryOfdLock } from "../_shared/retained-directory-ofd-lock";
+import { acquireRetainedDirectoryLock } from "../_shared/retained-directory-lock";
 import { normalizeProjectRoot } from "../_shared/runtime";
 
 export const SEDIMENT_INTAKE_SCHEMA = "sediment-intake/v2" as const;
@@ -576,7 +576,7 @@ export function tryClaimSedimentIntake(abrainHome: string, windowId: string, own
   assertWindowId(windowId);
   const claimDir = path.join(sedimentIntakeClaimsDir(abrainHome), windowId);
   fsSync.mkdirSync(claimDir, { recursive: true, mode: 0o700 });
-  const lock = acquireRetainedDirectoryOfdLock(claimDir);
+  const lock = acquireRetainedDirectoryLock(claimDir);
   if (lock.status === "BUSY") return { claimed: false, status: "busy" };
   let released = false;
   return {

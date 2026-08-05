@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-astack.local/schemas/windows-native-addon-manifest-v1.json",
+  "title": "windows-native-addon-manifest/v1",
+  "description": "Frozen core ABI v1 provenance manifest for the package-relative win32-x64 N-API addon binary under native/windows/win32-x64/. Exact key set; additionalProperties false; raw bytes are LF-only and pinned by extensions/_shared/windows-native-addon-pin.ts (package output; not source closure). Core ABI is frozen at 1; versioned capabilities extend function surface without ABI bump. Capabilities is an extensible sorted-unique array that must contain retained_directory_lock_v1 (contains). Known allowlist currently includes atomic_file_tempdir_v1, atomic_file_v1, protected_dacl_v1, retained_directory_lock_v1; runtime manifest capabilities must exact-match native self-report. Unadvertised capabilities must not be called. Production zero-arg loader rejects missing pin, missing binary, invalid manifest, matrix mismatch, path symlink/reparse, capability mismatch, hash/size mismatch, source-commit pin mismatch, and post-load package_rx ACL failure (WINDOWS_NATIVE_ADDON_PACKAGE_ACL_INVALID) fail-closed. Evidence fields build_mode/reproducibility/native_tests/clippy/build_config_sha256 must exact-match binary BuildIdentity; package only accepts production+dual_clean_match+passed+passed. toolchain_id is sha256 of path/locale-free captured components (numeric cl/link versions; no cargo_home/rustup_home/raw banners). Package via scripts/package-windows-native-addon.mjs; no runtime download or auto-compile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "addon_abi",
+    "platform",
+    "arch",
+    "napi_version",
+    "minimum_node",
+    "source_commit",
+    "source_tree_sha256",
+    "toolchain",
+    "toolchain_id",
+    "target",
+    "binary_file",
+    "binary_bytes",
+    "binary_sha256",
+    "build_id",
+    "build_mode",
+    "reproducibility",
+    "native_tests",
+    "clippy",
+    "build_config_sha256",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "windows-native-addon-manifest/v1"
+    },
+    "addon_abi": {
+      "const": 1,
+      "description": "Frozen core ABI v1. Function surface expands only via versioned capabilities."
+    },
+    "platform": {
+      "const": "win32"
+    },
+    "arch": {
+      "const": "x64"
+    },
+    "napi_version": {
+      "const": 9
+    },
+    "minimum_node": {
+      "const": "22.19.0",
+      "description": "Frozen first-matrix Node floor. Exact string equality; prerelease suffixes are rejected. Runtime must be >= this value with prerelease-aware comparison."
+    },
+    "source_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full lowercase git commit SHA that produced the binary."
+    },
+    "source_tree_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of the native source closure bound into the binary build."
+    },
+    "toolchain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[\\x20-\\x7E]+$",
+      "description": "Human-auditable toolchain summary (compiler/SDK/cargo/etc)."
+    },
+    "toolchain_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "sha256 of path/locale-free captured toolchain components (rustc -Vv, cargo -V, numeric cl/link versions, VCToolsVersion, trimmed WindowsSDKVersion, target, cargo config). Does not include cargo_home/rustup_home or raw locale banners."
+    },
+    "target": {
+      "const": "win32-x64",
+      "description": "Frozen ABI target triple fragment for the first support matrix."
+    },
+    "binary_file": {
+      "const": "pi-astack-windows-native.node",
+      "description": "Fixed basename under native/windows/win32-x64/; no path separators."
+    },
+    "binary_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864,
+      "description": "Exact on-disk byte length of the binary."
+    },
+    "binary_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase sha256 of the binary file bytes."
+    },
+    "build_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$",
+      "description": "Deterministic build identity (sha256 of build_id preimage including source/toolchain/evidence fields); self-reported by the loaded addon."
+    },
+    "build_mode": {
+      "type": "string",
+      "enum": ["development", "production"],
+      "description": "Build driver mode baked into binary BuildIdentity. Package accepts only production."
+    },
+    "reproducibility": {
+      "type": "string",
+      "enum": ["skipped", "dual_clean_match"],
+      "description": "Dual clean rebuild evidence. Package accepts only dual_clean_match."
+    },
+    "native_tests": {
+      "const": "passed",
+      "description": "Native cargo test gate result baked into identity. Package accepts only passed."
+    },
+    "clippy": {
+      "const": "passed",
+      "description": "Native cargo clippy -D warnings gate result baked into identity. Package accepts only passed."
+    },
+    "build_config_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "Lowercase sha256 of cargo config raw bytes (at least native/windows/.cargo/config.toml) bound into identity."
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$"
+      },
+      "contains": {
+        "const": "retained_directory_lock_v1"
+      },
+      "description": "Sorted unique versioned capability identifiers. Must contain retained_directory_lock_v1. Known allowlist is loader-side (atomic_file_tempdir_v1, atomic_file_v1, protected_dacl_v1, retained_directory_lock_v1); unadvertised capabilities must not be called. Runtime manifest must exact-match native getCapabilities()."
+    }
+  }
+}

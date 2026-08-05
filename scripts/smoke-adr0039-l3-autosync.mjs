@@ -77,7 +77,9 @@ function loadKnowledgeModule() {
   stageTs(outRoot, "extensions/_shared/canonical-mutation-authority.ts");
   stageTs(outRoot, "extensions/_shared/canonical-mutation-barrier.ts");
   stageTs(outRoot, "extensions/_shared/git-singleflight.ts");
+  stageTs(outRoot, "extensions/_shared/retained-directory-lock.ts");
   stageTs(outRoot, "extensions/_shared/retained-directory-ofd-lock.ts");
+  stageTs(outRoot, "extensions/_shared/windows-native-addon.ts");
   stageTs(outRoot, "extensions/_shared/worker-budget-context.ts");
   stageTs(outRoot, "extensions/sediment/local-executor-authority.ts");
   fs.mkdirSync(path.join(outRoot, "schemas"), { recursive: true });
