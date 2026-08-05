@@ -3,8 +3,8 @@
  *
  * One instance owns one and only one governance termination promise. External
  * parent abort and wall-clock timeouts remain lifecycle owners outside this
- * module. Task-governor audit stages, provider budgets, visible repetition,
- * and bounded tool observations enter here as signals; first terminal wins.
+ * module. Provider budgets, visible repetition, and bounded tool observations
+ * enter here as signals; first terminal wins.
  */
 
 import { createHmac, randomBytes } from "node:crypto";
@@ -27,9 +27,6 @@ export type WorkerGovernorSignal =
   | "empty_visible_retry"
   | "full_output_cap_hit"
   | "repetitive_output"
-  | "task_governor_checkpoint"
-  | "task_governor_audit_pause"
-  | "task_governor_fresh_auth"
   | "same_file_small_read_churn"
   | "schema_error_storm";
 
@@ -47,9 +44,6 @@ export interface WorkerRunGovernorCounters {
   successful_tool_response_count: number;
   same_file_small_read_churn_count: number;
   schema_error_storm_count: number;
-  task_governor_checkpoint_count: number;
-  task_governor_audit_pause_count: number;
-  task_governor_fresh_auth_count: number;
 }
 
 export interface WorkerRunGovernorThresholds {
@@ -127,7 +121,6 @@ export const DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS: WorkerRunGovernorSettings = {
 export interface WorkerRunGovernorDecision {
   worker_run_id: string;
   rule_version: typeof WORKER_RUN_GOVERNOR_RULE_VERSION;
-  profile: string;
   signal: WorkerGovernorSignal;
   mode: "observe" | "abort";
   counters: WorkerRunGovernorCounters;
@@ -165,7 +158,6 @@ export function buildWorkerRunAuditEvent(
     row_kind: "worker_run_event",
     worker_run_id: decision.worker_run_id,
     rule_version: decision.rule_version,
-    profile: decision.profile,
     signal: decision.signal,
     mode: decision.mode,
     counters: decision.counters,
@@ -195,7 +187,6 @@ export function buildWorkerRunAuditEvent(
 export interface WorkerRunGovernanceSummary {
   worker_run_id: string;
   rule_version: typeof WORKER_RUN_GOVERNOR_RULE_VERSION;
-  profile: string;
   counters: WorkerRunGovernorCounters;
   thresholds: WorkerRunGovernorThresholds;
   requested_output_cap?: number;
@@ -246,9 +237,6 @@ function freshCounters(): WorkerRunGovernorCounters {
     successful_tool_response_count: 0,
     same_file_small_read_churn_count: 0,
     schema_error_storm_count: 0,
-    task_governor_checkpoint_count: 0,
-    task_governor_audit_pause_count: 0,
-    task_governor_fresh_auth_count: 0,
   };
 }
 
@@ -353,7 +341,6 @@ export class WorkerRunGovernor {
 
   constructor(
     readonly workerRunId: string,
-    readonly profile: string,
     readonly settings: WorkerRunGovernorSettings = DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS,
     private readonly cwd = process.cwd(),
     now = Date.now(),
@@ -380,7 +367,7 @@ export class WorkerRunGovernor {
 
   observe(input: WorkerGovernorSignalInput, now = Date.now()): WorkerRunGovernorDecision | undefined {
     if (this.terminal) return undefined;
-    if (!this.settings.enabled && !input.signal.startsWith("task_governor_")) return undefined;
+    if (!this.settings.enabled) return undefined;
     this.applyCounter(input.signal);
     if (input.signal === "provider_retry") this.recordProviderRetryObservation("retry");
     if (input.signal === "assistant_response" && input.providerProgress === true) {
@@ -432,7 +419,6 @@ export class WorkerRunGovernor {
     const decision: WorkerRunGovernorDecision = {
       worker_run_id: this.workerRunId,
       rule_version: WORKER_RUN_GOVERNOR_RULE_VERSION,
-      profile: this.profile,
       signal: input.signal,
       mode: terminal ? "abort" : "observe",
       counters: { ...this.counters },
@@ -532,7 +518,6 @@ export class WorkerRunGovernor {
     return {
       worker_run_id: this.workerRunId,
       rule_version: WORKER_RUN_GOVERNOR_RULE_VERSION,
-      profile: this.profile,
       counters: { ...this.counters },
       thresholds: { ...this.thresholds },
       ...(this.requestedOutputCap !== undefined ? { requested_output_cap: this.requestedOutputCap } : {}),
@@ -572,9 +557,6 @@ export class WorkerRunGovernor {
       case "assistant_response": this.counters.assistant_response_count++; break;
       case "empty_visible_retry": this.counters.empty_visible_retry_count++; break;
       case "full_output_cap_hit": this.counters.full_output_cap_hit_count++; break;
-      case "task_governor_checkpoint": this.counters.task_governor_checkpoint_count++; break;
-      case "task_governor_audit_pause": this.counters.task_governor_audit_pause_count++; break;
-      case "task_governor_fresh_auth": this.counters.task_governor_fresh_auth_count++; break;
     }
   }
 
@@ -587,9 +569,6 @@ export class WorkerRunGovernor {
       case "full_output_cap_hit": return this.counters.full_output_cap_hit_count;
       case "same_file_small_read_churn": return this.counters.same_file_small_read_churn_count;
       case "schema_error_storm": return this.counters.schema_error_storm_count;
-      case "task_governor_checkpoint": return this.counters.task_governor_checkpoint_count;
-      case "task_governor_audit_pause": return this.counters.task_governor_audit_pause_count;
-      case "task_governor_fresh_auth": return this.counters.task_governor_fresh_auth_count;
       default: return undefined;
     }
   }

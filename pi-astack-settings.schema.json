@@ -1700,35 +1700,6 @@
           "maximum": 16,
           "description": "Maximum number of concurrent dispatch_parallel workers allowed for the same provider. Invalid or missing values fall back to 4."
         },
-        "taskGovernor": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "Deterministic per-worker tool-call audit thresholds for dispatch/workflow workers. This does not apply to the main session and does not call an LLM audit. Checkpoint, auditPause, and freshAuth each emit one non-terminal audit/progress event; cumulative tool-call count never terminates a worker.",
-          "properties": {
-            "enabled": {
-              "type": "boolean",
-              "default": true,
-              "description": "Kill switch for deterministic sub-agent tool-count audit stages. Default true."
-            },
-            "profiles": {
-              "type": "object",
-              "additionalProperties": false,
-              "description": "Optional overrides for per-profile non-terminal tool-call thresholds. Omitted profiles use runtime defaults.",
-              "properties": {
-                "read_only": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
-                "research": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
-                "implementation": { "$ref": "#/definitions/dispatchTaskGovernorLimits" },
-                "mutating_default": { "$ref": "#/definitions/dispatchTaskGovernorLimits" }
-              },
-              "default": {
-                "read_only": { "checkpoint": 60, "auditPause": 90, "freshAuth": 120 },
-                "research": { "checkpoint": 80, "auditPause": 120, "freshAuth": 160 },
-                "implementation": { "checkpoint": 120, "auditPause": 180, "freshAuth": 240 },
-                "mutating_default": { "checkpoint": 60, "auditPause": 100, "freshAuth": 120 }
-              }
-            }
-          }
-        },
         "workerRunGovernor": {
           "type": "object",
           "additionalProperties": false,
@@ -1907,18 +1878,6 @@
           "minimum": 1000,
           "default": 20000
         }
-      }
-    }
-  },
-  "definitions": {
-    "dispatchTaskGovernorLimits": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Non-terminal tool-call audit thresholds for a dispatch task-governor profile. checkpoint, auditPause, and freshAuth are each emitted once per run; counts above the final threshold remain audit-only.",
-      "properties": {
-        "checkpoint": { "type": "integer", "minimum": 1 },
-        "auditPause": { "type": "integer", "minimum": 1 },
-        "freshAuth": { "type": "integer", "minimum": 1 }
       }
     }
   }

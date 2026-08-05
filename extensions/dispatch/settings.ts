@@ -10,34 +10,11 @@ import {
   type JsonlRotationSettings,
 } from "../_shared/rotating-jsonl";
 
-export type DispatchTaskGovernorProfile = "read_only" | "research" | "implementation" | "mutating_default";
-
-export type DispatchTaskGovernorStage = "checkpoint" | "audit_pause" | "fresh_auth";
-
-export interface DispatchTaskGovernorLimits {
-  checkpoint: number;
-  auditPause: number;
-  freshAuth: number;
-}
-
-export interface DispatchTaskGovernorSettings {
-  enabled: boolean;
-  profiles: Record<DispatchTaskGovernorProfile, DispatchTaskGovernorLimits>;
-}
-
 export interface DispatchSettings {
   maxProviderConcurrency: number;
   auditRotation: JsonlRotationSettings;
-  taskGovernor: DispatchTaskGovernorSettings;
   workerRunGovernor: WorkerRunGovernorSettings;
 }
-
-export const DEFAULT_TASK_GOVERNOR_PROFILES: Record<DispatchTaskGovernorProfile, DispatchTaskGovernorLimits> = {
-  read_only: { checkpoint: 60, auditPause: 90, freshAuth: 120 },
-  research: { checkpoint: 80, auditPause: 120, freshAuth: 160 },
-  implementation: { checkpoint: 120, auditPause: 180, freshAuth: 240 },
-  mutating_default: { checkpoint: 60, auditPause: 100, freshAuth: 120 },
-};
 
 export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
   maxProviderConcurrency: 4,
@@ -46,10 +23,6 @@ export const DEFAULT_DISPATCH_SETTINGS: DispatchSettings = {
     maxBytes: 64 * 1024 * 1024,
     maxAgeMs: 7 * 24 * 60 * 60 * 1000,
     lockTimeoutMs: 1_000,
-  },
-  taskGovernor: {
-    enabled: true,
-    profiles: DEFAULT_TASK_GOVERNOR_PROFILES,
   },
   workerRunGovernor: DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS,
 };
@@ -177,32 +150,6 @@ function resolveWorkerRunGovernor(raw: unknown): WorkerRunGovernorSettings {
   };
 }
 
-function resolveTaskGovernor(raw: unknown): DispatchTaskGovernorSettings {
-  const rec = (raw && typeof raw === "object" && !Array.isArray(raw)
-    ? raw
-    : {}) as Record<string, unknown>;
-  const def = DEFAULT_DISPATCH_SETTINGS.taskGovernor;
-  const profilesRaw = (rec.profiles && typeof rec.profiles === "object" && !Array.isArray(rec.profiles)
-    ? rec.profiles
-    : {}) as Record<string, unknown>;
-  const profiles = { ...def.profiles } as Record<DispatchTaskGovernorProfile, DispatchTaskGovernorLimits>;
-  for (const profile of Object.keys(profiles) as DispatchTaskGovernorProfile[]) {
-    const rawLimits = (profilesRaw[profile] && typeof profilesRaw[profile] === "object" && !Array.isArray(profilesRaw[profile])
-      ? profilesRaw[profile]
-      : {}) as Record<string, unknown>;
-    const fallback = def.profiles[profile];
-    profiles[profile] = {
-      checkpoint: asPositiveBudget(rawLimits.checkpoint, fallback.checkpoint),
-      auditPause: asPositiveBudget(rawLimits.auditPause, fallback.auditPause),
-      freshAuth: asPositiveBudget(rawLimits.freshAuth, fallback.freshAuth),
-    };
-  }
-  return {
-    enabled: typeof rec.enabled === "boolean" ? rec.enabled : def.enabled,
-    profiles,
-  };
-}
-
 export function resolveDispatchSettings(rawSettings: unknown = {}): DispatchSettings {
   const root = (rawSettings && typeof rawSettings === "object" && !Array.isArray(rawSettings)
     ? rawSettings
@@ -214,7 +161,6 @@ export function resolveDispatchSettings(rawSettings: unknown = {}): DispatchSett
   return {
     maxProviderConcurrency: asPositiveInt(dispatch.maxProviderConcurrency, def.maxProviderConcurrency),
     auditRotation: resolveJsonlRotationSettings(dispatch.auditRotation, def.auditRotation),
-    taskGovernor: resolveTaskGovernor(dispatch.taskGovernor),
     workerRunGovernor: resolveWorkerRunGovernor(dispatch.workerRunGovernor),
   };
 }

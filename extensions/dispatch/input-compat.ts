@@ -11,10 +11,6 @@
  *  - task array coercion (single task → [task])
  */
 
-import {
-  resolveDispatchTaskProfileAliases,
-  type DispatchTaskProfile,
-} from "./task-profile";
 import { canonicalizeToolCsv } from "../_shared/tool-name-compat";
 
 // ── types ──────────────────────────────────────────────────────
@@ -28,7 +24,6 @@ export interface TaskSpec {
   role?: string;
   tools?: string;
   timeoutMs?: number;
-  taskProfile?: DispatchTaskProfile;
 }
 
 // ── core: unwrap stringified values ────────────────────────────
@@ -100,7 +95,6 @@ export function normalizeTaskSpec(raw: unknown): TaskSpec {
     role: t.role ? String(t.role) : undefined,
     tools: normalizeTools(t.tools),
     timeoutMs: normalizeTimeout(t.timeoutMs),
-    taskProfile: resolveDispatchTaskProfileAliases(t.taskProfile, t.profile),
   };
 }
 

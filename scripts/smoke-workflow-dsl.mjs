@@ -136,24 +136,13 @@ await check("on_fail bounds: closed set; max_retries only with retry, [1,3]", as
   assert(D.validateWorkflow(doc([agent("a", { on_fail: "retry", max_retries: 3 })]), RO).ok, "valid retry");
 });
 
-await check("taskProfile/profile: exact five-value contract applies to agents and parallel children", async () => {
-  const legal = ["reviewer", "read_only", "research", "implementation", "heavy"];
-  const valid = D.validateWorkflow(doc([
-    agent("a0", { taskProfile: legal[0] }),
-    agent("a1", { taskProfile: legal[1], needs: ["a0"] }),
-    agent("a2", { taskProfile: legal[2], needs: ["a1"] }),
-    agent("a3", { taskProfile: legal[3], needs: ["a2"] }),
-    { id: "p", kind: "parallel", needs: ["a3"], children: [agent("c1", { profile: legal[4] })] },
+await check("retired taskProfile/profile fields are ignored by workflow validation", async () => {
+  const withRetired = D.validateWorkflow(doc([
+    agent("a0", { taskProfile: "research" }),
+    agent("a1", { profile: "heavy", needs: ["a0"] }),
   ]), RO);
-  assert(valid.ok, errsOf(valid));
-  for (const profile of ["reviewer/read_only", "implementation/heavy", "review", "readonly", "unbounded"]) {
-    const invalid = D.validateWorkflow(doc([agent("a", { taskProfile: profile })]), RO);
-    assert(!invalid.ok && errsOf(invalid).includes("taskProfile must be one of"), `${profile}: ${errsOf(invalid)}`);
-  }
-  const invalidPrimary = D.validateWorkflow(doc([agent("a", { taskProfile: "reviewer/read_only", profile: "research" })]), RO);
-  assert(!invalidPrimary.ok && errsOf(invalidPrimary).includes("taskProfile must be one of"), errsOf(invalidPrimary));
-  const conflict = D.validateWorkflow(doc([agent("a", { taskProfile: "research", profile: "heavy" })]), RO);
-  assert(!conflict.ok && errsOf(conflict).includes("conflict"), errsOf(conflict));
+  assert(withRetired.ok, errsOf(withRetired));
+  assert(!/taskProfile|profile=/.test(D.formatEffectiveStageLines(doc([agent("a", { taskProfile: "research" })]), { model: "x/y", thinking: "low" }).join("\n")), "effective stage lines must not advertise retired profile");
 });
 
 await check("W12 concurrency pre-check: parallel+agent same wave fails; needs ordering fixes it; parallel children self-cap", async () => {
