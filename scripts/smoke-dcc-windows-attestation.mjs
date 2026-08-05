@@ -2,8 +2,9 @@
 /**
  * Windows DCC attestation physical-layer smoke (implementation integration).
  *
- * - Loads native addon only via __TEST + temp package (never production pin bypass).
- * - Production zero-arg loader remains fail-closed when pin is null.
+ * - Loads native addon only via __TEST + temp package for fixture suites.
+ * - Production pin null → zero-arg fail-closed; pin live → production positive only in
+ *   closed child (controller never maps live .node). Temp suites stay independent.
  * - Covers: pending→ready/blocked state machine, protected dir/file DACL,
  *   inheritance/extra ACE tamper, CAS identity, weak ACL fail-closed,
  *   six-condition foreground observation.
@@ -76,31 +77,40 @@ for (const c of CAPABILITIES) {
   assert(Array.isArray(buildInfo.capabilities) && buildInfo.capabilities.includes(c), `build-info must include ${c}`);
 }
 
-// Production pin must remain null / zero-arg loader fail-closed.
-assert(
-  nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256 == null,
-  "production pin must remain null",
-);
+// Production pin may be null (fail-closed) or live (post-pin). Never map live .node in controller.
+const pinSha = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+const pinSrc = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+const pinLive =
+  typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+  && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
+const pinAbsent = pinSha == null && pinSrc == null;
+assert(pinAbsent || pinLive, `production pin null or live, got manifest=${pinSha} source=${pinSrc}`);
 assert(nativeMod.loadWindowsNativeAddon.length === 0, "production loader must be zero-arg");
-let productionLoadCode = null;
-try {
-  nativeMod.loadWindowsNativeAddon();
-} catch (error) {
-  productionLoadCode = error?.code ?? String(error);
+if (!pinLive) {
+  let productionLoadCode = null;
+  try {
+    nativeMod.loadWindowsNativeAddon();
+  } catch (error) {
+    productionLoadCode = error?.code ?? String(error);
+  }
+  assert(
+    productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
+      || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
+      || String(productionLoadCode || "").includes("PROVENANCE")
+      || String(productionLoadCode || "").includes("PIN"),
+    `production zero-arg load must fail closed, got ${productionLoadCode}`,
+  );
+  // isDccAttestationPlatformSupported: pin null → win32 unsupported (no throw, no cache).
+  assert(control.isDccAttestationPlatformSupported("linux") === true, "linux supported");
+  assert(control.isDccAttestationPlatformSupported("darwin") === true, "darwin supported");
+  assert(control.isDccAttestationPlatformSupported("win32") === false, "win32 production pin-null must be unsupported");
+  assert(control.isDccAttestationPlatformSupported() === false, "default process.platform pin-null fail-closed");
+} else {
+  // pin live: do not call isDccAttestationPlatformSupported / loadWindowsNativeAddon in controller
+  // (would dlopen + cache production addon and break temp-suite no-inject isolation).
+  assert(control.isDccAttestationPlatformSupported("linux") === true, "linux supported");
+  assert(control.isDccAttestationPlatformSupported("darwin") === true, "darwin supported");
 }
-assert(
-  productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
-    || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
-    || String(productionLoadCode || "").includes("PROVENANCE")
-    || String(productionLoadCode || "").includes("PIN"),
-  `production zero-arg load must fail closed, got ${productionLoadCode}`,
-);
-
-// isDccAttestationPlatformSupported: production pin null → win32 unsupported (no throw).
-assert(control.isDccAttestationPlatformSupported("linux") === true, "linux supported");
-assert(control.isDccAttestationPlatformSupported("darwin") === true, "darwin supported");
-assert(control.isDccAttestationPlatformSupported("win32") === false, "win32 production pin-null must be unsupported");
-assert(control.isDccAttestationPlatformSupported() === false, "default process.platform pin-null fail-closed");
 
 // Temp package + __TEST load (not production pin bypass).
 const abrainHomeRoot = path.resolve(os.homedir(), ".abrain");
@@ -273,7 +283,12 @@ async function check(name, fn) {
 
 console.log("DCC Windows attestation physical layer");
 
-await check("production pin-null reader/control remain unavailable without test inject", async () => {
+await check("production path without test inject (pin-null unavailable; pin-live skipped in-controller)", async () => {
+  if (pinLive) {
+    // Calling production reader/control here would dlopen + cache live addon in this process.
+    // Production positive is owned by closed child / dossier; temp suite uses inject only.
+    return;
+  }
   const abrain = createAbrain("prod-unavailable");
   let code = null;
   try {
@@ -558,15 +573,17 @@ await check("weak/default ACL file is not accepted as ready", async () => {
   })}\n`;
   fs.writeFileSync(attestationFile(abrain), weakBody, "utf8");
 
-  let code = null;
-  try {
-    // Outside ALS inject — production pin-null path.
-    control.readCanonicalConvergenceAttestation(abrain);
-  } catch (error) {
-    code = error?.code;
+  if (!pinLive) {
+    let code = null;
+    try {
+      // Outside ALS inject — production pin-null path.
+      control.readCanonicalConvergenceAttestation(abrain);
+    } catch (error) {
+      code = error?.code;
+    }
+    // Without ALS inject, production pin-null already unavailable.
+    assert(code === "attestation_unavailable", `weak without inject code=${code}`);
   }
-  // Without ALS inject, production pin-null already unavailable; with inject, weak DACL still unavailable.
-  assert(code === "attestation_unavailable", `weak without inject code=${code}`);
 
   let weakWithInject = null;
   try {
@@ -640,13 +657,15 @@ await check("six-condition foreground observation ready only when stable+authori
   });
   assert(revoked.status === "blocked" && revoked.reason_code === "authority_revoked", JSON.stringify(revoked));
 
-  // No inject + production pin null → unavailable (not ready).
-  const noInject = await control.observeForegroundCanonicalConvergence(abrain, {
-    authorityObservation: { observeLock: () => "held" },
-    readCanonicalHead: async () => goodHead,
-  });
-  assert(noInject.status === "unavailable", JSON.stringify(noInject));
-  assert(noInject.reason_code === "attestation_unavailable", JSON.stringify(noInject));
+  // No inject: pin-null → unavailable; pin-live would load production — skip to keep process clean.
+  if (!pinLive) {
+    const noInject = await control.observeForegroundCanonicalConvergence(abrain, {
+      authorityObservation: { observeLock: () => "held" },
+      readCanonicalHead: async () => goodHead,
+    });
+    assert(noInject.status === "unavailable", JSON.stringify(noInject));
+    assert(noInject.reason_code === "attestation_unavailable", JSON.stringify(noInject));
+  }
 });
 
 await check("write failure on DACL-broken directory maps attestation_write_failed / unavailable", async () => {
@@ -776,6 +795,38 @@ await check("dual-writer first-write concurrent CAS: single expected writer wins
   assert(parsed.convergence_generation === "1", "raw gen");
   assert(parsed.schema === "pi-astack/canonical-convergence-attestation/v1", "raw schema");
 });
+
+// pin-live: closed child verifies production zero-arg load (controller never maps live .node).
+if (pinLive) {
+  await check("production zero-arg load positive (closed child, no test hooks)", () => {
+    const env = { ...process.env };
+    delete env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    const script = `
+      const { createRequire } = require("node:module");
+      const path = require("node:path");
+      if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== undefined) {
+        throw new Error("hooks must be unset");
+      }
+      const { createJiti } = createRequire(path.join(${JSON.stringify(repoRoot)}, "package.json"))("jiti");
+      const jiti = createJiti(${JSON.stringify(repoRoot)}, { interopDefault: true, fsCache: false, moduleCache: false });
+      const m = jiti(path.join(${JSON.stringify(repoRoot)}, "extensions/_shared/windows-native-addon.ts"));
+      const loaded = m.loadWindowsNativeAddon();
+      if (loaded.status !== "loaded") throw new Error("status=" + loaded.status);
+      if (loaded.manifest.build_mode !== "production") throw new Error("build_mode");
+      if (m.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256 !== ${JSON.stringify(pinSha)}) throw new Error("pin");
+      process.stdout.write(JSON.stringify({ ok: true, status: loaded.status }) + "\\n");
+    `;
+    const r = spawnSync(process.execPath, ["--input-type=commonjs", "-e", script], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      env,
+    });
+    assert(r.status === 0, `prod-zeroarg child exit ${r.status}: ${r.stderr}\n${r.stdout}`);
+    const json = JSON.parse(String(r.stdout).trim().split(/\r?\n/).filter(Boolean).pop());
+    assert(json.ok === true && json.status === "loaded", JSON.stringify(json));
+  });
+}
 
 console.log(`\n${passed} checks passed`);
 console.log("smoke-dcc-windows-attestation: OK");

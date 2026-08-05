@@ -2,8 +2,9 @@
 /**
  * Windows Policy stable-view durable pointer / read / injection smoke.
  *
- * Loads native addon only via __TEST + temp package (never production pin bypass).
- * Production zero-arg loader remains fail-closed when pin is null.
+ * Loads native addon only via __TEST + temp package for fixture suites.
+ * Production pin null → zero-arg fail-closed; pin live → production positive only via
+ * closed child / cleared-override path without claiming temp as production.
  *
  * Covers:
  * - publish → read → injection compose
@@ -86,22 +87,30 @@ for (const c of CAPABILITIES) {
   assert(Array.isArray(buildInfo.capabilities) && buildInfo.capabilities.includes(c), `build-info must include ${c}`);
 }
 
-// Production pin must remain null / zero-arg loader fail-closed.
-assert(nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256 == null, "production pin must remain null");
+// Production pin may be null (fail-closed) or live (post-pin). Never map live .node in controller here.
+const pinSha = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+const pinSrc = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+const pinLive =
+  typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+  && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
+const pinAbsent = pinSha == null && pinSrc == null;
+assert(pinAbsent || pinLive, `production pin null or live, got manifest=${pinSha} source=${pinSrc}`);
 assert(nativeMod.loadWindowsNativeAddon.length === 0, "production loader must be zero-arg");
-let productionLoadCode = null;
-try {
-  nativeMod.loadWindowsNativeAddon();
-} catch (error) {
-  productionLoadCode = error?.code ?? String(error);
+if (!pinLive) {
+  let productionLoadCode = null;
+  try {
+    nativeMod.loadWindowsNativeAddon();
+  } catch (error) {
+    productionLoadCode = error?.code ?? String(error);
+  }
+  assert(
+    productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
+      || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
+      || String(productionLoadCode || "").includes("PROVENANCE")
+      || String(productionLoadCode || "").includes("PIN"),
+    `production zero-arg load must fail closed, got ${productionLoadCode}`,
+  );
 }
-assert(
-  productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
-    || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
-    || String(productionLoadCode || "").includes("PROVENANCE")
-    || String(productionLoadCode || "").includes("PIN"),
-  `production zero-arg load must fail closed, got ${productionLoadCode}`,
-);
 
 const abrainHomeRoot = path.resolve(os.homedir(), ".abrain");
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-stable-view-win-"));
@@ -654,34 +663,65 @@ await check("runtime unset test hooks: override becomes unusable", async () => {
   retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(addon);
 });
 
-await check("production zero-arg path without test override remains fail-closed", async () => {
+await check("production zero-arg path without test override (pin-null fail-closed / pin-live child positive)", async () => {
   stableWin.stableViewWindowsNativeTestApi.installAddonOverride(null);
   stableWin.stableViewWindowsNativeTestApi.resetProductionSingleton();
   retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(null);
   retainedLock.retainedDirectoryLockTestApi.resetWindowsAddonSingleton();
-  const target = makeSandbox("prod-fail-closed");
-  let code = null;
   try {
-    await publisher.__TEST.publishSandboxProductionForTests({
-      sourceAbrainHome: fullSource,
-      targetAbrainHome: target,
-      repoRoot,
-      // no windowsNativeAddon — production loader only
-    });
-  } catch (error) {
-    code = error?.code ?? String(error);
+    if (!pinLive) {
+      const target = makeSandbox("prod-fail-closed");
+      let code = null;
+      try {
+        await publisher.__TEST.publishSandboxProductionForTests({
+          sourceAbrainHome: fullSource,
+          targetAbrainHome: target,
+          repoRoot,
+          // no windowsNativeAddon — production loader only
+        });
+      } catch (error) {
+        code = error?.code ?? String(error);
+      }
+      assert(
+        code === "WINDOWS_NATIVE_UNAVAILABLE"
+          || code === "LOCK_BUSY"
+          || code === "RETAINED_DIRECTORY_LOCK_UNSUPPORTED"
+          || String(code || "").includes("WINDOWS_NATIVE")
+          || String(code || "").includes("PROVENANCE"),
+        `expected production fail-closed, got ${code}`,
+      );
+    } else {
+      // pin live: do not call production publish in this process (maps live .node).
+      // Closed child verifies zero-arg load only; full production publish is dossier-owned.
+      const env = { ...process.env };
+      delete env.PI_ASTACK_ENABLE_TEST_HOOKS;
+      const script = `
+        const { createRequire } = require("node:module");
+        const path = require("node:path");
+        if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== undefined) throw new Error("hooks set");
+        const { createJiti } = createRequire(path.join(${JSON.stringify(repoRoot)}, "package.json"))("jiti");
+        const jiti = createJiti(${JSON.stringify(repoRoot)}, { interopDefault: true, fsCache: false, moduleCache: false });
+        const m = jiti(path.join(${JSON.stringify(repoRoot)}, "extensions/_shared/windows-native-addon.ts"));
+        const loaded = m.loadWindowsNativeAddon();
+        if (loaded.status !== "loaded") throw new Error("status=" + loaded.status);
+        if (loaded.manifest.build_mode !== "production") throw new Error("build_mode");
+        process.stdout.write(JSON.stringify({ ok: true, status: loaded.status }) + "\\n");
+      `;
+      const r = spawnSync(process.execPath, ["--input-type=commonjs", "-e", script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+        env,
+      });
+      assert(r.status === 0, `prod-zeroarg child exit ${r.status}: ${r.stderr}\n${r.stdout}`);
+      const json = JSON.parse(String(r.stdout).trim().split(/\r?\n/).filter(Boolean).pop());
+      assert(json.ok === true && json.status === "loaded", JSON.stringify(json));
+    }
+  } finally {
+    // Restore overrides for any trailing checks.
+    retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(addon);
+    stableWin.stableViewWindowsNativeTestApi.installAddonOverride(addon);
   }
-  assert(
-    code === "WINDOWS_NATIVE_UNAVAILABLE"
-      || code === "LOCK_BUSY"
-      || code === "RETAINED_DIRECTORY_LOCK_UNSUPPORTED"
-      || String(code || "").includes("WINDOWS_NATIVE")
-      || String(code || "").includes("PROVENANCE"),
-    `expected production fail-closed, got ${code}`,
-  );
-  // Restore overrides for any trailing checks.
-  retainedLock.retainedDirectoryLockTestApi.installWindowsAddonOverride(addon);
-  stableWin.stableViewWindowsNativeTestApi.installAddonOverride(addon);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

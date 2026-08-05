@@ -301,6 +301,12 @@ export interface CanonicalControlTestHooks {
 }
 
 export interface SedimentWorkerCanonicalControlDeps {
+  /**
+   * Required production configuration dependency: resolves the abrain home root
+   * for this control invocation. Not a test seam — production callers always
+   * supply this (e.g. settings/env-derived home). Distinct from optional
+   * testHooks / windowsDccNativeAddon / platform overrides which ARE test seams.
+   */
   resolveAbrainHome: () => string;
   authorityObservation?: LocalExecutorAuthorityObservationDeps;
   testHooks?: CanonicalControlTestHooks;

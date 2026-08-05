@@ -2,8 +2,9 @@
 /**
  * Windows edge-protocol-shadow durable journal / audit production path smoke.
  *
- * Loads native addon only via __TEST + temp package (never production pin bypass).
- * Production zero-arg loader remains fail-closed when pin is null.
+ * Loads native addon only via __TEST + temp package for fixture suites.
+ * Production pin null → zero-arg fail-closed; pin live → production positive only via
+ * closed child. Temp suites stay independent and are never labeled production.
  *
  * Covers:
  * - normal journal capture + witness flow under protected private_rw layout
@@ -12,7 +13,7 @@
  * - contention / crash partial JSONL fail-closed (reader + next writer no wash)
  * - DACL tamper on directory/file fail-closed
  * - reparse / foreign / missing / oversize fail-closed
- * - production pin-null fail-closed
+ * - production pin-null fail-closed / pin-live child positive
  *
  * Non-win32 / non-x64 / missing artifact → print `SKIP:` and exit 0.
  * Does not touch ~/.abrain or settings.
@@ -83,22 +84,30 @@ for (const c of CAPABILITIES) {
   assert(Array.isArray(buildInfo.capabilities) && buildInfo.capabilities.includes(c), `build-info must include ${c}`);
 }
 
-// Production pin must remain null / zero-arg loader fail-closed.
-assert(nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256 == null, "production pin must remain null");
+// Production pin may be null (fail-closed) or live (post-pin). Never map live .node in controller here.
+const pinSha = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+const pinSrc = nativeMod.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+const pinLive =
+  typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+  && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
+const pinAbsent = pinSha == null && pinSrc == null;
+assert(pinAbsent || pinLive, `production pin null or live, got manifest=${pinSha} source=${pinSrc}`);
 assert(nativeMod.loadWindowsNativeAddon.length === 0, "production loader must be zero-arg");
-let productionLoadCode = null;
-try {
-  nativeMod.loadWindowsNativeAddon();
-} catch (error) {
-  productionLoadCode = error?.code ?? String(error);
+if (!pinLive) {
+  let productionLoadCode = null;
+  try {
+    nativeMod.loadWindowsNativeAddon();
+  } catch (error) {
+    productionLoadCode = error?.code ?? String(error);
+  }
+  assert(
+    productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
+      || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
+      || String(productionLoadCode || "").includes("PROVENANCE")
+      || String(productionLoadCode || "").includes("PIN"),
+    `production zero-arg load must fail closed, got ${productionLoadCode}`,
+  );
 }
-assert(
-  productionLoadCode === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
-    || productionLoadCode === "WINDOWS_NATIVE_ADDON_MANIFEST_MISSING"
-    || String(productionLoadCode || "").includes("PROVENANCE")
-    || String(productionLoadCode || "").includes("PIN"),
-  `production zero-arg load must fail closed, got ${productionLoadCode}`,
-);
 
 const abrainHomeRoot = path.resolve(os.homedir(), ".abrain");
 const tmp = process.env.SMOKE_EDGE_WIN_TMP
@@ -293,26 +302,52 @@ function spawnChild(args, env) {
 
 console.log("edge-protocol-shadow windows native durable path");
 
-await check("production pin-null remains fail-closed", async () => {
+await check("production zero-arg path (pin-null fail-closed / pin-live child positive)", async () => {
   edgeWin.edgeWindowsNativeTestApi.resetProductionSingleton();
   const prev = process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
   try {
-    // Clear override path and assert production resolve fails closed without pin.
     edgeWin.edgeWindowsNativeTestApi.installAddonOverride(null);
-    delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
-    let code = null;
-    try {
-      edgeWin.resolveEdgeWindowsNativeAddon();
-    } catch (error) {
-      code = error?.code ?? String(error);
+    if (!pinLive) {
+      delete process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+      let code = null;
+      try {
+        edgeWin.resolveEdgeWindowsNativeAddon();
+      } catch (error) {
+        code = error?.code ?? String(error);
+      }
+      assert(
+        code === "EDGE_WINDOWS_NATIVE_UNAVAILABLE"
+          || String(code || "").includes("PROVENANCE")
+          || String(code || "").includes("PIN")
+          || String(code || "").includes("UNAVAILABLE"),
+        `expected pin-null fail-closed, got ${code}`,
+      );
+    } else {
+      // pin live: resolve in this process would map live .node — use closed child only.
+      const env = { ...process.env };
+      delete env.PI_ASTACK_ENABLE_TEST_HOOKS;
+      const script = `
+        const { createRequire } = require("node:module");
+        const path = require("node:path");
+        if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== undefined) throw new Error("hooks set");
+        const { createJiti } = createRequire(path.join(${JSON.stringify(repoRoot)}, "package.json"))("jiti");
+        const jiti = createJiti(${JSON.stringify(repoRoot)}, { interopDefault: true, fsCache: false, moduleCache: false });
+        const m = jiti(path.join(${JSON.stringify(repoRoot)}, "extensions/_shared/windows-native-addon.ts"));
+        const loaded = m.loadWindowsNativeAddon();
+        if (loaded.status !== "loaded") throw new Error("status=" + loaded.status);
+        if (loaded.manifest.build_mode !== "production") throw new Error("build_mode");
+        process.stdout.write(JSON.stringify({ ok: true, status: loaded.status }) + "\\n");
+      `;
+      const r = spawnSync(process.execPath, ["--input-type=commonjs", "-e", script], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+        env,
+      });
+      assert(r.status === 0, `prod-zeroarg child exit ${r.status}: ${r.stderr}\n${r.stdout}`);
+      const json = JSON.parse(String(r.stdout).trim().split(/\r?\n/).filter(Boolean).pop());
+      assert(json.ok === true && json.status === "loaded", JSON.stringify(json));
     }
-    assert(
-      code === "EDGE_WINDOWS_NATIVE_UNAVAILABLE"
-        || String(code || "").includes("PROVENANCE")
-        || String(code || "").includes("PIN")
-        || String(code || "").includes("UNAVAILABLE"),
-      `expected pin-null fail-closed, got ${code}`,
-    );
   } finally {
     process.env.PI_ASTACK_ENABLE_TEST_HOOKS = prev || "1";
     edgeWin.edgeWindowsNativeTestApi.installAddonOverride(addon);

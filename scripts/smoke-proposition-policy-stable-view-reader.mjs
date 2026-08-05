@@ -16,6 +16,10 @@ if (process.platform === "win32") {
   process.exit(0);
 }
 
+// publisher.__TEST methods require PI_ASTACK_ENABLE_TEST_HOOKS=1
+const prevTestHooks = process.env.PI_ASTACK_ENABLE_TEST_HOOKS;
+process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);

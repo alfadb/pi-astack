@@ -1493,8 +1493,10 @@ function validateProductionPublicationResult(
   binding: ReturnType<typeof buildProductionPublicationBinding>,
   result: PropositionPolicyStableViewPublicationResult,
 ): void {
+  // Only content-addressed bundle artifact file rows carry bytes+sha256.
+  // Windows latest is also kind:"file" (pointer) but is not an artifact_rows entry.
   const expectedArtifactRows = (binding.mutation_inventory.durable_rows as readonly Readonly<Record<string, unknown>>[])
-    .filter((row) => row.kind === "file")
+    .filter((row) => row.kind === "file" && typeof row.sha256 === "string" && typeof row.bytes === "number")
     .map((row) => ({ name: path.basename(String(row.path)), bytes: row.bytes, sha256: row.sha256 }));
   if (result.mode !== "production"
     || result.bundle_hash !== binding.previewed_bundle_hash
@@ -1759,10 +1761,31 @@ async function publishSandboxProductionForTests(options: {
   }
 }
 
+function assertPublisherTestHooksEnabled(name: string): void {
+  if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+    throw new Error(`${name} requires PI_ASTACK_ENABLE_TEST_HOOKS=1`);
+  }
+}
+
+/**
+ * Test-only seams. Production callers must use public publishPropositionPolicyStableView
+ * (and related production APIs). Each method is gated by PI_ASTACK_ENABLE_TEST_HOOKS=1;
+ * the underlying production helpers remain callable without the env when used by
+ * production publish paths directly.
+ */
 export const __TEST = Object.freeze({
-  acquireProductionPublicationLock,
-  materializeBundle,
-  publishSandboxProductionForTests,
+  acquireProductionPublicationLock(lockRoot: string) {
+    assertPublisherTestHooksEnabled("__TEST.acquireProductionPublicationLock");
+    return acquireProductionPublicationLock(lockRoot);
+  },
+  materializeBundle(options: Parameters<typeof materializeBundle>[0]) {
+    assertPublisherTestHooksEnabled("__TEST.materializeBundle");
+    return materializeBundle(options);
+  },
+  publishSandboxProductionForTests(options: Parameters<typeof publishSandboxProductionForTests>[0]) {
+    assertPublisherTestHooksEnabled("__TEST.publishSandboxProductionForTests");
+    return publishSandboxProductionForTests(options);
+  },
 });
 
 function fail(code: string, message: string, detail?: Record<string, unknown>): never {

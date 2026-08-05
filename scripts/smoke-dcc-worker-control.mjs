@@ -1199,79 +1199,102 @@ await check("readCanonicalHeadOid shares runtime Git isolation (config nulled)",
   assert(/^[0-9a-f]{40}$/.test(head), `head=${head}`);
 });
 
-await check("win32 deps platform fail-closed before authority/attestation/runtime; no tree delta", async () => {
+await check("win32 deps platform gate (pin-null fail-closed / pin-live no controller production dlopen)", async () => {
   assert(typeof control.isDccAttestationPlatformSupported === "function",
     "isDccAttestationPlatformSupported must be exported");
   assert(control.isDccAttestationPlatformSupported("linux") === true, "linux must be supported");
   assert(control.isDccAttestationPlatformSupported("darwin") === true, "darwin must be supported");
-  // Production pin-null: win32 unsupported even on real Windows hosts.
-  // (Test-seam inject does not change isDccAttestationPlatformSupported.)
-  assert(control.isDccAttestationPlatformSupported("win32") === false, "win32 production pin-null must fail closed");
-  assert(
-    control.isDccAttestationPlatformSupported(process.platform) === (process.platform !== "win32"),
-    "default process.platform helper must match real host under pin-null",
-  );
 
-  const abrain = createAbrain("win32-fail-closed");
-  const beforeTree = snapshotTree(abrain);
-  assert(!fs.existsSync(attestationDirectory(abrain)), "attestation dir must not pre-exist");
-
-  for (const operation of ["kick", "observe"]) {
-    let kickCalls = 0;
-    let observeCalls = 0;
-    let resolveCalls = 0;
-    let lockCalls = 0;
-    const manifest = request(operation, `win32-${operation}`);
-    const closed = await control.runSedimentWorkerCanonicalControl(JSON.stringify(manifest), {
-      resolveAbrainHome: () => {
-        resolveCalls += 1;
-        return abrain;
-      },
-      authorityObservation: {
-        observeLock: () => {
-          lockCalls += 1;
-          return "held";
-        },
-      },
-      platform: "win32",
-      testHooks: {
-        kickStartup() {
-          kickCalls += 1;
-          return { promise: Promise.resolve(diagnostics("ready")) };
-        },
-        observeStartup() {
-          observeCalls += 1;
-          return Object.freeze({ status: "ready", generation: 1 });
-        },
-        readCanonicalHead: async () => {
-          kickCalls += 1; // also forbidden side-effect path
-          return goodHead;
-        },
-      },
-    });
-    assert(closed.request_id === manifest.request_id, `${operation} request_id mismatch`);
-    assert(closed.operation === operation, `${operation} operation mismatch`);
-    assert(closed.status === "unavailable", `${operation} status=${closed.status}`);
-    assert(closed.reason_code === "attestation_unavailable", `${operation} reason=${closed.reason_code}`);
-    assert(closed.convergence_generation === null, `${operation} generation=${closed.convergence_generation}`);
-    assert(closed.retryable === true, `${operation} retryable=${closed.retryable}`);
-    assert(control.sanitizeSedimentWorkerCanonicalControlResult(closed), `${operation} illegal closed shape`);
-    assert(kickCalls === 0, `${operation} kickStartup calls=${kickCalls}`);
-    assert(observeCalls === 0, `${operation} observeStartup calls=${observeCalls}`);
-    assert(resolveCalls === 0, `${operation} resolveAbrainHome calls=${resolveCalls}`);
-    assert(lockCalls === 0, `${operation} observeLock calls=${lockCalls}`);
+  // Detect production pin without loading the native addon.
+  let pinLive = false;
+  if (process.platform === "win32") {
+    const nativePin = await jiti.import(path.join(root, "extensions/_shared/windows-native-addon-pin.ts"));
+    const pinSha = nativePin.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+    const pinSrc = nativePin.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+    pinLive =
+      typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+      && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
   }
 
-  assert(!fs.existsSync(attestationDirectory(abrain)), "win32 path must not create attestation dir");
-  assert(snapshotTree(abrain) === beforeTree, "win32 path mutated abrain tree");
+  if (!pinLive) {
+    // Production pin-null: win32 unsupported even on real Windows hosts.
+    // Do not call isDccAttestationPlatformSupported("win32") when pin is live — it dlopens + caches.
+    assert(control.isDccAttestationPlatformSupported("win32") === false, "win32 production pin-null must fail closed");
+    assert(
+      control.isDccAttestationPlatformSupported(process.platform) === (process.platform !== "win32"),
+      "default process.platform helper must match real host under pin-null",
+    );
 
-  // Production gate: without inject, win32 reader throws closed.
-  // When this smoke installs a temp-package test override on real win32,
-  // absent store returns null (physical layer available, object missing).
-  if (process.platform === "win32" && !windowsDccAddon) {
-    expectAttestationUnavailable(abrain);
+    const abrain = createAbrain("win32-fail-closed");
+    const beforeTree = snapshotTree(abrain);
+    assert(!fs.existsSync(attestationDirectory(abrain)), "attestation dir must not pre-exist");
+
+    for (const operation of ["kick", "observe"]) {
+      let kickCalls = 0;
+      let observeCalls = 0;
+      let resolveCalls = 0;
+      let lockCalls = 0;
+      const manifest = request(operation, `win32-${operation}`);
+      const closed = await control.runSedimentWorkerCanonicalControl(JSON.stringify(manifest), {
+        resolveAbrainHome: () => {
+          resolveCalls += 1;
+          return abrain;
+        },
+        authorityObservation: {
+          observeLock: () => {
+            lockCalls += 1;
+            return "held";
+          },
+        },
+        platform: "win32",
+        testHooks: {
+          kickStartup() {
+            kickCalls += 1;
+            return { promise: Promise.resolve(diagnostics("ready")) };
+          },
+          observeStartup() {
+            observeCalls += 1;
+            return Object.freeze({ status: "ready", generation: 1 });
+          },
+          readCanonicalHead: async () => {
+            kickCalls += 1; // also forbidden side-effect path
+            return goodHead;
+          },
+        },
+      });
+      assert(closed.request_id === manifest.request_id, `${operation} request_id mismatch`);
+      assert(closed.operation === operation, `${operation} operation mismatch`);
+      assert(closed.status === "unavailable", `${operation} status=${closed.status}`);
+      assert(closed.reason_code === "attestation_unavailable", `${operation} reason=${closed.reason_code}`);
+      assert(closed.convergence_generation === null, `${operation} generation=${closed.convergence_generation}`);
+      assert(closed.retryable === true, `${operation} retryable=${closed.retryable}`);
+      assert(control.sanitizeSedimentWorkerCanonicalControlResult(closed), `${operation} illegal closed shape`);
+      assert(kickCalls === 0, `${operation} kickStartup calls=${kickCalls}`);
+      assert(observeCalls === 0, `${operation} observeStartup calls=${observeCalls}`);
+      assert(resolveCalls === 0, `${operation} resolveAbrainHome calls=${resolveCalls}`);
+      assert(lockCalls === 0, `${operation} observeLock calls=${lockCalls}`);
+    }
+
+    assert(!fs.existsSync(attestationDirectory(abrain)), "win32 path must not create attestation dir");
+    assert(snapshotTree(abrain) === beforeTree, "win32 path mutated abrain tree");
+
+    // Production gate: without inject, win32 reader throws closed.
+    // When this smoke installs a temp-package test override on real win32,
+    // absent store returns null (physical layer available, object missing).
+    if (process.platform === "win32" && !windowsDccAddon) {
+      expectAttestationUnavailable(abrain);
+    } else {
+      assert(readAttestation(abrain) === null, "absent read must be null when physical layer available");
+    }
   } else {
-    assert(readAttestation(abrain) === null, "absent read must be null when physical layer available");
+    // pin live: production path may be ready. Do not assert pin-null fail-closed or call
+    // isDccAttestationPlatformSupported("win32") in this process (dlopen + cache).
+    // Temp-suite inject remains independent; production positive is dossier/child-owned.
+    assert(process.platform === "win32", "pin-live branch only on win32");
+    if (windowsDccAddon) {
+      const abrain = createAbrain("win32-pin-live-temp");
+      assert(readAttestation(abrain) === null, "absent read must be null with temp inject");
+    }
   }
 });
 

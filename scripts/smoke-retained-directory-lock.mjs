@@ -6,15 +6,18 @@
  * - static assert Linux OFD key source unchanged (still hard-requires linux + flock)
  * - static assert fd-dependent production consumers still import OFD directly
  * - static assert non-fd production consumers import the adapter
- * - production path: zero-arg load / pin-null fail-closed on win32; unsupported on other non-linux
+ * - production path: pin-null fail-closed on win32; pin-live production zero-arg in closed child;
+ *   unsupported on other non-linux
  *
  * Windows (with smoke-staging binary):
  * - temp package + dynamic pin via windows-native-addon `__TEST` only
  * - adapter seam `retainedDirectoryLockTestApi.acquireWithWindowsAddon` (no env override)
  * - BUSY contention, crash release, stable RetainedDirectoryLockError mapping
- * - production acquireRetainedDirectoryLock fails closed while pin is null
+ * - production acquireRetainedDirectoryLock: pin-null fail-closed; pin-live child positive
+ *   (controller never maps live .node)
  *
  * Does not touch ~/.abrain or settings. Does not write production pin.
+ * Temp suites remain independent and are never labeled production.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -27,8 +30,12 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
-// windows-native-addon __TEST.loadWindowsNativeAddon requires test hooks.
-process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+// Temp-package __TEST loaders need hooks. Production acquire child must keep them unset.
+const IS_PROD_ACQUIRE_CHILD =
+  process.argv[2] === "--child" && process.argv[3] === "prod-acquire";
+if (!IS_PROD_ACQUIRE_CHILD) {
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+}
 const stagedNode = path.join(repoRoot, "native/windows/target/smoke-staging/pi-astack-windows-native.node");
 const buildInfoPath = path.join(repoRoot, "native/windows/target/smoke-staging/build-info.json");
 
@@ -105,6 +112,160 @@ function loadJitiModule(rel) {
 function read(rel) {
   return fs.readFileSync(path.join(repoRoot, rel), "utf8");
 }
+
+function writeReadyAtomic(readyFile, payload) {
+  const dir = path.dirname(readyFile);
+  const tmp = path.join(dir, `.${path.basename(readyFile)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, "utf8");
+  fs.renameSync(tmp, readyFile);
+}
+
+// Child modes must short-circuit BEFORE controller static checks (which may spawn children).
+if (process.argv[2] === "--child") {
+  const mode = process.argv[3];
+  const payload = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
+  const { packageRoot, manifestSha256, lockDir, readyFile, releaseFile } = payload;
+  try {
+    if (mode === "prod-acquire") {
+      if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== undefined) {
+        throw new Error("prod-acquire child must not see PI_ASTACK_ENABLE_TEST_HOOKS");
+      }
+      const ad = loadJitiModule("extensions/_shared/retained-directory-lock.ts");
+      const target = payload.lockDir || lockDir;
+      fs.mkdirSync(target, { recursive: true });
+      const before = fs.readdirSync(target);
+      const lease = ad.acquireRetainedDirectoryLock(target);
+      if (!lease || lease.status !== "ACQUIRED") {
+        throw new Error(`expected ACQUIRED, got ${lease && lease.status}`);
+      }
+      const abandoned = lease.acquired_after_abandon;
+      lease.assertIdentity();
+      const after = fs.readdirSync(target);
+      lease.close();
+      writeReadyAtomic(payload.readyFile || readyFile, {
+        status: "ACQUIRED",
+        zero_files: before.length === 0 && after.length === 0,
+        acquired_after_abandon: abandoned,
+      });
+      process.exit(0);
+    }
+
+    const win = loadJitiModule("extensions/_shared/windows-native-addon.ts");
+    const ad = loadJitiModule("extensions/_shared/retained-directory-lock.ts");
+    const loaded = win.__TEST.loadWindowsNativeAddon({
+      packageRoot,
+      platform: "win32",
+      arch: "x64",
+      nodeVersion: process.versions.node,
+      expectedManifestSha256: manifestSha256,
+    });
+    if (mode === "inproc-suite") {
+      const results = [];
+      const case_ = (name, fn) => {
+        try {
+          fn();
+          results.push({ name, ok: true });
+        } catch (e) {
+          results.push({ name, ok: false, error: String(e?.stack || e) });
+        }
+      };
+      case_("acquire/assert/fd-null/close", () => {
+        const a = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
+        if (a.status !== "ACQUIRED") throw new Error(`status=${a.status}`);
+        if (a.fd !== null) throw new Error("fd must be null");
+        if (a.procfd_path !== null) throw new Error("procfd_path must be null");
+        if (typeof a.acquired_after_abandon !== "boolean") throw new Error("acquired_after_abandon missing");
+        if (typeof a.identity.path !== "string" || !a.identity.path) throw new Error("identity.path");
+        if (typeof a.identity.file_id !== "string") throw new Error("identity.file_id");
+        a.assertIdentity();
+        a.close();
+        let closedErr = null;
+        try { a.assertIdentity(); } catch (e) { closedErr = e; }
+        if (!closedErr || closedErr.code !== "RETAINED_DIRECTORY_LOCK_CLOSED") {
+          throw new Error(`closed assert: ${closedErr?.code}`);
+        }
+      });
+      case_("second acquire BUSY", () => {
+        const a = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
+        if (a.status !== "ACQUIRED") throw new Error("first");
+        const b = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
+        if (b.status !== "BUSY") throw new Error(`second=${b.status}`);
+        a.close();
+        const c = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
+        if (c.status !== "ACQUIRED") throw new Error("reacquire");
+        c.close();
+      });
+      case_("error maps to RetainedDirectoryLockError", () => {
+        const missing = path.join(lockDir, "no-such-nested-dir-xyz");
+        let err = null;
+        try {
+          ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(missing, loaded.addon);
+        } catch (e) { err = e; }
+        if (!err) throw new Error("expected error");
+        if (err.name !== "RetainedDirectoryLockError") throw new Error(`name=${err.name}`);
+        if (typeof err.code !== "string" || !err.code.startsWith("WINDOWS_NATIVE_ADDON_")) {
+          throw new Error(`code=${err.code}`);
+        }
+      });
+      writeReadyAtomic(readyFile, { status: "OK", results });
+      process.exit(results.every((r) => r.ok) ? 0 : 1);
+    }
+
+    const lease = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
+    if (mode === "try-once") {
+      writeReadyAtomic(readyFile, {
+        status: lease.status,
+        fd: lease.fd,
+        procfd_path: lease.procfd_path,
+        hasAssert: typeof lease.assertIdentity === "function",
+        acquired_after_abandon: lease.acquired_after_abandon,
+      });
+      if (lease.status === "ACQUIRED") lease.close();
+      process.exit(0);
+    } else if (mode === "hold-until-release") {
+      if (lease.status !== "ACQUIRED") {
+        writeReadyAtomic(readyFile, { status: lease.status });
+        process.exit(2);
+      }
+      writeReadyAtomic(readyFile, {
+        status: "ACQUIRED",
+        fd: lease.fd,
+        pid: process.pid,
+        acquired_after_abandon: lease.acquired_after_abandon,
+      });
+      const releaseFilePath = releaseFile;
+      const start = Date.now();
+      while (!fs.existsSync(releaseFilePath)) {
+        if (Date.now() - start > 60000) throw new Error("release timeout");
+        sleep(50);
+      }
+      lease.close();
+      process.exit(0);
+    } else if (mode === "hold-forever") {
+      if (lease.status !== "ACQUIRED") {
+        writeReadyAtomic(readyFile, { status: lease.status });
+        process.exit(2);
+      }
+      globalThis.__PI_ASTACK_RDL_HOLD_LEASE = lease;
+      writeReadyAtomic(readyFile, { status: "ACQUIRED" });
+      setInterval(() => {
+        try { globalThis.__PI_ASTACK_RDL_HOLD_LEASE.assertIdentity(); } catch { /* keep alive */ }
+      }, 1000);
+    } else {
+      throw new Error(`unknown child mode ${mode}`);
+    }
+  } catch (error) {
+    try {
+      writeReadyAtomic(readyFile, {
+        status: "ERROR",
+        name: error?.name,
+        code: error?.code,
+        message: String(error?.message || error),
+      });
+    } catch { /* ignore */ }
+    process.exit(1);
+  }
+} else {
 
 // ── Static wiring assertions (all platforms) ───────────────────────────────
 
@@ -203,38 +364,83 @@ check("publisher identity check is platform-split (linux fstat / windows assertI
 const adapter = loadJitiModule("extensions/_shared/retained-directory-lock.ts");
 const winMod = loadJitiModule("extensions/_shared/windows-native-addon.ts");
 
-check("production acquire fails closed on non-linux without successful native load", () => {
+const pinSha = winMod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+const pinSrc = winMod.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+const pinLive =
+  typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+  && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
+const pinAbsent = pinSha === null && pinSrc === null;
+assert(pinAbsent || pinLive, `production pin null or live, got manifest=${pinSha} source=${pinSrc}`);
+
+check("production acquire path (pin-null fail-closed / pin-live child positive; controller no live dlopen)", () => {
   if (process.platform === "linux") {
-    // On Linux production path is OFD; skip fail-closed pin check here.
+    // On Linux production path is OFD; skip win32 pin check here.
     return;
   }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rdl-prod-"));
-  try {
-    let err = null;
+  if (process.platform !== "win32") {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rdl-prod-"));
     try {
-      adapter.acquireRetainedDirectoryLock(dir);
-    } catch (e) {
-      err = e;
+      let err = null;
+      try {
+        adapter.acquireRetainedDirectoryLock(dir);
+      } catch (e) {
+        err = e;
+      }
+      assert(err, "expected fail-closed error");
+      assert(
+        err.code === "RETAINED_DIRECTORY_LOCK_UNSUPPORTED"
+          || /UNSUPPORTED/.test(String(err.code)),
+        `non-win non-linux unsupported, got ${err.code}`,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
-    assert(err, "expected fail-closed error");
-    assert(err.name === "RetainedDirectoryLockError" || err.name === "WindowsNativeAddonError"
-      || /RetainedDirectoryLockError|WindowsNativeAddonError/.test(err.name), `error class: ${err.name}`);
-    if (process.platform === "win32") {
+    return;
+  }
+  if (!pinLive) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rdl-prod-"));
+    try {
+      let err = null;
+      try {
+        adapter.acquireRetainedDirectoryLock(dir);
+      } catch (e) {
+        err = e;
+      }
+      assert(err, "expected fail-closed error");
       assert(
         err.code === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
           || /PROVENANCE_PIN_MISSING/.test(String(err.message))
           || /PROVENANCE_PIN_MISSING/.test(String(err.code)),
         `win32 production must fail on missing pin, got ${err.code}: ${err.message}`,
       );
-    } else {
-      assert(
-        err.code === "RETAINED_DIRECTORY_LOCK_UNSUPPORTED"
-          || /UNSUPPORTED/.test(String(err.code)),
-        `non-win non-linux unsupported, got ${err.code}`,
-      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
+    return;
+  }
+  // pin live: production acquire would map live .node in controller — use closed child only.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-rdl-prod-live-"));
+  const lockDir = path.join(root, "lock");
+  const ready = path.join(root, "ready.json");
+  fs.mkdirSync(lockDir, { recursive: true });
+  try {
+    const payloadPath = path.join(root, "payload.json");
+    fs.writeFileSync(payloadPath, `${JSON.stringify({ lockDir, readyFile: ready, mode: "prod-acquire" })}\n`);
+    const env = { ...process.env };
+    delete env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    const r = spawnSync(process.execPath, [__filename, "--child", "prod-acquire", payloadPath], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      windowsHide: true,
+      env,
+    });
+    assert(r.status === 0, `prod-acquire child exit ${r.status}: ${r.stderr}\n${r.stdout}`);
+    assert(fs.existsSync(ready), "prod-acquire ready missing");
+    const payload = JSON.parse(fs.readFileSync(ready, "utf8"));
+    assert(payload.status === "ACQUIRED", `prod-acquire ${JSON.stringify(payload)}`);
+    assert(payload.zero_files === true, "lock dir must remain zero-file");
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 });
 
@@ -312,140 +518,6 @@ function prepareTempPackage(mod, buildInfo, binaryBytes) {
   fs.writeFileSync(paths.manifestPath, manifestText, "utf8");
   return { root, paths, manifestSha256: sha256(Buffer.from(manifestText, "utf8")) };
 }
-
-function writeReadyAtomic(readyFile, payload) {
-  const dir = path.dirname(readyFile);
-  const tmp = path.join(dir, `.${path.basename(readyFile)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
-  fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, "utf8");
-  fs.renameSync(tmp, readyFile);
-}
-
-// Child mode: load temp package via windows __TEST, then adapter test seam.
-// Must not fall through into the controller suite.
-if (process.argv[2] === "--child") {
-  const mode = process.argv[3];
-  const payload = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
-  const { packageRoot, manifestSha256, lockDir, readyFile, releaseFile } = payload;
-  try {
-    const win = loadJitiModule("extensions/_shared/windows-native-addon.ts");
-    const ad = loadJitiModule("extensions/_shared/retained-directory-lock.ts");
-    const loaded = win.__TEST.loadWindowsNativeAddon({
-      packageRoot,
-      platform: "win32",
-      arch: "x64",
-      nodeVersion: process.versions.node,
-      expectedManifestSha256: manifestSha256,
-    });
-    if (mode === "inproc-suite") {
-      // Controller never loads .node — all same-process native checks run here.
-      const results = [];
-      const case_ = (name, fn) => {
-        try {
-          fn();
-          results.push({ name, ok: true });
-        } catch (e) {
-          results.push({ name, ok: false, error: String(e?.stack || e) });
-        }
-      };
-      case_("acquire/assert/fd-null/close", () => {
-        const a = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
-        if (a.status !== "ACQUIRED") throw new Error(`status=${a.status}`);
-        if (a.fd !== null) throw new Error("fd must be null");
-        if (a.procfd_path !== null) throw new Error("procfd_path must be null");
-        if (typeof a.acquired_after_abandon !== "boolean") throw new Error("acquired_after_abandon missing");
-        if (typeof a.identity.path !== "string" || !a.identity.path) throw new Error("identity.path");
-        if (typeof a.identity.file_id !== "string") throw new Error("identity.file_id");
-        a.assertIdentity();
-        a.close();
-        let closedErr = null;
-        try { a.assertIdentity(); } catch (e) { closedErr = e; }
-        if (!closedErr || closedErr.code !== "RETAINED_DIRECTORY_LOCK_CLOSED") {
-          throw new Error(`closed assert: ${closedErr?.code}`);
-        }
-      });
-      case_("second acquire BUSY", () => {
-        const a = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
-        if (a.status !== "ACQUIRED") throw new Error("first");
-        const b = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
-        if (b.status !== "BUSY") throw new Error(`second=${b.status}`);
-        a.close();
-        const c = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
-        if (c.status !== "ACQUIRED") throw new Error("reacquire");
-        c.close();
-      });
-      case_("error maps to RetainedDirectoryLockError", () => {
-        const missing = path.join(lockDir, "no-such-nested-dir-xyz");
-        let err = null;
-        try {
-          ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(missing, loaded.addon);
-        } catch (e) { err = e; }
-        if (!err) throw new Error("expected error");
-        if (err.name !== "RetainedDirectoryLockError") throw new Error(`name=${err.name}`);
-        if (typeof err.code !== "string" || !err.code.startsWith("WINDOWS_NATIVE_ADDON_")) {
-          throw new Error(`code=${err.code}`);
-        }
-      });
-      writeReadyAtomic(readyFile, { status: "OK", results });
-      process.exit(results.every((r) => r.ok) ? 0 : 1);
-    }
-
-    const lease = ad.retainedDirectoryLockTestApi.acquireWithWindowsAddon(lockDir, loaded.addon);
-    if (mode === "try-once") {
-      writeReadyAtomic(readyFile, {
-        status: lease.status,
-        fd: lease.fd,
-        procfd_path: lease.procfd_path,
-        hasAssert: typeof lease.assertIdentity === "function",
-        identityPath: lease.identity?.path,
-      });
-      if (lease.status === "ACQUIRED") {
-        lease.assertIdentity();
-        lease.close();
-      }
-      process.exit(0);
-    }
-    if (mode === "hold-until-release") {
-      if (lease.status !== "ACQUIRED") {
-        writeReadyAtomic(readyFile, { status: lease.status });
-        process.exit(1);
-      }
-      lease.assertIdentity();
-      // Pin across sync wait so FR cannot drop the mutex.
-      globalThis.__PI_ASTACK_RDL_HOLD_LEASE = lease;
-      writeReadyAtomic(readyFile, { status: "ACQUIRED", fd: lease.fd });
-      waitForFile(releaseFile, 60000);
-      lease.close();
-      process.exit(0);
-    }
-    if (mode === "hold-forever") {
-      if (lease.status !== "ACQUIRED") {
-        writeReadyAtomic(readyFile, { status: lease.status });
-        process.exit(1);
-      }
-      globalThis.__PI_ASTACK_RDL_HOLD_LEASE = lease;
-      writeReadyAtomic(readyFile, { status: "ACQUIRED" });
-      setInterval(() => {
-        try { globalThis.__PI_ASTACK_RDL_HOLD_LEASE.assertIdentity(); } catch { /* keep alive */ }
-      }, 1000);
-    } else {
-      throw new Error(`unknown child mode ${mode}`);
-    }
-  } catch (error) {
-    try {
-      writeReadyAtomic(readyFile, {
-        status: "ERROR",
-        name: error?.name,
-        code: error?.code,
-        message: String(error?.message || error),
-      });
-    } catch { /* ignore */ }
-    process.exit(1);
-  }
-} else {
-  await runController();
-}
-
-async function runController() {
 
 async function runWindowsDynamicPinSuite() {
   if (process.platform !== "win32" || process.arch !== "x64") {
@@ -566,24 +638,27 @@ async function runWindowsDynamicPinSuite() {
     });
 
     await checkAsync("production acquire still pin-null fail-closed after temp-pin tests", () => {
-      // Production path never used the temp package; pin remains null.
+      // Production path never used the temp package inject. pin-null → fail-closed in-process;
+      // pin-live would map live .node — skip (covered by early child prod-acquire check).
       process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
       adapter.retainedDirectoryLockTestApi.resetWindowsAddonSingleton();
-      const lockDir = path.join(workRoot, "prod-still-closed");
-      fs.mkdirSync(lockDir, { recursive: true });
-      let err = null;
-      try {
-        adapter.acquireRetainedDirectoryLock(lockDir);
-      } catch (e) {
-        err = e;
+      if (!pinLive) {
+        const lockDir = path.join(workRoot, "prod-still-closed");
+        fs.mkdirSync(lockDir, { recursive: true });
+        let err = null;
+        try {
+          adapter.acquireRetainedDirectoryLock(lockDir);
+        } catch (e) {
+          err = e;
+        }
+        assert(err, "production must fail-closed");
+        assert(
+          err.code === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
+            || /PROVENANCE_PIN_MISSING/.test(String(err.code))
+            || /PROVENANCE_PIN_MISSING/.test(String(err.message)),
+          `expected pin missing, got ${err.code}: ${err.message}`,
+        );
       }
-      assert(err, "production must fail-closed");
-      assert(
-        err.code === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING"
-          || /PROVENANCE_PIN_MISSING/.test(String(err.code))
-          || /PROVENANCE_PIN_MISSING/.test(String(err.message)),
-        `expected pin missing, got ${err.code}: ${err.message}`,
-      );
     });
   } finally {
     // Controller never loads .node — children must be gone before package delete.

@@ -7,7 +7,7 @@ updated: 2026-08-06
 
 # pi-astack Windows 原生支持 Living Plan
 
-**状态：Active；当前阶段：P0 合同/构建探测已完成；P1/P2/P3 为 implementation probe；package/pin/ACL plumbing 已落地但 production pin 仍为 null**——adapter / stable-view / edge / DCC 物理层已接线，零参数 load 因 pin=null 继续 fail-closed；package 命令只接受 production build-info，本切片不跑 production build、不写非 null pin、不 commit；hash→dlopen TOCTOU 仍未完全闭合（package_rx 闭合跨 token 重写边界；same-token/admin 合同外；fd/path identity 仍保留）；未改 settings/~/.abrain；全部 8 个 acceptance criteria 保持未勾选。**
+**状态：Active；当前阶段：P0–P3 implementation + package plumbing 已落地；旧 892ddeb live artifact 已 unlock 并移出 worktree，pin 已恢复 `null`；最终 source commit 待建立，其后 clean production rebuild/package/artifact commit/dossier；production acceptance dossier 已封闭加固（hardCleanup strict / child exit assert / latest byte-exact / DACL system-owner 真拒绝 / live abrain bounded aggregate guard / 全局 residual 含 `binary_hash_to_dlopen_toctou_not_fully_closed` ⇒ accepted:false；provenance section 可 pass 但不自动宣称 WIN-BINARY 完成）但仍未 accepted——dossier workers 开发验证全绿，full gate 待 final artifact；TOCTOU+DCC 仍 blocking**——adapter / stable-view / edge / DCC 物理层已接线；零参数 load 在 pin null 时 fail-closed；smokes 双态（pin null fail-closed / pin live child 正向，live 仅当 final pin 存在）；dossier 脚本已进 source closure；不 commit、不勾 criteria；未改 settings/~/.abrain。**
 
 本计划是 pi-astack 生产级 Windows 原生支持的唯一 living plan。它冻结已确认决策、阶段边界与外部验收门；不宣称 Windows production acceptance 已完成。会话讨论只保留决策来源，不是执行权威。每次实施和验收必须同时核对 [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md)、[central-sediment-edge](../architecture/central-sediment-edge.md)、[local-sediment-executor-authority](../architecture/local-sediment-executor-authority.md)、[retained-directory-ofd-lock](../../extensions/_shared/retained-directory-ofd-lock.ts)、当前代码、live settings 与真实 Windows 主机证据。文档与现场冲突时，按下文 Replanning Protocol 处理。
 
@@ -79,8 +79,11 @@ updated: 2026-08-06
 
 > 本节是 living plan 的可重写热区。阶段切换、发现现场冲突或形成新阻塞时整节更新；不要在此冻结会快速过期的运行数量。
 
-- 当前阶段：**P0 合同/构建探测完成；P1/P2/P3 = implementation probe**；**production package plumbing 已实现但 pin 仍 null**。
-- **Production package / pin / package_rx plumbing（2026-08-06；pin 仍 null；≠ production acceptance）**：
+- 当前阶段：**P0–P3 implementation probe + package plumbing 完成；pin=`null`（旧 892ddeb live 已 unlock 移出）；P4 dossier 已加固（未 accepted）；final source commit + clean rebuild/package/artifact commit 待做**。
+- **Live pin / artifact**：`windows-native-addon-pin.ts` 已恢复 `null`；旧 `892ddeb` live artifact 已 unlock 并移出 worktree；**不得**再以该旧 live 包作 final 证据。最终 production 包须在建立 final source commit 后于 clean tree 上 rebuild + package + artifact commit。
+- **Production acceptance dossier（2026-08-06 再封闭；≠ accepted）**：`scripts/dossier-windows-native-production-acceptance.mjs` + `dossier:windows-native-production-acceptance`；controller 永不 dlopen；closed workers 单 JSON stdout；`WorkerFail` throw + 顶层 catch 统一 emit/exit（禁 process.exit 绕 finally）。**hardCleanup strict**：成功路径 kill(仅存活 child)/restore/hardRm 后 temp 仍在或 hardRm 失败 → throw 使 worker fail；失败路径 best-effort 且 `cleanup_errors` bounded 写入 failure JSON，不吞。retained/edge 所有自然 exit 断言 `code===0 && signal==null`；timeout/非 0 带 bounded stderr 诊断；crash holder `taskkill` 单独标 `holder_exit_expected_taskkill`（不按自然 exit 失败）。stable latest **仅** byte-exact `bundles/<hash>\n`（删 contains-hash 宽松）；DACL tamper 加 icacls Everyone readback + native verify deny。DACL system owner-mismatch：实际存在 targets 必须全部 denied，禁止全 absent_skip 仍 claim denied；≥1 成功拒绝；residual 标明非第二账户主动 tamper。live `~/.abrain` guard = bounded recursive aggregate（stable-view / recovery / edge-protocol-shadow / canonical-convergence / local-executor-authority），只输出 count+sha256（含 hidden；rel+type+size+mtime+小文件 content hash；条目/总 bytes 封顶 → invalid/accepted false）；before/after exact。全局 residual 恒含 `binary_hash_to_dlopen_toctou_not_fully_closed` ⇒ `accepted:false`；provenance section 可 pass 但 **不**自动宣称 WIN-BINARY 完成。sections：provenance zeroarg+package_rx；retained-lock async 三阶段 barrier 16×3 + crash；DACL 矩阵；stable-view temp ABRAIN_ROOT production self-publication + loud zero；edge pair/coord/audit/tamper/partial；DCC not_covered partial。脏树 full run→`gates_failed`；**dossier workers 开发验证全绿；full gate 待 final artifact**。不 commit、不勾 criteria。
+- **Post-pin smoke 双态（2026-08-06）**：7 个冲突 smoke（addon / retained-lock / retained adapter / dcc-windows / dcc-worker / stable-windows / edge-windows）pin null 保留 fail-closed；pin live 允许并在 child 验证 production zeroarg 正向；controller 不因 live dlopen 阻塞 live 包覆盖/删除；temp suites 独立且不称 production。**当前 pin=`null` → 走 fail-closed 态。**
+- **Production package / pin / package_rx plumbing（2026-08-06；pin 现 `null`；final 待 source commit 后 rebuild；≠ production acceptance）**：
   - pin 常量拆到 `extensions/_shared/windows-native-addon-pin.ts`（初值 null；package 输出；**不进** source closure）；loader import/re-export。
   - `scripts/package-windows-native-addon.mjs`：`package|install|unlock|verify`；package 只接受 `mode=production` + `development_only=false` + `dirty=false` + native_tests/clippy/repro passed；复制 staging `.node` → `native/windows/win32-x64/`；exact manifest/v1 LF raw bytes；hash 后严格模板覆写 pin.ts；temp/test loader 验证 manifest/binary/self identity；**不**下载/编译。
   - install：校验 pin/manifest/hash/self identity 后 `setProtectedPath` files→dir `package_rx` 并 native reverify；失败不声称安装。
@@ -95,7 +98,7 @@ updated: 2026-08-06
   - loader 生产路径：`PIN_SOURCE_COMMIT` 非 null/40hex 且等于 `manifest.source_commit`（闭式错误）；test options 不要求。`__TEST.loadWindowsNativeAddonEnforcingPackageAcl` 门控 ACL 强制。
   - unlock：`loadInstalledForAcl` **throw** 不 die/process.exit（catch 可落 icacls）；无 pin/坏 binary/缺 DLL → 固定 icacls reset fallback + 明确 method。package 写前 directory create/delete writability probe；裸 EACCES 变 closed 提示；binary ≤64MiB；post-verify 失败恢复原 pin/manifest/binary 或 pin→null fail-closed。install ACL 部分失败 best-effort private_rw 并提示。
   - smoke：`smoke:windows-native-package`（无 artifact/pin → SKIP；live 固定包只读 production verify；hash/missing/ACL tamper 用独立 temp package；production ACL gate 经 temp + test-hooks enforcing 入口；unlock↔install 仅动 live ACL 并 restore）。
-  - **本切片不写非 null pin、不跑 production build、不 commit；criteria 全不勾。**
+  - **本切片：旧 live 已清；pin=`null`；final 待 source commit + clean rebuild/package/artifact commit；不 commit；criteria 全不勾。**
 - **DCC attestation 物理层 integration（2026-08-06；pin null → 生产仍 fail-closed）**：
   - `canonical-control.ts`：`isDccAttestationPlatformSupported(win32)` 仅当 production 零参数 loader 成功且 capabilities 含 `protected_dacl_v1`+`atomic_file_v1`；pin null/加载失败 → false，不抛坏 startup；Linux 判定不变。
   - Windows ensure → `ensureProtectedDirectory`+`verify private_rw`；write → `durableAtomicReplaceFile`；read → `readProtectedFile` 先 DACL+identity 再既有 strict JSON parser；snapshot identity = vol/file_id/size；`sameSnapshot` 平台 union（Linux dev/ino 不变）；CAS 写前 sameSnapshot + replace + readback raw exact；missing→null；DACL 问题 → unavailable/write_failed，不 ready。
@@ -128,7 +131,7 @@ updated: 2026-08-06
     - Linux reader：严格 existing publisher temp 文法（`.staging-...` dir / `.latest-...` symlink）在 publish 窗口可忽略；近似名/unsafe type 仍 foreign；**未**改 POSIX 写协议。
     - smoke 增补：tampered root/bundles DACL 不自动修；live partial/collision 不删不洗白；non-live residual 安全补齐；native latest temp 清理/忽略与 foreign 近似名拒绝；oversize reason；hooks unset 后 override 不可用。Windows stable-view smoke 20 项通过；POSIX publisher/reader/recovery 在 win32 上 SKIP。
   - **不等于** `WIN-STABLE-VIEW-INJECTION` / production acceptance。
-- **Adapter 接线（2026-08-06）但 pin null → 实际 production 仍 fail-closed**：
+- **Adapter 接线（2026-08-06）；pin=`null` → 实际 production 仍 fail-closed**：
   - 新增 `extensions/_shared/retained-directory-lock.ts`（platform-neutral production adapter）。
   - Linux → 现有 `acquireRetainedDirectoryOfdLock`（语义全保留；wrapper 补 `assertIdentity`）。
   - Windows → production `loadWindowsNativeAddon` singleton + `tryAcquireRetainedDirectoryLock`；native null→BUSY；错误映射 `RetainedDirectoryLockError`；**绝不** fallback TS lockfile；pin null → `WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING` fail-closed。
@@ -170,12 +173,12 @@ updated: 2026-08-06
     - ABI smoke — 可扩展 capabilities + 新错误码闭集。
     - retained smoke — controller/worker；temp package binaryPath；16 进程 barrier 等。
     - durable-dacl smoke（真实 probe）— private/package_rx；icacls tamper exit0+readback 后 native 拒；foreign group 收敛；mutex squat helper 默认 DACL → DACL_INVALID/MUTEX_NAMESPACE_DENIED（非 BUSY）；16 create err=null/created false=collision/barrier skew 有界；replace reader barrier+success/error counts+必见 OLD+NEW；16×1MiB append head/tail hash+LEN 哨兵；kill-during-attempt ready→native+多 delay 强杀 dest 仅 exact OLD|NEW；leaf+ancestor junction 拒；maxBytes=0 非 TOO_LARGE；temp 无残留。
-- **P0 退出判定**：TOCTOU 仍未闭合；production pin 仍 null；Linux zero-regression 外证入口未固化。
-- **P1/P2/P3 判定**：均为 **implementation probe**（temp smoke 真机通过；DCC 物理层为 integration probe）；**有效生产仍受 pin null 阻塞**；**不等于**对应 acceptance criteria 已满足。
+- **P0 退出判定**：TOCTOU 仍未闭合；production pin 现 `null`；Linux zero-regression 外证入口未固化。
+- **P1/P2/P3 判定**：均为 **implementation probe**（temp smoke 真机通过；DCC 物理层为 integration probe）；**有效生产仍受 pin null + final artifact 缺失阻塞**；**不等于**对应 acceptance criteria 已满足。
 - Linux 侧：retained OFD / DCC production acceptance 继续有效。
-- Windows 侧：production pin null 时 DCC 仍 `attestation_unavailable`；test seam 下 DCC 物理层/状态机可跑；adapter 已接线但 pin null 所以实际 production 仍 fail-closed；**未**改 settings / `~/.abrain`。
+- Windows 侧：pin=`null` → DCC 仍 `attestation_unavailable`；零参 load fail-closed；test seam 下物理层/状态机可跑；adapter 已接线；**未**改 settings / `~/.abrain`。
 - 工具链：blocker 已解决。
-- TOCTOU：仍未完全闭合。
+- **TOCTOU + DCC：仍 blocking**。
 - 本文件是唯一 living plan。
 
 ## Phase Table
@@ -208,22 +211,22 @@ updated: 2026-08-06
 ## Current Blockers
 
 - **工具链缺失：已解决** — `C:/BuildTools` VsDevCmd + MSVC 14.44 + rustc/cargo `x86_64-pc-windows-msvc`；`build:windows-native-addon` 真实 release 构建通过。
-- **production pin 仍为 null（主 blocker）**：package/install/unlock/verify plumbing 已就绪，但本切片不跑 production build、不写非 null pin；零参数生产 loader 继续 `PROVENANCE_PIN_MISSING` fail-closed。
-- **hash→dlopen TOCTOU（部分缓解，未完全闭合）**：fd/path identity best-effort 保留；production 成功路径在 dlopen+self identity 后强制 package_rx 三点验证（跨 token 重写边界）。same-token/admin 恶意仍合同外。**不得**声称 TOCTOU 已完全解决；仍绑定 `WIN-BINARY-PROVENANCE`。
-- **Adapter 已接线、有效生产仍未接通（pin null）**：非 fd 调用点已走 adapter；Windows 生产路径因 pin=null 继续 fail-closed。
+- **final source commit + production pin/artifact 待建立（主 blocker）**：package/install/unlock/verify plumbing 已就绪；旧 892ddeb live 已 unlock 移出，pin 已回 `null`；须 final source commit → clean-tree production build + package + artifact commit + tracked-in-HEAD 后才可 full dossier gate / P4 accepted。
+- **hash→dlopen TOCTOU（部分缓解，未完全闭合；仍 blocking）**：fd/path identity best-effort 保留；production 成功路径在 dlopen+self identity 后强制 package_rx 三点验证（跨 token 重写边界）。same-token/admin 恶意仍合同外。**不得**声称 TOCTOU 已完全解决；仍绑定 `WIN-BINARY-PROVENANCE`。
+- **Adapter 已接线；有效生产取决于 final pin+package_rx（现 pin=`null`）**：非 fd 调用点已走 adapter；pin null → 零参 fail-closed。
 - **Named mutex 默认 DACL / squat（实现探测已闭合，有效生产仍 blocker）**：实现探测路径已用 protected DACL + SID hash 名。**Availability residual**：predictable Global 名同机 squat 仍可 DoS（fail-closed）；same-token malice out-of-contract。
-- **DCC / production pin / production acceptance（仍 blocker）**：DCC 物理层已接 native；pin=null 时仍 `attestation_unavailable`。Adapter/DCC/package plumbing **不等于** production acceptance。
+- **DCC / production acceptance（仍 blocking）**：DCC 物理层已接 native；sandbox 无法合法构造完整 live daemon/authorization ready 六条件时 dossier 记 `not_covered`/`partial`（不假 pass）。Adapter/DCC/package plumbing **不等于** production acceptance。
 - **DELETE 目录 handle 方案已 supersede**：不得回退。
 - 纯 TS lockfile 禁止作为生产 fallback。
-- 尚无 Windows production acceptance dossier；P4 前不得宣告完成。
+- Windows production acceptance dossier：workers 开发验证全绿；full gate 待 final artifact；**accepted:false** 直至 final rebuild/package/artifact + 全准则覆盖；P4 前不得宣告完成。
 
 ## Next Probe
 
-1. **Clean-tree production build + package + install**（主会话审查后）：生成非 null pin 与 package artifacts；跑 `smoke:windows-native-package` 全路径；仍不自动勾选 criteria。
-2. **TOCTOU residual 评估**：package_rx + fd/path identity 之后，哪些竞态仍开放；是否需要额外 native 加载门；绑定 `WIN-BINARY-PROVENANCE`。
-3. **P1/P2/P3→有效生产门槛**：pin 非 null + install package_rx + 生产零参数 load 成功后，再评估 DCC/stable-view/edge production acceptance（不得以 temp package smoke 勾选）。
+1. **建立 final source commit → clean-tree production build + package + artifact commit**：pin/artifacts tracked-in-HEAD；跑 `smoke:windows-native-package` + 7 个 post-pin smokes；仍不自动勾选 criteria。
+2. **跑 `dossier:windows-native-production-acceptance` 全量**（final artifact 就绪后）：gates 通过后收集各 section 外证；DCC `not_covered` 保持 partial；不得为补 DCC 改生产合同。
+3. **TOCTOU residual 评估**：package_rx + fd/path identity 之后仍开放的竞态；绑定 `WIN-BINARY-PROVENANCE`。
 4. **Linux regression 外证入口**：标明并运行 `WIN-LINUX-ZERO-REGRESSION` 证据。
-5. **Production acceptance dossier（P4）**：第一矩阵真实主机联合外证。
+5. **P4 勾选纪律**：仅当 dossier `accepted:true` 且证据匹配时才允许 `goal_check`；本切片不勾。
 
 ## Execution Order (Planned)
 
@@ -255,6 +258,9 @@ updated: 2026-08-06
 - 2026-08-06：**Windows edge 审查项闭合（implementation；criteria 全不勾；不改 settings/~/.abrain）**。(1) layout/audit 共用 `ensureWindowsEdgeLayoutPath` ownership：共享祖先 `.state/sediment` 已存在只验 exact 非 reparse（不要求 private DACL）；缺失共享祖先普通 Node mkdir + exact 复核（绝不 protected）；自 `edge-protocol-shadow` 起 native protected。(2) audit 并发：parent-dir retained lock 覆盖 exists/create-or-append；锁序 parent→file append mutex；同字节每次落一行；BUSY fail-closed；禁止 audit 嵌套 journal/lock（ALS）。(3) 新 capability `atomic_file_tempdir_v1` + `durableAtomicCreateFileWithTempDirectory`（同卷 protected staging；双 parent guard 按 identity 稳定排序；MoveFileEx no-replace；不改既有 same-dir create ABI）；edge records/sources 走 `tmpPath` dirname staging。(4) audit NOT_FOUND 先 verify parent；list JSON.parse → `journal_record_corrupt` 不泄内容。(5) 16 进程 smoke 加载后 rendezvous barrier + identical payload 行数=32。(6) `retainedDirectoryLockTestApi` acquire/reset/has 全 test-hooks 门。(7) 删除 NOT_FOUND/TOO_LARGE message regex fallback。(8) DACL tamper smoke 走真实 capture 集成 fail。(9) frozen-contract adapter win32 record/source 走 production zeroarg `readProtected` + 目录/文件 DACL fail-closed（Linux 不变）。**不等于** production acceptance；全部 8 criteria 仍未勾选。
 - 2026-08-06：**Windows native production provenance/package plumbing**（仍 pin=null、不跑 production build、不 commit、criteria 全不勾）。(1) pin 拆到 `windows-native-addon-pin.ts`（package 输出，硬排除 source closure）。(2) `package-windows-native-addon.mjs` package/install/unlock/verify；package 仅 production build-info；exact LF manifest + pin 模板；install package_rx files→dir；unlock native private_rw 或固定 `icacls.exe` reset（只看 exit）。(3) 生产零参数 loader 成功后 package_rx 三点；`PACKAGE_ACL_INVALID`；test options 不强制 ACL；`__TEST.loadWindowsNativeAddon` 门控 test hooks。(4) Cargo `trim-paths=all`；toolchain_id 去 path/locale。(5) gitattributes/gitignore/package scripts/package smoke。(6) 现有 fd/path identity 保留；same-token/admin 合同外；package_rx 跨 token；无 PowerShell 热路径。**不等于** `WIN-BINARY-PROVENANCE` / production acceptance。
 - 2026-08-06：**production package 首 commit 前放行项修复**（仍 pin=null、不 commit、criteria 全不勾）。(1) `CARGO_ENCODED_RUSTFLAGS` 显式 `-C`+`link-arg=/Brepro` + remap，assert 不覆盖丢失 config 语义；development dual repro 真跑。(2) manifest/BuildIdentity 冻结证据字段 `build_mode`/`reproducibility`/`native_tests`/`clippy`/`build_config_sha256`；build.rs 受控 env；gates 后 build；package 只收 production/dual_clean_match/passed/passed 并与 binary exact；schema/loader/fakes/smokes 同步；build_id preimage + `build_id_preimage_sha256` 可交叉核验。(3) `.gitattributes` 首行 `* text=auto eol=lf` + binary override；自身进 source closure；closure 拒 CRLF。(4) 生产 loader 校验 `PIN_SOURCE_COMMIT` 非 null/40hex = manifest.source_commit；test options 不要求。(5) `loadInstalledForAcl` throw 不 die；icacls fallback + method；writability probe；64MiB 上限；post-verify 失败恢复 pin/artifacts fail-closed；install ACL 部分失败 best-effort unlock。(6) package smoke 不破坏 live .node；tamper 走 temp；ACL gate 走 test-hooks enforcing 入口。(7) capability 四方 + manifest 字段静态同步；binary 敏感路径扫描。(8) PIN source field 测试。(9) 本 plan 更新、**不勾** criteria。
+- 2026-08-06：**post-pin smoke 双态 + Windows production acceptance dossier 实现**（不 commit、criteria 全不勾）。(1) 7 个 post-pin 冲突 smoke 最小修：pin null 保留 fail-closed；pin live 允许并 child 验证 production zeroarg 正向；controller 永不因 live dlopen 阻塞 live 包覆盖/删除；temp suites 独立不称 production；pre/post 都能跑。(2) 新增 `scripts/dossier-windows-native-production-acceptance.mjs` + package script；进 build source closure；controller/closed worker；强制 win32-x64 + git clean + pin/artifact tracked-in-HEAD + source_commit 范围仅 package 输出 + package_rx；env 无 test hooks；禁止 __TEST/override/deps injection；每 case 独立 child + hard temp cleanup + ~/.abrain before/after guard；sections：provenance / retained-lock 16×3 + crash abandon / DACL tamper / stable-view（preview residual 诚实）/ edge / DCC（不可构造则 `not_covered`→`partial`）；exit0≠accepted。(3) **决策**：当前 live pin/artifact 仅 post-pin 开发验证（旧 HEAD），final 待 clean rebuild；dossier 已实现但未 accepted。(4) 不勾任何 criteria。
+- 2026-08-06：**Windows production acceptance dossier 加固**（不 commit、criteria 全不勾）。(1) worker failure：`dieWorker`→throw `WorkerFail`；顶层 catch 统一 emit/exit + hard cleanup/kill；禁 process.exit 绕 finally；`runWorker` 记 signal。(2) retained-lock async 三阶段 barrier（loaded→barrier→release 自然 exit；winner identity/zero-file；crash `/T /F` + abandon observed boolean 非门）。(3) DACL 全矩阵 + closed code + 无 SID 泄漏。(4) stable-view temp `ABRAIN_ROOT` production self-publication + managed injection + loud zero 三案；去掉 preview residual。(5) edge 真实 pair/candidate/witness/audit/16-proc/DACL tamper/partial no-whitewash。(6) DCC 诚实 not_covered：platform true；empty abrain observe/read/kick 非 ready；无伪造 authority；residual 写 live daemon+git+settled kick 前提。(7) controller：stable/edge full-pass-only；DCC not_covered⇒partial `accepted:false`。(8) 验证：`--self-test` ok；`provenance-load`/`retained-lock`/`dacl`/`stable-view`/`edge`/`dcc` workers 直接 ok；full dirty gate 停；smoke-windows-native-addon 抽查绿。顺带修 production publisher Windows latest pointer 行不得以 undefined sha256 进入 artifact_rows JCS 比较。
+- 2026-08-06：**Windows production acceptance dossier 最后封闭（不 commit、criteria 全不勾）**。(1) hardCleanup strict：成功路径 temp residual/hardRm 失败 throw；失败路径 cleanup_errors bounded 入 failure JSON；仅存活 child 才 kill。(2) retained/edge child wait 断言 code===0/signal null + bounded stderr；crash holder taskkill 单独标。(3) stable latest 仅 byte-exact `bundles/<hash>\n`；DACL tamper 加 icacls readback + native verify deny。(4) system owner probes：存在 targets 全 denied；≥1 成功拒绝；residual 非第二账户主动 tamper。(5) live ~/.abrain guard → bounded recursive aggregate（count+sha256 only；含 hidden；封顶 invalid）。(6) 全局 residual 恒加 `binary_hash_to_dlopen_toctou_not_fully_closed` ⇒ accepted false；provenance 可 pass 不宣称 WIN-BINARY 完成。(7) 6 worker 再跑确认；plan 补记不勾。
 
 ## Definition of Fully Complete
 

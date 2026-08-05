@@ -14,6 +14,9 @@
  * - non-win32 / non-x64 / missing artifact → print `SKIP:` and exit 0
  *
  * Does not mock the lock; does not touch ~/.abrain; does not write production pin.
+ * Production pin may be null (controller fail-closed, no dlopen) or live (post-pin:
+ * controller never maps live .node; production zero-arg verified only in a closed child).
+ * Temp package suites remain independent and are never labeled production.
  * Cleanup failures hard-fail (no WARN pass).
  */
 import { createHash, randomBytes } from "node:crypto";
@@ -28,8 +31,12 @@ import { Worker } from "node:worker_threads";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..");
-// __TEST.loadWindowsNativeAddon requires test hooks.
-process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+// Temp-package __TEST loaders need hooks. Production zero-arg child must keep them unset.
+const IS_PROD_ZEROARG_CHILD =
+  process.argv[2] === "--child" && process.argv[3] === "prod-zeroarg";
+if (!IS_PROD_ZEROARG_CHILD) {
+  process.env.PI_ASTACK_ENABLE_TEST_HOOKS = "1";
+}
 const stagedNode = path.join(repoRoot, "native/windows/target/smoke-staging/pi-astack-windows-native.node");
 const buildInfoPath = path.join(repoRoot, "native/windows/target/smoke-staging/build-info.json");
 
@@ -166,6 +173,24 @@ function runChild() {
 
   try {
     if (process.platform !== "win32") throw new Error("child requires win32");
+
+    // Production zero-arg probe: no test hooks, no temp package, no __TEST.
+    if (mode === "prod-zeroarg") {
+      if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== undefined) {
+        throw new Error("prod-zeroarg child must not see PI_ASTACK_ENABLE_TEST_HOOKS");
+      }
+      const mod = loadModule();
+      const loaded = mod.loadWindowsNativeAddon();
+      writeReadyAtomic(readyFile, {
+        status: "LOADED",
+        build_mode: loaded.manifest?.build_mode,
+        source_commit: loaded.manifest?.source_commit,
+        pin: mod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256,
+        capabilities: [...(loaded.capabilities || [])],
+      });
+      process.exit(0);
+    }
+
     const mod = loadModule();
     const loaded = loadAddonFromTempPackage(mod, packageRoot, manifestSha256);
     // Prove we loaded the package binary, not staging.
@@ -642,7 +667,13 @@ async function main() {
   // Controller loads TS module only (no .node).
   const mod = loadModule();
   assert(mod.WINDOWS_NATIVE_ADDON_ABI === 1, "TS ABI 1");
-  assert(mod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256 === null, "production pin still null");
+  const pinSha = mod.WINDOWS_NATIVE_ADDON_PROVENANCE_MANIFEST_SHA256;
+  const pinSrc = mod.WINDOWS_NATIVE_ADDON_PROVENANCE_SOURCE_COMMIT;
+  const pinLive =
+    typeof pinSha === "string" && /^[0-9a-f]{64}$/.test(pinSha)
+    && typeof pinSrc === "string" && /^[0-9a-f]{40}$/.test(pinSrc);
+  const pinAbsent = pinSha === null && pinSrc === null;
+  assert(pinAbsent || pinLive, `production pin null or live, got manifest=${pinSha} source=${pinSrc}`);
   assert(
     mod.WINDOWS_NATIVE_ADDON_ERROR_CODES.includes("WINDOWS_NATIVE_ADDON_MUTEX_NAMESPACE_DENIED"),
     "MUTEX_NAMESPACE_DENIED in closed set",
@@ -679,15 +710,39 @@ async function main() {
     });
   }
 
-  // Production pin still fail-closed without loading native.
-  await check("production pin still fail-closed (controller, no native load)", () => {
-    let caught;
-    try {
-      mod.loadWindowsNativeAddon();
-    } catch (err) {
-      caught = err;
+  // pin-null: controller may call zero-arg (fails before dlopen).
+  // pin-live: never map live package in controller; closed child verifies production zero-arg.
+  await check("production zero-arg path (pin-null fail-closed / pin-live child positive)", () => {
+    if (!pinLive) {
+      let caught;
+      try {
+        mod.loadWindowsNativeAddon();
+      } catch (err) {
+        caught = err;
+      }
+      assert(caught?.code === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING", "pin missing");
+      return;
     }
-    assert(caught?.code === "WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING", "pin missing");
+    const env = { ...process.env, PI_ASTACK_GC_REEXEC: "1" };
+    delete env.PI_ASTACK_ENABLE_TEST_HOOKS;
+    const r = spawnSync(
+      process.execPath,
+      [__filename, "--child", "prod-zeroarg", workRoot, packageRoot, manifestSha256, path.join(workRoot, "prod-zeroarg-ready.json")],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        windowsHide: true,
+        env,
+      },
+    );
+    // Child mode requires packageRoot/manifest for other modes; prod-zeroarg ignores them and uses production loader.
+    assert(r.status === 0, `prod-zeroarg child exit ${r.status}: ${r.stderr}\n${r.stdout}`);
+    const readyPath = path.join(workRoot, "prod-zeroarg-ready.json");
+    assert(fs.existsSync(readyPath), "prod-zeroarg ready missing");
+    const payload = JSON.parse(fs.readFileSync(readyPath, "utf8"));
+    assert(payload.status === "LOADED", `prod-zeroarg status ${JSON.stringify(payload)}`);
+    assert(payload.build_mode === "production", "prod-zeroarg build_mode");
+    assert(payload.source_commit === pinSrc, "prod-zeroarg source_commit");
   });
 
   // ── Async in-process suite worker (loads verified package binary) ────────

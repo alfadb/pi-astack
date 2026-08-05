@@ -54,6 +54,7 @@ const EXTRA_CLOSURE_FILES = [
   "scripts/smoke-windows-native-retained-lock.mjs",
   "scripts/smoke-windows-native-durable-dacl.mjs",
   "scripts/smoke-windows-native-package.mjs",
+  "scripts/dossier-windows-native-production-acceptance.mjs",
   "scripts/smoke-retained-directory-lock.mjs",
   "scripts/smoke-dcc-windows-attestation.mjs",
   "scripts/smoke-proposition-policy-stable-view-windows.mjs",
