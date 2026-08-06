@@ -2,8 +2,10 @@
 /**
  * Windows production physical layer for edge-protocol-shadow durable objects.
  *
- * - Production: zero-arg loadWindowsNativeAddon success cache only (pin null → fail-closed).
- * - Test seam: ALS + explicit deps + gated process override under PI_ASTACK_ENABLE_TEST_HOOKS=1.
+ * - Production: process-level zero-arg loadWindowsNativeAddon successful-load singleton
+ *   (shared with retained/stable/DCC; failures never cached).
+ * - Test seam: ALS + explicit deps + gated process override under PI_ASTACK_ENABLE_TEST_HOOKS=1
+ *   (test injection does not write the process production singleton).
  * - Directories / private files: current TokenUser protected private_rw DACL.
  * - Existing weak / inherited / tampered DACL: never auto-repair (fail-closed).
  * - create → durableAtomicCreateFile (no-replace); append → durableAppendFile;
@@ -26,10 +28,12 @@ import {
   durableAtomicCreateFile,
   durableAtomicCreateFileWithTempDirectory,
   ensureProtectedDirectory,
+  hasWindowsNativeAddonProductionLoadSingleton,
   loadWindowsNativeAddon,
   mapAtomicFileError,
   mapProtectedDaclError,
   readProtectedFile,
+  resetWindowsNativeAddonProductionLoadSingleton,
   verifyProtectedPath,
   WindowsNativeAddonError,
   WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_TEMPDIR_V1,
@@ -50,8 +54,8 @@ const REQUIRED_CAPS = Object.freeze([
 const AUDIT_PARENT_LOCK_RETRIES = 200;
 const AUDIT_PARENT_LOCK_SLEEP_MS = 10;
 
-let productionAddonSingleton: WindowsNativeAddonModuleV1 | null = null;
 const testAddonAls = new AsyncLocalStorage<WindowsNativeAddonModuleV1>();
+/** Test-only override; does not write the process production singleton. */
 let testAddonOverride: WindowsNativeAddonModuleV1 | null = null;
 
 export class EdgeProtocolShadowWindowsNativeError extends Error {
@@ -125,12 +129,11 @@ function requireCaps(addon: WindowsNativeAddonModuleV1): void {
 }
 
 function loadProductionAddon(): WindowsNativeAddonModuleV1 {
-  if (productionAddonSingleton) return productionAddonSingleton;
   try {
+    // Shared process-level successful-load singleton (windows-native-addon globalThis).
     const loaded = loadWindowsNativeAddon();
     requireCaps(loaded.addon);
-    productionAddonSingleton = loaded.addon;
-    return productionAddonSingleton;
+    return loaded.addon;
   } catch (error) {
     // Do not cache failures — next call re-attempts production zero-arg load.
     throw mapNative(error, "EDGE_WINDOWS_NATIVE_UNAVAILABLE");
@@ -559,10 +562,10 @@ export const edgeWindowsNativeTestApi = Object.freeze({
   },
   resetProductionSingleton(): void {
     assertTestHooksEnabled("resetProductionSingleton");
-    productionAddonSingleton = null;
+    resetWindowsNativeAddonProductionLoadSingleton();
   },
   hasProductionSingleton(): boolean {
     assertTestHooksEnabled("hasProductionSingleton");
-    return productionAddonSingleton != null;
+    return hasWindowsNativeAddonProductionLoadSingleton();
   },
 });

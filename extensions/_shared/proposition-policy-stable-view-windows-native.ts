@@ -2,8 +2,10 @@
 /**
  * Windows production physical layer for Policy stable-view durable publish/read.
  *
- * - Production: zero-arg loadWindowsNativeAddon success cache only (pin null → fail-closed).
- * - Test seam: ALS + explicit deps under PI_ASTACK_ENABLE_TEST_HOOKS=1 (no unguarded global pin override).
+ * - Production: process-level zero-arg loadWindowsNativeAddon successful-load singleton
+ *   (shared with retained/edge/DCC; failures never cached).
+ * - Test seam: ALS + explicit deps under PI_ASTACK_ENABLE_TEST_HOOKS=1 (no unguarded global pin override;
+ *   test injection does not write the process production singleton).
  * - latest is a protected private_rw regular pointer file: exact `bundles/<64 lowercase hex>\n`.
  * - Never uses symlink, TS lockfile, or ordinary Node rename for durable publish.
  * - Linux callers must not import this for the POSIX durable path.
@@ -15,10 +17,12 @@ import {
   durableAtomicCreateFile,
   durableAtomicReplaceFile,
   ensureProtectedDirectory,
+  hasWindowsNativeAddonProductionLoadSingleton,
   loadWindowsNativeAddon,
   mapAtomicFileError,
   mapProtectedDaclError,
   readProtectedFile,
+  resetWindowsNativeAddonProductionLoadSingleton,
   verifyProtectedPath,
   WindowsNativeAddonError,
   WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1,
@@ -42,9 +46,8 @@ const REQUIRED_CAPS = Object.freeze([
   WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1,
 ] as const);
 
-let productionAddonSingleton: WindowsNativeAddonModuleV1 | null = null;
 const testAddonAls = new AsyncLocalStorage<WindowsNativeAddonModuleV1>();
-/** Process override only via gated test API (retained-lock style). */
+/** Process override only via gated test API (retained-lock style). Does not touch production singleton. */
 let testAddonOverride: WindowsNativeAddonModuleV1 | null = null;
 
 export class PropositionPolicyStableViewWindowsNativeError extends Error {
@@ -118,12 +121,11 @@ function requireCaps(addon: WindowsNativeAddonModuleV1): void {
 }
 
 function loadProductionAddon(): WindowsNativeAddonModuleV1 {
-  if (productionAddonSingleton) return productionAddonSingleton;
   try {
+    // Shared process-level successful-load singleton (windows-native-addon globalThis).
     const loaded = loadWindowsNativeAddon();
     requireCaps(loaded.addon);
-    productionAddonSingleton = loaded.addon;
-    return productionAddonSingleton;
+    return loaded.addon;
   } catch (error) {
     // Do not cache failures — next call re-attempts production zero-arg load.
     throw mapNative(error, "WINDOWS_STABLE_VIEW_NATIVE_UNAVAILABLE");
@@ -484,10 +486,10 @@ export const stableViewWindowsNativeTestApi = Object.freeze({
   },
   resetProductionSingleton(): void {
     assertTestHooksEnabled("resetProductionSingleton");
-    productionAddonSingleton = null;
+    resetWindowsNativeAddonProductionLoadSingleton();
   },
   hasProductionSingleton(): boolean {
     assertTestHooksEnabled("hasProductionSingleton");
-    return productionAddonSingleton != null;
+    return hasWindowsNativeAddonProductionLoadSingleton();
   },
 });

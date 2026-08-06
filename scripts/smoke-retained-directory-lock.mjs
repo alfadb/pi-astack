@@ -348,8 +348,17 @@ check("adapter surface + Windows production pin fail-closed path + gated test ov
     "test api must not expose pin/package paths");
   assert(/WINDOWS_NATIVE_ADDON_PROVENANCE_PIN_MISSING|mapWindowsToRetainedError|loadWindowsNativeAddon\(\)/.test(src)
     || /loadWindowsNativeAddon/.test(src), "production load path present");
-  // Failures must not be cached on the production singleton.
-  assert(/Do not cache failures|windowsAddonSingleton = loaded/.test(src), "success-only singleton cache");
+  // Failures must not be cached; production singleton is process-level in windows-native-addon.
+  assert(
+    /Do not cache failures|process-level successful-load singleton|resetWindowsNativeAddonProductionLoadSingleton|loadWindowsNativeAddon\(\)\.addon/.test(src),
+    "success-only process-level singleton (no local failure cache)",
+  );
+  // Resolve-time recheck of test hooks so deauthorization stops using fake override.
+  assert(
+    /assertRetainedLockTestHooks\("testWindowsAddonOverride"\)/.test(src)
+      || /Re-check at resolve time[\s\S]*testWindowsAddonOverride/.test(src),
+    "resolve rechecks PI_ASTACK_ENABLE_TEST_HOOKS before using override",
+  );
 });
 
 check("publisher identity check is platform-split (linux fstat / windows assertIdentity)", () => {

@@ -10,20 +10,45 @@
  * - Does not write ~/.abrain (before/after guard). Output is a single JSON object
  *   on stdout; never writes into the repo.
  *
- * Full run gates (all required for accepted:true):
+ * Two distinct conclusions (never conflate):
+ * 1) extension_windows_adaptation — local, mechanically verifiable Windows extension
+ *    gates: artifact lineage + provenance/native package_rx + retained + DACL +
+ *    stable + edge (+ structural same-fd rehash / threat-model documentation).
+ *    Pass here means extension-scope adaptation evidence only.
+ * 2) overall production accepted (`accepted` + top-level `status`) — requires
+ *    daemon DCC live coverage, live matrix roots, Linux zero-regression, second-
+ *    account DACL tamper, and Node>=22.19 + Windows Server external evidence.
+ *    Those external/daemon items are closed blocking residuals and are DEFERRED
+ *    until after daemon redesign. This dossier intentionally has NO env/manifest
+ *    switch that can flip overall accepted:true. Overall remains accepted:false
+ *    / status partial whenever deferred residuals are present.
+ *
+ * Mechanical gates for extension_windows_adaptation:
  * - runtime win32-x64
- * - git worktree clean
- * - pin + package artifacts tracked and present in HEAD
- * - manifest.source_commit is exactly HEAD^; source_commit..HEAD is exactly the three
- *   package outputs (pin + manifest + .node) — no source_commit===HEAD alternate
+ * - git worktree clean (no arbitrary source drift / dirty tree)
+ * - pin + package artifacts tracked and present in HEAD (content-bound)
+ * - auditable artifact lineage:
+ *     source_commit (pin) is an ancestor of HEAD;
+ *     there exists artifact commit A on HEAD's history whose tree for the three
+ *     package outputs matches the live pin/manifest/binary content;
+ *     source_commit..A is exactly the three package outputs;
+ *     A..HEAD may only contain docs/evidence commits (docs/** paths);
+ *     arbitrary source-closure drift after artifact ⇒ fail.
  * - production package_rx three-point (dir/binary/manifest) via zero-arg load
  *
- * --self-test: dirty-tree static + worker env probe only. Must NOT emit accepted:true
- * and must not claim production acceptance.
+ * Threat model (user-confirmed; not a global "TOCTOU must be atomic" blocker):
+ * same TokenUser + admin malice out of loader contract; other principals fail-closed;
+ * hash/pin/package_rx = provenance + corruption detection; no small bootstrap.
  *
- * exit 0 = dossier execution completed (JSON emitted). accepted:false unless every
- * Windows criterion section is covered. DCC may be not_covered → status partial;
- * accepted:true currently cannot hold while DCC is not_covered.
+ * Cross-host first-matrix external evidence ingestion/schema/slot validators are
+ * NOT implemented in this round (unreliable; redesign after daemon refactor).
+ *
+ * --self-test: dirty-tree static + lineage unit negatives + real temp git DAG +
+ *   deferred-matrix / overall-never-green assertions + worker env probe only.
+ *   No matrix schema fixtures, no pseudo command evidence, no external hosts.
+ *   Must NOT emit accepted:true and must not claim production acceptance.
+ *
+ * exit 0 = dossier execution completed (JSON emitted) or self-test passed.
  */
 import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
@@ -377,6 +402,330 @@ function worktreeClean() {
   return r.status === 0 && r.stdout.length === 0;
 }
 
+const PACKAGE_OUTPUT_PATHS = Object.freeze([
+  "extensions/_shared/windows-native-addon-pin.ts",
+  "native/windows/win32-x64/manifest.json",
+  "native/windows/win32-x64/pi-astack-windows-native.node",
+]);
+
+/** Paths allowed on artifact_commit..HEAD (docs/evidence only). */
+function isDocsOrEvidencePath(relPosix) {
+  const n = String(relPosix || "").replace(/\\/g, "/");
+  return n === "docs" || n.startsWith("docs/");
+}
+
+function isPackageOutputPath(relPosix) {
+  const n = String(relPosix || "").replace(/\\/g, "/");
+  return PACKAGE_OUTPUT_PATHS.includes(n);
+}
+
+/** Blob sha1 for a path at a commit (git hash-object equivalent via ls-tree). */
+function blobShaAt(commit, relPosix) {
+  const r = git(["ls-tree", commit, "--", relPosix], { allowFail: true });
+  if (r.status !== 0 || !r.stdout) return null;
+  // <mode> <type> <sha>\t<name>
+  const m = r.stdout.trim().match(/^\d+\s+blob\s+([0-9a-f]{40})\t/);
+  return m ? m[1] : null;
+}
+
+function blobShaOfFile(absPath) {
+  if (!fs.existsSync(absPath)) return null;
+  const r = git(["hash-object", absPath], { allowFail: true });
+  return r.status === 0 && /^[0-9a-f]{40}$/.test(r.stdout) ? r.stdout : null;
+}
+
+/**
+ * Find the newest commit reachable from HEAD at which the three package outputs
+ * match the live on-disk/pin content (content-bound artifact commit).
+ */
+function findArtifactCommit(head, liveBlobShas) {
+  // Walk commits that touched any package output; pick newest whose three blobs match live.
+  const log = git(
+    ["log", "--format=%H", head, "--", ...PACKAGE_OUTPUT_PATHS],
+    { allowFail: true },
+  );
+  if (log.status !== 0) return null;
+  const commits = log.stdout.split(/\r?\n/).filter(Boolean);
+  for (const c of commits) {
+    let ok = true;
+    for (const rel of PACKAGE_OUTPUT_PATHS) {
+      const at = blobShaAt(c, rel);
+      if (!at || at !== liveBlobShas[rel]) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return c;
+  }
+  return null;
+}
+
+/** Pure helpers for lineage classification / self-test (no git required). */
+function classifyLineagePath(relPosix) {
+  if (isPackageOutputPath(relPosix)) return "package_output";
+  if (isDocsOrEvidencePath(relPosix)) return "docs_or_evidence";
+  return "source_or_other";
+}
+
+function evaluateRangeAgainstAllowlist(names, allowPred) {
+  const normalized = names.map((n) => n.replace(/\\/g, "/")).filter(Boolean);
+  const foreign = normalized.filter((n) => !allowPred(n));
+  return { normalized, foreign, ok: foreign.length === 0 };
+}
+
+/** Commits strictly after `from` up to and including `to` (git rev-list from..to). */
+function listCommitsExclusive(from, to, gitFn = git) {
+  const r = gitFn(["rev-list", "--reverse", `${from}..${to}`], { allowFail: true });
+  if (r.status !== 0) return null;
+  return r.stdout.split(/\r?\n/).filter(Boolean);
+}
+
+/** Paths changed by a single commit (first parent for merges; rejects merge hiding). */
+function pathsChangedByCommit(commit, gitFn = git) {
+  // --root handles orphan; -m -1 uses first-parent for merges so merge-introduced paths are visible.
+  const r = gitFn(
+    ["diff-tree", "--no-commit-id", "--name-only", "-r", "-m", "--root", commit],
+    { allowFail: true },
+  );
+  if (r.status !== 0) return null;
+  // For merges, -m emits one block per parent; take unique paths across parents.
+  const names = r.stdout
+    .split(/\r?\n/)
+    .map((n) => n.replace(/\\/g, "/").trim())
+    .filter(Boolean);
+  return [...new Set(names)];
+}
+
+/**
+ * Per-commit lineage evaluation (NOT endpoint-only diff).
+ * Rejects change-then-rollback and merge-hidden non-allowlisted paths.
+ *
+ * @param {object} args
+ * @param {string} args.sourceCommit
+ * @param {string} args.artifactCommit
+ * @param {string} args.head
+ * @param {(args: string[], opts?: object) => {status:number, stdout:string}} [args.gitFn]
+ */
+function evaluatePerCommitLineage({
+  sourceCommit,
+  artifactCommit,
+  head,
+  gitFn = git,
+}) {
+  const residuals = [];
+  const detail = {
+    source_is_ancestor_of_artifact: false,
+    artifact_is_ancestor_of_head: false,
+    source_to_artifact_commits: [],
+    artifact_to_head_commits: [],
+    source_to_artifact_ok: false,
+    artifact_to_head_ok: false,
+  };
+
+  const ancArt = gitFn(
+    ["merge-base", "--is-ancestor", sourceCommit, artifactCommit],
+    { allowFail: true },
+  );
+  detail.source_is_ancestor_of_artifact = ancArt.status === 0 && sourceCommit !== artifactCommit;
+  if (!detail.source_is_ancestor_of_artifact) {
+    residuals.push("source_commit_not_ancestor_of_artifact");
+  }
+
+  const ancHead = gitFn(
+    ["merge-base", "--is-ancestor", artifactCommit, head],
+    { allowFail: true },
+  );
+  detail.artifact_is_ancestor_of_head = ancHead.status === 0;
+  if (!detail.artifact_is_ancestor_of_head) {
+    residuals.push("artifact_commit_not_ancestor_of_HEAD");
+  }
+
+  if (!detail.source_is_ancestor_of_artifact || !detail.artifact_is_ancestor_of_head) {
+    return { ok: false, residuals, detail };
+  }
+
+  const artCommits = listCommitsExclusive(sourceCommit, artifactCommit, gitFn);
+  if (!artCommits) {
+    residuals.push("source_to_artifact_rev_list_failed");
+    return { ok: false, residuals, detail };
+  }
+  detail.source_to_artifact_commits = artCommits;
+  // Strict: exactly one commit (the artifact), introducing exactly the three package outputs.
+  if (artCommits.length !== 1 || artCommits[0] !== artifactCommit) {
+    residuals.push("source_to_artifact_not_exactly_one_artifact_commit");
+  } else {
+    const paths = pathsChangedByCommit(artifactCommit, gitFn);
+    if (!paths) {
+      residuals.push("artifact_commit_paths_unreadable");
+    } else {
+      const evalPaths = evaluateRangeAgainstAllowlist(paths, isPackageOutputPath);
+      const exact =
+        evalPaths.ok
+        && evalPaths.normalized.length === PACKAGE_OUTPUT_PATHS.length
+        && PACKAGE_OUTPUT_PATHS.every((n) => evalPaths.normalized.includes(n));
+      detail.source_to_artifact_ok = exact;
+      if (!exact) residuals.push("source_commit_to_artifact_not_only_package_outputs");
+    }
+  }
+
+  const postCommits = listCommitsExclusive(artifactCommit, head, gitFn);
+  if (!postCommits) {
+    residuals.push("artifact_to_head_rev_list_failed");
+    return { ok: false, residuals, detail };
+  }
+  detail.artifact_to_head_commits = postCommits;
+  let postOk = true;
+  for (const c of postCommits) {
+    const paths = pathsChangedByCommit(c, gitFn);
+    if (!paths) {
+      residuals.push("post_artifact_commit_paths_unreadable");
+      postOk = false;
+      break;
+    }
+    const evalPaths = evaluateRangeAgainstAllowlist(paths, isDocsOrEvidencePath);
+    if (!evalPaths.ok) {
+      residuals.push("post_artifact_non_docs_drift");
+      // Distinguish rollback/merge-hidden cases when endpoint-only would look clean.
+      residuals.push(`post_artifact_commit_non_docs:${c.slice(0, 12)}`);
+      postOk = false;
+      break;
+    }
+  }
+  detail.artifact_to_head_ok = postOk && !residuals.includes("post_artifact_non_docs_drift");
+
+  const ok =
+    detail.source_to_artifact_ok
+    && detail.artifact_to_head_ok
+    && residuals.length === 0;
+  return { ok, residuals: [...new Set(residuals)], detail };
+}
+
+/**
+ * Self-test: build a temporary real git DAG covering order, source-change-then-rollback,
+ * and merge/non-docs rejection. Does not touch the live repo.
+ */
+function runLineageGitDagSelfTest() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-lineage-dag-"));
+  const results = {
+    order_ok: false,
+    rollback_rejected: false,
+    merge_non_docs_rejected: false,
+  };
+  const gitTmp = (args, opts = {}) => {
+    const r = spawnSync("git", ["-C", tmp, ...args], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    const stdout = String(r.stdout || "").trim();
+    if (!opts.allowFail && r.status !== 0) {
+      throw new Error(`git -C tmp ${args.join(" ")} failed: ${r.stderr || stdout}`);
+    }
+    return { status: r.status ?? 1, stdout };
+  };
+  try {
+    gitTmp(["init", "-b", "main"]);
+    gitTmp(["config", "user.email", "lineage-selftest@example.invalid"]);
+    gitTmp(["config", "user.name", "lineage-selftest"]);
+    // Isolate from global hooks / gpg.
+    gitTmp(["config", "commit.gpgsign", "false"]);
+
+    const write = (rel, body) => {
+      const abs = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, body, "utf8");
+    };
+
+    // source commit: base tree with placeholders for package paths + source.
+    write("extensions/_shared/windows-native-addon.ts", "source-v1\n");
+    write("extensions/_shared/windows-native-addon-pin.ts", "pin-null\n");
+    write("native/windows/win32-x64/manifest.json", "{}\n");
+    write("native/windows/win32-x64/pi-astack-windows-native.node", "bin-v0\n");
+    write("docs/plans/plan.md", "plan\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "source"]);
+    const source = gitTmp(["rev-parse", "HEAD"]).stdout;
+
+    // artifact commit: exactly three package outputs.
+    write("extensions/_shared/windows-native-addon-pin.ts", "pin-live\n");
+    write("native/windows/win32-x64/manifest.json", '{"ok":true}\n');
+    write("native/windows/win32-x64/pi-astack-windows-native.node", "bin-v1\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "artifact"]);
+    const artifact = gitTmp(["rev-parse", "HEAD"]).stdout;
+
+    // docs-only after artifact.
+    write("docs/plans/plan.md", "plan-updated\n");
+    write("docs/evidence/note.md", "evidence\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "docs"]);
+    const headDocs = gitTmp(["rev-parse", "HEAD"]).stdout;
+
+    const order = evaluatePerCommitLineage({
+      sourceCommit: source,
+      artifactCommit: artifact,
+      head: headDocs,
+      gitFn: gitTmp,
+    });
+    results.order_ok = order.ok === true;
+
+    // Rollback trap: source change then revert — endpoint may look clean, per-commit must reject.
+    write("extensions/_shared/windows-native-addon.ts", "source-v2-bad\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "bad-source"]);
+    write("extensions/_shared/windows-native-addon.ts", "source-v1\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "rollback-source"]);
+    const headRollback = gitTmp(["rev-parse", "HEAD"]).stdout;
+    // Endpoint-only name-only source..HEAD may be empty for the source file, but per-commit sees it.
+    const rollback = evaluatePerCommitLineage({
+      sourceCommit: source,
+      artifactCommit: artifact,
+      head: headRollback,
+      gitFn: gitTmp,
+    });
+    results.rollback_rejected =
+      rollback.ok === false
+      && rollback.residuals.some((r) => r === "post_artifact_non_docs_drift" || r.startsWith("post_artifact_commit_non_docs:"));
+
+    // Reset to docs head and create a merge that introduces non-docs via side branch.
+    gitTmp(["reset", "--hard", headDocs]);
+    gitTmp(["checkout", "-b", "side"]);
+    write("scripts/evil.mjs", "evil\n");
+    gitTmp(["add", "."]);
+    gitTmp(["commit", "-m", "side-non-docs"]);
+    gitTmp(["checkout", "main"]);
+    // Merge side into main (no-ff so merge commit exists).
+    gitTmp(["merge", "--no-ff", "-m", "merge-side", "side"], { allowFail: true });
+    const headMerge = gitTmp(["rev-parse", "HEAD"]).stdout;
+    const mergeEval = evaluatePerCommitLineage({
+      sourceCommit: source,
+      artifactCommit: artifact,
+      head: headMerge,
+      gitFn: gitTmp,
+    });
+    results.merge_non_docs_rejected =
+      mergeEval.ok === false
+      && mergeEval.residuals.some((r) => r === "post_artifact_non_docs_drift" || r.startsWith("post_artifact_commit_non_docs:"));
+
+    return {
+      pass: results.order_ok && results.rollback_rejected && results.merge_non_docs_rejected,
+      results,
+    };
+  } catch (error) {
+    return {
+      pass: false,
+      results,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 function evaluateProvenanceGates() {
   const gates = {
     platform_win32_x64: process.platform === "win32" && process.arch === "x64",
@@ -386,8 +735,17 @@ function evaluateProvenanceGates() {
     binary_tracked: trackedInHead("native/windows/win32-x64/pi-astack-windows-native.node"),
     artifacts_on_disk: fs.existsSync(binaryPath) && fs.existsSync(manifestPath),
     pin_live: false,
+    // Legacy names retained as derived views for older readers; lineage is authoritative.
     source_commit_is_head_parent: false,
     range_only_package_outputs: false,
+    // New lineage gates (per-commit; not endpoint-only):
+    source_commit_is_ancestor: false,
+    source_commit_is_ancestor_of_artifact: false,
+    artifact_commit_is_ancestor_of_head: false,
+    artifact_commit_found: false,
+    artifact_range_only_package_outputs: false,
+    post_artifact_docs_only: false,
+    live_blobs_match_artifact: false,
     package_rx: false,
   };
   const residuals = [];
@@ -403,6 +761,7 @@ function evaluateProvenanceGates() {
 
   let head = null;
   let parent = null;
+  let artifact_commit = null;
   try {
     head = git(["rev-parse", "HEAD"]).stdout;
     parent = git(["rev-parse", "HEAD^"], { allowFail: true }).stdout || null;
@@ -410,43 +769,79 @@ function evaluateProvenanceGates() {
     residuals.push("git_rev_parse_failed");
   }
 
+  let lineage_detail = null;
   if (gates.pin_live && pin.source_commit && head) {
-    // Strict: source_commit must be exactly HEAD^ (HEAD parent). No source_commit===HEAD alternate.
-    if (parent && pin.source_commit === parent) {
-      gates.source_commit_is_head_parent = true;
-    } else {
-      residuals.push("source_commit_not_HEAD_parent");
-      if (pin.source_commit === head) {
-        residuals.push("source_commit_equals_HEAD_rejected");
-      }
+    // source_commit must be a strict ancestor of HEAD (or equal only if rejected below).
+    const anc = git(
+      ["merge-base", "--is-ancestor", pin.source_commit, head],
+      { allowFail: true },
+    );
+    gates.source_commit_is_ancestor = anc.status === 0;
+    if (!gates.source_commit_is_ancestor) {
+      residuals.push("source_commit_not_ancestor_of_HEAD");
+    }
+    if (pin.source_commit === head) {
+      // Artifact must be a distinct commit after source; source===HEAD means no package commit yet.
+      residuals.push("source_commit_equals_HEAD_rejected");
+      gates.source_commit_is_ancestor = false;
     }
 
-    if (gates.source_commit_is_head_parent) {
-      const names = git(
-        ["diff", "--name-only", `${pin.source_commit}..HEAD`],
-        { allowFail: true },
-      ).stdout.split(/\r?\n/).filter(Boolean).map((n) => n.replace(/\\/g, "/"));
-      const allowedExact = [
-        "extensions/_shared/windows-native-addon-pin.ts",
-        "native/windows/win32-x64/manifest.json",
-        "native/windows/win32-x64/pi-astack-windows-native.node",
-      ];
-      const allowed = new Set(allowedExact);
-      const foreign = names.filter((n) => !allowed.has(n));
-      // Exact three package outputs only (set equality, not mere subset).
-      gates.range_only_package_outputs =
-        foreign.length === 0
-        && names.length === allowedExact.length
-        && allowedExact.every((n) => names.includes(n));
-      if (!gates.range_only_package_outputs) {
-        residuals.push("source_commit_range_not_only_package_outputs");
+    // Content-bound live blob shas (provenance still binds artifact/source content).
+    const liveBlobShas = {
+      "extensions/_shared/windows-native-addon-pin.ts": blobShaOfFile(pinPath),
+      "native/windows/win32-x64/manifest.json": blobShaOfFile(manifestPath),
+      "native/windows/win32-x64/pi-astack-windows-native.node": blobShaOfFile(binaryPath),
+    };
+    if (Object.values(liveBlobShas).some((s) => !s)) {
+      residuals.push("live_package_blob_hash_failed");
+    } else if (gates.source_commit_is_ancestor) {
+      artifact_commit = findArtifactCommit(head, liveBlobShas);
+      gates.artifact_commit_found = Boolean(artifact_commit);
+      if (!artifact_commit) {
+        residuals.push("artifact_commit_not_found_for_live_blobs");
+      } else {
+        // Live blobs match artifact commit by construction of findArtifactCommit.
+        gates.live_blobs_match_artifact = true;
+
+        // Per-commit lineage (rejects rollback / merge-hidden non-docs; not endpoint-only).
+        const lineage = evaluatePerCommitLineage({
+          sourceCommit: pin.source_commit,
+          artifactCommit: artifact_commit,
+          head,
+        });
+        lineage_detail = lineage.detail;
+        gates.source_commit_is_ancestor_of_artifact = lineage.detail.source_is_ancestor_of_artifact;
+        gates.artifact_commit_is_ancestor_of_head = lineage.detail.artifact_is_ancestor_of_head;
+        gates.artifact_range_only_package_outputs = lineage.detail.source_to_artifact_ok;
+        gates.post_artifact_docs_only = lineage.detail.artifact_to_head_ok;
+        for (const r of lineage.residuals) residuals.push(r);
+
+        // Derived legacy view: true only when artifact is exactly HEAD and source is HEAD^.
+        gates.source_commit_is_head_parent = Boolean(parent && pin.source_commit === parent && artifact_commit === head);
+        gates.range_only_package_outputs =
+          gates.artifact_range_only_package_outputs && artifact_commit === head;
       }
     }
   }
 
   // package_rx only verifiable via child (controller never dlopens).
-  return { gates, residuals, pin, head, parent };
+  return {
+    gates,
+    residuals,
+    pin,
+    head,
+    parent,
+    artifact_commit,
+    lineage: {
+      package_output_paths: [...PACKAGE_OUTPUT_PATHS],
+      post_artifact_allow: "docs/** only (per-commit)",
+      source_commit: pin.source_commit,
+      artifact_commit,
+      per_commit: lineage_detail,
+    },
+  };
 }
+
 
 function cleanEnv(base = process.env) {
   const e = { ...base };
@@ -2252,23 +2647,51 @@ function abrainGuardPair(before, after) {
   };
 }
 
-/** Residual classification: known (documented open items) vs blocking (must clear for accepted). */
+/** Closed deferred residuals that keep overall production accepted:false.
+ *  No env/manifest/ingestion path can clear these in this dossier revision.
+ *  Redesign of cross-host evidence is deferred until after daemon refactor.
+ */
+const OVERALL_DEFERRED_BLOCKING_RESIDUALS = Object.freeze([
+  "external_matrix_deferred_until_daemon_redesign",
+  "daemon_dcc_live_not_covered",
+  "live_matrix_stable_edge_not_covered",
+  "linux_zero_regression_not_covered",
+  "second_account_dacl_tamper_not_covered",
+  "node_22_and_server_external_evidence_not_covered",
+]);
+
+/** Residual classification: known (documented open items) vs blocking (must clear for overall accepted). */
 function classifyResiduals(list) {
   const KNOWN = new Set([
-    "binary_hash_to_dlopen_toctou_not_fully_closed",
+    // Practical threat-model documentation (NOT a global atomic-TOCTOU overall blocker).
+    "threat_model_same_token_and_admin_out_of_contract",
+    "threat_model_hash_pin_package_rx_provenance_and_corruption_detection",
     "dcc_not_covered_requires_live_daemon_lock_plus_real_git_plus_settled_kick",
     "temp_empty_abrain_observe_read_kick_closed_unavailable_or_authority_absent",
     "no_forged_authority_store",
     "self_test_only_not_production_acceptance",
-    "source_commit_not_HEAD_parent",
+    "source_commit_not_ancestor_of_HEAD",
     "source_commit_equals_HEAD_rejected",
-    "source_commit_range_not_only_package_outputs",
+    "source_commit_to_artifact_not_only_package_outputs",
+    "artifact_commit_not_found_for_live_blobs",
+    "post_artifact_non_docs_drift",
+    "live_package_blob_hash_failed",
     "production_pin_null",
     "git_worktree_dirty",
     "git_worktree_dirty_after_workers",
+    // Lineage per-commit residuals.
+    "source_commit_not_ancestor_of_artifact",
+    "artifact_commit_not_ancestor_of_HEAD",
+    "source_to_artifact_not_exactly_one_artifact_commit",
+    "source_to_artifact_rev_list_failed",
+    "artifact_to_head_rev_list_failed",
+    "artifact_commit_paths_unreadable",
+    "post_artifact_commit_paths_unreadable",
+    // Closed deferred overall gaps (honest partial; not local extension scope).
+    ...OVERALL_DEFERRED_BLOCKING_RESIDUALS,
   ]);
   const BLOCKING = new Set([
-    "binary_hash_to_dlopen_toctou_not_fully_closed",
+    // Mechanical / integrity blockers.
     "dcc_not_covered_requires_live_daemon_lock_plus_real_git_plus_settled_kick",
     "temp_empty_abrain_observe_read_kick_closed_unavailable_or_authority_absent",
     "git_worktree_dirty",
@@ -2283,22 +2706,81 @@ function classifyResiduals(list) {
     "stable_view_failed",
     "edge_failed",
     "dcc_failed",
-    "source_commit_not_HEAD_parent",
+    "source_commit_not_ancestor_of_HEAD",
     "source_commit_equals_HEAD_rejected",
-    "source_commit_range_not_only_package_outputs",
+    "source_commit_to_artifact_not_only_package_outputs",
+    "source_commit_not_ancestor_of_artifact",
+    "artifact_commit_not_ancestor_of_HEAD",
+    "source_to_artifact_not_exactly_one_artifact_commit",
+    "artifact_commit_not_found_for_live_blobs",
+    "post_artifact_non_docs_drift",
+    "live_package_blob_hash_failed",
+    // Deferred overall hard gaps — always block overall accepted in this revision.
+    ...OVERALL_DEFERRED_BLOCKING_RESIDUALS,
   ]);
   const known = [];
   const blocking = [];
   for (const r of list) {
-    if (KNOWN.has(r) || BLOCKING.has(r)) known.push(r);
-    if (BLOCKING.has(r)) blocking.push(r);
-    // Unknown residuals are treated as blocking by default.
-    if (!KNOWN.has(r) && !BLOCKING.has(r)) {
+    const dynamicKnown = r.startsWith("post_artifact_commit_non_docs:");
+    const dynamicBlocking = dynamicKnown;
+    if (KNOWN.has(r) || BLOCKING.has(r) || dynamicKnown) known.push(r);
+    if (BLOCKING.has(r) || dynamicBlocking) blocking.push(r);
+    else if (!KNOWN.has(r) && !dynamicKnown) {
+      // Unknown residuals are treated as blocking by default.
       known.push(r);
       blocking.push(r);
     }
   }
   return { known: [...new Set(known)], blocking: [...new Set(blocking)] };
+}
+
+/** Always-on deferred residuals for overall production acceptance. */
+function pushOverallDeferredResiduals(residuals) {
+  for (const r of OVERALL_DEFERRED_BLOCKING_RESIDUALS) residuals.push(r);
+  return residuals;
+}
+
+/**
+ * Local extension-scope conclusion. Pass ≠ production accepted.
+ * Covers provenance/native package/retained/DACL/stable/edge mechanical gates.
+ */
+function evaluateExtensionWindowsAdaptation({
+  gatesReady,
+  sections,
+  anyFail,
+  abrain_guard,
+  beforeAbrain,
+  afterAbrain,
+  gitCleanAfter,
+  residual_class,
+}) {
+  const localSectionPass =
+    sections.structural?.status === "pass"
+    && sections.provenance?.status === "pass"
+    && sections.retained_lock?.status === "pass"
+    && sections.dacl?.status === "pass"
+    && sections.stable_view?.status === "pass"
+    && sections.edge?.status === "pass";
+  // DCC is daemon-scoped; not required for extension_windows_adaptation pass.
+  const localMechanicalBlockers = residual_class.blocking.filter(
+    (r) => !OVERALL_DEFERRED_BLOCKING_RESIDUALS.includes(r)
+      && r !== "dcc_not_covered_requires_live_daemon_lock_plus_real_git_plus_settled_kick"
+      && r !== "temp_empty_abrain_observe_read_kick_closed_unavailable_or_authority_absent",
+  );
+  const pass =
+    gatesReady
+    && !anyFail
+    && localSectionPass
+    && abrain_guard.unchanged
+    && beforeAbrain.valid === true
+    && afterAbrain.valid === true
+    && gitCleanAfter
+    && localMechanicalBlockers.length === 0;
+  return {
+    status: !gatesReady ? "gates_failed" : anyFail ? "fail" : pass ? "pass" : "partial",
+    pass,
+    note: "extension_windows_adaptation pass is local mechanical evidence only; it is NOT overall production accepted",
+  };
 }
 
 async function mainController() {
@@ -2317,6 +2799,107 @@ async function mainController() {
     const probe = await runWorker("self-test-probe", { timeoutMs: 60_000 });
     const afterAbrain = snapshotAbrainGuard();
     const abrain_guard = abrainGuardPair(beforeAbrain, afterAbrain);
+
+    // Lineage unit negatives (pure path class) + real temp git DAG.
+    const lineage_unit = {
+      package_output_class: classifyLineagePath("extensions/_shared/windows-native-addon-pin.ts"),
+      docs_class: classifyLineagePath("docs/plans/example.md"),
+      source_class: classifyLineagePath("extensions/_shared/windows-native-addon.ts"),
+      scripts_class: classifyLineagePath("scripts/dossier-windows-native-production-acceptance.mjs"),
+      post_docs_only_ok: evaluateRangeAgainstAllowlist(
+        ["docs/plans/a.md", "docs/completions/b.md"],
+        isDocsOrEvidencePath,
+      ).ok,
+      post_source_drift_rejected: evaluateRangeAgainstAllowlist(
+        ["docs/plans/a.md", "extensions/_shared/windows-native-addon.ts"],
+        isDocsOrEvidencePath,
+      ).ok === false,
+      artifact_range_requires_exact_package_set:
+        evaluateRangeAgainstAllowlist([...PACKAGE_OUTPUT_PATHS], isPackageOutputPath).ok
+        && evaluateRangeAgainstAllowlist(
+          [...PACKAGE_OUTPUT_PATHS, "extensions/_shared/windows-native-addon.ts"],
+          isPackageOutputPath,
+        ).ok === false,
+    };
+    const lineage_unit_pass =
+      lineage_unit.package_output_class === "package_output"
+      && lineage_unit.docs_class === "docs_or_evidence"
+      && lineage_unit.source_class === "source_or_other"
+      && lineage_unit.scripts_class === "source_or_other"
+      && lineage_unit.post_docs_only_ok === true
+      && lineage_unit.post_source_drift_rejected === true
+      && lineage_unit.artifact_range_requires_exact_package_set === true;
+
+    const lineage_dag = runLineageGitDagSelfTest();
+
+    // Assert: external matrix deferred; overall never greens from local sections alone.
+    // No matrix schema / pseudo command evidence fixtures in this revision.
+    const deferredResiduals = [];
+    pushOverallDeferredResiduals(deferredResiduals);
+    const threatResiduals = [
+      "threat_model_same_token_and_admin_out_of_contract",
+      "threat_model_hash_pin_package_rx_provenance_and_corruption_detection",
+    ];
+    const residual = [
+      "self_test_only_not_production_acceptance",
+      ...threatResiduals,
+      ...deferredResiduals,
+    ];
+    const residual_class = classifyResiduals(residual);
+    const threat_not_blocking = threatResiduals.every((r) => !residual_class.blocking.includes(r));
+    const deferred_all_blocking = OVERALL_DEFERRED_BLOCKING_RESIDUALS.every((r) =>
+      residual_class.blocking.includes(r),
+    );
+    const deferred_present = OVERALL_DEFERRED_BLOCKING_RESIDUALS.every((r) => residual.includes(r));
+
+    // Simulate local sections all-pass — overall must still be false/partial.
+    const simulatedLocalPassSections = {
+      structural: { status: "pass" },
+      provenance: { status: "pass" },
+      retained_lock: { status: "pass" },
+      dacl: { status: "pass" },
+      stable_view: { status: "pass" },
+      edge: { status: "pass" },
+      dcc: { status: "not_covered" },
+    };
+    const simulatedExtension = evaluateExtensionWindowsAdaptation({
+      gatesReady: true,
+      sections: simulatedLocalPassSections,
+      anyFail: false,
+      abrain_guard: { unchanged: true },
+      beforeAbrain: { valid: true },
+      afterAbrain: { valid: true },
+      gitCleanAfter: true,
+      residual_class,
+    });
+    const simulatedOverallAccepted =
+      residual_class.blocking.length === 0
+      && simulatedLocalPassSections.dcc.status === "pass";
+    const overall_never_green_from_local =
+      simulatedExtension.pass === true
+      && simulatedOverallAccepted === false
+      && deferred_all_blocking
+      && deferred_present;
+
+    // Static surface checks: this dossier source must not contain first-matrix ingestion.
+    // Tokens are assembled so this self-test source does not embed the forbidden identifiers literally.
+    const selfPath = path.join(repoRoot, "scripts", "dossier-windows-native-production-acceptance.mjs");
+    const srcText = fs.readFileSync(selfPath, "utf8");
+    const banned = [
+      ["FIRST", "MATRIX", "SLOT", "IDS"].join("_"),
+      ["load", "First", "Matrix", "Evidence"].join(""),
+      ["evaluate", "First", "Matrix", "Evidence"].join(""),
+      ["run", "First", "Matrix", "Evidence", "SelfTest"].join(""),
+      ["validate", "Slot", "Dossier", "Schema"].join(""),
+      ["validate", "First", "Matrix", "Index", "Schema"].join(""),
+      ["windows", "native", "first", "matrix", "evidence"].join("-"),
+      ["MATRIX", "COMMAND", "SPECS"].join("_"),
+      "--" + "evidence",
+    ];
+    const no_matrix_ingestion_surface =
+      !residual.some((r) => r.startsWith("first_matrix_"))
+      && banned.every((token) => !srcText.includes(token));
+
     const body = {
       dossier_version: DOSSIER_VERSION,
       mode: "self-test",
@@ -2332,19 +2915,32 @@ async function mainController() {
         worker_pid: probe.worker_pid || null,
       },
       structural: probe.json?.structural || null,
-      residual: [
-        "self_test_only_not_production_acceptance",
-        "binary_hash_to_dlopen_toctou_not_fully_closed",
-      ],
-      residual_class: {
-        known: ["self_test_only_not_production_acceptance", "binary_hash_to_dlopen_toctou_not_fully_closed"],
-        blocking: ["binary_hash_to_dlopen_toctou_not_fully_closed"],
-      },
+      lineage_unit,
+      lineage_unit_pass,
+      lineage_dag,
+      external_matrix_deferred: deferred_present,
+      deferred_residuals_blocking: deferred_all_blocking,
+      overall_never_green_from_local,
+      no_matrix_ingestion_surface,
+      extension_windows_adaptation_simulated: simulatedExtension,
+      threat_model_residuals_not_blocking: threat_not_blocking,
+      residual,
+      residual_class,
       abrain_guard,
+      note: "self-test only; extension_windows_adaptation simulation pass is not production accepted; external matrix deferred; no first-matrix schema/command fixtures",
     };
     body.accepted = false;
+    const selfTestPass =
+      lineage_unit_pass
+      && threat_not_blocking
+      && lineage_dag.pass
+      && deferred_present
+      && deferred_all_blocking
+      && overall_never_green_from_local
+      && no_matrix_ingestion_surface
+      && body.accepted === false;
     emit(body);
-    process.exitCode = 0;
+    process.exitCode = selfTestPass ? 0 : 1;
     return;
   }
 
@@ -2353,6 +2949,7 @@ async function mainController() {
       dossier_version: DOSSIER_VERSION,
       accepted: false,
       status: "not_applicable",
+      extension_windows_adaptation: { status: "not_applicable", pass: false },
       runtime,
       residual: ["runtime_not_win32_x64"],
     });
@@ -2404,13 +3001,20 @@ async function mainController() {
     && gateEval.gates.binary_tracked
     && gateEval.gates.artifacts_on_disk
     && gateEval.gates.pin_live
-    && gateEval.gates.source_commit_is_head_parent
-    && gateEval.gates.range_only_package_outputs;
+    && gateEval.gates.source_commit_is_ancestor
+    && gateEval.gates.source_commit_is_ancestor_of_artifact
+    && gateEval.gates.artifact_commit_is_ancestor_of_head
+    && gateEval.gates.artifact_commit_found
+    && gateEval.gates.artifact_range_only_package_outputs
+    && gateEval.gates.post_artifact_docs_only
+    && gateEval.gates.live_blobs_match_artifact;
 
-  // TOCTOU residual remains: same-fd post-dlopen rehash + package_rx mitigate but do NOT fully close.
-  // No native bootstrap atomic guarantee; ancestor-delete-handles and same-token/admin residual open.
-  // Provenance section may still pass package_rx + pin checks; WIN-BINARY must NOT auto-claim complete.
-  residuals.push("binary_hash_to_dlopen_toctou_not_fully_closed");
+  // Practical threat-model evidence (known non-secret residuals; NOT overall atomic-TOCTOU blocker).
+  residuals.push("threat_model_same_token_and_admin_out_of_contract");
+  residuals.push("threat_model_hash_pin_package_rx_provenance_and_corruption_detection");
+
+  // Closed deferred overall gaps — always present; no env/manifest switch clears them.
+  pushOverallDeferredResiduals(residuals);
 
   if (!gatesReady) {
     const afterAbrain = snapshotAbrainGuard();
@@ -2419,10 +3023,22 @@ async function mainController() {
       residuals.push("live_abrain_guard_invalid_or_changed");
     }
     const uniqueResiduals = [...new Set(residuals)];
+    const residual_class = classifyResiduals(uniqueResiduals);
+    const extension_windows_adaptation = evaluateExtensionWindowsAdaptation({
+      gatesReady: false,
+      sections,
+      anyFail: sections.structural?.status === "fail",
+      abrain_guard,
+      beforeAbrain,
+      afterAbrain,
+      gitCleanAfter: worktreeClean(),
+      residual_class,
+    });
     emit({
       dossier_version: DOSSIER_VERSION,
       accepted: false,
-      status: "gates_failed",
+      status: "partial",
+      extension_windows_adaptation,
       runtime,
       root_source: liveAbrainRootSource,
       gates: gateEval.gates,
@@ -2432,11 +3048,13 @@ async function mainController() {
       },
       head: gateEval.head,
       head_parent: gateEval.parent,
+      artifact_commit: gateEval.artifact_commit,
+      lineage: gateEval.lineage,
       sections,
       residual: uniqueResiduals,
-      residual_class: classifyResiduals(uniqueResiduals),
+      residual_class,
       abrain_guard,
-      note: "same_fd_post_dlopen_rehash is structural/provenance evidence only; TOCTOU residual remains (no native bootstrap atomic guarantee; ancestor-delete-handles + same-token/admin open); WIN-BINARY remains open while binary_hash_to_dlopen_toctou_not_fully_closed; source_commit must be HEAD^ with exact 3 package outputs",
+      note: "overall production accepted is false/partial while deferred residuals remain; extension_windows_adaptation is a separate local conclusion and is not production accepted; artifact lineage binds pin/manifest/binary content; docs/evidence commits after artifact are allowed; no first-matrix external evidence ingestion in this revision",
     });
     process.exitCode = 0;
     return;
@@ -2579,7 +3197,8 @@ async function mainController() {
     }
   }
 
-  // After all workers: git clean recheck. Worker writing the repo ⇒ accepted false.
+
+  // After all workers: git clean recheck.
   if (!worktreeClean()) {
     residuals.push("git_worktree_dirty_after_workers");
   }
@@ -2592,39 +3211,34 @@ async function mainController() {
   if (!abrain_guard.unchanged) residuals.push("live_abrain_mutated");
 
   const anyFail = Object.values(sections).some((s) => s.status === "fail");
-  const dccNotCovered = sections.dcc?.status === "not_covered";
-  // accepted:true only when every criterion section is full pass (DCC covered),
-  // abrain guard valid+unchanged, git clean after workers, AND no open residuals (incl. TOCTOU).
-  // Current honest state: binary_hash_to_dlopen_toctou_not_fully_closed always present ⇒ accepted false.
-  // Provenance section may pass package_rx; that does NOT auto-complete WIN-BINARY.
-  // Temp ABRAIN_ROOT / fixture sections are NOT live matrix coverage.
   const uniqueResiduals = [...new Set(residuals)];
-  const residual_class = classifyResiduals(uniqueResiduals);
-  const gitCleanAfter = !uniqueResiduals.includes("git_worktree_dirty_after_workers");
-  const accepted =
-    !anyFail
-    && abrain_guard.unchanged
-    && beforeAbrain.valid === true
-    && afterAbrain.valid === true
-    && gitCleanAfter
-    && residual_class.blocking.length === 0
-    && uniqueResiduals.length === 0
-    && sections.provenance?.status === "pass"
-    && sections.retained_lock?.status === "pass"
-    && sections.dacl?.status === "pass"
-    && sections.stable_view?.status === "pass"
-    && sections.edge?.status === "pass"
-    && sections.dcc?.status === "pass";
+  // Re-assert deferred residuals cannot be dropped by workers/env.
+  pushOverallDeferredResiduals(uniqueResiduals);
+  const finalResiduals = [...new Set(uniqueResiduals)];
+  const residual_class = classifyResiduals(finalResiduals);
+  const gitCleanAfter = !finalResiduals.includes("git_worktree_dirty_after_workers");
 
-  let status = "complete";
-  if (anyFail) status = "failed";
-  else if (dccNotCovered || uniqueResiduals.length) status = "partial";
-  else if (accepted) status = "accepted";
+  const extension_windows_adaptation = evaluateExtensionWindowsAdaptation({
+    gatesReady: true,
+    sections,
+    anyFail,
+    abrain_guard,
+    beforeAbrain,
+    afterAbrain,
+    gitCleanAfter,
+    residual_class,
+  });
+
+  // Overall production accepted: intentionally false while deferred residuals exist.
+  // No env/manifest/ingestion switch. Extension pass must not imply overall accepted.
+  const accepted = false;
+  const status = anyFail && !extension_windows_adaptation.pass ? "failed" : "partial";
 
   emit({
     dossier_version: DOSSIER_VERSION,
     accepted,
     status,
+    extension_windows_adaptation,
     runtime,
     root_source: liveAbrainRootSource,
     gates: gateEval.gates,
@@ -2634,12 +3248,14 @@ async function mainController() {
     },
     head: gateEval.head,
     head_parent: gateEval.parent,
+    artifact_commit: gateEval.artifact_commit,
+    lineage: gateEval.lineage,
     sections,
-    residual: uniqueResiduals,
+    residual: finalResiduals,
     residual_class,
     abrain_guard,
     git_clean_after_workers: gitCleanAfter,
-    note: "exit 0 means dossier execution completed; accepted:true only when all Windows criteria covered including DCC and residuals empty; same_fd_post_dlopen_rehash may pass (loader contract + success path) but binary_hash_to_dlopen_toctou_not_fully_closed remains (no native bootstrap atomicity; ancestor-delete-handles + same-token/admin residual) so accepted:false; WIN-BINARY not auto-claimed; temp fixtures are not live matrix; source_commit must be HEAD^ with exact 3 package outputs",
+    note: "exit 0 means dossier execution completed; accepted is overall production accepted and stays false while closed deferred residuals remain (daemon DCC/live matrix/Linux/second-account/Node22+Server); extension_windows_adaptation is a separate local conclusion and must not be called production accepted; threat-model residuals document same-token/admin out-of-contract; docs commits after artifact do not fail read-only revalidation; WIN-BINARY not auto-claimed; temp fixtures are not live matrix; no first-matrix external evidence ingestion in this revision",
   });
   process.exitCode = 0;
 }

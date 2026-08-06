@@ -9,13 +9,23 @@
  *
  * Pure TS cannot fully close hash→dlopen TOCTOU. Held binary fd is hashed before
  * load and re-hashed from the same fd after dlopen (exact manifest.binary_sha256),
- * then fd/path identity + self-identity. No path re-read after open. Still no
- * native bootstrap atomic guarantee; ancestor-delete-handles and same-token/admin
- * malice remain residual (WIN-BINARY-PROVENANCE). Production package_rx on the
- * fixed package directory + binary + manifest closes the cross-token rewrite
- * boundary after successful dlopen + self-identity (fail-closed
- * WINDOWS_NATIVE_ADDON_PACKAGE_ACL_INVALID; no raw SID/path leak). Test options
- * loader does not force package ACL. No PowerShell hot path.
+ * then fd/path identity + self-identity. No path re-read after open.
+ *
+ * Threat boundary (loader contract, user-confirmed):
+ * - Same TokenUser + administrator malicious rewrite is OUT of contract (DllMain /
+ *   napi_register_module side effects run before any post-dlopen JS check).
+ * - Other principals: fail-closed (package_rx + path/ACL gates).
+ * - hash / pin / package_rx provide provenance binding and corruption detection,
+ *   not a same-token race proof. No small native bootstrap.
+ *
+ * Production package_rx on the fixed package directory + binary + manifest closes
+ * the cross-token rewrite boundary after successful dlopen + self-identity
+ * (fail-closed WINDOWS_NATIVE_ADDON_PACKAGE_ACL_INVALID; no raw SID/path leak).
+ * Test options loader does not force package ACL. No PowerShell hot path.
+ *
+ * Production zero-arg load is a process-level successful-load singleton
+ * (globalThis; jiti multi-copy safe). Failures are never cached. Test options
+ * loader does not touch the production singleton.
  *
  * Provenance pin constants live in windows-native-addon-pin.ts (package output;
  * not source-closure). Production pin remains null until package command writes
@@ -310,11 +320,20 @@ export interface WindowsNativeAddonLoadResult {
   readonly addon: WindowsNativeAddonModuleV1;
 }
 
+/**
+ * File identity for best-effort TOCTOU guards (fd/path same-object checks).
+ *
+ * - `dev` / `ino` are bigint (lossless; never Number-truncated).
+ * - `size` is a non-negative safe integer (binary ceiling keeps it safe).
+ * - `mtimeMs` is optional diagnostic only — NOT part of security equality.
+ * Error `detail` snapshots must JSON-serialize (bigint → decimal string).
+ */
 export interface WindowsNativeAddonFileIdentity {
-  readonly dev: number;
-  readonly ino: number;
+  readonly dev: bigint;
+  readonly ino: bigint;
   readonly size: number;
-  readonly mtimeMs: number;
+  /** Diagnostic only; not used by identityEquals. */
+  readonly mtimeMs?: number;
   isFile(): boolean;
 }
 
@@ -964,13 +983,98 @@ export function readProtectedFile(
   }
 }
 
+/** Process-level production successful-load cache (jiti multi-copy safe). */
+const PRODUCTION_LOAD_STATE_KEY = Symbol.for("pi-astack.windowsNativeAddon.productionLoad.v1");
+
+type ProductionLoadState = {
+  /** Only successful zero-arg production loads are retained. Failures stay null. */
+  loaded: WindowsNativeAddonLoadResult | null;
+  /** Observable: how many successful zero-arg loads were performed (not cache hits). */
+  successfulLoadCount: number;
+  /** Observable: how many zero-arg load attempts ran the full load path (excludes pure cache hits). */
+  attemptCount: number;
+};
+
+function productionLoadState(): ProductionLoadState {
+  const g = globalThis as Record<PropertyKey, unknown>;
+  const existing = g[PRODUCTION_LOAD_STATE_KEY] as ProductionLoadState | undefined;
+  if (
+    existing
+    && typeof existing === "object"
+    && Object.prototype.hasOwnProperty.call(existing, "loaded")
+    && typeof (existing as ProductionLoadState).successfulLoadCount === "number"
+    && typeof (existing as ProductionLoadState).attemptCount === "number"
+  ) {
+    return existing;
+  }
+  const created: ProductionLoadState = { loaded: null, successfulLoadCount: 0, attemptCount: 0 };
+  g[PRODUCTION_LOAD_STATE_KEY] = created;
+  return created;
+}
+
+/**
+ * Production zero-arg load requires the full current known capability set so a
+ * schema-valid incomplete object is never process-cached as a successful production load.
+ */
+function assertProductionCapabilitiesComplete(capabilities: readonly string[]): void {
+  const missing = WINDOWS_NATIVE_ADDON_KNOWN_CAPABILITIES.filter((c) => !capabilities.includes(c));
+  if (missing.length > 0) {
+    fail(
+      "WINDOWS_NATIVE_ADDON_CAPABILITY_MISMATCH",
+      "production load requires all known capabilities; refusing incomplete production cache",
+      { missing, actual: [...capabilities], required: [...WINDOWS_NATIVE_ADDON_KNOWN_CAPABILITIES] },
+    );
+  }
+}
+
 /**
  * Production entry: zero parameters. Uses process defaults + production pin.
  * After dlopen + self-identity, verifies package dir/binary/manifest package_rx.
- * All seams live on `__TEST.loadWindowsNativeAddon(options)` (test-hooks gated).
+ * Successful loads are process-level singleton-cached (globalThis); failures are
+ * never cached so a later pin/install in-process can retry. Production contract
+ * requires all four known capabilities before caching. All seams live on
+ * `__TEST.loadWindowsNativeAddon(options)` (test-hooks gated; does not use or
+ * pollute the production singleton).
  */
 export function loadWindowsNativeAddon(): WindowsNativeAddonLoadResult {
-  return loadWindowsNativeAddonWithOptions({}, { enforcePackageAcl: true });
+  const state = productionLoadState();
+  if (state.loaded) return state.loaded;
+  state.attemptCount += 1;
+  // Do not cache failures — only assign after a successful return path with full caps.
+  const loaded = loadWindowsNativeAddonWithOptions({}, { enforcePackageAcl: true });
+  assertProductionCapabilitiesComplete(loaded.capabilities);
+  state.loaded = loaded;
+  state.successfulLoadCount += 1;
+  return loaded;
+}
+
+/**
+ * Test-hooks gated: drop process-level production successful-load singleton.
+ * Production consumers' test APIs may call this; production runtime must not.
+ */
+export function resetWindowsNativeAddonProductionLoadSingleton(): void {
+  assertWindowsNativeAddonTestHooks("resetWindowsNativeAddonProductionLoadSingleton");
+  const state = productionLoadState();
+  state.loaded = null;
+  // Counters are intentionally retained across reset so tests can observe retry.
+}
+
+/** Test-hooks gated: whether the process production successful-load singleton is held. */
+export function hasWindowsNativeAddonProductionLoadSingleton(): boolean {
+  assertWindowsNativeAddonTestHooks("hasWindowsNativeAddonProductionLoadSingleton");
+  return productionLoadState().loaded != null;
+}
+
+/** Test-hooks gated: successful zero-arg load count (excludes cache hits). */
+export function getWindowsNativeAddonProductionSuccessfulLoadCount(): number {
+  assertWindowsNativeAddonTestHooks("getWindowsNativeAddonProductionSuccessfulLoadCount");
+  return productionLoadState().successfulLoadCount;
+}
+
+/** Test-hooks gated: zero-arg full-path attempt count (excludes pure cache hits). */
+export function getWindowsNativeAddonProductionLoadAttemptCount(): number {
+  assertWindowsNativeAddonTestHooks("getWindowsNativeAddonProductionLoadAttemptCount");
+  return productionLoadState().attemptCount;
 }
 
 function loadWindowsNativeAddonWithOptions(
@@ -1278,12 +1382,14 @@ export const __TEST = Object.freeze({
   loadWindowsNativeAddon(options: WindowsNativeAddonLoadOptions = {}): WindowsNativeAddonLoadResult {
     assertWindowsNativeAddonTestHooks("__TEST.loadWindowsNativeAddon");
     // Options / temp-package path never forces package_rx (install owns ACL).
+    // Does not read or write the process-level production singleton.
     return loadWindowsNativeAddonWithOptions(options, { enforcePackageAcl: false });
   },
   /**
    * Test-hooks gated: load with package_rx ACL enforce (production gate) without
    * using the zero-arg production pin path. Used by package smoke on temp copies
    * so live package binaries are never destructively rewritten.
+   * Does not read or write the process-level production singleton.
    */
   loadWindowsNativeAddonEnforcingPackageAcl(
     options: WindowsNativeAddonLoadOptions = {},
@@ -1291,19 +1397,41 @@ export const __TEST = Object.freeze({
     assertWindowsNativeAddonTestHooks("__TEST.loadWindowsNativeAddonEnforcingPackageAcl");
     return loadWindowsNativeAddonWithOptions(options, { enforcePackageAcl: true });
   },
+  /** Drop process-level production successful-load singleton. Requires test hooks. */
+  resetProductionLoadSingleton(): void {
+    resetWindowsNativeAddonProductionLoadSingleton();
+  },
+  /** Observe whether production successful-load singleton is held. Requires test hooks. */
+  hasProductionLoadSingleton(): boolean {
+    return hasWindowsNativeAddonProductionLoadSingleton();
+  },
+  /** Successful zero-arg load count (excludes cache hits). Requires test hooks. */
+  productionSuccessfulLoadCount(): number {
+    return getWindowsNativeAddonProductionSuccessfulLoadCount();
+  },
+  /** Zero-arg full-path attempt count (excludes pure cache hits). Requires test hooks. */
+  productionLoadAttemptCount(): number {
+    return getWindowsNativeAddonProductionLoadAttemptCount();
+  },
   validateWindowsNativeAddonManifest,
   validateWindowsNativeAddonCapabilities,
   resolveWindowsNativeAddonPaths,
   resolveWindowsNativeAddonPackageRoot,
   isNodeVersionAtLeast,
   defaultFs,
+  /** JSON-safe identity snapshot (bigint → decimal string). */
+  identitySnapshot,
+  identityEquals,
+  /** Production zero-arg requires all known capabilities before cache. */
+  assertProductionCapabilitiesComplete,
 });
 
 function defaultFs(): WindowsNativeAddonFs {
   return {
     existsSync: (filePath) => fs.existsSync(filePath),
     readFileSync: (filePath) => fs.readFileSync(filePath),
-    statSync: (filePath) => toFileIdentity(fs.statSync(filePath)),
+    // bigint:true — never Number-truncate dev/ino (Windows FILE_ID can exceed MAX_SAFE_INTEGER).
+    statSync: (filePath) => toFileIdentity(fs.statSync(filePath, { bigint: true })),
     lstatSync: (filePath) => {
       const st = fs.lstatSync(filePath);
       return {
@@ -1314,17 +1442,18 @@ function defaultFs(): WindowsNativeAddonFs {
     },
     realpathSync: (filePath) => fs.realpathSync(filePath),
     openSync: (filePath, flags) => fs.openSync(filePath, flags),
-    fstatSync: (fd) => toFileIdentity(fs.fstatSync(fd)),
+    fstatSync: (fd) => toFileIdentity(fs.fstatSync(fd, { bigint: true })),
     readFileFdSync: (fd) => {
       // Always positional (pread-equivalent) so fd cursor is irrelevant across rehash.
-      const st = fs.fstatSync(fd);
-      if (st.size > WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES) {
+      const st = fs.fstatSync(fd, { bigint: true });
+      if (st.size > BigInt(WINDOWS_NATIVE_ADDON_BINARY_CEILING_BYTES)) {
         throw Object.assign(new Error("binary exceeds hard ceiling"), { code: "EFBIG" });
       }
-      const buf = Buffer.allocUnsafe(st.size);
+      const size = Number(st.size);
+      const buf = Buffer.allocUnsafe(size);
       let offset = 0;
-      while (offset < st.size) {
-        const n = fs.readSync(fd, buf, offset, st.size - offset, offset);
+      while (offset < size) {
+        const n = fs.readSync(fd, buf, offset, size - offset, offset);
         if (n <= 0) break;
         offset += n;
       }
@@ -1336,12 +1465,25 @@ function defaultFs(): WindowsNativeAddonFs {
   };
 }
 
-function toFileIdentity(st: fs.Stats): WindowsNativeAddonFileIdentity {
+/** Normalize Stats/BigIntStats into lossless FileIdentity (dev/ino as bigint). */
+function toFileIdentity(st: fs.Stats | fs.BigIntStats): WindowsNativeAddonFileIdentity {
+  const dev = typeof st.dev === "bigint" ? st.dev : BigInt(st.dev);
+  const ino = typeof st.ino === "bigint" ? st.ino : BigInt(st.ino);
+  const sizeBig = typeof st.size === "bigint" ? st.size : BigInt(st.size);
+  if (sizeBig < 0n || sizeBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw Object.assign(new Error("file size is not a non-negative safe integer"), { code: "EOVERFLOW" });
+  }
+  const size = Number(sizeBig);
+  // mtimeMs is diagnostic only (may be fractional); never used in identityEquals.
+  const mtimeMs =
+    typeof (st as fs.Stats).mtimeMs === "number" && Number.isFinite((st as fs.Stats).mtimeMs)
+      ? (st as fs.Stats).mtimeMs
+      : undefined;
   return {
-    dev: st.dev,
-    ino: st.ino,
-    size: st.size,
-    mtimeMs: st.mtimeMs,
+    dev,
+    ino,
+    size,
+    mtimeMs,
     isFile: () => st.isFile(),
   };
 }
@@ -1569,12 +1711,25 @@ function assertBinaryIdentityUnchanged(
   }
 }
 
+/**
+ * Security identity equality: dev + ino + size only.
+ * mtime is never a security identity guarantee (diagnostic at most).
+ */
 function identityEquals(a: WindowsNativeAddonFileIdentity, b: WindowsNativeAddonFileIdentity): boolean {
-  return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+  return a.dev === b.dev && a.ino === b.ino && a.size === b.size;
 }
 
-function identitySnapshot(id: WindowsNativeAddonFileIdentity): Record<string, number> {
-  return { dev: id.dev, ino: id.ino, size: id.size, mtimeMs: id.mtimeMs };
+/** JSON-serializable identity snapshot (bigint fields as decimal strings). */
+function identitySnapshot(id: WindowsNativeAddonFileIdentity): Record<string, string | number> {
+  const snap: Record<string, string | number> = {
+    dev: id.dev.toString(),
+    ino: id.ino.toString(),
+    size: id.size,
+  };
+  if (typeof id.mtimeMs === "number" && Number.isFinite(id.mtimeMs)) {
+    snap.mtimeMs = id.mtimeMs;
+  }
+  return snap;
 }
 
 function coerceAddonModule(

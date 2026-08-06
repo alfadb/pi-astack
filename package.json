@@ -119,6 +119,7 @@
     "smoke:windows-native-retained-lock": "node scripts/smoke-windows-native-retained-lock.mjs",
     "smoke:windows-native-durable-dacl": "node scripts/smoke-windows-native-durable-dacl.mjs",
     "smoke:windows-native-package": "node scripts/smoke-windows-native-package.mjs",
+    "smoke:windows-native-load-canary": "node scripts/smoke-windows-native-load-canary.mjs",
     "dossier:windows-native-production-acceptance": "node scripts/dossier-windows-native-production-acceptance.mjs",
     "smoke:retained-directory-lock": "node scripts/smoke-retained-directory-lock.mjs",
     "smoke:context7": "node scripts/smoke-context7.mjs",

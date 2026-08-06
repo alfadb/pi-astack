@@ -44,8 +44,10 @@ import {
   readProtectedFile,
   verifyProtectedPath,
   WindowsNativeAddonError,
+  WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_TEMPDIR_V1,
   WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1,
   WINDOWS_NATIVE_ADDON_CAPABILITY_PROTECTED_DACL_V1,
+  WINDOWS_NATIVE_ADDON_CAPABILITY_RETAINED_DIRECTORY_LOCK_V1,
   type WindowsNativeAddonModuleV1,
 } from "../_shared/windows-native-addon";
 import {
@@ -320,36 +322,33 @@ export interface SedimentWorkerCanonicalControlDeps {
   windowsDccNativeAddon?: WindowsNativeAddonModuleV1;
 }
 
-/**
- * Production Windows DCC addon cache. Only successful loads are cached.
- * pin=null / missing binary / missing capabilities → return null without caching
- * unavailable (next call re-attempts). Never throws out of resolve paths.
- */
-type ProductionWindowsDccAddonCache =
-  | { readonly state: "unset" }
-  | { readonly state: "loaded"; readonly addon: WindowsNativeAddonModuleV1 };
-
-let productionWindowsDccAddonCache: ProductionWindowsDccAddonCache = { state: "unset" };
-
 /** AsyncLocalStorage carries test-injected addon through kick/observe async trees. */
 const windowsDccAddonAls = new AsyncLocalStorage<WindowsNativeAddonModuleV1>();
 
+/**
+ * Production Windows DCC addon resolve.
+ * Uses the shared process-level successful-load singleton in windows-native-addon
+ * (globalThis). Failures / missing capabilities return null without caching
+ * unavailable (next call re-attempts). Never throws out of resolve paths.
+ */
 function getProductionWindowsDccAddon(): WindowsNativeAddonModuleV1 | null {
-  if (productionWindowsDccAddonCache.state === "loaded") {
-    return productionWindowsDccAddonCache.addon;
-  }
   if (process.platform !== "win32") return null;
   try {
+    // Shared process-level successful-load singleton (only success is cached upstream).
+    // Production load contract already requires all four known capabilities; incomplete
+    // loads fail closed and are never cached. Re-check here for defense in depth.
     const loaded = loadWindowsNativeAddon();
     const caps = loaded.capabilities;
-    if (
-      !caps.includes(WINDOWS_NATIVE_ADDON_CAPABILITY_PROTECTED_DACL_V1)
-      || !caps.includes(WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1)
-    ) {
-      // Missing capabilities: do not cache unavailable.
+    const required = [
+      WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_TEMPDIR_V1,
+      WINDOWS_NATIVE_ADDON_CAPABILITY_ATOMIC_FILE_V1,
+      WINDOWS_NATIVE_ADDON_CAPABILITY_PROTECTED_DACL_V1,
+      WINDOWS_NATIVE_ADDON_CAPABILITY_RETAINED_DIRECTORY_LOCK_V1,
+    ];
+    if (!required.every((c) => caps.includes(c))) {
+      // Missing capabilities: do not treat as a permanent process failure.
       return null;
     }
-    productionWindowsDccAddonCache = { state: "loaded", addon: loaded.addon };
     return loaded.addon;
   } catch {
     // pin null, hash mismatch, missing artifact, arch/node mismatch, etc.
@@ -361,7 +360,14 @@ function getProductionWindowsDccAddon(): WindowsNativeAddonModuleV1 | null {
 function resolveWindowsDccAddon(): WindowsNativeAddonModuleV1 | null {
   if (process.platform !== "win32") return null;
   const injected = windowsDccAddonAls.getStore();
-  if (injected) return injected;
+  if (injected) {
+    // Re-check at resolve time: after PI_ASTACK_ENABLE_TEST_HOOKS is withdrawn,
+    // never keep using the fake ALS injection.
+    if (process.env.PI_ASTACK_ENABLE_TEST_HOOKS !== "1") {
+      return getProductionWindowsDccAddon();
+    }
+    return injected;
+  }
   return getProductionWindowsDccAddon();
 }
 

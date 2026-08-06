@@ -3,13 +3,14 @@
  * Platform-neutral retained directory lock production adapter.
  *
  * - Linux: delegates to retained-directory-ofd-lock (full OFD semantics preserved).
- * - Windows: production loadWindowsNativeAddon singleton + tryAcquireRetainedDirectoryLock;
+ * - Windows: process-level production loadWindowsNativeAddon successful-load singleton
+ *   (shared across retained/stable/edge/DCC consumers) + tryAcquireRetainedDirectoryLock;
  *   native null → BUSY; errors map to RetainedDirectoryLockError; never falls back to TS lockfile.
  * - Other platforms: unsupported (fail-closed).
  *
- * Production pin for the Windows addon is currently null → zero-parameter production load
- * fails closed. Adapter is wired at non-fd consumers; actual Windows production still
- * fail-closed until provenance pin lands. No settings/~/.abrain changes.
+ * Production zero-arg load is cached only on success inside windows-native-addon
+ * (globalThis). Failures are never cached. Test override is local and does not
+ * pollute the process production singleton.
  *
  * Test seam is explicit `retainedDirectoryLockTestApi` (not env path / not production-mutable).
  * Windows addon override requires PI_ASTACK_ENABLE_TEST_HOOKS=1.
@@ -22,11 +23,12 @@ import {
   type RetainedDirectoryOfdLock,
 } from "./retained-directory-ofd-lock";
 import {
+  hasWindowsNativeAddonProductionLoadSingleton,
   loadWindowsNativeAddon,
   mapRetainedDirectoryLockError,
+  resetWindowsNativeAddonProductionLoadSingleton,
   tryAcquireRetainedDirectoryLock,
   WindowsNativeAddonError,
-  type WindowsNativeAddonLoadResult,
   type WindowsNativeAddonModuleV1,
   type WindowsNativeRetainedDirectoryLockIdentity,
   type WindowsNativeRetainedDirectoryLockLease,
@@ -66,30 +68,30 @@ export class RetainedDirectoryLockError extends Error {
   }
 }
 
-/** Successful Windows production load cache (singleton). Failures are not cached. */
-let windowsAddonSingleton: WindowsNativeAddonLoadResult | null = null;
-
 /**
  * __TEST-only Windows addon override for acquireRetainedDirectoryLock (temp package).
  * Production never sets this; zero-arg production load remains the only production path.
- * Install requires PI_ASTACK_ENABLE_TEST_HOOKS=1.
+ * Install requires PI_ASTACK_ENABLE_TEST_HOOKS=1. Does not write the process production singleton.
  */
 let testWindowsAddonOverride: WindowsNativeAddonModuleV1 | null = null;
 
 function loadWindowsAddonProduction(): WindowsNativeAddonModuleV1 {
-  if (windowsAddonSingleton) return windowsAddonSingleton.addon;
   try {
-    const loaded = loadWindowsNativeAddon();
-    windowsAddonSingleton = loaded;
-    return loaded.addon;
+    // Process-level successful-load singleton lives in windows-native-addon (globalThis).
+    // Do not cache failures here — loadWindowsNativeAddon never caches failures either.
+    return loadWindowsNativeAddon().addon;
   } catch (error) {
-    // Do not cache failures — next call re-attempts production load.
     throw mapWindowsToRetainedError(error);
   }
 }
 
 function resolveWindowsAddonForAcquire(): WindowsNativeAddonModuleV1 {
-  if (testWindowsAddonOverride) return testWindowsAddonOverride;
+  if (testWindowsAddonOverride) {
+    // Re-check at resolve time so unsetting PI_ASTACK_ENABLE_TEST_HOOKS mid-process
+    // deauthorizes the fake and never uses it after hooks are withdrawn.
+    assertRetainedLockTestHooks("testWindowsAddonOverride");
+    return testWindowsAddonOverride;
+  }
   return loadWindowsAddonProduction();
 }
 
@@ -307,14 +309,14 @@ export const retainedDirectoryLockTestApi = Object.freeze({
     assertRetainedLockTestHooks("installWindowsAddonOverride");
     testWindowsAddonOverride = addon;
   },
-  /** Drop production Windows addon singleton so the next production load re-runs. Requires test hooks. */
+  /** Drop process-level production Windows addon singleton so the next production load re-runs. Requires test hooks. */
   resetWindowsAddonSingleton(): void {
     assertRetainedLockTestHooks("resetWindowsAddonSingleton");
-    windowsAddonSingleton = null;
+    resetWindowsNativeAddonProductionLoadSingleton();
   },
-  /** Observe whether the production singleton is currently held (test diagnostics). Requires test hooks. */
+  /** Observe whether the process-level production singleton is currently held (test diagnostics). Requires test hooks. */
   hasWindowsAddonSingleton(): boolean {
     assertRetainedLockTestHooks("hasWindowsAddonSingleton");
-    return windowsAddonSingleton != null;
+    return hasWindowsNativeAddonProductionLoadSingleton();
   },
 });

@@ -179,11 +179,15 @@ function writeFixturePackage(root, { binaryBytes = Buffer.from("fake-binary\n"),
 }
 
 function toIdentity(st) {
+  // Mirror production FileIdentity: bigint dev/ino (no Number truncation); mtime diagnostic only.
+  const dev = typeof st.dev === "bigint" ? st.dev : BigInt(st.dev);
+  const ino = typeof st.ino === "bigint" ? st.ino : BigInt(st.ino);
+  const size = typeof st.size === "bigint" ? Number(st.size) : st.size;
   return {
-    dev: st.dev,
-    ino: st.ino,
-    size: st.size,
-    mtimeMs: st.mtimeMs,
+    dev,
+    ino,
+    size,
+    mtimeMs: typeof st.mtimeMs === "number" ? st.mtimeMs : undefined,
     isFile: () => st.isFile(),
   };
 }
@@ -201,7 +205,7 @@ function realFsSeam(overrides = {}) {
     },
     statSync: (p) => {
       ops.push({ op: "statSync", path: p });
-      return toIdentity(fs.statSync(p));
+      return toIdentity(fs.statSync(p, { bigint: true }));
     },
     lstatSync: (p) => {
       ops.push({ op: "lstatSync", path: p });
@@ -222,7 +226,7 @@ function realFsSeam(overrides = {}) {
     },
     fstatSync: (fd) => {
       ops.push({ op: "fstatSync", fd });
-      return toIdentity(fs.fstatSync(fd));
+      return toIdentity(fs.fstatSync(fd, { bigint: true }));
     },
     readFileFdSync: (fd) => {
       ops.push({ op: "readFileFdSync", fd });
@@ -428,6 +432,7 @@ passed += 1;
     "scripts/smoke-dcc-worker-control.mjs",
     "scripts/smoke-edge-protocol-shadow-windows.mjs",
     "scripts/smoke-edge-protocol-shadow.mjs",
+    "scripts/smoke-windows-native-load-canary.mjs",
   ]);
   const strictOffenders = [];
   for (const file of walkCode(repoRoot)) {
