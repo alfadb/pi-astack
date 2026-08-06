@@ -32,16 +32,18 @@ Historical partial (older artifact identity; do not rewrite): [2026-08-06-window
 
 | Field | Value |
 |---|---|
-| source commit | `bbe558946347c469f74749944ebb8945b9335ded` |
-| artifact commit | `058b40544e69d7ef10f4164d1487a87f20b25783` |
-| manifest sha256 | `2baeeb6153e554d1b5c912c848ec7fbe7444826aef4896116f20592f7f1e32f1` |
-| binary sha256 | `b698dca25a3baaa35ca2cb07f75d6773c326c4e8b3ce0af15d782323644a576e` |
-| build_id | `11806eb6e283cca426f99064a0275c6c86f75390f3bb9ccd7f72b0281e3c14a8` |
-| source_tree sha256 | `a8c300d4891793325844a2d5fa5f45b5b92581af2e6ed942d6637c0e1cf68e20` |
+| source commit | `fc1364ec20f00375534aa7b5738fa79388a7359e` |
+| artifact commit | `fc97429fc9dd46455a8f0dd23fd5e22bea2b59db` |
+| manifest sha256 | `ccde3967d28801c8bd707ff61cc3ff2658f04052f43ac880563950be7d655278` |
+| binary sha256 | `f95ee212a16ea246e338064cf334d6c1588c66c994117c9c39dedeacccd0bf46` |
+| build_id | `f84854a9a21281ef56ccc3f74f1cc19ed003d8663310d9bdd1f0877787a038c0` |
+| source_tree sha256 | `205b5eaf6df308ff7dcbaeacef8674185825d1e5f2aa38db53a72ff77bc1bb5f` |
 | toolchain_id | `b937bbdab556e3df8ce518def79c0c6bd75fd0d163453040b8290f4c3db04c02` (unchanged) |
 | pin | live (non-null manifest pin + source_commit pin; package installed `package_rx`) |
 
-Historical note only: earlier partial record used artifact `8823e47f…` / source `f0aac173…`. That identity is **not** current.
+Integration note: `origin/main` `3315f57` dispatch profile removal was merged into source `fc1364ec…`. Core dispatch/workflow tests passed. workflow-tools Windows symlink **EPERM×4** is an environment limitation, not a functional regression. Post-merge production dual_clean_match / native 21 / clippy / package_rx and full focused smokes passed; dossier extension pass / overall partial; live abrain aggregate unchanged.
+
+Historical note only: prior extension-record identity was artifact `058b4054…` / source `bbe55894…` (now historical). Earlier partial record used artifact `8823e47f…` / source `f0aac173…` (do **not** rewrite). Those identities are **not** current.
 
 ## Build / package evidence
 
