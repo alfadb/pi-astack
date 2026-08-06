@@ -13,8 +13,9 @@
  *    the snapshot is appended after already-composed rule injection content.
  * 5. The multi-vendor roster and per-model hints remain selectable/rendered.
  * 6. The live config recommends Grok for deterministic execution; deepseek-v4-flash
- *    is a bounded mid-level execution route under precise specs + adversarial acceptance;
- *    every other curated non-GPT model remains judgment-only.
+ *    is a T0/flagship bounded mid-level execution route under precise specs + adversarial
+ *    acceptance (no auto hot-path/execution fallback); deepseek-v4-pro is absent from live
+ *    providers/hints/tiers; every other curated non-GPT model remains judgment-only.
  */
 
 import { createRequire } from "node:module";
@@ -211,6 +212,26 @@ console.log("\n[4] live responsibility hints recommend Grok execution, bound fla
     typeof grokHint === "string" &&
       grokHint.includes("judgment-oriented tasks") &&
       grokHint.includes("independent review of completed task results or final diffs"));
+
+  const liveProvidersForDeepseek = liveSettings.modelCurator?.providers ?? {};
+  const deepseekKeep = liveProvidersForDeepseek.deepseek ?? [];
+  const fastModels = liveTiers.fast?.models ?? [];
+  check("live deepseek keep-list excludes deepseek-v4-pro",
+    !deepseekKeep.includes("deepseek-v4-pro"));
+  check("live deepseek keep-list includes deepseek-v4-flash",
+    deepseekKeep.includes("deepseek-v4-flash"));
+  check("live hints exclude deepseek/deepseek-v4-pro",
+    liveHints["deepseek/deepseek-v4-pro"] === undefined);
+  check("live deepseek-v4-pro is absent from every tier",
+    Object.values(liveTiers).every((tier) =>
+      !Array.isArray(tier?.models) || !tier.models.includes("deepseek/deepseek-v4-pro")));
+  check("live flagship includes deepseek/deepseek-v4-flash",
+    (liveTiers.flagship?.models ?? []).includes("deepseek/deepseek-v4-flash"));
+  check("live fast excludes deepseek/deepseek-v4-flash",
+    !fastModels.includes("deepseek/deepseek-v4-flash"));
+  check("live deepseek-v4-flash appears in exactly one tier",
+    Object.values(liveTiers).filter((tier) =>
+      Array.isArray(tier?.models) && tier.models.includes("deepseek/deepseek-v4-flash")).length === 1);
 
   const flashHint = liveHints["deepseek/deepseek-v4-flash"];
   check("live deepseek-v4-flash hint positions a disciplined mid-level execution engineer",
