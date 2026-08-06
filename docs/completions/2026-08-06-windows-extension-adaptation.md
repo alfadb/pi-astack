@@ -32,41 +32,41 @@ Historical partial (older artifact identity; do not rewrite): [2026-08-06-window
 
 | Field | Value |
 |---|---|
-| source commit | `fc1364ec20f00375534aa7b5738fa79388a7359e` |
-| artifact commit | `fc97429fc9dd46455a8f0dd23fd5e22bea2b59db` |
-| manifest sha256 | `ccde3967d28801c8bd707ff61cc3ff2658f04052f43ac880563950be7d655278` |
-| binary sha256 | `f95ee212a16ea246e338064cf334d6c1588c66c994117c9c39dedeacccd0bf46` |
-| build_id | `f84854a9a21281ef56ccc3f74f1cc19ed003d8663310d9bdd1f0877787a038c0` |
-| source_tree sha256 | `205b5eaf6df308ff7dcbaeacef8674185825d1e5f2aa38db53a72ff77bc1bb5f` |
+| source commit | `7c7dd71e5b6f401a8d7b46d64d23c1b29af4e9e5` |
+| artifact commit | `0b040be85b140f69574fba1c0f1e2a279b2c253e` |
+| manifest sha256 | `9c91242ba26c749e9777eac2b6992f85b293b137effa4388673d77242bb351c6` |
+| binary sha256 | `9d98e955208999f59fd32e3733bf0a4ea525d081d1753110870c104c0db3b489` |
+| build_id | `0f53ce2f650347b1ba32e59fd673300500c5f0a3eb1971c9389e8c38885b7ce3` |
+| source_tree sha256 | `205b5eaf6df308ff7dcbaeacef8674185825d1e5f2aa38db53a72ff77bc1bb5f` (unchanged) |
 | toolchain_id | `b937bbdab556e3df8ce518def79c0c6bd75fd0d163453040b8290f4c3db04c02` (unchanged) |
 | pin | live (non-null manifest pin + source_commit pin; package installed `package_rx`) |
 
-Integration note: `origin/main` `3315f57` dispatch profile removal was merged into source `fc1364ec…`. Core dispatch/workflow tests passed. workflow-tools Windows symlink **EPERM×4** is an environment limitation, not a functional regression. Post-merge production dual_clean_match / native 21 / clippy / package_rx and full focused smokes passed; dossier extension pass / overall partial; live abrain aggregate unchanged.
+Integration note (second remote merge): remote `53ee7aa` → source `7c7dd71e5b6f401a8d7b46d64d23c1b29af4e9e5` merged into this lineage. First remote merge (`3315f57` dispatch profile removal → historical source `fc1364ec…`) remains historical under prior identity. **model-curator live smoke**：Windows URL pathname **源码 bug 仍存在**；仅用不落盘的 `fileURLToPath` 临时包装继续诊断；包装后因**父仓 live settings 未迁移**仍有 **5 fail**——属远端已存在 / 父仓待处理，**不**影响 Windows extension artifact 验收；**不得**宣称全绿。
 
-Historical note only: prior extension-record identity was artifact `058b4054…` / source `bbe55894…` (now historical). Earlier partial record used artifact `8823e47f…` / source `f0aac173…` (do **not** rewrite). Those identities are **not** current.
+Quick acceptance (this identity): package **15** / addon **32** / load canary **pass**；dossier `extension_windows_adaptation=pass` / overall `partial` / `accepted:false`；live abrain aggregate **unchanged**. Full retained/adapter/durable-dacl/stable/edge/DCC physical matrices not re-asserted as all-green in this refresh.
+
+Historical note only: prior current identity was artifact `fc97429f…` / source `fc1364ec…` (now historical). Earlier extension-record identity was artifact `058b4054…` / source `bbe55894…`. Earlier partial record used artifact `8823e47f…` / source `f0aac173…` (do **not** rewrite). Those identities are **not** current.
 
 ## Build / package evidence
 
 - build_mode: production
-- reproducibility: `dual_clean_match`
-- native tests: passed (21)
-- clippy: passed
-- package_rx: verified
-- pin live; production zero-arg load positive path available
+- reproducibility: `dual_clean_match` (prior lineage; this identity refresh inherits package_rx pin live)
+- package_rx: verified / pin live; production zero-arg load positive path available
+- **not** claimed: full suite all-green after second remote merge
 
-## Smokes (pass)
+## Smokes (quick acceptance — this identity)
 
 | Suite | Result |
 |---|---|
 | package | 15 pass |
 | addon | 32 pass |
 | load canary | pass |
-| retained-native | 9 pass |
-| adapter | 11 pass |
-| durable-dacl | pass（同步修复后、最终 artifact 重建前连续 20 次；最终 artifact 安装后连续 5 次） |
-| stable-view | 21 pass |
-| edge | 9 pass |
-| DCC physical | 10 pass |
+| dossier extension | pass (`extension_windows_adaptation`) |
+| dossier overall | partial / `accepted:false` |
+| live abrain | unchanged |
+| model-curator live | **not** all-green (source Windows URL pathname bug **still open**; non-persisted `fileURLToPath` temp wrap only for continued diagnosis; after wrap still **5 fail** from parent-repo live settings not migrated — remote-known / parent pending; **out of** Windows extension artifact acceptance) |
+
+Historical full-matrix notes (prior identity `fc97429f…`/`fc1364ec…`, not re-run as claim for this refresh): retained-native 9; adapter 11; durable-dacl (post-sync fix continuous 20 before final rebuild; continuous 5 after install); stable-view 21; edge 9; DCC physical 10.
 
 ## Dossier dual disposition
 
