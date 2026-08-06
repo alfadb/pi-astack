@@ -366,10 +366,18 @@ function runWorker() {
     }
 
     if (mode === "atomic-replace-reader") {
+      // Protocol (real happens-before, no sleep races):
+      //  1) wait goFile → start reading
+      //  2) first strict OLD success → write oldAckFile (controller releases writer only after this)
+      //  3) first legal complete NEW success → write newAckFile
+      //  4) loop until stopFile; final ready keeps seen/hashes/closed errorCodes
       const dest = extra[0];
       const goFile = extra[1];
       const stopFile = extra[2];
-      // Barrier: wait until controller says go so reader is definitely running before writers.
+      const oldAckFile = extra[3];
+      const newAckFile = extra[4];
+      const oldText = extra[5] || "hello-private-rw-payload";
+      const completeNewRe = /^VERSION-\d+-COMPLETE-x{64}$/;
       const t0 = Date.now();
       while (!fs.existsSync(goFile)) {
         if (Date.now() - t0 > 30000) throw new Error("reader go timeout");
@@ -380,6 +388,8 @@ function runWorker() {
       const seenHashes = new Set();
       let success = 0;
       let errors = 0;
+      let oldAcked = false;
+      let newAcked = false;
       /** @type {Record<string, number>} */
       const errorCodes = {};
       const start = Date.now();
@@ -392,6 +402,19 @@ function runWorker() {
           seen.add(text);
           seenHashes.add(sha256(r.data));
           // Exact content must match known complete patterns only — checked by controller.
+          if (!oldAcked && text === oldText) {
+            writeReadyAtomic(oldAckFile, { ok: true, phase: "old", pid: process.pid });
+            oldAcked = true;
+          }
+          if (!newAcked && completeNewRe.test(text)) {
+            writeReadyAtomic(newAckFile, {
+              ok: true,
+              phase: "new",
+              pid: process.pid,
+              text: text.slice(0, 80),
+            });
+            newAcked = true;
+          }
         } catch (e) {
           errors += 1;
           const code = e?.code || String(e);
@@ -406,11 +429,14 @@ function runWorker() {
         success,
         errors,
         errorCodes,
+        oldAcked,
+        newAcked,
       });
       process.exit(0);
     }
 
     if (mode === "atomic-replace-writer") {
+      // Released only after controller observes reader's strict-OLD ack (writerGo).
       const dest = extra[0];
       const n = Number(extra[1] || "20");
       const goFile = extra[2];
@@ -987,40 +1013,63 @@ async function mainController() {
       assert(setup.ok, setup.error || "setup failed");
       const dest = setup.file;
       // OLD is the private-dir-file setup payload; writer publishes VERSION-*-COMPLETE NEW bodies.
+      // Happens-before (file acks, not sleep):
+      //   readerGo → reader strict-OLD ack → writerGo → writer success + NEW ack → stop.
       const oldText = "hello-private-rw-payload";
-      const goFile = path.join(workRoot, "replace-go");
+      const readerGo = path.join(workRoot, "replace-reader-go");
+      const writerGo = path.join(workRoot, "replace-writer-go");
       const stopFile = path.join(workRoot, "replace-stop");
+      const oldAck = path.join(workRoot, "replace-old-ack.json");
+      const newAck = path.join(workRoot, "replace-new-ack.json");
       const readerReady = path.join(workRoot, "ready-replace-reader.json");
       const writerReady = path.join(workRoot, "ready-replace-writer.json");
+      for (const f of [readerGo, writerGo, stopFile, oldAck, newAck, readerReady, writerReady]) {
+        try {
+          fs.unlinkSync(f);
+        } catch {
+          // ignore
+        }
+      }
       const reader = spawnWorker("atomic-replace-reader", pkg.root, pkg.manifestSha256, workRoot, readerReady, [
         dest,
-        goFile,
+        readerGo,
         stopFile,
+        oldAck,
+        newAck,
+        oldText,
       ]);
       const writer = spawnWorker("atomic-replace-writer", pkg.root, pkg.manifestSha256, workRoot, writerReady, [
         dest,
         "30",
-        goFile,
+        writerGo,
       ]);
-      sleep(200);
-      fs.writeFileSync(goFile, "go\n");
+      // Release reader only; writer stays blocked on writerGo until OLD ack.
+      fs.writeFileSync(readerGo, "go\n");
+      const oldAckResult = waitReady(oldAck, 30000);
+      assert(oldAckResult.ok === true && oldAckResult.phase === "old", `strict OLD ack missing: ${JSON.stringify(oldAckResult)}`);
+      fs.writeFileSync(writerGo, "go\n");
       const writerResult = waitReady(writerReady, 90000);
+      const newAckResult = waitReady(newAck, 30000);
+      assert(writerResult.ok, writerResult.error || "writer failed");
+      assert(newAckResult.ok === true && newAckResult.phase === "new", `complete NEW ack missing: ${JSON.stringify(newAckResult)}`);
+      // Stop only after writer success + NEW ack (both observed).
       fs.writeFileSync(stopFile, "stop\n");
       const readerResult = waitReady(readerReady, 30000);
       forceKill(reader);
       forceKill(writer);
-      assert(writerResult.ok, writerResult.error || "writer failed");
       assert(readerResult.ok, readerResult.error || "reader failed");
+      assert(readerResult.oldAcked === true, "reader final must report oldAcked");
+      assert(readerResult.newAcked === true, "reader final must report newAcked");
       assert(readerResult.success > 0, `reader success count must be >0, got ${readerResult.success}`);
       assert(Array.isArray(readerResult.seen) && readerResult.seen.length > 0, "seen must be non-empty (must not swallow empty set)");
       const seen = readerResult.seen;
-      const hasOld = seen.some((s) => s === oldText || s.includes("hello-private-rw-payload"));
-      const hasNew = seen.some((s) => /VERSION-\d+-COMPLETE-/.test(s));
-      assert(hasOld, `must observe OLD complete content; seen=${seen.map((s) => s.slice(0, 40)).join("|")}`);
+      const hasOld = seen.some((s) => s === oldText);
+      const hasNew = seen.some((s) => /^VERSION-\d+-COMPLETE-x{64}$/.test(s));
+      assert(hasOld, `must observe strict OLD complete content; seen=${seen.map((s) => s.slice(0, 40)).join("|")}`);
       assert(hasNew, `must observe at least one NEW complete content; seen=${seen.map((s) => s.slice(0, 40)).join("|")}`);
       for (const s of seen) {
         assert(
-          s === oldText || s.includes("hello-private-rw-payload") || /VERSION-\d+-COMPLETE-x{64}/.test(s),
+          s === oldText || /^VERSION-\d+-COMPLETE-x{64}$/.test(s),
           `partial/unknown content: ${s.slice(0, 100)}`,
         );
         assert(!s.includes("PARTIAL"), "partial marker must not appear");
