@@ -28,10 +28,6 @@
  * that is PR-10 (after the dispatch shared-runner API extraction).
  */
 
-import {
-  resolveDispatchTaskProfileAliases,
-  type DispatchTaskProfile,
-} from "../dispatch/task-profile";
 import { canonicalizeToolNames } from "../_shared/tool-name-compat";
 
 export const WORKFLOW_SCHEMA_VERSION = 1 as const;
@@ -76,8 +72,6 @@ export interface WorkflowStage {
   thinking?: string;
   prompt?: string;
   tools?: string[];
-  taskProfile?: DispatchTaskProfile;
-  profile?: DispatchTaskProfile;
   mutating?: boolean;
   needs?: string[];
   on_fail?: OnFail;
@@ -193,11 +187,6 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
   const mutatingStages: string[] = [];
 
   const validateToolsAndFlags = (s: WorkflowStage, where: string) => {
-    try {
-      resolveDispatchTaskProfileAliases(s.taskProfile, s.profile);
-    } catch (error) {
-      err(`${where}: ${error instanceof Error ? error.message : String(error)}`);
-    }
     let hasMutatingTool = false;
     if (s.tools !== undefined) {
       if (!Array.isArray(s.tools) || s.tools.some((t) => typeof t !== "string")) {
@@ -276,8 +265,8 @@ export function validateWorkflow(doc: WorkflowDoc, opts: { readOnly: boolean }):
       // parallel = aggregate DAG node (§7): children agent-only, no needs,
       // no nesting, not externally referenceable.
       if (s.prompt !== undefined) warnings.push(`${where}: parallel stage prompt is ignored (children carry the prompts)`);
-      if (s.tools !== undefined || s.mutating !== undefined || s.model !== undefined || s.thinking !== undefined || s.taskProfile !== undefined || s.profile !== undefined) {
-        err(`${where}: parallel stage must not carry tools/mutating/model/thinking/taskProfile — declare them per child`);
+      if (s.tools !== undefined || s.mutating !== undefined || s.model !== undefined || s.thinking !== undefined) {
+        err(`${where}: parallel stage must not carry tools/mutating/model/thinking — declare them per child`);
       }
       if (!Array.isArray(s.children) || s.children.length === 0) {
         err(`${where}: parallel requires non-empty children[]`);
@@ -410,8 +399,7 @@ export function formatEffectiveStageLines(
     const model = s.model ?? `${defaults.model} (default)`;
     const thinking = s.thinking ?? `${defaults.thinking} (default)`;
     const tools = s.tools && s.tools.length > 0 ? s.tools.join(",") : "(default read-only set)";
-    const profile = s.taskProfile ?? s.profile;
-    lines.push(`${indent}${s.id}: model=${model} thinking=${thinking} tools=${tools}${profile ? ` profile=${profile}` : ""}${s.mutating ? " ⚠MUTATING" : ""}`);
+    lines.push(`${indent}${s.id}: model=${model} thinking=${thinking} tools=${tools}${s.mutating ? " ⚠MUTATING" : ""}`);
   };
   for (const s of doc.stages) {
     if (s.kind === "parallel") {

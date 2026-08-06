@@ -144,7 +144,7 @@ async function realAgentSessionEmptyRaceSmoke() {
     }],
   });
   faux.setResponses(Array.from({ length: 8 }, () => Faux.fauxAssistantMessage([{ type: "text", text: "" }])));
-  const governor = new G.WorkerRunGovernor("real-agent-empty", "read_only", G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS, root);
+  const governor = new G.WorkerRunGovernor("real-agent-empty", G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS, root);
   let session;
   let terminalCallCount;
   let terminalMessage;
@@ -299,7 +299,7 @@ for (const [label, size, maxMs] of [["200K", 200000, 10000], ["1M", 1000000, 300
 
 console.log("\n[worker state machine]");
 const defaults = G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS;
-const provider = new G.WorkerRunGovernor("provider-run", "read_only", defaults, root, 1000);
+const provider = new G.WorkerRunGovernor("provider-run", defaults, root, 1000);
 const requestedCap = provider.observe({ signal: "requested_output_cap", requestedOutputCap: 128000 });
 for (let i = 0; i < 20; i++) provider.observe({ signal: "provider_request" }, 1001 + i);
 check("provider request count and requested output cap are observe-only", requestedCap?.mode === "observe" && !provider.terminalDecision && provider.snapshot().counters.provider_request_count === 20 && provider.snapshot().requested_output_cap === 128000);
@@ -311,7 +311,7 @@ const observeAssistant = (governor, message) => governor.observe({
 });
 const cleanVisible = (text = "recovered") => ({ stopReason: "stop", content: [{ type: "text", text }] });
 
-const sparse = new G.WorkerRunGovernor("provider-sparse", "read_only", defaults, root);
+const sparse = new G.WorkerRunGovernor("provider-sparse", defaults, root);
 let sparseRetry;
 for (let i = 0; i < 8; i++) {
   sparseRetry = sparse.observe({ signal: "provider_retry" });
@@ -320,7 +320,7 @@ for (let i = 0; i < 8; i++) {
 const sparseCounters = sparse.snapshot().counters;
 check("sparse eighth lifetime retry reports the consecutive budget without terminating", !sparse.terminalDecision && sparseRetry?.mode === "observe" && sparseRetry.count === 1 && sparseRetry.limit === 7 && sparseRetry.counters.provider_retry_count === 8 && sparseRetry.counters.provider_retry_consecutive_count === 1 && sparseCounters.provider_retry_count === 8 && sparseCounters.provider_retry_consecutive_count === 0, JSON.stringify({ decision: sparseRetry, snapshot: sparse.snapshot() }));
 
-const consecutive = new G.WorkerRunGovernor("provider-consecutive", "read_only", defaults, root);
+const consecutive = new G.WorkerRunGovernor("provider-consecutive", defaults, root);
 const consecutiveAllowed = [];
 for (let i = 0; i < 7; i++) consecutiveAllowed.push(consecutive.observe({ signal: "provider_retry" }));
 const consecutiveDecision = consecutive.observe({ signal: "provider_retry" });
@@ -329,7 +329,7 @@ check("consecutive retries 1-7 are allowed and retry 8 terminates", consecutiveA
 const resetThenConsecutiveSettings = structuredClone(defaults);
 resetThenConsecutiveSettings.providerBudgets.providerRetryWindowSize = 30;
 resetThenConsecutiveSettings.providerBudgets.providerRetryWindowLimit = 20;
-const resetThenConsecutive = new G.WorkerRunGovernor("provider-reset-then-consecutive", "read_only", resetThenConsecutiveSettings, root);
+const resetThenConsecutive = new G.WorkerRunGovernor("provider-reset-then-consecutive", resetThenConsecutiveSettings, root);
 for (let i = 0; i < 7; i++) resetThenConsecutive.observe({ signal: "provider_retry" });
 observeAssistant(resetThenConsecutive, cleanVisible("progress resets the first streak"));
 let resetThenConsecutiveDecision;
@@ -337,7 +337,7 @@ for (let i = 0; i < 8; i++) resetThenConsecutiveDecision = resetThenConsecutive.
 check("progress resets the streak and retry 8 in the new consecutive run terminates", resetThenConsecutiveDecision?.mode === "abort" && resetThenConsecutiveDecision.budget_kind === "consecutive" && resetThenConsecutiveDecision.count === 8 && resetThenConsecutiveDecision.limit === 7 && resetThenConsecutiveDecision.counters.provider_retry_count === 15, JSON.stringify(resetThenConsecutiveDecision));
 
 function replayRetryWindow(id, observations) {
-  const governor = new G.WorkerRunGovernor(id, "read_only", defaults, root);
+  const governor = new G.WorkerRunGovernor(id, defaults, root);
   let decision;
   for (const observation of observations) {
     decision = observation === "r"
@@ -352,7 +352,7 @@ check("10 retries in 14 observations do not terminate", !tenOfFourteen.governor.
 const elevenOfFourteen = replayRetryWindow("provider-window-11", "rrrprrrprrrprr");
 check("11 retries in 14 observations terminate on rolling budget", elevenOfFourteen.decision?.failureType === "provider_retry_budget_exceeded" && elevenOfFourteen.decision.budget_kind === "rolling_window" && elevenOfFourteen.decision.count === 11 && elevenOfFourteen.decision.limit === 10 && elevenOfFourteen.decision.window_size === 14, JSON.stringify(elevenOfFourteen.decision));
 
-const alternatingErrors = new G.WorkerRunGovernor("provider-alternating-errors", "read_only", defaults, root);
+const alternatingErrors = new G.WorkerRunGovernor("provider-alternating-errors", defaults, root);
 let alternatingDecision;
 for (let i = 0; i < 8; i++) {
   observeAssistant(alternatingErrors, { stopReason: "error", errorMessage: "HTTP 503", content: [{ type: "text", text: "partial" }] });
@@ -368,7 +368,7 @@ const nonProgressMessages = [
   { stopReason: "length", content: [{ type: "text", text: "partial" }] },
 ];
 const nonProgressDecisions = nonProgressMessages.map((message, index) => {
-  const governor = new G.WorkerRunGovernor(`provider-non-progress-${index}`, "read_only", defaults, root);
+  const governor = new G.WorkerRunGovernor(`provider-non-progress-${index}`, defaults, root);
   for (let i = 0; i < 7; i++) governor.observe({ signal: "provider_retry" });
   observeAssistant(governor, message);
   return governor.observe({ signal: "provider_retry" });
@@ -377,7 +377,7 @@ check("thinking-only, empty-visible, error, abort, and length responses do not r
 check("clean toolUse or pi-ai stop with visible text is provider progress", D.isProviderProgressAssistantMessage({ stopReason: "toolUse", content: [{ type: "thinking", thinking: "x" }] }) && D.isProviderProgressAssistantMessage(cleanVisible()) && !D.isProviderProgressAssistantMessage({ stopReason: "toolUse", errorMessage: "failed" }));
 check("non-normalized end_turn spellings are not provider progress", !D.isProviderProgressAssistantMessage({ stopReason: "end_turn", content: [{ type: "text", text: "done" }] }) && !D.isProviderProgressAssistantMessage({ stopReason: "endTurn", content: [{ type: "text", text: "done" }] }));
 
-const toolSuccess = new G.WorkerRunGovernor("provider-tool-success", "read_only", defaults, root);
+const toolSuccess = new G.WorkerRunGovernor("provider-tool-success", defaults, root);
 for (let i = 0; i < 7; i++) toolSuccess.observe({ signal: "provider_retry" });
 toolSuccess.observeToolEnd("read", { content: [{ type: "text", text: "ok" }] }, false, "tool-ok");
 const afterToolSuccess = toolSuccess.observe({ signal: "provider_retry" });
@@ -387,12 +387,12 @@ for (const [signal, failureType] of [
   ["empty_visible_retry", "empty_visible_retry_budget_exceeded"],
   ["full_output_cap_hit", "full_output_cap_budget_exceeded"],
 ]) {
-  const governor = new G.WorkerRunGovernor(`${signal}-run`, "read_only", defaults);
+  const governor = new G.WorkerRunGovernor(`${signal}-run`, defaults);
   let terminal;
   for (let i = 0; i < 3; i++) terminal = governor.observe({ signal });
   check(`${signal} stops on third hit`, terminal?.mode === "abort" && terminal.failureType === failureType && terminal.count === 3, JSON.stringify(terminal));
 }
-const noUsage = new G.WorkerRunGovernor("no-usage", "read_only", defaults);
+const noUsage = new G.WorkerRunGovernor("no-usage", defaults);
 noUsage.observe({ signal: "empty_visible_retry" });
 noUsage.observe({ signal: "empty_visible_retry" });
 const noUsageStop = noUsage.observe({ signal: "empty_visible_retry" });
@@ -401,38 +401,33 @@ check("toolUse at or above usage ratio is not a full-cap hit", !D.isFullOutputCa
 check("ordinary stop at usage ratio remains a full-cap hit", D.isFullOutputCapHit("stop", 980, 1000, 0.98));
 check("explicit length and max_tokens remain full-cap hits without usage", D.isFullOutputCapHit("length", undefined, undefined, 0.98) && D.isFullOutputCapHit("max_tokens", undefined, undefined, 0.98));
 
-const taskGovernor = new G.WorkerRunGovernor("task-run", "implementation", defaults);
-const checkpoint = taskGovernor.observe({ signal: "task_governor_checkpoint", count: 120, limit: 120 });
-const auditPause = taskGovernor.observe({ signal: "task_governor_audit_pause", count: 180, limit: 180 });
-const freshAuth = taskGovernor.observe({ signal: "task_governor_fresh_auth", count: 240, limit: 240, action: "audit_fresh_auth_due_no_total_tool_limit" });
-for (let i = 0; i < 1000; i++) taskGovernor.observeToolStart("ls", {}, `tool-${i}`);
-check("task-governor stages remain observe-only", checkpoint?.mode === "observe" && auditPause?.mode === "observe" && freshAuth?.mode === "observe" && freshAuth.failureType === undefined && freshAuth.action === "audit_fresh_auth_due_no_total_tool_limit");
-check("1000 cumulative tool calls remain non-terminal and auditable", !taskGovernor.terminalDecision && taskGovernor.snapshot().counters.tool_call_count === 1000, JSON.stringify(taskGovernor.snapshot()));
-check("task-governor stage counters record each emitted stage once", taskGovernor.snapshot().counters.task_governor_checkpoint_count === 1 && taskGovernor.snapshot().counters.task_governor_audit_pause_count === 1 && taskGovernor.snapshot().counters.task_governor_fresh_auth_count === 1, JSON.stringify(taskGovernor.snapshot().counters));
+const cumulativeTools = new G.WorkerRunGovernor("tool-volume", defaults);
+for (let i = 0; i < 1000; i++) cumulativeTools.observeToolStart("ls", {}, `tool-${i}`);
+check("1000 cumulative tool calls remain non-terminal and auditable", !cumulativeTools.terminalDecision && cumulativeTools.snapshot().counters.tool_call_count === 1000, JSON.stringify(cumulativeTools.snapshot()));
 
-const pagination = new G.WorkerRunGovernor("pagination", "read_only", defaults, root);
+const pagination = new G.WorkerRunGovernor("pagination", defaults, root);
 let paginationObservation;
 for (let i = 0; i < 8; i++) paginationObservation = pagination.observeToolStart("read", { path: "src/a.ts", offset: 1 + i * 100, limit: 100 }, `p-${i}`) ?? paginationObservation;
 check("increasing read pagination does not report churn", !paginationObservation && pagination.snapshot().counters.same_file_small_read_churn_count === 0);
-const churn = new G.WorkerRunGovernor("churn", "read_only", defaults, root);
+const churn = new G.WorkerRunGovernor("churn", defaults, root);
 let churnObservation;
 for (let i = 0; i < 5; i++) churnObservation = churn.observeToolStart("read", { path: "src/a.ts", offset: 1, limit: 80 }, `c-${i}`) ?? churnObservation;
 check("high-overlap small reads report observe-only churn", churnObservation?.signal === "same_file_small_read_churn" && churnObservation.mode === "observe" && churnObservation.coverage === "post_execution_only");
 const exactOverlapSettings = structuredClone(defaults);
 exactOverlapSettings.toolObservers.sameFileSmallReadChurn.observeAfter = 1;
-const exactOverlap = new G.WorkerRunGovernor("exact-overlap", "read_only", exactOverlapSettings, root);
+const exactOverlap = new G.WorkerRunGovernor("exact-overlap", exactOverlapSettings, root);
 exactOverlap.observeToolStart("read", { path: "src/exact.ts", offset: 1, limit: 100 }, "e-1");
 const exactOverlapObservation = exactOverlap.observeToolStart("read", { path: "src/exact.ts", offset: 21, limit: 100 }, "e-2");
 check("exact 80 percent sliding overlap reports at observeAfter", exactOverlapObservation?.signal === "same_file_small_read_churn", JSON.stringify(exactOverlapObservation));
 const pathEvictionSettings = structuredClone(exactOverlapSettings);
 pathEvictionSettings.toolObservers.sameFileSmallReadChurn.maxTrackedPaths = 2;
-const pathEviction = new G.WorkerRunGovernor("path-eviction", "read_only", pathEvictionSettings, root);
+const pathEviction = new G.WorkerRunGovernor("path-eviction", pathEvictionSettings, root);
 for (const name of ["a.ts", "b.ts", "c.ts"]) pathEviction.observeToolStart("read", { path: `src/${name}`, offset: 1, limit: 20 });
 const evictedPathFirst = pathEviction.observeToolStart("read", { path: "src/a.ts", offset: 1, limit: 20 });
 const evictedPathSecond = pathEviction.observeToolStart("read", { path: "src/a.ts", offset: 1, limit: 20 });
 check("tracked-path map evicts exactly at maxTrackedPaths boundary", !evictedPathFirst && evictedPathSecond?.signal === "same_file_small_read_churn");
 
-const schemaFix = new G.WorkerRunGovernor("schema-fix", "read_only", defaults);
+const schemaFix = new G.WorkerRunGovernor("schema-fix", defaults);
 const schemaError = { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] };
 schemaFix.observeToolEnd("read", schemaError, true, "s1");
 schemaFix.observeToolEnd("read", { content: [{ type: "text", text: "ok" }] }, false, "s2");
@@ -441,7 +436,7 @@ for (let i = 0; i < 3; i++) schemaObs = schemaFix.observeToolEnd("read", schemaE
 check("one corrected schema error does not count as a storm, sustained same shape does", schemaObs?.signal === "schema_error_storm" && schemaObs.mode === "observe" && schemaObs.coverage === "post_execution_only");
 const secretToken = "TOP_SECRET_7f3c";
 const fullSchemaError = `schema validation full error: required parameter '${secretToken}' is missing from path /private/${secretToken}`;
-const privacyGovernor = new G.WorkerRunGovernor("schema-privacy", "read_only", defaults);
+const privacyGovernor = new G.WorkerRunGovernor("schema-privacy", defaults);
 let privacyObservation;
 for (let i = 0; i < 3; i++) privacyObservation = privacyGovernor.observeToolEnd("read", { content: [{ type: "text", text: fullSchemaError }] }, true, `privacy-${i}`) ?? privacyObservation;
 const privacyAuditJson = JSON.stringify(G.buildWorkerRunAuditEvent(privacyObservation));
@@ -451,7 +446,7 @@ check("schema audit excludes field token and complete error text", !privacyAudit
 const shapeEvictionSettings = structuredClone(defaults);
 shapeEvictionSettings.toolObservers.schemaErrorStorm.observeAfter = 2;
 shapeEvictionSettings.toolObservers.schemaErrorStorm.maxTrackedShapes = 2;
-const shapeEviction = new G.WorkerRunGovernor("shape-eviction", "read_only", shapeEvictionSettings);
+const shapeEviction = new G.WorkerRunGovernor("shape-eviction", shapeEvictionSettings);
 const shapeError = (field) => ({ content: [{ type: "text", text: `schema validation: required parameter '${field}' is missing` }] });
 for (const field of ["alpha", "beta", "gamma"]) shapeEviction.observeToolEnd("read", shapeError(field), true);
 const evictedShapeFirst = shapeEviction.observeToolEnd("read", shapeError("alpha"), true);
@@ -459,7 +454,7 @@ const evictedShapeSecond = shapeEviction.observeToolEnd("read", shapeError("alph
 check("schema-shape map evicts exactly at maxTrackedShapes boundary", !evictedShapeFirst && evictedShapeSecond?.signal === "schema_error_storm");
 check("tool observers never terminate the worker", !schemaFix.terminalDecision && !churn.terminalDecision);
 
-const auditDecision = new G.WorkerRunGovernor("audit-run", "research", defaults).observe({
+const auditDecision = new G.WorkerRunGovernor("audit-run", defaults).observe({
   signal: "repetitive_output", hash: "deadbeef", count: 8192, action: "abort_session_return_bounded_partial",
 });
 const audit = G.buildWorkerRunAuditEvent(auditDecision, {
@@ -485,7 +480,7 @@ const source = fs.readFileSync(path.join(root, "extensions/dispatch/index.ts"), 
 check("subscriber detects only assistant text_delta", /assistantMessageEvent\?\.type === "text_delta"/.test(source) && /event\.message\?\.role === "assistant"/.test(source));
 check("streamed final is not appended into detector twice", /Final reconciliation always uses a fresh detector/.test(source) && /visibleDetector\.pushDelta\(finalText\)/.test(source) === false);
 check("final reconciliation contains no FNV-plus-length equality shortcut", !/rawTextFingerprint|visibleTextFingerprint|responseStreamFingerprint/.test(source));
-check("legacy task governor no longer owns a second termination promise", !/governorPromise|resolveGovernorStop|dispatch\.task_governor/.test(source));
+check("task governor classification layer is fully removed", !/task_governor_|taskProfile|taskGovernor|inferTaskGovernorProfile|evaluateTaskGovernor/.test(source));
 check("all governance terminal outputs use the UTF-8 bounded partial path", /governanceOutputOverride \?\? boundedUtf8Prefix\(finalOutput \|\| responsePartial\)/.test(source));
 check("reasoning trace remains thinking-only", !/visibleDetector[\s\S]{0,200}reasoningTrace\.write/.test(source));
 

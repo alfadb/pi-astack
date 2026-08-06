@@ -267,7 +267,6 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
           anchor,
           projectRoot,
           maxRuntimeMs: req.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-          taskProfile: req.taskProfile,
           parentContextFiles,
           reasoningTrace: {
             workflowRunId: req.workflowRunId,

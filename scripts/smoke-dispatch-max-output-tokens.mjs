@@ -59,12 +59,15 @@ const dispatchSrc = fs.readFileSync(
   "utf-8",
 );
 const inputCompatSrc = path.join(repoRoot, "extensions/dispatch/input-compat.ts");
-const taskProfileSrc = path.join(repoRoot, "extensions/dispatch/task-profile.ts");
+const toolNameCompatSrc = path.join(repoRoot, "extensions/_shared/tool-name-compat.ts");
 const inputCompatCompiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-dispatch-max-output-"));
-const tmpFile = path.join(tmpDir, "input-compat.cjs");
+const dispatchDir = path.join(tmpDir, "dispatch");
+fs.mkdirSync(dispatchDir, { recursive: true });
+fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
+const tmpFile = path.join(dispatchDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, inputCompatCompiled);
-fs.writeFileSync(path.join(tmpDir, "task-profile.js"), transpileTsToCjs(taskProfileSrc));
+fs.writeFileSync(path.join(tmpDir, "_shared", "tool-name-compat.js"), transpileTsToCjs(toolNameCompatSrc));
 const { normalizeTaskSpec } = loadModuleFromString(
   inputCompatCompiled,
   tmpFile,

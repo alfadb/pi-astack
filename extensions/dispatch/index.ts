@@ -39,11 +39,6 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 import { canonicalizeToolNames } from "../_shared/tool-name-compat";
-import {
-  DISPATCH_TASK_PROFILES,
-  isDispatchTaskProfile,
-  normalizeDispatchTaskProfile,
-} from "./task-profile";
 import { isSubAgentSession, markSessionAsSubAgent, bindSubAgentBoundarySentinel } from "../_shared/pi-internals";
 import {
   bindLifecycle as bindCausalAnchorLifecycle,
@@ -84,9 +79,6 @@ import { randomUUID } from "node:crypto";
 import {
   DEFAULT_DISPATCH_SETTINGS,
   readDispatchSettings,
-  type DispatchTaskGovernorProfile,
-  type DispatchTaskGovernorSettings,
-  type DispatchTaskGovernorStage,
 } from "./settings";
 import {
   VisibleTextRepeatDetector,
@@ -185,16 +177,6 @@ export const MAX_PROVIDER_CONCURRENCY = DEFAULT_DISPATCH_SETTINGS.maxProviderCon
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes without progress
 const DEFAULT_MAX_RUNTIME_MULTIPLIER = 4;
 const ABORT_TRACE_DRAIN_MS = 3_000;
-
-export function dispatchTaskProfileSchema(description: string) {
-  return Type.Union([
-    Type.Literal(DISPATCH_TASK_PROFILES[0]),
-    Type.Literal(DISPATCH_TASK_PROFILES[1]),
-    Type.Literal(DISPATCH_TASK_PROFILES[2]),
-    Type.Literal(DISPATCH_TASK_PROFILES[3]),
-    Type.Literal(DISPATCH_TASK_PROFILES[4]),
-  ], { description });
-}
 
 export function providerFromModel(model: string): string {
   const provider = String(model ?? "").split("/")[0]?.trim();
@@ -908,46 +890,6 @@ export function enforceMutatingEnvGate(toolsStr: string | undefined): ToolValida
     }
   }
   return { ok: true };
-}
-
-function toolNamesFromAllowlist(toolsStr: string | undefined): string[] {
-  return resolveSubAgentTools(toolsStr).map((name) => name.toLowerCase());
-}
-
-export function inferTaskGovernorProfile(toolsStr?: string, taskProfile?: string): DispatchTaskGovernorProfile {
-  const explicit = normalizeDispatchTaskProfile(isDispatchTaskProfile(taskProfile) ? taskProfile : undefined);
-  if (explicit) return explicit;
-  const hasMutatingTool = toolNamesFromAllowlist(toolsStr).some((name) => MUTATING_TOOLS.has(name));
-  if (hasMutatingTool) return "mutating_default";
-  return "read_only";
-}
-
-export interface TaskGovernorVerdict {
-  profile: DispatchTaskGovernorProfile;
-  stage?: DispatchTaskGovernorStage;
-  limit?: number;
-  terminal: false;
-}
-
-export function evaluateTaskGovernor(
-  settings: DispatchTaskGovernorSettings,
-  profile: DispatchTaskGovernorProfile,
-  toolCallCount: number,
-  emittedStages: ReadonlySet<DispatchTaskGovernorStage> = new Set(),
-): TaskGovernorVerdict {
-  if (!settings.enabled) return { profile, terminal: false };
-  const limits = settings.profiles[profile];
-  if (!limits) return { profile, terminal: false };
-  if (toolCallCount >= limits.freshAuth && !emittedStages.has("fresh_auth")) {
-    return { profile, stage: "fresh_auth", limit: limits.freshAuth, terminal: false };
-  }
-  if (toolCallCount >= limits.auditPause && !emittedStages.has("audit_pause")) {
-    return { profile, stage: "audit_pause", limit: limits.auditPause, terminal: false };
-  }
-  if (toolCallCount >= limits.checkpoint && !emittedStages.has("checkpoint")) {
-    return { profile, stage: "checkpoint", limit: limits.checkpoint, terminal: false };
-  }
-  return { profile, terminal: false };
 }
 
 // ── In-process agent ────────────────────────────────────────────
@@ -1760,7 +1702,6 @@ export type SubAgentExecutionContext = {
   anchor?: CausalAnchor;
   projectRoot?: string;
   maxRuntimeMs?: number;
-  taskProfile?: string;
   onProgress?: (progress: DispatchRunProgress) => void;
   reasoningTrace?: {
     dispatchToolCallId?: string;
@@ -2002,13 +1943,10 @@ export async function runInProcess(
   // eligible when the target session actually registers and activates it.
   const tools = resolveSubAgentTools(toolAllowlist);
   const dispatchSettings = readDispatchSettings();
-  const governorProfile = inferTaskGovernorProfile(toolAllowlist, executionContext?.taskProfile);
-  const governorEmittedStages = new Set<DispatchTaskGovernorStage>();
   const visibleRepeatEnabled =
     dispatchSettings.workerRunGovernor.enabled && dispatchSettings.workerRunGovernor.visibleText.enabled;
   const workerGovernor = new WorkerRunGovernor(
     randomUUID(),
-    governorProfile,
     dispatchSettings.workerRunGovernor,
     heartbeatProjectRoot,
     start,
@@ -2359,27 +2297,6 @@ export async function runInProcess(
           toolCallCount++;
           // Safe metadata only — never pass args into the snapshot tracker.
           toolTracker.onStart(event.toolName, event.toolCallId);
-          const verdict = evaluateTaskGovernor(dispatchSettings.taskGovernor, governorProfile, toolCallCount, governorEmittedStages);
-          if (verdict.stage) {
-            governorEmittedStages.add(verdict.stage);
-            emitWorkerRunDecision(workerGovernor.observe({
-              signal: `task_governor_${verdict.stage}` as WorkerRunGovernorDecision["signal"],
-              count: toolCallCount,
-              ...(verdict.limit !== undefined ? { limit: verdict.limit } : {}),
-              ...(typeof event.toolCallId === "string" ? { toolCallId: event.toolCallId } : {}),
-              action: verdict.stage === "fresh_auth"
-                ? "audit_fresh_auth_due_no_total_tool_limit"
-                : "audit_task_governor_stage_no_abort",
-            }));
-            try {
-              executionContext?.onProgress?.({
-                reason: `governor:${verdict.stage}`,
-                at: Date.now(),
-                heartbeatTracePath: heartbeat.tracePath,
-                toolCallCount,
-              });
-            } catch { /* best-effort UI telemetry */ }
-          }
           emitWorkerRunDecision(workerGovernor.observeToolStart(
             String(event.toolName ?? "unknown"),
             event.args,
@@ -2933,8 +2850,6 @@ export default function (pi: ExtensionAPI) {
       prompt: Type.String({ description: "Prompt sent to this task" }),
       name: Type.String({ description: "Required short human-readable task title shown in the Task table / dispatch tool block. Keep it concise; do not paste the full prompt." }),
       tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Registered extension tools and bash/edit/write may be requested explicitly; dispatch_agent/dispatch_parallel/workflow_run/prompt_user/vault_release are disabled." })),
-      taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy. Mutating tools without an explicit implementation/heavy profile use mutating-default.")),
-      profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
       timeoutMs: Type.Optional(Type.Number({ description: "No-progress idle timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -2952,7 +2867,6 @@ export default function (pi: ExtensionAPI) {
         prompt: n.prompt,
         ...(n.name !== undefined ? { name: n.name } : {}),
         ...(n.tools !== undefined ? { tools: n.tools } : {}),
-        ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
         ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
       };
     },
@@ -3164,7 +3078,6 @@ export default function (pi: ExtensionAPI) {
             {
               anchor: subAnchor,
               projectRoot: ctx.cwd || process.cwd(),
-              taskProfile: params.taskProfile,
               parentContextFiles,
               reasoningTrace: {
                 dispatchToolCallId: toolCallId,
@@ -3349,8 +3262,6 @@ export default function (pi: ExtensionAPI) {
           prompt: Type.String({ description: "Prompt sent to this task" }),
           name: Type.String({ description: "Required short human-readable task title shown in the Task table / dispatch tool block. Keep it concise; do not paste the full prompt." }),
           tools: Type.Optional(Type.String({ description: "Comma-separated exact tool names for this task (default: read,grep,find,ls,web_search,web_fetch,memory_search,abrain_get,memory_decide). Names must be registered in the target session; structural disabled tools are rejected." })),
-          taskProfile: Type.Optional(dispatchTaskProfileSchema("Optional audit-threshold profile: reviewer, read_only, research, implementation, or heavy.")),
-          profile: Type.Optional(dispatchTaskProfileSchema("Alias for taskProfile; when both are present they must match.")),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task no-progress idle timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -3385,7 +3296,6 @@ export default function (pi: ExtensionAPI) {
           prompt: n.prompt,
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.tools !== undefined ? { tools: n.tools } : {}),
-          ...(n.taskProfile !== undefined ? { taskProfile: n.taskProfile } : {}),
           ...(n.timeoutMs !== undefined ? { timeoutMs: n.timeoutMs } : {}),
         };
       });
@@ -3620,7 +3530,6 @@ export default function (pi: ExtensionAPI) {
                 {
                   anchor: subAnchor,
                   projectRoot,
-                  taskProfile: t.taskProfile,
                   parentContextFiles,
                   reasoningTrace: {
                     dispatchToolCallId: toolCallId,

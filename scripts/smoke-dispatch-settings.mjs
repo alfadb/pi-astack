@@ -93,12 +93,14 @@ check("schema defines the current dispatch settings surface", () => {
   const schema = JSON.parse(schemaText);
   const dispatchProps = schema?.properties?.dispatch?.properties;
   if (!dispatchProps) throw new Error("dispatch.properties missing from parsed schema");
-  for (const key of ["auditRotation", "maxProviderConcurrency", "taskGovernor", "workerRunGovernor"]) {
+  for (const key of ["auditRotation", "maxProviderConcurrency", "workerRunGovernor"]) {
     if (!(key in dispatchProps)) {
       throw new Error(`dispatch.properties missing ${key}`);
     }
   }
   if ("hub" in dispatchProps) throw new Error("retired dispatch.properties.hub must stay removed");
+  if ("taskGovernor" in dispatchProps) throw new Error("retired dispatch.properties.taskGovernor must stay removed");
+  if (schema.definitions?.dispatchTaskGovernorLimits) throw new Error("retired definitions.dispatchTaskGovernorLimits must stay removed");
 });
 
 check("default resolver value is 4 with 64 MiB / 7d audit rotation", () => {
@@ -148,24 +150,18 @@ check("valid override is honored", () => {
   }
 });
 
-check("taskGovernor exposes only three non-terminal thresholds and ignores legacy hard input", () => {
-  const schema = JSON.parse(schemaText);
-  const taskGovernorSchema = schema.properties.dispatch.properties.taskGovernor;
-  const limitsSchema = schema.definitions.dispatchTaskGovernorLimits;
-  if ("hard" in limitsSchema.properties) throw new Error("active task-governor schema still exposes hard");
-  if (JSON.stringify(Object.keys(limitsSchema.properties).sort()) !== JSON.stringify(["auditPause", "checkpoint", "freshAuth"])) {
-    throw new Error(`unexpected task-governor thresholds: ${JSON.stringify(limitsSchema.properties)}`);
-  }
-  for (const [profile, limits] of Object.entries(taskGovernorSchema.properties.profiles.default)) {
-    if ("hard" in limits || typeof limits.freshAuth !== "number") {
-      throw new Error(`profile ${profile} does not use the three-stage audit contract: ${JSON.stringify(limits)}`);
-    }
-  }
-  const resolved = resolveDispatchSettings({ dispatch: { taskGovernor: { profiles: {
-    read_only: { checkpoint: 11, auditPause: 22, freshAuth: 33, hard: 1 },
-  } } } });
-  if (JSON.stringify(resolved.taskGovernor.profiles.read_only) !== JSON.stringify({ checkpoint: 11, auditPause: 22, freshAuth: 33 })) {
-    throw new Error(`legacy hard affected runtime resolution: ${JSON.stringify(resolved.taskGovernor.profiles.read_only)}`);
+check("legacy taskGovernor settings are ignored without poisoning workerRunGovernor", () => {
+  const resolved = resolveDispatchSettings({
+    dispatch: {
+      taskGovernor: {
+        enabled: false,
+        profiles: { read_only: { checkpoint: 11, auditPause: 22, freshAuth: 33, hard: 1 } },
+      },
+    },
+  });
+  if ("taskGovernor" in resolved) throw new Error(`taskGovernor leaked into resolved settings: ${JSON.stringify(resolved)}`);
+  if (!resolved.workerRunGovernor.enabled) {
+    throw new Error(`workerRunGovernor was affected by legacy taskGovernor: ${JSON.stringify(resolved.workerRunGovernor)}`);
   }
 });
 

@@ -71,7 +71,6 @@ function loadModuleFromString(code, fakePath) {
 }
 
 const inputCompatSrc = path.join(repoRoot, "extensions/dispatch/input-compat.ts");
-const taskProfileSrc = path.join(repoRoot, "extensions/dispatch/task-profile.ts");
 const toolNameCompatSrc = path.join(repoRoot, "extensions/_shared/tool-name-compat.ts");
 const compiled = transpileTsToCjs(inputCompatSrc);
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-input-compat-"));
@@ -80,7 +79,6 @@ fs.mkdirSync(dispatchDir, { recursive: true });
 fs.mkdirSync(path.join(tmpDir, "_shared"), { recursive: true });
 const tmpFile = path.join(dispatchDir, "input-compat.cjs");
 fs.writeFileSync(tmpFile, compiled);
-fs.writeFileSync(path.join(dispatchDir, "task-profile.js"), transpileTsToCjs(taskProfileSrc));
 fs.writeFileSync(path.join(tmpDir, "_shared", "tool-name-compat.js"), transpileTsToCjs(toolNameCompatSrc));
 const { coerceTasksParam, normalizeTaskSpec } = loadModuleFromString(
   compiled,
@@ -160,35 +158,16 @@ check("normalizeTaskSpec does not invent a title when name is absent", () => {
   if (r.name !== undefined) throw new Error(`unexpected derived name: ${JSON.stringify(r)}`);
 });
 
-for (const profile of ["reviewer", "read_only", "research", "implementation", "heavy"]) {
-  check(`normalizeTaskSpec accepts legal profile ${profile}`, () => {
-    const r = normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: profile });
-    if (r.taskProfile !== profile) throw new Error(`profile changed: ${JSON.stringify(r)}`);
+check("normalizeTaskSpec drops retired taskProfile/profile classification fields", () => {
+  const r = normalizeTaskSpec({
+    model: "x/y",
+    prompt: "p",
+    taskProfile: "research",
+    profile: "heavy",
   });
-}
-
-for (const profile of ["reviewer/read_only", "implementation/heavy", "review", "readonly"]) {
-  check(`normalizeTaskSpec rejects illegal profile ${profile}`, () => {
-    let error;
-    try { normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: profile }); } catch (caught) { error = caught; }
-    if (!error) throw new Error("expected profile rejection");
-  });
-}
-
-check("illegal taskProfile does not silently override legal profile alias", () => {
-  let error;
-  try {
-    normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: "reviewer/read_only", profile: "research" });
-  } catch (caught) { error = caught; }
-  if (!error) throw new Error("expected invalid primary field rejection");
-});
-
-check("conflicting legal taskProfile/profile aliases are rejected", () => {
-  let error;
-  try {
-    normalizeTaskSpec({ model: "x/y", prompt: "p", taskProfile: "research", profile: "heavy" });
-  } catch (caught) { error = caught; }
-  if (!error) throw new Error("expected alias conflict rejection");
+  if ("taskProfile" in r || "profile" in r) {
+    throw new Error(`retired classification fields survived: ${JSON.stringify(r)}`);
+  }
 });
 
 // ── prepareArguments behavior under the bug payload ─────────────

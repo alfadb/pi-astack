@@ -76,7 +76,6 @@ export interface StageRunRequest {
   prompt: string;
   /** Comma-joined allowlist; undefined → runner default (read-only set). */
   tools?: string;
-  taskProfile?: string;
   timeoutMs: number;
   signal?: AbortSignal;
 }
@@ -525,7 +524,6 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
           thinking,
           prompt,
           ...(stage.tools && stage.tools.length > 0 ? { tools: stage.tools.join(",") } : {}),
-          ...(stage.taskProfile ?? stage.profile ? { taskProfile: stage.taskProfile ?? stage.profile } : {}),
           timeoutMs,
           signal: runCtl.signal,
         });
