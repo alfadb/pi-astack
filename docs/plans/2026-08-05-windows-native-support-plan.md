@@ -7,7 +7,7 @@ updated: 2026-08-06
 
 # pi-astack Windows 原生支持 Living Plan
 
-**状态：Active / partial；overall production accepted **永远不得**因本机 section 误绿；当前阶段：Windows-only extension 收口 + artifact lineage 已落地；**已移除**不可靠 first-matrix external evidence ingestion/schema/slot validator；跨主机外证 ingestion **defer 至 daemon 重构后重新设计**（本轮不实现）；daemon/live **不碰**。final package 仍为 artifact `8823e47f…` / source `f0aac173…` / pin live / package_rx。**用户确认威胁边界**：同一 TokenUser 与管理员恶意改写 **不在** loader 合同内；其他 principal fail-closed；hash/pin/package_rx = provenance+损坏检测；**不做** small bootstrap；canary 证明 same-token race 合同外。Dossier **双结论**：`extension_windows_adaptation`（本机可机械验证的 provenance/native package/retained/DACL/stable/edge/canary 相关门）≠ overall production accepted（`accepted:false` / `status:partial`；closed blocking residual 列 daemon DCC / live matrix / Linux / second-account / Node22+Server 外证 deferred）。**无** env/manifest 开关使 overall 变 true。Artifact lineage 保留（source⊏artifact⊏HEAD、逐 commit、真实 DAG self-test）。**不得**宣称 production accepted；extension scope pass **不得**称 production accepted；全部 8 criteria 保持未勾；未改 settings。partial 记录见 [completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)。**
+**状态：Active / partial（Windows-only extension 本机适配 scope 已完成；goal 可 pause）；overall production accepted **永远不得**因本机 section 误绿；当前阶段：Windows-only extension 适配在本机范围完成 + artifact lineage 已落地；daemon/external overall **deferred**；**已移除**不可靠 first-matrix external evidence ingestion/schema/slot validator；跨主机外证 ingestion **defer 至 daemon 重构后重新设计**（本轮不实现）；daemon/live **不碰**。final package（现行）：artifact `058b40544e69d7ef10f4164d1487a87f20b25783` / source `bbe558946347c469f74749944ebb8945b9335ded` / pin live / package_rx。**用户确认威胁边界**：同一 TokenUser 与管理员恶意改写 **不在** loader 合同内；其他 principal fail-closed；hash/pin/package_rx = provenance+损坏检测；**不做** small bootstrap；canary 证明 same-token race 合同外——**不得**再写 same-token TOCTOU 为全局 blocker。Dossier **双结论**：`extension_windows_adaptation=pass`（本机可机械验证的 provenance/native package/retained/DACL/stable/edge/canary 相关门）≠ overall production accepted（`accepted:false` / `status:partial`；closed blocking residual 列 daemon DCC / live matrix / Linux / second-account / Node22+Server 外证 deferred）。**无** env/manifest 开关使 overall 变 true。Artifact lineage 保留（source⊏artifact⊏HEAD、逐 commit、真实 DAG self-test）。**不得**宣称 production accepted；extension scope pass **不得**称 production accepted；全部 8 criteria 保持未勾（open 因完整矩阵外证未齐，非因 same-token bootstrap）；未改 settings。historical partial 见 [completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)；extension 适配完成记录见 [completions/2026-08-06-windows-extension-adaptation.md](../completions/2026-08-06-windows-extension-adaptation.md)。**
 
 本计划是 pi-astack 生产级 Windows 原生支持的唯一 living plan。它冻结已确认决策、阶段边界与外部验收门；不宣称 Windows production acceptance 已完成。会话讨论只保留决策来源，不是执行权威。每次实施和验收必须同时核对 [ADR 0046](../adr/0046-daemon-owned-canonical-convergence.md)、[central-sediment-edge](../architecture/central-sediment-edge.md)、[local-sediment-executor-authority](../architecture/local-sediment-executor-authority.md)、[retained-directory-ofd-lock](../../extensions/_shared/retained-directory-ofd-lock.ts)、当前代码、live settings 与真实 Windows 主机证据。文档与现场冲突时，按下文 Replanning Protocol 处理。
 
@@ -72,14 +72,14 @@ updated: 2026-08-06
 - **DCC 门闩**：在 protected-DACL writer/verifier 完成并验收前，Windows DCC 继续 `attestation_unavailable` fail-closed；禁止“先 ready 再补 DACL”。
 - **Addon 加载门闩**：缺失、错误架构、hash 不符 → fail-closed；禁止 silent skip / soft warn / 回落 TS lock。
 - **分发门闩**：不运行时下载、不现场自动编译。
-- **Provenance 门闩**：每个 binary 必须绑定 source、toolchain、target、hash、provenance；缺任一绑定不得进入生产路径。生产 manifest pin **现为 live**（`windows-native-addon-pin.ts` package 输出；不进 source closure）：manifest sha256 `b41b07d13005ff5189c7e61a080d36ba72640624174828ce0181a9148f5bb6e7`，source_commit `f0aac1737550c1a926fc73e775a1870768215320`；artifact commit `8823e47f4de37156ac8ebbb9a6149bd8617ce470`；package installed `package_rx`。零参数生产 loader 在 pin live 时走正向路径，成功加载后仍须 package_rx 三点验证。pin 缺失 / hash 不符 / 错架构继续 fail-closed。
+- **Provenance 门闩**：每个 binary 必须绑定 source、toolchain、target、hash、provenance；缺任一绑定不得进入生产路径。生产 manifest pin **现为 live**（`windows-native-addon-pin.ts` package 输出；不进 source closure）：manifest sha256 `2baeeb6153e554d1b5c912c848ec7fbe7444826aef4896116f20592f7f1e32f1`，source_commit `bbe558946347c469f74749944ebb8945b9335ded`；artifact commit `058b40544e69d7ef10f4164d1487a87f20b25783`；package installed `package_rx`。零参数生产 loader 在 pin live 时走正向路径，成功加载后仍须 package_rx 三点验证。pin 缺失 / hash 不符 / 错架构继续 fail-closed。
 - **证据门闩**：acceptance 只认外部证据（`cmd:` / `file:` / `git:` 及固化 dossier）；模型自述、synthetic-only、WSL 替代均不算 production acceptance。temp package + dynamic pin 的 smoke **不等于** production acceptance。**partial dossier 固化 ≠ production accepted**（`accepted:false`）。
 
 ## Current State
 
 > 本节是 living plan 的可重写热区。阶段切换、发现现场冲突或形成新阻塞时整节更新；不要在此冻结会快速过期的运行数量。
 
-- 当前阶段：**Windows-only extension 收口 + artifact lineage 已落地**（2026-08-06）；**已移除** first-matrix external evidence ingestion/schema/slot validator/fixtures；跨主机外证 ingestion **defer 至 daemon 重构后重新设计**（本轮不实现、criteria 不改不勾）；final package 仍 pin live + package_rx；P4 overall 仍 partial / `accepted:false`；**daemon/live 不碰**。
+- 当前阶段：**Windows-only extension 适配在本机范围完成 + artifact lineage 已落地**（2026-08-06）；goal **可 pause**；**已移除** first-matrix external evidence ingestion/schema/slot validator/fixtures；跨主机外证 ingestion **defer 至 daemon 重构后重新设计**（本轮不实现、criteria 不改不勾）；final package pin live + package_rx（现行 artifact `058b4054…` / source `bbe55894…`）；P4 overall 仍 partial / `accepted:false`；daemon/external overall **deferred**；**daemon/live 不碰**。
 - **用户确认威胁边界 + 三模型审计事实（2026-08-06）**：
   - 同一 TokenUser 与管理员恶意修改 **out of loader contract**（不伪称闭合）。
   - 其他 principal：**fail-closed**（package_rx / path / ACL）。
@@ -90,18 +90,20 @@ updated: 2026-08-06
   - 四 consumer（retained / stable / edge / DCC）收敛为 **进程级 successful-load singleton**（globalThis；失败不缓存；测试注入不交叉污染）。
 - **只读外部前提探测（2026-08-06；未 kick / 未写 / 未改 settings）**：live production observe = `legacy` / `not_authorized`；attestation **absent**；本机 Node 车道 **仅 Node 24**（无 Node 22 双车道）；本地 **无** 其他 enabled 普通账户可供第二 principal 外证；**无** repo CI / Linux / Server runner 入口，WSL **不可计** production acceptance。闭合 DCC live / 第二账户 DACL / Linux zero-regression / 完整 OS/Node 矩阵 **依赖 daemon 重构后重新设计的跨主机外证路径**；本轮不实现 ingestion。
 - **Live pin / artifact（现行）**：
-  - artifact commit：`8823e47f4de37156ac8ebbb9a6149bd8617ce470`
-  - source commit：`f0aac1737550c1a926fc73e775a1870768215320`
-  - manifest sha256：`b41b07d13005ff5189c7e61a080d36ba72640624174828ce0181a9148f5bb6e7`
-  - binary sha256：`f29c1e7ae35e4dcbd864333feb25fe972d0cb6e4b725aabf9c3bdbc237ef4d0f`
-  - build_id：`0adb312d6245f470ff05ca2627cb2dc45f94616387fa2cb5f53fc1b03defce26`
-  - source_tree sha256：`d38a50965a6909267445b693c9a9f37c52f1d323ceec8c432f838f2774664afd`
-  - toolchain_id：`b937bbdab556e3df8ce518def79c0c6bd75fd0d163453040b8290f4c3db04c02`
+  - artifact commit：`058b40544e69d7ef10f4164d1487a87f20b25783`
+  - source commit：`bbe558946347c469f74749944ebb8945b9335ded`
+  - manifest sha256：`2baeeb6153e554d1b5c912c848ec7fbe7444826aef4896116f20592f7f1e32f1`
+  - binary sha256：`b698dca25a3baaa35ca2cb07f75d6773c326c4e8b3ce0af15d782323644a576e`
+  - build_id：`11806eb6e283cca426f99064a0275c6c86f75390f3bb9ccd7f72b0281e3c14a8`
+  - source_tree sha256：`a8c300d4891793325844a2d5fa5f45b5b92581af2e6ed942d6637c0e1cf68e20`
+  - toolchain_id：`b937bbdab556e3df8ce518def79c0c6bd75fd0d163453040b8290f4c3db04c02`（不变）
   - pin live；package installed `package_rx`；production zero-arg load 正向可用。
-  - 构建证据：dual clean match；native tests 21 passed；clippy passed；sensitive scan passed；gates 全 true。
-  - package smoke 15；post-pin matrices 在 live pin 下跑通。
-  - 历史：旧 `892ddeb` live 曾 unlock 移出、pin 曾回 `null` 待 rebuild——**该等待态已结束**；Decision Log 保留历史条目，现在时不再写 pin null / 待 final rebuild。
-- **Partial production acceptance（2026-08-06；`accepted:false`）**：固化记录 [docs/completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)。runtime 切片：Node 24.18.1 / win32-x64 / Windows_NT 10.0.26100 / local NTFS。dossier sections：provenance / retained / DACL / stable / edge = pass；DCC = `not_covered`；`same_fd_post_dlopen_rehash` = pass；live abrain aggregate unchanged；git clean after。**不得**据此勾 criteria 或宣称 production accepted。
+  - 构建证据：production `dual_clean_match`；native tests 21 passed；clippy passed；package_rx verified；gates 全 true。
+  - Smokes（pass）：package 15；addon 32；canary；retained-native 9；adapter 11；durable-dacl（同步修复后、最终 artifact 重建前连续 20 次；最终 artifact 安装后连续 5 次）；stable 21；edge 9；DCC physical 10。
+  - Dossier：`extension_windows_adaptation=pass`；overall `accepted:false` / `status:partial`；live abrain aggregate unchanged；git clean。
+  - 历史：旧 final package 曾为 artifact `8823e47f…` / source `f0aac173…`（见 partial completion 与 Decision Log）；旧 `892ddeb` live 曾 unlock 移出、pin 曾回 `null` 待 rebuild——**该等待态已结束**；现在时只写现行 `058b4054…`/`bbe55894…`。
+- **Partial production acceptance（historical 2026-08-06；`accepted:false`）**：固化记录 [docs/completions/2026-08-06-windows-native-production-acceptance-partial.md](../completions/2026-08-06-windows-native-production-acceptance-partial.md)（记录当时 artifact `8823e47f…` / source `f0aac173…`；**不改**历史证据）。runtime 切片：Node 24.18.1 / win32-x64 / Windows_NT 10.0.26100 / local NTFS。dossier sections：provenance / retained / DACL / stable / edge = pass；DCC = `not_covered`；`same_fd_post_dlopen_rehash` = pass；live abrain aggregate unchanged；git clean after。**不得**据此勾 criteria 或宣称 production accepted。
+- **Windows-only extension adaptation（2026-08-06；scope pass ≠ production accepted）**：固化记录 [docs/completions/2026-08-06-windows-extension-adaptation.md](../completions/2026-08-06-windows-extension-adaptation.md)。现行 final package（source `bbe55894…` / artifact `058b4054…`）下 dossier `extension_windows_adaptation=pass`、overall partial/`accepted:false`；本机 Windows extension 适配范围完成；daemon 未触碰；8 criteria 仍 open（完整矩阵外证未齐）；goal 可 pause。
 - **Loader 威胁模型与缓解（2026-08-06 收口；≠ 伪称 same-token 闭合）**：`assertTrustedLeafPath` 逐组件 lstat 仅 ENOENT 可 defer 到 MISSING；EACCES/EPERM/EBUSY/其他 → `PATH_UNTRUSTED`；realpath 同类 fail-closed。生产/测试共同 load flow：binary fd 自 hash 前持有到 load 后；dlopen 后 **same-fd** 全量 rehash + after-load identity（dev/ino **bigint 无损**；mtime 仅诊断）。**合同**：same-token/admin out-of-contract；其他 principal fail-closed；hash/pin/package_rx = provenance+损坏检测；无 small bootstrap。真实 canary：`scripts/smoke-windows-native-load-canary.mjs` + `native/windows-load-canary`（**不进** production source closure/package manifest）。
 - **Production acceptance dossier 合同（2026-08-06 收缩裁决；partial；≠ accepted）**：`scripts/dossier-windows-native-production-acceptance.mjs`。**双结论（不得混称）**：(1) `extension_windows_adaptation` — 本机可机械验证的 provenance/native package_rx / retained / DACL / stable / edge（+ structural same-fd rehash）；pass **≠** production accepted；(2) overall `accepted` + top-level `status` — production accepted；因 closed blocking residual 固定列出 daemon DCC / live matrix / Linux zero-regression / second-account DACL / Node≥22.19+Server 外证 **deferred/not covered**，overall **必须** `accepted:false` / `status:partial`；**无** env/manifest 开关可使其变 true。**Artifact lineage 保留**（source⊏artifact⊏HEAD；content-bound artifact A；source..A 恰三 package 输出；A..HEAD 逐 commit 仅 docs/**；真实 temp git DAG self-test；拒 rollback/merge 隐藏）。**已完整移除** first-matrix external evidence ingestion、schema（`schemas/windows-native-first-matrix-evidence-v1.json`）、slot validator、伪 command evidence fixtures、`--evidence` 开关。self-test 断言 external matrix deferred、overall 永不因本机 section 误绿。跨主机 evidence ingestion **daemon 重构后重新设计**；本轮不实现；**criteria 不改不勾**。
 - **Post-pin smoke 双态（2026-08-06）**：7 个冲突 smoke pin null 保留 fail-closed；pin live 允许并在 child 验证 production zeroarg 正向；controller 不因 live dlopen 阻塞 live 包覆盖/删除；temp suites 独立且不称 production。**当前 pin live → 走 live 正向态。**
@@ -120,7 +122,7 @@ updated: 2026-08-06
   - loader 生产路径：`PIN_SOURCE_COMMIT` 非 null/40hex 且等于 `manifest.source_commit`（闭式错误）；test options 不要求。`__TEST.loadWindowsNativeAddonEnforcingPackageAcl` 门控 ACL 强制。
   - unlock：`loadInstalledForAcl` **throw** 不 die/process.exit（catch 可落 icacls）；无 pin/坏 binary/缺 DLL → 固定 icacls reset fallback + 明确 method。package 写前 directory create/delete writability probe；裸 EACCES 变 closed 提示；binary ≤64MiB；post-verify 失败恢复原 pin/manifest/binary 或 pin→null fail-closed。install ACL 部分失败 best-effort private_rw 并提示。
   - smoke：`smoke:windows-native-package`（无 artifact/pin → SKIP；live 固定包只读 production verify；hash/missing/ACL tamper 用独立 temp package；production ACL gate 经 temp + test-hooks enforcing 入口；unlock↔install 仅动 live ACL 并 restore）。
-  - **现行：final package 已 commit + installed package_rx；pin live；partial dossier 已固化；criteria 全不勾；不宣称 production accepted。**
+  - **现行：final package 已 commit（artifact `058b4054…` / source `bbe55894…`）+ installed package_rx；pin live；`extension_windows_adaptation=pass` + overall partial 已固化；criteria 全不勾；不宣称 production accepted；goal 可 pause。**
 - **DCC attestation 物理层 integration（2026-08-06；物理层已接；dossier DCC=`not_covered`；未 ready）**：
   - `canonical-control.ts`：`isDccAttestationPlatformSupported(win32)` 仅当 production 零参数 loader 成功且 capabilities 含 `protected_dacl_v1`+`atomic_file_v1`；pin null/加载失败 → false，不抛坏 startup；Linux 判定不变。
   - Windows ensure → `ensureProtectedDirectory`+`verify private_rw`；write → `durableAtomicReplaceFile`；read → `readProtectedFile` 先 DACL+identity 再既有 strict JSON parser；snapshot identity = vol/file_id/size；`sameSnapshot` 平台 union（Linux dev/ino 不变）；CAS 写前 sameSnapshot + replace + readback raw exact；missing→null；DACL 问题 → unavailable/write_failed，不 ready。
@@ -166,9 +168,9 @@ updated: 2026-08-06
   - 测试 seam：`retainedDirectoryLockTestApi`（显式函数；temp package dynamic pin 注入；无生产 env override）。
   - smoke：`scripts/smoke-retained-directory-lock.mjs` + `smoke:retained-directory-lock`。
   - **未**改 settings 合同；partial dossier retained=pass；**不等于** production acceptance / criterion close。
-- **不得**因 partial dossier 勾选任一 acceptance criterion。`WIN-LOCK-CONTENTION-CRASH` / `WIN-DACL-TAMPER` / `WIN-DCC-READY` / `WIN-BINARY-PROVENANCE` / `WIN-PRODUCTION-ACCEPTANCE` 等仍要求完整匹配外证；temp-root smoke 与 partial section pass **不是**这些门的全部证据。
+- **不得**因 partial dossier 或 `extension_windows_adaptation=pass` 勾选任一 acceptance criterion。`WIN-LOCK-CONTENTION-CRASH` / `WIN-DACL-TAMPER` / `WIN-DCC-READY` / `WIN-BINARY-PROVENANCE` / `WIN-PRODUCTION-ACCEPTANCE` 等仍要求完整匹配外证（完整第一矩阵外证未齐 → 仍 open）；temp-root smoke 与 partial/extension section pass **不是**这些门的全部证据。same-token/admin **out-of-contract**，**不做** bootstrap，**不得**再把 same-token TOCTOU 写成 `WIN-BINARY-PROVENANCE` 的全局 blocker。
 - **协议 supersede（审查实证）**：初版 `CreateFileW(DELETE)` 目录 handle 方案已被证据 supersede 并移除。现行协议为零文件 **Global named mutex**（无 sentinel / 无 ADS）：目录仅 identity probe；mutex 名 `Global\pi-astack-retained-v1-<sidhash8>-<volumehex16>-<fileidhex32>`；`CreateMutexW` + protected SD + handle 级 DACL verify + `WaitForSingleObject(0)`。
-- **Named mutex default DACL / predictable-name squat**：实现探测路径已用 current-primary-TokenUser protected DACL + SID hash 短标识闭合；**仍不得**据此勾选 criteria（availability residual / TOCTOU / DCC live 等仍 open）。
+- **Named mutex default DACL / predictable-name squat**：实现探测路径已用 current-primary-TokenUser protected DACL + SID hash 短标识闭合；**仍不得**据此勾选 criteria（availability residual / DCC live / 完整矩阵外证 等仍 open；same-token 非 TOCTOU blocker）。
 - 已落地（2026-08-05 P1 封闭审查 + P2/P3 垂直切片；pin 现 live，见上）：
   - **Core ABI v1 + 可扩展 capabilities**：
     - TS loader — ABI=1；capabilities allowlist = sorted `{atomic_file_tempdir_v1, atomic_file_v1, protected_dacl_v1, retained_directory_lock_v1}` + must-contain retained；lease 含 `acquired_after_abandon`；错误闭集含 `MUTEX_NAMESPACE_DENIED`/`DACL_INVALID`/`IO_FAILED`/…；map error **前缀锚定**（`RETAINED_DIRECTORY_LOCK_`/`PROTECTED_DACL_`/`ATOMIC_FILE_`）；identity 规范化失败会 close raw lease；BUSY=`null`；pin 缺失 fail-closed（现行 pin live）；`__TEST` 门控。
@@ -199,11 +201,12 @@ updated: 2026-08-06
     - retained smoke — controller/worker；temp package binaryPath；16 进程 barrier 等。
     - durable-dacl smoke（真实 probe）— private/package_rx；icacls tamper exit0+readback 后 native 拒；foreign group 收敛；mutex squat helper 默认 DACL → DACL_INVALID/MUTEX_NAMESPACE_DENIED（非 BUSY）；16 create err=null/created false=collision/barrier skew 有界；replace reader barrier+success/error counts+必见 OLD+NEW；16×1MiB append head/tail hash+LEN 哨兵；kill-during-attempt ready→native+多 delay 强杀 dest 仅 exact OLD|NEW；leaf+ancestor junction 拒；maxBytes=0 非 TOO_LARGE；temp 无残留。
 - **P0 退出判定**：package pin 策略 / production build **已落地**；合同+loader+package 主线完成。**正式 P0 证据退出仍卡**完整第一矩阵外证（Linux zero-regression 入口、OS/Node 双车道与 Server 覆盖）——**不是** “必须做 small native bootstrap / 原子闭合 same-token TOCTOU”。same-token/admin 已冻结为合同外；hash/pin/package_rx = provenance+损坏检测。
-- **P1/P2/P3 判定**：P1 production adapter 已接线（partial retained=pass）；P2 durable/stable/edge production physical 已接线（partial pass；live matrix / Linux external 仍 open）；P3 physical+DACL partial pass、DCC=`not_covered`、第二账户外证 open；**不等于**对应 acceptance criteria 已满足——criterion 仍因 temp fixture / 真实生产调用点或矩阵外证不足 open。
+- **P1/P2/P3 判定**：P1 production adapter 已接线（partial retained=pass）；P2 durable/stable/edge production physical 已接线（partial pass；live matrix / Linux external 仍 open）；P3 physical+DACL partial pass、DCC=`not_covered`、第二账户外证 open；**不等于**对应 acceptance criteria 已满足——criterion 仍因完整矩阵外证未齐 open。
 - Linux 侧：retained OFD / DCC production acceptance 继续有效；本机无 Linux zero-regression 新证据。
-- Windows 侧：pin live + package_rx installed；零参 load 正向；partial dossier `accepted:false`；DCC 仍非 ready（`not_covered`）。
+- Windows 侧：pin live + package_rx installed（现行 `058b4054…`/`bbe55894…`）；零参 load 正向；dossier `extension_windows_adaptation=pass` / overall `accepted:false`；DCC 仍非 ready（`not_covered`）；daemon **untouched**。
 - 工具链：blocker 已解决。
-- **仍 blocking（overall accepted；closed deferred residuals）**：`external_matrix_deferred_until_daemon_redesign`、`daemon_dcc_live_not_covered`、`live_matrix_stable_edge_not_covered`、`linux_zero_regression_not_covered`、`second_account_dacl_tamper_not_covered`、`node_22_and_server_external_evidence_not_covered`。跨主机外证路径 **daemon 重构后重新设计**；本轮无 ingestion。same-token TOCTOU **不再**作为“必须原子闭合”的全局 blocking residual（threat-model known non-blocking）。
+- **仍 blocking（overall accepted；closed deferred residuals）**：`external_matrix_deferred_until_daemon_redesign`、`daemon_dcc_live_not_covered`、`live_matrix_stable_edge_not_covered`、`linux_zero_regression_not_covered`、`second_account_dacl_tamper_not_covered`、`node_22_and_server_external_evidence_not_covered`。跨主机外证路径 **daemon 重构后重新设计**；本轮无 ingestion。same-token/admin **out-of-contract**；**不做** bootstrap；same-token TOCTOU **不是**全局 blocking residual（threat-model known non-blocking）。
+- **Goal disposition**：Windows-only extension 本机适配可视为本阶段完成；overall production accepted deferred；goal **可 pause** 直至 daemon 重构后恢复 / 外部 host 到位。
 - 本文件是唯一 living plan。
 
 ## Phase Table
@@ -214,7 +217,7 @@ updated: 2026-08-06
 | P1 | native lock | **production adapter 已接线**；partial dossier retained=pass；criterion 仍 open | P0 合同可用；工具链可用 | Windows 跨进程 contention + crash release **生产路径**外证；Linux OFD zero-regression | criterion 仍因 temp fixture / 真实生产调用点或矩阵外证不足 open；禁止以 temp smoke 或 partial retained=pass 当 production acceptance |
 | P2 | atomic pointer / durable replace | durable/stable/edge **production physical 已接线**；partial pass；live matrix 与 Linux external 仍 open | P1 合同可用 | Windows durable replace / atomic pointer **生产路径**外部证据；相关 Linux 路径 zero-regression | 补 live matrix 与 Linux external 外证；进入 P3 DCC live 覆盖评估；不得以 temp fixture partial pass 关闭 |
 | P3 | protected DACL + DCC | **physical+DACL partial pass**；DCC=`not_covered`；第二账户外证 open；未 criterion close | P2 合同可用 | protected-DACL **生产**外证；DACL tamper fail-closed；DCC 不再以 `attestation_unavailable` 作为唯一终态，且仅在 DACL 验收后才允许 ready 路径 | 补第二账户 DACL 主动 tamper 外证；DCC live **defer 至 daemon 重构**；P4 不得以 partial 关闭 |
-| P4 | Windows production acceptance | **partial**（dossier 双结论；overall `accepted:false`/`partial`；`extension_windows_adaptation` 可本机 pass；criteria 全未勾；跨主机外证 ingestion **removed/deferred**） | P3 物理接线 + live package | overall production accepted 仅在 daemon 重构后跨主机外证路径重设且全部 stable criteria 有匹配外证时 | 本轮不实现跨主机 ingestion；DCC/live matrix/Linux/second-account/Node22+Server 保持 deferred closed residuals；不得以 extension pass 或 partial 关闭本计划 |
+| P4 | Windows production acceptance | **partial**（dossier 双结论；overall `accepted:false`/`partial`；`extension_windows_adaptation=pass` 本机已完成；criteria 全未勾；跨主机外证 ingestion **removed/deferred**；goal 可 pause） | P3 物理接线 + live package | overall production accepted 仅在 daemon 重构后跨主机外证路径重设且全部 stable criteria 有匹配外证时 | daemon 重构后恢复 / 外部 host；本轮不实现跨主机 ingestion；不得以 extension pass 或 partial 关闭 overall 或勾 criteria |
 
 任一阶段完成**不**自动放宽 Frozen Contracts，也**不**自动勾选未获外证的 criteria。
 
@@ -230,34 +233,35 @@ updated: 2026-08-06
 - [ ] (WIN-EDGE-JOURNAL) 在第一支持矩阵的真实 Windows 主机上，edge journal 相关耐久路径（含跨进程协调所需的 native lock/durable replace 边界）按既有 closed 合同工作，并以外部证据证明成功路径与 fail-closed 路径。
 - [ ] (WIN-DACL-TAMPER) Windows protected-DACL writer/verifier 在对象 ACL 被篡改、非 current-primary-TokenUser、或权限弱于合同要求时 fail-closed；不得把 inherited/default ACL 或“文件存在即可读”当作通过。
 - [ ] (WIN-DCC-READY) 仅在 protected-DACL writer/verifier 完成并验收后，Windows DCC 才允许离开单纯 `attestation_unavailable` 终态；ready 路径必须满足既有六条件观察合同，且 attestation 私有对象受 protected-DACL 保护。
-- [ ] (WIN-BINARY-PROVENANCE) 每个生产加载的 win32-x64 N-API binary 均可复核绑定 source、toolchain、target、hash 与 provenance；addon 缺失、错误架构或 hash 不符时生产路径 fail-closed，且不发生运行时下载或现场自动编译。**注：pin live + same-fd rehash pass 仍不闭合 TOCTOU（无 native bootstrap 原子保证；ancestor-delete-handles / same-token-admin 残留）。**
+- [ ] (WIN-BINARY-PROVENANCE) 每个生产加载的 win32-x64 N-API binary 均可复核绑定 source、toolchain、target、hash 与 provenance；addon 缺失、错误架构或 hash 不符时生产路径 fail-closed，且不发生运行时下载或现场自动编译。**注：same-token/admin 恶意改写 out-of-contract；hash/pin/package_rx = provenance+损坏检测；不做 small bootstrap。本项仍 open 因完整第一矩阵外证未齐——不得再写 same-token TOCTOU 为 blocker，也不得因 pin live / same-fd rehash / extension pass 自动勾选。**
 - [ ] (WIN-PRODUCTION-ACCEPTANCE) 在第一支持矩阵真实 Windows 主机上完成 production acceptance：覆盖 native lock、durable replace/atomic pointer、protected-DACL、DCC、stable-view injection 与 edge journal 的联合外证 dossier；WSL/synthetic-only/模型自述不计入本项。
 
 ## Current Blockers
 
 - **工具链缺失：已解决** — VsDevCmd + MSVC 14.44 + rustc/cargo `x86_64-pc-windows-msvc`；production release + dual clean 已通过。
-- **final package / pin / package_rx：已解决（现行 live）** — artifact `8823e47f…` / source `f0aac173…` / pin live / installed package_rx；不再写“待 rebuild / pin null”。
-- **hash→dlopen / same-token（威胁模型已冻结；非 atomic-TOCTOU 全局 blocker）**：held fd pre-hash + same-fd post-dlopen rehash + bigint identity + package_rx。same-token/admin **out of contract**（canary 证明 native 副作用先于 post-dlopen 检查）；**不做** small bootstrap。`WIN-BINARY-PROVENANCE` 仍 open（不因 rehash pass 自动勾选）。
-- **DCC live 六条件（仍 blocking；daemon 路径 defer 至重构完成）**：物理层已接；partial dossier DCC=`not_covered`。本切片 **不** kick / **不** 写 live abrain / **不** 碰 daemon 代码或运行态。闭合需 daemon 重构完成后的独立授权路径。
+- **final package / pin / package_rx：已解决（现行 live）** — artifact `058b40544e69d7ef10f4164d1487a87f20b25783` / source `bbe558946347c469f74749944ebb8945b9335ded` / pin live / installed package_rx；不再写“待 rebuild / pin null”。
+- **hash→dlopen / same-token（威胁模型已冻结；非 TOCTOU blocker）**：held fd pre-hash + same-fd post-dlopen rehash + bigint identity + package_rx。same-token/admin **out of contract**（canary 证明 native 副作用先于 post-dlopen 检查）；**不做** small bootstrap。**不得**再把 same-token TOCTOU 写成全局 / `WIN-BINARY-PROVENANCE` blocker。`WIN-BINARY-PROVENANCE` 仍 open **仅因**完整第一矩阵外证未齐（不因 rehash pass / extension pass 自动勾选）。
+- **DCC live 六条件（仍 blocking；daemon 路径 defer 至重构完成）**：物理层已接；dossier DCC=`not_covered`。本切片 **不** kick / **不** 写 live abrain / **不** 碰 daemon 代码或运行态。闭合需 daemon 重构完成后的独立授权路径。
 - **DACL 第二账户主动 tamper（仍 open；本机不可构造）**：system-owner / same-token deny 矩阵已观察；本地无其他 enabled 普通账户 → 第二账户主动 tamper 未覆盖 → 不闭合 `WIN-DACL-TAMPER`；需用户提供独立 principal 或外部 host。
-- **stable / edge live matrix（仍 open）**：partial 为 temp fixture production physical path，非 live production matrix root → 不闭合 `WIN-STABLE-VIEW-INJECTION` / `WIN-EDGE-JOURNAL`。
+- **stable / edge live matrix（仍 open）**：dossier 为 temp fixture production physical path，非 live production matrix root → 不闭合 `WIN-STABLE-VIEW-INJECTION` / `WIN-EDGE-JOURNAL`。
 - **Linux zero-regression 外证（仍 open；本机不可构造）**：无 repo CI / Linux / Server runner；WSL 不计；无 `WIN-LINUX-ZERO-REGRESSION` 证据 → 需外部 Linux host 或授权 CI。
 - **完整 OS/Node 矩阵（仍 open）**：仅 Node 24.18.1 + Windows_NT 10.0.26100 + win32-x64 + local NTFS 切片；**无 Node 22 车道** 于本机。
-- **External authorization / host（仍 blocking execution）**：在用户授权或外部 host 到位前，不得执行 kick、写 attestation、第二账户 tamper、跨主机矩阵；状态保持 active/partial，execution **BLOCKED**。
+- **External authorization / host（overall 仍 deferred；goal 可 pause）**：在 daemon 重构完成、用户授权或外部 host 到位前，不得执行 kick、写 attestation、第二账户 tamper、跨主机矩阵；Windows-only extension 本机适配已完成，overall execution **paused/deferred**。
 - **Named mutex availability residual**：predictable Global 名同机 squat 仍可 DoS（fail-closed）；same-token malice out-of-contract。
 - **DELETE 目录 handle 方案已 supersede**：不得回退。
 - 纯 TS lockfile 禁止作为生产 fallback。
-- **P4 overall**：partial dossier 已固化且 `accepted:false`；**不得**宣告 production accepted。
+- **P4 overall**：`extension_windows_adaptation=pass`；overall partial / `accepted:false`；**不得**宣告 production accepted。
 
 ## Next Probe
 
-0. **Daemon 重构完成后再重新设计跨主机外证 ingestion**（前置；本轮明确不实现）：不恢复已删 first-matrix schema/validator/fixtures；不引入 env/manifest 开关使 overall 变 true。
-1. **Daemon 重构完成后再评估 DCC live**（defer）：本切片不 kick/不写 live abrain。
-2. **DACL 第二账户主动 tamper 外证**（需独立 principal 或外部 host；重构后路径）。
-3. **stable / edge live production root** 联合外证（非 temp fixture）。
-4. **Linux zero-regression 外证入口**（外部 Linux/CI host）。
-5. **Node ≥22.19 车道 + Windows Server 覆盖**（按冻结矩阵）。
-6. **勾选纪律**：仅当 overall `accepted:true` 且证据与 criterion 文本匹配时才允许 `goal_check`；`extension_windows_adaptation` pass / partial **不勾**任何项；criteria 正文本轮不改；same-token out-of-contract **不**自动关闭 `WIN-BINARY-PROVENANCE`。
+0. **Pause / resume gate**：Windows-only extension 本机适配已完成；goal **可 pause**。恢复条件 = **daemon 重构完成** 和/或 **外部 host** 到位；在此之前不推进 overall production accepted。
+1. **Daemon 重构完成后恢复跨主机外证路径设计**（前置；本轮明确不实现）：不恢复已删 first-matrix schema/validator/fixtures；不引入 env/manifest 开关使 overall 变 true。
+2. **Daemon 重构完成后评估 DCC live**（defer）：不 kick / 不写 live abrain；daemon **untouched** 直至授权重构路径。
+3. **DACL 第二账户主动 tamper 外证**（需独立 principal 或外部 host；重构后路径）。
+4. **stable / edge live production root** 联合外证（非 temp fixture；外部 host 可选）。
+5. **Linux zero-regression 外证入口**（外部 Linux/CI host）。
+6. **Node ≥22.19 车道 + Windows Server 覆盖**（按冻结矩阵；外部 host）。
+7. **勾选纪律**：仅当 overall `accepted:true` 且证据与 criterion 文本匹配时才允许 `goal_check`；`extension_windows_adaptation` pass / partial **不勾**任何项；criteria 正文本轮不改；same-token out-of-contract **不**自动关闭 `WIN-BINARY-PROVENANCE`（该 criterion 仍因完整矩阵外证未齐 open）。
 
 ## Execution Order (Planned)
 
@@ -299,6 +303,7 @@ updated: 2026-08-06
 - 2026-08-06：**审查修复 P0/P1（不 commit；不碰 daemon/live）**。(1) Matrix evidence：immutable per-slot dossier 引用（sha256 + source/artifact commits + runtime + section_results + 真实 commands argv）；手写 closed-schema validator；禁跨 slot 复用/placeholder/`cmd:true`；self-test 覆盖 placeholder/duplicate/hash mismatch/slot mismatch/missing file；无外证仍 partial。(2) Lineage：source⊏artifact⊏HEAD；**逐 commit** path 检查（拒 rollback/merge 隐藏）；source..artifact 恰一 artifact commit 且恰三 package 输出；artifact..HEAD 每 commit 仅 docs/**；temp git DAG self-test。(3) retained/stable/edge/DCC resolve 时重检 `PI_ASTACK_ENABLE_TEST_HOOKS`，撤权后不用 fake。(4) production 零参 load 强制四 capabilities 才缓存；observable counter；失败不缓存；跨 consumer 共享 load result。(5) canary 每次唯一 temp `CARGO_TARGET_DIR` clean build + fixed ID + source/binary hash 绑定。(6) bigint 用 >MAX_SAFE_INTEGER 相邻值回归。(7) plan 消除 bootstrap 作为 P0 退出 blocker 的矛盾，明确 practical boundary；criteria 正文/checkbox 未改。
 - 2026-08-06：**Matrix evidence 语义误绿修复（不 commit；不碰其他逻辑）**。对 7 个 slot 建立代码内 closed semantic spec（platform/os/node lane/edition、必需 section 全 pass、command_id+argv allowlist+exit0、stdout artifact 文件 sha256 + closed result schema）；threat_model 严格 closed keys/const；禁 provenance-only / fail|not_covered|skipped section / 跨 slot dossier 或 stdout artifact 复用；second-account distinct principal 指纹；live-root `fixture_mode=live_production_root`；linux 必须 platform=linux。self-test 正例为每 slot 独立语义匹配 fixtures；负例覆盖 wrong platform/node lane、failed/missing section、wrong fixture mode、second principal absent、stdout hash/command mismatch、threat_model invalid；不连外部。无仓内真实外证 production 仍 partial。
 - 2026-08-06：**收缩裁决 — 移除不可靠 first-matrix external evidence ingestion（不 commit；不碰 daemon/live；criteria 不改不勾）**。(1) **完整移除** first-matrix external evidence ingestion、closed-schema/slot validator、self-test fixtures、`--evidence` 开关；删除未跟踪 `schemas/windows-native-first-matrix-evidence-v1.json`。(2) **保留**已审查 artifact lineage（source⊏artifact⊏HEAD、逐 commit path、真实 temp git DAG self-test）。(3) dossier **双结论**：`extension_windows_adaptation`（本机 provenance/native package/retained/DACL/stable/edge 机械门）与 overall production accepted；因 daemon DCC / live matrix / Linux / second-account / Node22+Server 外证 deferred/not covered，overall **必须** `accepted:false`/`status:partial`；closed blocking residual 固定列出上述缺口；**无** env/manifest 开关使 overall 变 true；extension scope pass **不得**称 production accepted。(4) self-test 断言 external matrix deferred、overall 永不因本机 section 误绿；无 matrix schema/伪 command evidence。(5) **裁决**：跨主机 evidence ingestion 等 **daemon 重构后重新设计**；本轮不实现；criteria 正文/checkbox 未改。
+- 2026-08-06：**Windows-only extension 适配本机完成记录 + final package 现行身份刷新（evidence 固化；不碰 daemon/live；criteria 不改不勾）**。(1) 现行 final package：source `bbe558946347c469f74749944ebb8945b9335ded` → artifact `058b40544e69d7ef10f4164d1487a87f20b25783`；manifest sha256 `2baeeb6153e554d1b5c912c848ec7fbe7444826aef4896116f20592f7f1e32f1`；binary `b698dca25a3baaa35ca2cb07f75d6773c326c4e8b3ce0af15d782323644a576e`；build_id `11806eb6e283cca426f99064a0275c6c86f75390f3bb9ccd7f72b0281e3c14a8`；source_tree `a8c300d4891793325844a2d5fa5f45b5b92581af2e6ed942d6637c0e1cf68e20`；toolchain_id 不变 `b937bbda…`；production dual_clean_match；21 native / clippy / package_rx verified；pin live。(2) Smokes pass：package15 / addon32 / canary / retained-native9 / adapter11 / durable-dacl（同步修复后、最终 artifact 重建前连续 20 次；最终 artifact 安装后连续 5 次）/ stable21 / edge9 / DCC physical10。(3) Dossier：`extension_windows_adaptation=pass`；overall `accepted:false`/`partial`；live abrain unchanged；git clean。(4) 威胁模型注释对齐：same-token/admin out-of-contract；不做 bootstrap；**不得**再写 same-token TOCTOU 为 blocker；`WIN-BINARY-PROVENANCE` 等 8 criteria 仍 open **因完整矩阵外证未齐**。(5) Current status：Windows-only extension 本机适配完成；daemon untouched；overall deferred；goal 可 pause；Next Probe = daemon 重构后恢复 / 外部 host。(6) 固化 [docs/completions/2026-08-06-windows-extension-adaptation.md](../completions/2026-08-06-windows-extension-adaptation.md)；历史 partial completion **不改**（仍记旧 `8823e47f…`/`f0aac173…`）。
 
 ## Definition of Fully Complete
 
