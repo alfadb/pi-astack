@@ -78,7 +78,7 @@ function stripCodeFence(text: string): string {
 export type Translator = (en: string, userHint: string, ctx: unknown) => Promise<string | null>;
 
 export async function defaultTranslator(en: string, userHint: string, ctx: unknown): Promise<string | null> {
-  const c = ctx as { model?: unknown; modelRegistry?: { getApiKeyAndHeaders?(model: unknown): Promise<{ ok?: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }> } } | undefined;
+  const c = ctx as { model?: unknown; modelRegistry?: { getApiKeyAndHeaders?(model: unknown): Promise<{ ok?: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }> } } | undefined;
   const model = c?.model;
   const registry = c?.modelRegistry;
   if (!model || typeof registry?.getApiKeyAndHeaders !== "function") return null;
@@ -89,7 +89,7 @@ export async function defaultTranslator(en: string, userHint: string, ctx: unkno
     streamSimple(
       model: unknown,
       opts: { messages: Array<{ role: "user"; content: Array<{ type: "text"; text: string }>; timestamp: number }> },
-      config: { apiKey: string; headers?: Record<string, string>; timeoutMs?: number; maxRetries?: number; signal?: AbortSignal },
+      config: { apiKey: string; headers?: Record<string, string | null>; timeoutMs?: number; maxRetries?: number; signal?: AbortSignal },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 

@@ -123,6 +123,9 @@
     "smoke:retained-directory-lock": "node scripts/smoke-retained-directory-lock.mjs",
     "smoke:context7": "node scripts/smoke-context7.mjs",
     "smoke:model-curator-live-reapply": "node scripts/smoke-model-curator-live-reapply.mjs",
+    "smoke:model-curator-native-provider": "node scripts/smoke-model-curator-native-provider.mjs",
+    "smoke:model-registry-refresh-result": "node scripts/smoke-model-registry-refresh-result.mjs",
+    "smoke:memory-embedding-null-headers": "node scripts/smoke-memory-embedding-null-headers.mjs",
     "smoke:pi-internals-subagent": "node scripts/smoke-pi-internals-subagent.mjs",
     "smoke:c5-terminal-state": "node scripts/smoke-c5-terminal-state.mjs",
     "smoke:c5-audit-row-schema": "node scripts/smoke-c5-audit-row-schema.mjs",
@@ -371,10 +374,10 @@
     "protobufjs": "7.6.5"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.83.0",
-    "@earendil-works/pi-ai": "0.83.0",
-    "@earendil-works/pi-coding-agent": "0.83.0",
-    "@earendil-works/pi-tui": "0.83.0",
+    "@earendil-works/pi-agent-core": "0.84.1",
+    "@earendil-works/pi-ai": "0.84.1",
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "@earendil-works/pi-tui": "0.84.1",
     "jiti": "2.7.0",
     "typescript": "6.0.3"
   },

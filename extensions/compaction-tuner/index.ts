@@ -89,7 +89,7 @@ interface CompactionTunerCtx {
   }): void;
   modelRegistry?: {
     find?(provider: string, modelId: string): unknown;
-    getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> } | { ok: false; error: string }>;
+    getApiKeyAndHeaders?(model: unknown): Promise<{ ok: true; apiKey?: string; headers?: Record<string, string | null> } | { ok: false; error: string }>;
   };
   getSystemPrompt?(): string;
   __testRemoteOpenAICompactFn?: RemoteOpenAICompactFn;
@@ -576,7 +576,11 @@ async function runCustomCompactionSummary(
         event.preparation,
         model as never,
         auth.apiKey,
-        auth.headers,
+        // pi-coding-agent compact's headers param is typed Record<string, string>,
+        // but 0.84.x ProviderHeaders may carry null delete markers. The cast is
+        // type-only; null markers are passed through to the OpenAI SDK untouched
+        // (never filtered) so header deletion semantics survive.
+        auth.headers as Record<string, string> | undefined,
         (event.customInstructions ?? settings.customInstructions) || undefined,
         event.signal,
       );

@@ -27,7 +27,7 @@ import {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, "..");
 const jiti = createJiti(import.meta.url);
-const TARGET = "0.83.0";
+const TARGET = "0.84.1";
 const localCodingAgent = path.join(repoRoot, "node_modules/@earendil-works/pi-coding-agent");
 const externalHost = resolveExternalHostCodingAgent(repoRoot);
 const aliasHost = externalHost.external
@@ -39,6 +39,18 @@ const aliasHostRoot = aliasHost.root && fs.existsSync(path.join(aliasHost.root, 
 const aliasHostIsExternal = Boolean(
   aliasHostRoot && !isRepoLocalPath(aliasHostRoot, repoRoot),
 );
+
+function versionAtLeast(actual, floor) {
+  const a = String(actual).match(/^(\d+)\.(\d+)\.(\d+)/);
+  const f = String(floor).match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!a || !f) return false;
+  const av = a.slice(1).map(Number);
+  const fv = f.slice(1).map(Number);
+  for (let i = 0; i < 3; i++) {
+    if (av[i] !== fv[i]) return av[i] > fv[i];
+  }
+  return true;
+}
 
 function packageDist(root, name, file) {
   if (name === "@earendil-works/pi-coding-agent") {
@@ -338,11 +350,14 @@ await checkAsync("host-aliased loader loads convertResponsesMessages from host p
 
   const hostAiVersion = hostPackageVersion(aliasHostRoot, "@earendil-works/pi-ai");
   const hostAgentVersion = hostPackageVersion(aliasHostRoot, "@earendil-works/pi-coding-agent");
-  if (hostAgentVersion !== TARGET && !(hostAgentVersion && hostAgentVersion.startsWith("0.83."))) {
-    throw new Error(`external host pi-coding-agent@${hostAgentVersion} is not 0.83.x at ${aliasHostRoot}`);
+  // 0.84.x gate: real host and host pi-ai must both be >= TARGET within the same
+  // 0.84.x line (same-target compatibility). This rejects old 0.83.x/0.84.0 and
+  // arbitrary future versions (0.85.0+, 1.x) — it never soft-passes off-minor.
+  if (!versionAtLeast(hostAgentVersion, TARGET) || !String(hostAgentVersion).startsWith("0.84.")) {
+    throw new Error(`external host pi-coding-agent@${hostAgentVersion} is not ${TARGET}+/0.84.x at ${aliasHostRoot}`);
   }
-  if (hostAiVersion !== TARGET && !(hostAiVersion && hostAiVersion.startsWith("0.83."))) {
-    throw new Error(`external host pi-ai@${hostAiVersion} is not 0.83.x under ${aliasHostRoot}`);
+  if (!versionAtLeast(hostAiVersion, TARGET) || !String(hostAiVersion).startsWith("0.84.")) {
+    throw new Error(`external host pi-ai@${hostAiVersion} is not ${TARGET}+/0.84.x under ${aliasHostRoot}`);
   }
 
   const hostJiti = createJiti(import.meta.url, {

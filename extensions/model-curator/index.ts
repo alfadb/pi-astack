@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { Api, Model } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, Provider } from "@earendil-works/pi-ai/compat";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 import { isSubAgentBoundaryUntrusted, getSubAgentBoundaryUntrustedDiagnostic, isSubAgentSession } from "../_shared/pi-internals";
 
@@ -153,14 +153,35 @@ function modelToProviderConfig(m: Model<Api>) {
   };
 }
 
+/** Auth readiness: an apiKey OR at least one non-empty string header counts as
+ *  credentials. A bare null delete marker is NOT a credential (0.84.x refresh
+ *  headers may carry them, but they only delete defaults — never authenticate). */
+function authHasCredentials(auth: { apiKey?: string; headers?: Record<string, string | null> }): boolean {
+  if (typeof auth.apiKey === "string" && auth.apiKey.length > 0) return true;
+  return Boolean(
+    auth.headers &&
+      Object.values(auth.headers).some((v) => typeof v === "string" && v.length > 0),
+  );
+}
+
+/** True when provider headers carry at least one null delete marker. Such markers
+ *  cannot be represented by the 0.84.x config-form ProviderConfigInput.headers
+ *  (Record<string, string>); feeding them to the composer breaks auth resolution. */
+function headersCarryNullMarker(headers: Record<string, string | null> | undefined): boolean {
+  return Boolean(headers && Object.values(headers).some((v) => v === null));
+}
+
 async function applyWhitelist(
   pi: ExtensionAPI,
   providerName: string,
   keepIds: readonly string[],
   allBuiltin: Model<Api>[],
   reg: {
+    /** pi >= 0.80.10 ModelRegistry facade; optional so older host facades
+     *  (and test doubles) fall back to the config-form path. */
+    getProvider?(name: string): Provider<Api> | undefined;
     getApiKeyAndHeaders(m: Model<Api>): Promise<{
-      ok: boolean; apiKey?: string; headers?: Record<string, string>;
+      ok: boolean; apiKey?: string; headers?: Record<string, string | null>;
     }>;
   },
 ): Promise<{ kept: number; missing: string[] }> {
@@ -175,20 +196,62 @@ async function applyWhitelist(
 
   if (found.length === 0) return { kept: 0, missing };
 
-  const baseUrl = found[0].baseUrl;
-  const api = found[0].api;
-
   // Resolve the actual API key from the existing provider config
   // via pi's own auth system — no models.json reading, no env var guessing.
   const auth = await reg.getApiKeyAndHeaders(found[0]);
-  const hasHeaders = Boolean(auth.headers && Object.keys(auth.headers).length > 0);
-  if (!auth.ok || (!auth.apiKey && !hasHeaders)) return { kept: 0, missing: ["(auth failed)"] };
+  if (!auth.ok || !authHasCredentials(auth)) return { kept: 0, missing: ["(auth failed)"] };
 
+  // Preferred path (pi >= 0.80.10): preserve the NATIVE provider and only fix
+  // getModels to the whitelist. The 0.84.x config-form ProviderConfigInput.headers
+  // is Record<string, string> and cannot represent ProviderHeaders null delete
+  // markers — the composer would crash auth resolution (null.startsWith). Wrapping
+  // the native Provider keeps id/name/baseUrl/headers/auth/stream/streamSimple/
+  // refresh/filter/deferred (including null markers) intact and never feeds the
+  // marker into the config composer. Methods that may close over `this` are bound
+  // to the original provider.
+  const native = typeof reg.getProvider === "function" ? reg.getProvider(providerName) : undefined;
+  if (native) {
+    const wrapper: Provider<Api> = {
+      id: native.id,
+      name: native.name,
+      baseUrl: native.baseUrl,
+      headers: native.headers,
+      auth: native.auth,
+      getModels: () => found,
+      stream: native.stream.bind(native),
+      streamSimple: native.streamSimple.bind(native),
+      // Optional capabilities are conditionally expanded: a provider without a
+      // capability must NOT advertise it as an explicit-undefined key (any
+      // `in`/presence probe would misjudge it as present). Methods that may
+      // close over `this` are bound to the original provider.
+      ...(native.refreshModels ? { refreshModels: native.refreshModels.bind(native) } : {}),
+      ...(native.filterModels ? { filterModels: native.filterModels.bind(native) } : {}),
+      ...(native.fetchDeferred ? { fetchDeferred: native.fetchDeferred.bind(native) } : {}),
+      ...(native.cancelDeferred ? { cancelDeferred: native.cancelDeferred.bind(native) } : {}),
+    };
+    pi.registerProvider(wrapper);
+    return { kept: found.length, missing };
+  }
+
+  // Legacy fallback (old host / test facade without getProvider): config-form
+  // registration is only safe when NO null delete markers are present — the
+  // composer cannot consume them. With markers we FAIL CLOSED (do not register)
+  // and never silently filter them away.
+  if (headersCarryNullMarker(auth.headers)) {
+    return {
+      kept: 0,
+      missing: ["(auth failed: provider headers carry null delete markers; legacy config-form cannot represent them)"],
+    };
+  }
+
+  const baseUrl = found[0].baseUrl;
+  const api = found[0].api;
   pi.registerProvider(providerName, {
     baseUrl,
     api,
     apiKey: auth.apiKey,
-    headers: auth.headers,
+    // Safe here: the null-marker guard above guarantees no null values remain.
+    headers: auth.headers as Record<string, string> | undefined,
     models: found.map(modelToProviderConfig),
   });
 
@@ -370,12 +433,17 @@ function buildAvailableModelsBlock(
 // ── Extension entry ─────────────────────────────────────────────
 
 interface CuratorRegistryLike {
-  /** pi >= 0.80.10; optional so older host facades remain supported. */
-  refresh?(): Promise<void>;
+  /**
+   * pi >= 0.80.10; optional so older host facades remain supported.
+   * 0.84.x refresh resolves ModelsRefreshResult { aborted, errors }; older
+   * hosts resolve void. Both are handled: aborted/provider errors warn and
+   * the current catalog snapshot is used (fail-open, never blocks).
+   */
+  refresh?(): Promise<{ aborted?: boolean; errors?: ReadonlyMap<string, Error> } | void>;
   getAll(): Model<Api>[];
   getAvailable?(): Model<Api>[];
   getApiKeyAndHeaders(m: Model<Api>): Promise<{
-    ok: boolean; apiKey?: string; headers?: Record<string, string>;
+    ok: boolean; apiKey?: string; headers?: Record<string, string | null>;
   }>;
 }
 
@@ -435,6 +503,50 @@ export default function (pi: ExtensionAPI) {
     return applyInFlight;
   }
 
+  /**
+   * Await the initial registry refresh and surface 0.84.x ModelsRefreshResult
+   * { aborted, errors } without dropping it: warn per provider error / abort,
+   * then continue with the current catalog snapshot. Older hosts that resolve
+   * void/undefined are treated as success (no noise). Rejections keep the
+   * existing fail-open warning.
+   */
+  async function refreshRegistryWithWarnings(reg: CuratorRegistryLike): Promise<void> {
+    if (typeof reg.refresh !== "function") return;
+    let result: unknown;
+    try {
+      result = await reg.refresh();
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(
+        `[model-curator] WARN initial registry refresh failed; ` +
+          `continuing with current catalog snapshot: ${message}`,
+      );
+      return;
+    }
+    if (result == null || typeof result !== "object") return; // old host void = success
+    const r = result as { aborted?: unknown; errors?: unknown };
+    if (r.aborted === true) {
+      // Best-effort: a monkey-patched console.warn that throws must never fail
+      // the curator's whitelist application (T0 review).
+      try {
+        console.warn(
+          "[model-curator] WARN initial registry refresh aborted; continuing with current catalog snapshot",
+        );
+      } catch { /* best-effort warning */ }
+    }
+    const errors = r.errors;
+    if (errors instanceof Map && errors.size > 0) {
+      for (const [providerId, error] of errors) {
+        try {
+          console.warn(
+            `[model-curator] WARN provider ${providerId} refresh failed; ` +
+              `continuing with current catalog snapshot: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        } catch { /* best-effort warning */ }
+      }
+    }
+  }
+
   async function doApplyAllWhitelists(ctx: CuratorCtxLike): Promise<void> {
     const reg = ctx.modelRegistry;
     if (!reg) return;
@@ -452,15 +564,7 @@ export default function (pi: ExtensionAPI) {
 
     if (builtinCatalog === null) {
       if (typeof reg.refresh === "function") {
-        try {
-          await reg.refresh();
-        } catch (e: unknown) {
-          const message = e instanceof Error ? e.message : String(e);
-          console.error(
-            `[model-curator] WARN initial registry refresh failed; ` +
-              `continuing with current catalog snapshot: ${message}`,
-          );
-        }
+        await refreshRegistryWithWarnings(reg);
       }
       builtinCatalog = reg.getAll();
     }

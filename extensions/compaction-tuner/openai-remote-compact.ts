@@ -21,7 +21,7 @@ export interface RemoteOpenAIModelLike extends Partial<Model<Api>> {
 
 export interface RemoteOpenAIAuthLike {
   apiKey?: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | null>;
 }
 
 type RemoteOpenAICompactResponse = CompactedResponse | string;

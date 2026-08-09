@@ -91,20 +91,52 @@ assert(
 
 // ── 3. refreshed cached catalog + no unregister-first (P1) ─────
 {
-  const body = src.slice(src.indexOf("async function doApplyAllWhitelists"));
-  const iRefresh = body.indexOf("await reg.refresh()");
-  const iSnapshot = body.indexOf("builtinCatalog = reg.getAll()");
-  assert(/refresh\?\(\): Promise<void>/.test(src), "registry refresh contract is optional for older hosts");
-  assert(iRefresh !== -1, "first catalog capture awaits registry refresh");
-  assert(iSnapshot !== -1, "built-in catalog cached on first apply");
+  // Locate the refreshRegistryWithWarnings HELPER BODY precisely (it sits
+  // immediately before doApplyAllWhitelists in the source) rather than
+  // full-file-wide substrings that could match comments or other call sites
+  // (avoid false green).
+  const helperStart = src.indexOf("async function refreshRegistryWithWarnings");
+  const applyStart = src.indexOf("async function doApplyAllWhitelists");
+  assert(helperStart !== -1, "refreshRegistryWithWarnings helper exists");
+  assert(
+    applyStart !== -1 && applyStart > helperStart,
+    "refreshRegistryWithWarnings defined immediately before doApplyAllWhitelists",
+  );
+  const helperBody = src.slice(helperStart, applyStart);
+  const applyBody = src.slice(applyStart, src.indexOf('pi.on("session_start"'));
+
+  assert(
+    /refresh\?\(\): Promise<\{ aborted\?: boolean; errors\?: ReadonlyMap<string, Error> \} \| void>;/.test(src),
+    "registry refresh contract covers 0.84.x ModelsRefreshResult + older void hosts",
+  );
+
+  // The helper owns ModelsRefreshResult reporting: the aborted + per-provider
+  // error warning logic must live INSIDE the helper body, and the fail-open
+  // refresh-rejection warning must too.
+  assert(
+    helperBody.includes("initial registry refresh aborted") &&
+      helperBody.includes("continuing with current catalog snapshot"),
+    "helper body reports aborted ModelsRefreshResult",
+  );
+  assert(
+    /provider \$\{providerId\} refresh failed/.test(helperBody) &&
+      helperBody.includes("continuing with current catalog snapshot"),
+    "helper body reports per-provider refresh errors",
+  );
+  assert(
+    helperBody.includes("WARN initial registry refresh failed") &&
+      helperBody.includes("continuing with current catalog snapshot"),
+    "helper body has an explicit fail-open refresh-rejection warning",
+  );
+
+  // The await + getAll snapshot ordering must be local to doApplyAllWhitelists.
+  const iRefresh = applyBody.indexOf("await refreshRegistryWithWarnings(reg)");
+  const iSnapshot = applyBody.indexOf("builtinCatalog = reg.getAll()");
+  assert(iRefresh !== -1, "first catalog capture awaits registry refresh (inside apply body)");
+  assert(iSnapshot !== -1, "built-in catalog cached on first apply (inside apply body)");
   assert(
     iRefresh !== -1 && iSnapshot !== -1 && iRefresh < iSnapshot,
     "registry refresh settles before the initial getAll snapshot",
-  );
-  assert(
-    /WARN initial registry refresh failed/.test(body) &&
-      /continuing with current catalog snapshot/.test(body),
-    "initial refresh failure has an explicit fail-open warning",
   );
 }
 {

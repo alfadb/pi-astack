@@ -50,7 +50,7 @@ export interface GoalJudgeInput {
 
 interface ModelRegistryLike {
   find(provider: string, id: string): unknown;
-  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
 }
 
 /** Compact transcript tail for the judge: user/assistant text only (tool
@@ -206,7 +206,7 @@ export async function runGoalJudge(
   if (deps.signal?.aborted) onParentAbort();
   else deps.signal?.addEventListener("abort", onParentAbort, { once: true });
 
-  let auth: { ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string };
+  let auth: { ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string };
   try {
     auth = await awaitAbortable(registry.getApiKeyAndHeaders(model), controller.signal);
   } catch (error) {
@@ -236,7 +236,7 @@ export async function runGoalJudge(
       streamSimple(
         model: unknown,
         opts: { messages: unknown[] },
-        config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
+        config: { apiKey: string; headers?: Record<string, string | null>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
       ): { result(): Promise<{ errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
     } = await awaitAbortable(import("@earendil-works/pi-ai/compat"), controller.signal);
     const result = await awaitAbortable(auditStreamSimple(

@@ -99,7 +99,7 @@ interface VisionParams {
 interface VisionDeps {
   modelRegistry: {
     getAvailable(): Promise<Array<{ provider: string; id: string; input?: string[]; cost?: { input?: number } }>>;
-    getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+    getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
     find(provider: string, modelId: string): unknown;
   };
   prefs: string[];
@@ -326,7 +326,7 @@ async function analyzeImage(
         opts: { messages: unknown[] },
         config: {
           apiKey: string;
-          headers?: Record<string, string>;
+          headers?: Record<string, string | null>;
           signal?: AbortSignal;
           timeoutMs?: number;
           maxRetries?: number;

@@ -310,7 +310,7 @@ async function invokeAggregatorLlm(
     streamSimple(
       model: unknown,
       opts: { messages: unknown[] },
-      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
+      config: { apiKey: string; headers?: Record<string, string | null>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 

@@ -130,7 +130,7 @@ function extractRecentConversationHistory(
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
-  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
 }
 
 interface PathALedgerRow {

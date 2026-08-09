@@ -419,7 +419,7 @@ export async function runMemoryDecide(args: {
 
   const registry = modelRegistry as {
     find(provider: string, modelId: string): unknown;
-    getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+    getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
   };
 
   const model = registry.find(modelRef.provider, modelRef.id);
@@ -449,7 +449,7 @@ export async function runMemoryDecide(args: {
     streamSimple(
       model: unknown,
       opts: { messages: unknown[] },
-      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
+      config: { apiKey: string; headers?: Record<string, string | null>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 

@@ -2,7 +2,7 @@
 /**
  * Smoke: current pi install target and backward-compatible peer contracts.
  *
- * Install target: 0.83.0. Peer floor: >=0.80.10 <1.0.0.
+ * Install target: 0.84.1. Peer floor: >=0.80.10 <1.0.0.
  *
  * Covers more than source-regex:
  *   1) package.json is the publish contract: pin four @earendil-works packages to
@@ -117,7 +117,7 @@ function walkFiles(dir, pred, out = []) {
 }
 
 const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
-const TARGET = "0.83.0";
+const TARGET = "0.84.1";
 const PEER_FLOOR = ">=0.80.10 <1.0.0";
 const EAR = [
   "@earendil-works/pi-agent-core",

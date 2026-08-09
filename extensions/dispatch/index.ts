@@ -1412,14 +1412,49 @@ function _modelRegistryRefreshInflight(): WeakMap<object, Promise<unknown>> {
   return map;
 }
 
+/**
+ * Report pi 0.84.x ModelsRefreshResult { aborted, errors } without dropping it.
+ * Older hosts resolve void/undefined — treated as success, no noise. Provider
+ * errors and cancellation warn once per refresh and never block the caller.
+ *
+ * Every console.warn is best-effort: a monkey-patched console.warn that throws
+ * must never fail refresh/dispatch (T0 review). Prefix uses the existing
+ * `pi-astack/dispatch:` convention.
+ */
+function reportModelRegistryRefreshResult(result: unknown): void {
+  if (result == null || typeof result !== "object") return; // old host void = success
+  const r = result as { aborted?: unknown; errors?: unknown };
+  if (r.aborted === true) {
+    try {
+      console.warn(
+        "pi-astack/dispatch: WARN model registry refresh was aborted; continuing with current catalog",
+      );
+    } catch { /* best-effort warning */ }
+  }
+  const errors = r.errors;
+  if (errors instanceof Map && errors.size > 0) {
+    for (const [providerId, error] of errors) {
+      try {
+        console.warn(
+          `pi-astack/dispatch: WARN provider refresh failed (${providerId}): ` +
+            `${error instanceof Error ? error.message : String(error)}; continuing with current catalog`,
+        );
+      } catch { /* best-effort warning */ }
+    }
+  }
+}
+
 export async function refreshModelRegistry(modelRegistry: any): Promise<any> {
   if (!modelRegistry || typeof modelRegistry.refresh !== "function") {
     return modelRegistry;
   }
   // Only object registries can be WeakMap keys; primitives fall through to a
-  // direct await (tests/mocks almost always pass objects).
+  // direct await (tests/mocks almost always pass objects). The fallback's
+  // refresh result still enters the report helper so aborted/provider errors
+  // are surfaced there too.
   if (typeof modelRegistry !== "object" && typeof modelRegistry !== "function") {
-    await modelRegistry.refresh();
+    const fallbackResult: unknown = await modelRegistry.refresh();
+    reportModelRegistryRefreshResult(fallbackResult);
     return modelRegistry;
   }
   const inflight = _modelRegistryRefreshInflight();
@@ -1427,6 +1462,11 @@ export async function refreshModelRegistry(modelRegistry: any): Promise<any> {
   if (!pending) {
     const created = Promise.resolve()
       .then(() => modelRegistry.refresh())
+      .then((result: unknown) => {
+        // Never silently drop aborted/provider errors from 0.84.x refresh.
+        reportModelRegistryRefreshResult(result);
+        return result;
+      })
       .finally(() => {
         if (inflight.get(modelRegistry as object) === created) {
           inflight.delete(modelRegistry as object);

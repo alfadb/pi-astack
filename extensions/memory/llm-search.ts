@@ -55,7 +55,7 @@ function classifyLlmError(message: string): string {
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
-  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
 }
 
 interface CandidatePick {
@@ -175,7 +175,7 @@ export async function callSearchModel(
     streamSimple(
       model: unknown,
       opts: { messages: unknown[] },
-      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: PiAiThinkingLevel },
+      config: { apiKey: string; headers?: Record<string, string | null>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: PiAiThinkingLevel },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai/compat");
 

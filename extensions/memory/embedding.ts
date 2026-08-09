@@ -30,7 +30,7 @@ import type { EmbeddingSettings } from "./settings";
 export interface EmbeddingProviderConfig {
   baseUrl: string;                       // e.g. https://sub2api.alfadb.cn/v1
   apiKey: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | null>;
   model: string;                         // doubao-embedding-vision
   dim: number;                           // 2048
   batchSize: number;                     // doubao hard cap = 10
@@ -44,7 +44,7 @@ export interface EmbeddingProviderConfig {
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
-  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string | null>; error?: string }>;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -152,11 +152,20 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
   const url = `${cfg.baseUrl.replace(/\/+$/, "")}/embeddings`;
   const started = Date.now();
   const callId = `${started.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const requestHeaders = {
+  // Raw fetch sink (ADR 0037 P1 review): provider headers may carry null delete
+  // markers (0.84.x ProviderHeaders). A plain spread would hand fetch a literal
+  // null value. WHATWG Headers applies string=set / null=delete case-insensitively
+  // starting from the default Authorization + Content-Type, so deletion semantics
+  // survive and the literal "null" never reaches the wire. Only this fetch sink
+  // applies deletion — provider headers are NOT globally filtered upstream.
+  const requestHeaders = new Headers({
     Authorization: `Bearer ${cfg.apiKey}`,
     "Content-Type": "application/json",
-    ...(cfg.headers || {}),
-  };
+  });
+  for (const [key, value] of Object.entries(cfg.headers || {})) {
+    if (value === null) requestHeaders.delete(key);
+    else requestHeaders.set(key, value);
+  }
   const requestBody = { model: cfg.model, input: chunk };
   const projectRoot = process.cwd();
   const totalInputChars = chunk.reduce((sum, item) => sum + item.length, 0);
