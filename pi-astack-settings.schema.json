@@ -1751,7 +1751,8 @@
                   "properties": {
                     "enabled": { "type": "boolean", "default": true },
                     "observeAfter": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 3 },
-                    "maxTrackedShapes": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 64 }
+                    "maxTrackedShapes": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 64 },
+                    "enforceConsecutiveExact": { "type": "boolean", "default": true, "description": "S4: enforce the production-supported exact consecutive branch of storm/post-cap-schema-rejection-signature/v1 (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive'). Rolling-window trips never enter control; there is no total tool cap. Only observeAfter===3 is a supported cap; any other cap is unsupported and never aborts." }
                   }
                 }
               }

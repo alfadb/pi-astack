@@ -231,6 +231,10 @@ export const NON_RETRYABLE_GOVERNANCE_FAILURES = new Set([
   "empty_visible_retry_budget_exceeded",
   "full_output_cap_budget_exceeded",
   "guardrail_stop",
+  // S4 single-rule enforce (living plan 2026-08-10 STORM-ENFORCE): the storm
+  // enforce terminal is a governance terminal — already bounded inside one
+  // worker run and must never be replayed by workflow retry policy.
+  "schema_rejection_storm_enforced",
 ]);
 
 export function isNonRetryableGovernanceFailure(failureType: string | undefined): boolean {

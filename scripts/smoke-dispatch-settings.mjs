@@ -179,6 +179,27 @@ check("workerRunGovernor defaults are enabled and bounded", () => {
   ) {
     throw new Error(`narrow budget defaults drifted: ${JSON.stringify(cfg.providerBudgets)}`);
   }
+  if (!cfg.toolObservers.schemaErrorStorm.enforceConsecutiveExact) {
+    throw new Error(`S4 enforceConsecutiveExact must default to true: ${JSON.stringify(cfg.toolObservers.schemaErrorStorm)}`);
+  }
+});
+
+check("S4 enforceConsecutiveExact override is honored and invalid values fall back to true", () => {
+  const off = resolveDispatchSettings({ dispatch: { workerRunGovernor: { toolObservers: { schemaErrorStorm: { enforceConsecutiveExact: false } } } } })
+    .workerRunGovernor.toolObservers.schemaErrorStorm;
+  if (off.enforceConsecutiveExact !== false) {
+    throw new Error(`enforceConsecutiveExact=false override not honored: ${JSON.stringify(off)}`);
+  }
+  if (off.observeAfter !== 3 || off.enabled !== true) {
+    throw new Error(`enforceConsecutiveExact override polluted unrelated schemaErrorStorm settings: ${JSON.stringify(off)}`);
+  }
+  for (const bad of ["false", 0, null, {}, []]) {
+    const resolved = resolveDispatchSettings({ dispatch: { workerRunGovernor: { toolObservers: { schemaErrorStorm: { enforceConsecutiveExact: bad } } } } })
+      .workerRunGovernor.toolObservers.schemaErrorStorm;
+    if (resolved.enforceConsecutiveExact !== true) {
+      throw new Error(`invalid enforceConsecutiveExact ${JSON.stringify(bad)} must fall back to true`);
+    }
+  }
 });
 
 check("invalid retry-window values and combinations fall back without affecting other valid settings", () => {
@@ -284,6 +305,9 @@ check("auditRotation and workerRunGovernor schema validate nested bounds and rej
   if (provider.properties.providerRetryWindowSize.minimum !== 2 || provider.properties.providerRetryWindowSize.maximum !== 10000 || provider.properties.providerRetryWindowSize.default !== 14) throw new Error("retry window size schema bounds drifted");
   if (provider.properties.providerRetryWindowLimit.minimum !== 1 || provider.properties.providerRetryWindowLimit.maximum !== 9999 || provider.properties.providerRetryWindowLimit.default !== 10) throw new Error("retry window limit schema bounds drifted");
   if (!provider.description.includes("1 <= limit < providerRetryWindowSize")) throw new Error("retry window relational constraint missing from schema description");
+  if (schemaStorm.properties.enforceConsecutiveExact?.type !== "boolean" || schemaStorm.properties.enforceConsecutiveExact?.default !== true) {
+    throw new Error("schemaErrorStorm.enforceConsecutiveExact schema must be boolean default true");
+  }
   if (readChurn.properties.overlapRatio.minimum !== 0.5 || readChurn.properties.overlapRatio.maximum !== 1) throw new Error("overlap ratio schema bounds drifted");
 });
 

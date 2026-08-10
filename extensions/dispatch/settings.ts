@@ -145,6 +145,7 @@ function resolveWorkerRunGovernor(raw: unknown): WorkerRunGovernorSettings {
         enabled: boolOr(schemaStorm.enabled, def.toolObservers.schemaErrorStorm.enabled),
         observeAfter: asPositiveBudget(schemaStorm.observeAfter, def.toolObservers.schemaErrorStorm.observeAfter),
         maxTrackedShapes: asPositiveBudget(schemaStorm.maxTrackedShapes, def.toolObservers.schemaErrorStorm.maxTrackedShapes),
+        enforceConsecutiveExact: boolOr(schemaStorm.enforceConsecutiveExact, def.toolObservers.schemaErrorStorm.enforceConsecutiveExact),
       },
     },
   };

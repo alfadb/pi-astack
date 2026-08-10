@@ -1,0 +1,891 @@
+{
+  "title": "S4 single-rule enforce — production evidence (dispatch-storm-enforce/v1, rule storm/post-cap-schema-rejection-signature/v1, consecutive branch only; positive enforce + negative rolling-only-shadow pair)",
+  "mode": "production_acceptance_evidence",
+  "result": "accepted_impl_evidence_review_waiting_subcommit",
+  "acceptance_scope": "S4 ENFORCE production evidence pair: (positive) the ONLY production-supported branch of the authorized rule — same strict exact composite signature in the same segment with consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive' — fires a REAL abort decision through WorkerRunGovernor.enforceSchemaRejectionStorm → emitWorkerRunDecision → requestGovernorTermination → FirstWriterTermination (failureType schema_rejection_storm_enforced, signal schema_rejection_storm_enforce, enforce_rule_version dispatch-storm-enforce/v1, budget_kind consecutive, action abort_session_return_bounded_partial); (negative) a rolling-window trip (would_abort_basis==='rolling_window', consecutive_count 2 < 4) stays shadow-only — 0 enforce rows, run completes normally. Rolling-window trips NEVER enter control. No general total tool cap. Shadow rows remain mode observe/counterfactual. This dossier records that S4 enforce behavior is PRODUCTION evidence (real providers/tools, real audit rows), not synthetic-only. ENFORCE-* criteria remain unchecked; no commit/push.",
+  "production_evidence_note": "S4 enforce behavior is production evidence, not synthetic-only: both runs below are real dispatch_agent worker runs (real deepseek/deepseek-v4-flash provider, real read tool, real schema rejections from the real tool schema), audited in .pi-astack/dispatch/audit.jsonl (gitignored mutable source; path reference only, no row content embedded). The positive run demonstrates the real abort decision (task failed, failure_type schema_rejection_storm_enforced, termination_owner worker_run_governor, abnormal closure complete, cleanup_done true, post-claim 0/0, 0 post-terminal rows). The negative run demonstrates the rolling-window trip staying shadow-only (0 enforce rows, task completed, owner run, normal closure, cleanup_done true, post-claim 0/0, 0 post-terminal rows).",
+  "positive": {
+    "kind": "production",
+    "label": "positive — consecutive enforce fires real abort",
+    "rule_version": "dispatch-storm-enforce/v1",
+    "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+    "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+    "shadow_rule_version": "dispatch-storm-shadow/v4",
+    "setup": {
+      "worktree": "fresh pi no-session worktree",
+      "main_model": "openai/gpt-5.6-luna",
+      "worker_model": "deepseek/deepseek-v4-flash",
+      "worker_thinking": "medium",
+      "worker_tools": "read",
+      "task_prompt_chars": 1781,
+      "task_output_chars": 0
+    },
+    "session_id": "019febab-a616-782f-8a89-6f9c25b4e74b",
+    "run": "dtr_71aba33d80debea947241f60",
+    "worker_run_id": "440ff156-8c14-41f0-93b9-1528e3156f22",
+    "dispatch_tool_call_id": "call_6I3NUguq8P3WQT3LMJvp8UP3|fc_0d866ace2d30107d016a79c5931e4081988e2257e09882dbe9",
+    "task_index": 0,
+    "task_count": 1,
+    "task_timestamp_utc": "2026-08-10T12:35:42.731Z",
+    "audit_version": 5,
+    "pid": 423342,
+    "tool_calls": {
+      "tool_call_count": 4,
+      "shape": "real read tool: 4 consecutive same-exact-identity (A) schema rejections (all digest d4072bcf.../key_id 7a2e3c8c55f261fb329ab4b3) — shadow counts 1..4, 3rd post_cap/no-abort, 4th would_abort=true/first_trip/basis consecutive; the SAME 4th event is enforce-eligible (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive') and the real abort decision fires; task failed schema_rejection_storm_enforced",
+      "last_tool": {
+        "tool_name": "read",
+        "tool_call_id": "call_5wuh3vuk",
+        "status": "error",
+        "started_at_utc": "2026-08-10T12:35:42.635Z",
+        "completed_at_utc": "2026-08-10T12:35:42.636Z"
+      }
+    },
+    "terminal_state": "failed",
+    "result": "fail",
+    "stop_reason": "toolUse",
+    "reason": "schema rejection storm enforced: 4 consecutive same-signature rejections > limit 3",
+    "failure_type": "schema_rejection_storm_enforced",
+    "duration_ms": 2968,
+    "rollback_done": true,
+    "closure": {
+      "lifecycle_path": "abnormal",
+      "termination_owner": "worker_run_governor",
+      "termination_claimed_at_ms": 1786365342638,
+      "closure_status": "complete",
+      "closure_completed_at_ms": 1786365342646,
+      "bounded_wait_ms": 7,
+      "bounded_wait_limit_ms": 3000,
+      "run_settled": true,
+      "session_closure_done": true,
+      "cleanup_done": true,
+      "post_claim_provider_start_count": 0,
+      "post_claim_tool_start_count": 0
+    },
+    "shadow_rows_total": 5,
+    "shadow_row_timeline": {
+      "row_0_tool_use_only_marker": {
+        "timestamp_utc": "2026-08-10T12:35:42.663Z",
+        "event_kind": "assistant_response",
+        "progress_verdict": "not_progress",
+        "progress_basis": "tool_use_only",
+        "segment": 0,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "hash_sha256": "edb51e4867d164856095a3f27e0e23ed172802f7f9624549e1a47d654c9a108e"
+      },
+      "exact4_same_identity_A": [
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.669Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "75149dac78dcb55635189002aa369d60df9ecd5cd8ea717e95501447703c11fe"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.678Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "consecutive_count": 2,
+          "window_count": 2,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "295c5d353d64b3b4385f1dcf0bf4a4ec9667fc4f290f3bc7634e4520462b54a5"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.713Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "consecutive_count": 3,
+          "window_count": 3,
+          "post_cap": true,
+          "would_abort": false,
+          "hash_sha256": "e15a8e273f72007a763f7d5450fd8cbc37a11401dde420bebbb4de26ff0ae966"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.722Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "consecutive_count": 4,
+          "window_count": 4,
+          "post_cap": true,
+          "would_abort": true,
+          "would_abort_basis": "consecutive",
+          "first_trip": true,
+          "already_tripped": false,
+          "hash_sha256": "7cd8cf556f8282125dde95c2e967823921303b89369842a876e057f310ff08fc"
+        }
+      ],
+      "exact4_note": "4 consecutive same-exact-identity (A) schema rejections: counts 1..4; the 3rd reaches the cap boundary (post_cap=true, no abort); the 4th EXCEEDS the cap -> would_abort=true / first_trip=true / basis consecutive. The SAME 4th event satisfies the S4 enforce predicate (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive') and the real abort decision fires on it.",
+      "post_terminal_events": 0
+    },
+    "governor_schema_error_storm": {
+      "row_count": 2,
+      "rows": [
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.708Z",
+          "count": 3,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "8d3f9ab650f50ffb5b2faa7cb19470af18789c67b530b8024a38888626ab7ace",
+          "governor_schema_identity_hash": "377258e7dea781a5ece1f2ff75b5f714b30fa563d94734c84130f07c721449dd",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_iaomannf"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:35:42.717Z",
+          "count": 4,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "28f1567c34893c9f44b2822863f650273d3d9c4e2075a25268714601f4c0d6f5",
+          "governor_schema_identity_hash": "377258e7dea781a5ece1f2ff75b5f714b30fa563d94734c84130f07c721449dd",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_5wuh3vuk"
+        }
+      ],
+      "final_schema_error_storm_count": 2,
+      "note": "governor observe path stays observe-only (audit_observation_no_abort, termination_source none) on counts 3 and 4; the real abort comes from the S4 enforce decision on the same 4th event, not from the governor observe path"
+    },
+    "enforce_decision": {
+      "row_kind": "worker_run_event",
+      "signal": "schema_rejection_storm_enforce",
+      "mode": "abort",
+      "action": "abort_session_return_bounded_partial",
+      "failure_type": "schema_rejection_storm_enforced",
+      "count": 4,
+      "limit": 3,
+      "budget_kind": "consecutive",
+      "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+      "enforce_rule_version": "dispatch-storm-enforce/v1",
+      "signature_hmac": {
+        "algorithm": "hmac-sha256",
+        "key_id": "7a2e3c8c55f261fb329ab4b3",
+        "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+      },
+      "segment": 0,
+      "termination_source": "worker_run_governor",
+      "elapsed_ms": 2948,
+      "timestamp_utc": "2026-08-10T12:35:42.726Z",
+      "hash_sha256": "7b18eafdbd0b24f6ad13aa09586735ebd9c5f2e74b0bb954a85b9f2cbed6a2d0",
+      "note": "the real abort decision: same strict exact composite signature (key_id 7a2e3c8c55f261fb329ab4b3 + digest d4072bcf...) in the same segment (0) with consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive' — the ONLY production-supported branch. Flows through WorkerRunGovernor.enforceSchemaRejectionStorm → emitWorkerRunDecision → requestGovernorTermination → FirstWriterTermination."
+    },
+    "control_flow_real_effect": {
+      "enforce_changed_real_execution": true,
+      "evidence": "the enforce decision (12:35:42.726Z) terminated the run: task row result=fail / terminal_state=failed / failure_type=schema_rejection_storm_enforced / termination_source=worker_run_governor / closure abnormal / termination_owner=worker_run_governor / closure_status=complete / cleanup_done=true / post-claim 0/0; 0 rows after the task row for this run/worker"
+    },
+    "task_row_canonical_jq_cS_hash_sha256": "19543ebea2f0d6955b2f77ad7faa35c5747d9af9568fe19018e0ac85c4e5b46f",
+    "row_hashes_total": 12,
+    "row_hashes": {
+      "worker_run_event_requested_output_cap": "4ff96e28a2647ae57c69c68cd0525226608eead097c6bc7125d1cccf4c772c55",
+      "worker_run_event_provider_request": "4bbd898aebefb067cc58a83b9eba2b537d90630a371d5fc4a86847d06fa9321b",
+      "worker_run_event_assistant_response": "9e8352795b1e653e93755642f0cdff6b8ecde4cecc356801c4d97bf01dbcb8ce",
+      "shadow_tool_use_only": "edb51e4867d164856095a3f27e0e23ed172802f7f9624549e1a47d654c9a108e",
+      "shadow_schema_rejection_count1": "75149dac78dcb55635189002aa369d60df9ecd5cd8ea717e95501447703c11fe",
+      "shadow_schema_rejection_count2": "295c5d353d64b3b4385f1dcf0bf4a4ec9667fc4f290f3bc7634e4520462b54a5",
+      "governor_schema_error_storm_count3": "8d3f9ab650f50ffb5b2faa7cb19470af18789c67b530b8024a38888626ab7ace",
+      "shadow_schema_rejection_count3_post_cap": "e15a8e273f72007a763f7d5450fd8cbc37a11401dde420bebbb4de26ff0ae966",
+      "governor_schema_error_storm_count4": "28f1567c34893c9f44b2822863f650273d3d9c4e2075a25268714601f4c0d6f5",
+      "shadow_schema_rejection_count4_would_abort": "7cd8cf556f8282125dde95c2e967823921303b89369842a876e057f310ff08fc",
+      "enforce_schema_rejection_storm_enforce": "7b18eafdbd0b24f6ad13aa09586735ebd9c5f2e74b0bb954a85b9f2cbed6a2d0",
+      "task": "19543ebea2f0d6955b2f77ad7faa35c5747d9af9568fe19018e0ac85c4e5b46f"
+    },
+    "shadow_rule": {
+      "rule_version": "dispatch-storm-shadow/v4",
+      "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+      "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+      "signal": "storm_shadow",
+      "mode": "observe",
+      "counterfactual_action": "would_abort_only_no_control_effect",
+      "cap_after": 3,
+      "window_size": 6,
+      "window_limit": 4,
+      "signature_hmac": {
+        "algorithm": "hmac-sha256",
+        "key_id": "7a2e3c8c55f261fb329ab4b3",
+        "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+        "digest_note": "A — the exact identity that tripped (4 consecutive same-signature rejections) and the SAME identity the enforce decision acted on"
+      },
+      "shadow_rows_join": "all 12 rows join on the same worker_run_id 440ff156-8c14-41f0-93b9-1528e3156f22 / dispatch_run_id dtr_71aba33d80debea947241f60 / dispatch_tool_call_id call_6I3NUguq8P3WQT3LMJvp8UP3|fc_0d866ace2d30107d016a79c5931e4081988e2257e09882dbe9 / task_index=0 / task_count=1 (task row carries run_id + same worker_run_id + same dispatch_tool_call_id)"
+    }
+  },
+  "negative": {
+    "kind": "production",
+    "label": "negative — rolling-window trip stays shadow-only, 0 enforce",
+    "rule_version": "dispatch-storm-enforce/v1",
+    "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+    "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+    "shadow_rule_version": "dispatch-storm-shadow/v4",
+    "setup": {
+      "worktree": "fresh pi no-session worktree",
+      "main_model": "openai/gpt-5.6-luna",
+      "worker_model": "deepseek/deepseek-v4-flash",
+      "worker_thinking": "medium",
+      "worker_tools": "read",
+      "task_prompt_chars": 1298,
+      "task_output_chars": 17
+    },
+    "session_id": "019febae-ccb2-7794-9f67-47cb272dc7c4",
+    "run": "dtr_378273769527b2fcbf90b25e",
+    "worker_run_id": "7a8abc7f-e3a6-4363-8d5b-e462651fa9c0",
+    "dispatch_tool_call_id": "call_y6mbM2IdvZ5T9dDa9lWzNFPh|fc_06cd1acfcc6cc2df016a79c66511dc819890b390103454cad9",
+    "task_index": 0,
+    "task_count": 1,
+    "task_timestamp_utc": "2026-08-10T12:39:27.700Z",
+    "audit_version": 5,
+    "pid": 425571,
+    "tool_calls": {
+      "tool_call_count": 6,
+      "shape": "real read tool: 5 schema rejections with digest sequence A,A,B,A,A (A=d4072bcf..., B=f39283b5... — same tool/class/path, different bounded normalized descriptor, never merged); the 5th rejection has consecutive_count=2 (A streak restarted by B) but window_count=4 (A density inside the rolling window) -> would_abort=true / first_trip=true / basis rolling_window; rolling trips NEVER enter control -> 0 enforce rows; then success reset seg1, visible completion seg2, task completed",
+      "last_tool": {
+        "tool_name": "read",
+        "tool_call_id": "call_20ibvrky",
+        "status": "completed",
+        "started_at_utc": "2026-08-10T12:39:25.224Z",
+        "completed_at_utc": "2026-08-10T12:39:25.235Z"
+      }
+    },
+    "terminal_state": "completed",
+    "result": "ok",
+    "stop_reason": "stop",
+    "duration_ms": 19852,
+    "closure": {
+      "lifecycle_path": "normal",
+      "termination_owner": "run",
+      "termination_claimed_at_ms": 1786365567688,
+      "closure_status": "complete",
+      "closure_completed_at_ms": 1786365567688,
+      "bounded_wait_ms": 1,
+      "bounded_wait_limit_ms": 3000,
+      "run_settled": true,
+      "session_closure_done": true,
+      "cleanup_done": true,
+      "post_claim_provider_start_count": 0,
+      "post_claim_tool_start_count": 0
+    },
+    "shadow_rows_total": 9,
+    "shadow_row_timeline": {
+      "row_0_tool_use_only_marker": {
+        "timestamp_utc": "2026-08-10T12:39:22.577Z",
+        "event_kind": "assistant_response",
+        "progress_verdict": "not_progress",
+        "progress_basis": "tool_use_only",
+        "segment": 0,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "hash_sha256": "ff1f20d2dd0dfe908c0f2744155c58bfd6fe4127a135db1da3f5792d96e3e29e"
+      },
+      "digest_sequence_A_A_B_A_A": [
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.585Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "label": "A",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "8f5b503e17c8752944dee7a4fb83d3532e0d52976cd69b0cd20b3c7715848bfb"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.593Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "label": "A",
+          "consecutive_count": 2,
+          "window_count": 2,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "5ac0eff8f07bc2c41f6914c5284762ab8d88ba890fca120c5abb8f1e33c2421c"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.612Z",
+          "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+          "label": "B",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "ae9c80b7c15422fcba43d522f09af9aa5662887b5f53885559bd26a62d8bc395"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.625Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "label": "A",
+          "consecutive_count": 1,
+          "window_count": 3,
+          "post_cap": true,
+          "would_abort": false,
+          "hash_sha256": "46a35a322b09ee8f7f279516e34591d87612357ede526fb6ce87e431b66d3db1"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.639Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "label": "A",
+          "consecutive_count": 2,
+          "window_count": 4,
+          "post_cap": true,
+          "would_abort": true,
+          "would_abort_basis": "rolling_window",
+          "first_trip": true,
+          "already_tripped": false,
+          "hash_sha256": "3c7292f05a62b6401a58269119df6793b2644610fbbcc2e4eeec4544a1b46b61"
+        }
+      ],
+      "digest_sequence_note": "A,A,B,A,A: the B rejection (different bounded normalized descriptor, same tool/class/path) restarts the consecutive streak (A consecutive resets to 1) but the A density inside the rolling window keeps counting (window_count 1,2,3,4). The 5th event trips on the ROLLING basis (window_count 4 >= window_limit 4) with consecutive_count only 2 — the S4 enforce predicate (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive') is NOT satisfied -> 0 enforce rows. Rolling-window trips NEVER enter control.",
+      "post_trip_rows": {
+        "provider_request_already_tripped_marker": {
+          "timestamp_utc": "2026-08-10T12:39:24.908Z",
+          "event_kind": "provider_request",
+          "progress_verdict": "not_progress",
+          "progress_basis": "provider_request",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 2,
+          "window_count": 4,
+          "would_abort": false,
+          "already_tripped": true,
+          "hash_sha256": "910f06731ba9c64c14469bd0b26c9bbff387e7ec35cba19236518e3fabdcf119",
+          "note": "anti-sticky: after the first trip, neutral events report already_tripped=true instead of repeating would_abort"
+        },
+        "success_progress_reset_seg1": {
+          "timestamp_utc": "2026-08-10T12:39:25.241Z",
+          "event_kind": "tool_execution_end",
+          "progress_verdict": "progress",
+          "progress_basis": "successful_tool_response",
+          "segment": 1,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "post_cap": false,
+          "hash_sha256": "b90b07de23876b3c1e45df8aec2540d987804c525f433e388d4a1c8d5fa5cee4"
+        },
+        "final_visible_assistant_response": {
+          "timestamp_utc": "2026-08-10T12:39:27.683Z",
+          "event_kind": "assistant_response",
+          "progress_verdict": "progress",
+          "progress_basis": "visible_assistant_response",
+          "segment": 2,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "post_cap": false,
+          "hash_sha256": "4bf6f19c353897f7b65c845a121a94e5d839a74d570372f71fc41ab61573872a"
+        }
+      },
+      "post_terminal_events": 0
+    },
+    "governor_schema_error_storm": {
+      "row_count": 2,
+      "rows": [
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.619Z",
+          "count": 3,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "5bf3d1c8807687de1c9779a1745f2d80e6fe6bec1c814cc4d39a69650c1c4a8e",
+          "governor_schema_identity_hash": "a59983e80d061988f19f1c833851d23d1a68525060d55f231e5774240fd2e8f5",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_4brif3ah"
+        },
+        {
+          "timestamp_utc": "2026-08-10T12:39:22.632Z",
+          "count": 4,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "98b41a3c2fdb7d3643f7d3de47d99f6f9fbe1afd5055868ff2cb1c906f1f0a29",
+          "governor_schema_identity_hash": "a59983e80d061988f19f1c833851d23d1a68525060d55f231e5774240fd2e8f5",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_wca0o9at"
+        }
+      ],
+      "final_schema_error_storm_count": 2,
+      "note": "governor observe path stays observe-only (audit_observation_no_abort, termination_source none) on counts 3 and 4; no enforce decision anywhere in this run"
+    },
+    "enforce_decision": {
+      "row_count": 0,
+      "note": "0 worker_run_event rows with signal schema_rejection_storm_enforce for this run — the rolling-window trip (would_abort_basis='rolling_window', consecutive_count 2 < 4) never enters control. The run continues: provider_request, successful read (progress reset seg1), visible completion seg2, task completed."
+    },
+    "control_flow_zero_impact": {
+      "would_abort_never_changed_real_execution": true,
+      "evidence": "shadow would_abort=true fired on the 5th schema rejection (12:39:22.639Z, basis rolling_window) yet the run continued: provider_request at 12:39:24.901Z, successful read completed at 12:39:25.235Z, visible final assistant response at 12:39:27.683Z, task row result=ok / terminal_state=completed / closure normal with cleanup_done=true; governor termination_source=none throughout; 0 enforce rows"
+    },
+    "task_row_canonical_jq_cS_hash_sha256": "e65e94ee4522a419cab69f34a78cef3573061474d5aff2d5220e6fef56454a81",
+    "row_hashes_total": 19,
+    "row_hashes": {
+      "worker_run_event_requested_output_cap": "bf1d6f2bcc8f71bd8a74019320c617e8b51e2413359677d3bea4545cce2907ae",
+      "worker_run_event_provider_request_1": "a5bff148b84006420f00d18c1cf1f06c6c7a6d1d12590b72ff6738c6108abccc",
+      "worker_run_event_assistant_response_1": "20a1451ff47f47b6177c980aea3de66294ca4089a23034818df41f90fa09e392",
+      "shadow_tool_use_only": "ff1f20d2dd0dfe908c0f2744155c58bfd6fe4127a135db1da3f5792d96e3e29e",
+      "shadow_schema_rejection_A_count1": "8f5b503e17c8752944dee7a4fb83d3532e0d52976cd69b0cd20b3c7715848bfb",
+      "shadow_schema_rejection_A_count2": "5ac0eff8f07bc2c41f6914c5284762ab8d88ba890fca120c5abb8f1e33c2421c",
+      "shadow_schema_rejection_B_count1": "ae9c80b7c15422fcba43d522f09af9aa5662887b5f53885559bd26a62d8bc395",
+      "governor_schema_error_storm_count3": "5bf3d1c8807687de1c9779a1745f2d80e6fe6bec1c814cc4d39a69650c1c4a8e",
+      "shadow_schema_rejection_A_count1_post_cap_window3": "46a35a322b09ee8f7f279516e34591d87612357ede526fb6ce87e431b66d3db1",
+      "governor_schema_error_storm_count4": "98b41a3c2fdb7d3643f7d3de47d99f6f9fbe1afd5055868ff2cb1c906f1f0a29",
+      "shadow_schema_rejection_A_count2_post_cap_window4_rolling_trip": "3c7292f05a62b6401a58269119df6793b2644610fbbcc2e4eeec4544a1b46b61",
+      "worker_run_event_provider_request_2": "137cbbed49631534b9433f49696d5337bafdd88c9fd96bceb2abb0f7d24365d3",
+      "shadow_provider_request_already_tripped": "910f06731ba9c64c14469bd0b26c9bbff387e7ec35cba19236518e3fabdcf119",
+      "worker_run_event_assistant_response_2": "7a35cc25c3a538e4cbbd0f711f53e19c74d65d0f066834f4d216152ee245bd56",
+      "shadow_successful_tool_response_seg1": "b90b07de23876b3c1e45df8aec2540d987804c525f433e388d4a1c8d5fa5cee4",
+      "worker_run_event_provider_request_3": "572ed26b9f87889770d8d5aa73e066ee7384566ee1b693f375dfaa8234a3f0c1",
+      "worker_run_event_assistant_response_3": "c0517c6daceb98474977803c9bc39b0e5f77b429e78db6f9b298234bf2616a36",
+      "shadow_visible_assistant_response_seg2": "4bf6f19c353897f7b65c845a121a94e5d839a74d570372f71fc41ab61573872a",
+      "task": "e65e94ee4522a419cab69f34a78cef3573061474d5aff2d5220e6fef56454a81"
+    },
+    "shadow_rule": {
+      "rule_version": "dispatch-storm-shadow/v4",
+      "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+      "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+      "signal": "storm_shadow",
+      "mode": "observe",
+      "counterfactual_action": "would_abort_only_no_control_effect",
+      "cap_after": 3,
+      "window_size": 6,
+      "window_limit": 4,
+      "signature_hmac": {
+        "algorithm": "hmac-sha256",
+        "key_id": "7a2e3c8c55f261fb329ab4b3",
+        "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+        "digest_note": "A — the identity that tripped on the rolling basis (window_count 4). B (f39283b5...) is the collision-pair sibling that restarted the consecutive streak and never merged."
+      },
+      "collision_pair": {
+        "A": {
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "count": 4,
+          "note": "read({}) — same tool/class/path, different normalized descriptor; 4 occurrences in the window"
+        },
+        "B": {
+          "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+          "count": 1,
+          "note": "read({limit:5}) — same tool/class/path, different normalized descriptor; restarts the consecutive streak"
+        },
+        "never_merged": true,
+        "note": "v4 exact identity includes the bounded normalized descriptor; A and B are distinct digests that never merge — B restarts the consecutive streak while A density accumulates in the rolling window"
+      },
+      "shadow_rows_join": "all 19 rows join on the same worker_run_id 7a8abc7f-e3a6-4363-8d5b-e462651fa9c0 / dispatch_run_id dtr_378273769527b2fcbf90b25e / dispatch_tool_call_id call_y6mbM2IdvZ5T9dDa9lWzNFPh|fc_06cd1acfcc6cc2df016a79c66511dc819890b390103454cad9 / task_index=0 / task_count=1 (task row carries run_id + same worker_run_id + same dispatch_tool_call_id)"
+    }
+  },
+  "rejected_history": {
+    "note": "Rejected attempts are NOT part of the main evidence pair above. They are retained as facts/hash summaries only and must not be used to gate any criterion.",
+    "positive_attempt1": {
+      "status": "rejected_not_counted",
+      "reason": "outer dispatch timeout at 300s — the attempt never produced a worker/run: only session+user records were created, the audit stayed unchanged at baseline 136 rows (the main positive run starts at audit line 137), no worker_run_id / dispatch_run_id rows were written, and no residual processes remained (canary pids 423342/424227/425571 all absent at verification time). Not counted as acceptance evidence.",
+      "audit_baseline_before_positive": 136,
+      "no_worker_run_rows": true,
+      "no_residual_processes": true
+    },
+    "negative_attempt1": {
+      "status": "rejected_as_negative_acceptance",
+      "reason": "the worker model deviated from the intended rolling-only pattern and produced 4 CONSECUTIVE same-signature (A) rejections, which legitimately satisfied the consecutive enforce predicate — the run enforced (task failed schema_rejection_storm_enforced). This run therefore cannot serve as the negative acceptance evidence (which must demonstrate a rolling-window trip staying shadow-only with 0 enforce). Facts/hash summary retained below; it is NOT the rolling negative evidence and must not be called rolling.",
+      "facts": {
+        "session_id": "019febac-ce33-786f-b25a-3e67383d19e0",
+        "run": "dtr_f6e8a874895284f0ebf97411",
+        "worker_run_id": "7bd03523-ce8e-4c15-a439-fda454d61ce7",
+        "dispatch_tool_call_id": "call_im7Gko32uDfyuXnLY3jKHpYR|fc_03c945eee818e993016a79c5e45ae0819b8f981bcc1b0fd781",
+        "task_timestamp_utc": "2026-08-10T12:37:56.594Z",
+        "model": "deepseek/deepseek-v4-flash",
+        "tools": "read",
+        "duration_ms": 54256,
+        "result": "fail",
+        "terminal_state": "failed",
+        "failure_type": "schema_rejection_storm_enforced",
+        "tool_call_count": 4,
+        "closure": {
+          "lifecycle_path": "abnormal",
+          "termination_owner": "worker_run_governor",
+          "closure_status": "complete",
+          "cleanup_done": true,
+          "post_claim_provider_start_count": 0,
+          "post_claim_tool_start_count": 0
+        },
+        "row_count": 28,
+        "row_kinds": "1 task + 22 worker_run_event + 5 worker_run_shadow_event",
+        "task_row_canonical_jq_cS_hash_sha256": "aab1d8951006f5a614655d802a2e033c95b6af14655e6497b443b7dc2f0fd9bf"
+      },
+      "not_rolling_evidence": true
+    }
+  },
+  "replay_projection": {
+    "schema_version": "storm-enforce-replay-projection/v1",
+    "status": "production_data",
+    "note": "Self-contained sanitized replay projections of both production runs: the exact pre-projected StormShadowEventInput sequences (safe booleans + opaque signature key_id/digest) reconstructed from the written shadow audit rows, plus each expected observation. No raw error text / field path / normalized descriptor / tool args are included — only the opaque HMAC digest the state machine compares. Replaying these inputs with replayStormShadow(events, {capAfter:3, windowSize:6, windowLimit:4}) must reproduce every expected observation exactly. The S4 enforce predicate (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive') is then applied to the replayed observations: positive must yield exactly 1 eligible event (the unique 4th event), negative must yield 0. This makes the dossier recomputable even after the gitignored audit file disappears.",
+    "settings": {
+      "capAfter": 3,
+      "windowSize": 6,
+      "windowLimit": 4
+    },
+    "positive": {
+      "events": [
+        {
+          "seq": 1,
+          "kind": "assistant_response",
+          "hasVisibleText": false,
+          "completed": false,
+          "errorResponse": false,
+          "emptyVisibleRetry": false,
+          "toolUseOnly": true
+        },
+        {
+          "seq": 2,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 3,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 4,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 5,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        }
+      ],
+      "expected_verdicts": [
+        {
+          "seq": 1,
+          "progress_verdict": "not_progress",
+          "progress_basis": "tool_use_only",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 2,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 1,
+          "window_count": 1,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 3,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 2,
+          "window_count": 2,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 4,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 3,
+          "window_count": 3,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 5,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 4,
+          "window_count": 4,
+          "would_abort": true,
+          "would_abort_basis": "consecutive",
+          "first_trip": true,
+          "already_tripped": false
+        }
+      ],
+      "enforce_predicate": {
+        "predicate": "consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive' (same strict exact composite signature in the same segment)",
+        "cap_after_binding": "cap_after===3 is bound from the projection settings constant settings.capAfter=3 (embedded above), the read-only mirror of governor toolObservers.schemaErrorStorm.observeAfter; the expected observations carry consecutive_count and would_abort_basis",
+        "eligible_events": 1,
+        "eligible_event": {
+          "seq": 5,
+          "segment": 0,
+          "consecutive_count": 4,
+          "cap_after": 3,
+          "would_abort_basis": "consecutive",
+          "first_trip": true,
+          "signature_digest_prefix": "d4072bcf"
+        },
+        "note": "exactly 1 eligible event — the unique 4th same-identity schema rejection (seq 5). This is the event the real enforce decision acted on (enforce row 12:35:42.726Z, failure_type schema_rejection_storm_enforced)."
+      }
+    },
+    "negative": {
+      "events": [
+        {
+          "seq": 1,
+          "kind": "assistant_response",
+          "hasVisibleText": false,
+          "completed": false,
+          "errorResponse": false,
+          "emptyVisibleRetry": false,
+          "toolUseOnly": true
+        },
+        {
+          "seq": 2,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 3,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 4,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e"
+          }
+        },
+        {
+          "seq": 5,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 6,
+          "kind": "tool_execution_end",
+          "isError": true,
+          "schemaRejection": true,
+          "signature": {
+            "algorithm": "hmac-sha256",
+            "key_id": "7a2e3c8c55f261fb329ab4b3",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+          }
+        },
+        {
+          "seq": 7,
+          "kind": "provider_request"
+        },
+        {
+          "seq": 8,
+          "kind": "tool_execution_end",
+          "isError": false,
+          "schemaRejection": false
+        },
+        {
+          "seq": 9,
+          "kind": "assistant_response",
+          "hasVisibleText": true,
+          "completed": true,
+          "errorResponse": false,
+          "emptyVisibleRetry": false,
+          "toolUseOnly": false
+        }
+      ],
+      "expected_verdicts": [
+        {
+          "seq": 1,
+          "progress_verdict": "not_progress",
+          "progress_basis": "tool_use_only",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 2,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 1,
+          "window_count": 1,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 3,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 2,
+          "window_count": 2,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 4,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": false,
+          "consecutive_count": 1,
+          "window_count": 1,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 5,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 1,
+          "window_count": 3,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 6,
+          "progress_verdict": "not_progress",
+          "progress_basis": "schema_rejection",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 2,
+          "window_count": 4,
+          "would_abort": true,
+          "would_abort_basis": "rolling_window",
+          "first_trip": true,
+          "already_tripped": false
+        },
+        {
+          "seq": 7,
+          "progress_verdict": "not_progress",
+          "progress_basis": "provider_request",
+          "segment": 0,
+          "post_cap": true,
+          "consecutive_count": 2,
+          "window_count": 4,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": true
+        },
+        {
+          "seq": 8,
+          "progress_verdict": "progress",
+          "progress_basis": "successful_tool_response",
+          "segment": 1,
+          "post_cap": false,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        },
+        {
+          "seq": 9,
+          "progress_verdict": "progress",
+          "progress_basis": "visible_assistant_response",
+          "segment": 2,
+          "post_cap": false,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "would_abort": false,
+          "first_trip": false,
+          "already_tripped": false
+        }
+      ],
+      "enforce_predicate": {
+        "predicate": "consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive' (same strict exact composite signature in the same segment)",
+        "cap_after_binding": "cap_after===3 is bound from the projection settings constant settings.capAfter=3 (embedded above); the expected observations carry consecutive_count and would_abort_basis",
+        "eligible_events": 0,
+        "note": "0 eligible events: the only trip (seq 6) is on the rolling basis (would_abort_basis='rolling_window', consecutive_count 2 < 4) — rolling-window trips never enter control. Matches the audit: 0 worker_run_event rows with signal schema_rejection_storm_enforce for this run."
+      }
+    },
+    "replay_verification": "replayStormShadow(events, {capAfter:3, windowSize:6, windowLimit:4}) must reproduce every expected_verdicts field exactly (post_cap, would_abort, progress_basis, consecutive_count, window_count, segment, first_trip, already_tripped, would_abort_basis). Executed: node scripts/.replay-s4-enforce.tmp.mjs (jiti-imported extensions/dispatch/storm-shadow.ts, inputs reconstructed from the written audit rows) — result: positive 5/5 rows reproduced exactly (0 mismatches, final snapshot segment=0/post_cap=true/consecutive=4/window=4/tripped=true), negative 9/9 rows reproduced exactly (0 mismatches, final snapshot segment=2/post_cap=false/consecutive=0/window=0/tripped=false); enforce predicate: positive exactly 1 eligible (unique 4th event, seq 5), negative 0 eligible; exit 0.",
+    "privacy": "events carry only safe booleans + opaque signature (key_id + digest); no raw error text / field path / normalized descriptor / tool args / prompt / output in the projection."
+  },
+  "verification": {
+    "jq_empty_parse": "PASS (jq empty over .pi-astack/dispatch/audit.jsonl: every line parses)",
+    "row_hashes_recomputed": "all 31 recorded row hashes (positive 12 rows + negative 19 rows) recomputed via `jq -cS . | tr -d '\\n' | sha256sum` from the audit and match exactly (hash convention: no trailing newline)",
+    "task_row_hashes_recomputed": "positive task row canonical jq-cS hash 19543ebea2f0d6955b2f77ad7faa35c5747d9af9568fe19018e0ac85c4e5b46f and negative task row canonical jq-cS hash e65e94ee4522a419cab69f34a78cef3573061474d5aff2d5220e6fef56454a81 both recomputed via `jq -cS . | tr -d '\\n' | sha256sum` and match exactly",
+    "replay_verdict_equality": "PASS — replayStormShadow(v4, {capAfter:3, windowSize:6, windowLimit:4}) over the written rows' reconstructed inputs reproduces every observation field exactly for both runs (positive 5/5, negative 9/9, 0 mismatches)",
+    "enforce_predicate_recomputed": "PASS — applying the S4 enforce predicate (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive') to the replayed observations yields exactly 1 eligible event for the positive run (the unique 4th event, seq 5) and 0 for the negative run (rolling trip never enforces)",
+    "opaque_digest_equality": "PASS — positive: all 4 tripping rows share digest d4072bcf... / key_id 7a2e3c8c55f261fb329ab4b3, and the enforce decision carries the SAME signature; negative: digest sequence A,A,B,A,A (A=d4072bcf..., B=f39283b5...) never merged, the rolling trip is on A with window_count 4",
+    "post_terminal_zero": "PASS — 0 rows after the task row for both runs (positive task row is the last row of its run block; negative task row is the last line of the audit file)",
+    "joins": "PASS — all rows of each run join on the same worker_run_id / dispatch_run_id / dispatch_tool_call_id / task_index=0 / task_count=1 (task row carries run_id + same worker_run_id + same dispatch_tool_call_id)",
+    "privacy": "PASS — shadow/governor/enforce rows carry only closed progress classification + opaque HMAC signature (key_id + digest); no prompt / raw error text / field path / normalized descriptor / tool args / output / file contents in any row for either run",
+    "no_residual_processes": "PASS — canary pids 423342 (positive), 424227 (rejected negative attempt1), 425571 (negative) all absent at verification time",
+    "final_snapshot_positive": "segment=0, post_cap=true, consecutive_count=4, window_count=4, tripped=true (replayed)",
+    "final_snapshot_negative": "segment=2, post_cap=false, consecutive_count=0, window_count=0, tripped=false (replayed)"
+  },
+  "audit_privacy": {
+    "no_raw_content": true,
+    "note": "shadow rows carry only closed progress classification + opaque HMAC signature (key_id + digest); governor rows carry only closed identity hash + shape + coverage; the enforce row carries only the opaque signature + count/limit/budget_kind/segment; no prompt / raw error text / field path / normalized descriptor / tool args / output / file contents in any row for either run"
+  },
+  "git": {
+    "status": "uncommitted",
+    "note": "evidence collection step made no code changes; full worktree includes uncommitted S4 implementation"
+  }
+}

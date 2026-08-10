@@ -122,6 +122,7 @@ const GOVERNOR_FAILURE_TYPES: ReadonlySet<string> = new Set([
   "provider_retry_budget_exceeded",
   "empty_visible_retry_budget_exceeded",
   "full_output_cap_budget_exceeded",
+  "schema_rejection_storm_enforced",
 ]);
 
 const PROVIDER_FAILURE_TYPES: ReadonlySet<string> = new Set([

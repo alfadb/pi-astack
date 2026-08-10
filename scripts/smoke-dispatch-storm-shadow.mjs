@@ -379,9 +379,9 @@ await check("signature HMAC is recomputable and opaque; the exact identity never
 await check("classifier fail-open: hostile result (throwing getters) degrades without throwing", () => {
   const throwing = { get content() { throw new Error("hostile getter"); } };
   const result = D.buildSchemaRejectionShadowInput(throwing, "read", tempRoot);
-  assert.deepEqual(result, { schemaRejection: false }, "classifier throw must fail open to not-a-rejection");
+  assert.deepEqual(result, { schemaRejection: false, eligibility: "not_schema_rejection" }, "classifier throw must fail open to not-a-rejection");
   const proxy = new Proxy({}, { get() { throw new Error("hostile proxy"); } });
-  assert.deepEqual(D.buildSchemaRejectionShadowInput(proxy, "read", tempRoot), { schemaRejection: false });
+  assert.deepEqual(D.buildSchemaRejectionShadowInput(proxy, "read", tempRoot), { schemaRejection: false, eligibility: "not_schema_rejection" });
   // A normal schema rejection still classifies deterministically.
   const normal = D.buildSchemaRejectionShadowInput(
     { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
@@ -471,7 +471,7 @@ await check("strict key unavailable (unsafe dir) fails open: schemaRejection fal
       "read",
       unsafeRoot,
     );
-    assert.deepEqual(result, { schemaRejection: false }, "strict-key failure must fail open to not-a-rejection with no signature");
+    assert.deepEqual(result, { schemaRejection: false, eligibility: "strict_key_unavailable" }, "strict-key failure must fail open to not-a-rejection with a closed eligibility reason and no signature");
     // Sanity: the non-strict API WOULD have produced an ephemeral key here —
     // proving the wiring must never use it for the shadow signature.
     const fallback = AH.auditHmacHex(unsafeRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, "x");
@@ -536,7 +536,7 @@ try {
       "read",
       cacheRoot,
     );
-    assert.deepEqual(after, { schemaRejection: false }, "cached strict key must not bypass the directory mode re-verification");
+    assert.deepEqual(after, { schemaRejection: false, eligibility: "strict_key_unavailable" }, "cached strict key must not bypass the directory mode re-verification");
 
     // 4. Direct strict also throws (no ephemeral fallback).
     assert.throws(
@@ -570,7 +570,7 @@ try {
         "read",
         cacheRoot,
       ),
-      { schemaRejection: false },
+      { schemaRejection: false, eligibility: "strict_key_unavailable" },
       "0644 key file must fail open in the wiring too",
     );
     fs.chmodSync(keyFile, 0o600);
@@ -676,7 +676,7 @@ await check("runInProcess routes shadow verdicts only to the audit sink, never t
 await check("shadow feed sites are fail-open and pre-project safe fields only (no raw event payloads)", () => {
   const source = fs.readFileSync(path.join(root, "extensions/dispatch/index.ts"), "utf8");
   // Fail-open boundaries: classifier + HMAC, assistant projection, feed+audit.
-  assert.match(source, /const shadowFeed = \(input: StormShadowEventInput\): void => \{[\s\S]*?try \{[\s\S]*?stormShadow\.feed\(input\)[\s\S]*?\} catch \{/);
+  assert.match(source, /const shadowFeed = \(input: StormShadowEventInput\): StormShadowObservation \| undefined => \{[\s\S]*?try \{[\s\S]*?stormShadow\.feed\(input\)[\s\S]*?\} catch \{/);
   assert.match(source, /buildSchemaRejectionShadowInput\(event\.result, event\.toolName, heartbeatProjectRoot\)/);
   assert.match(source, /projectAssistantMessageViewSafe\(event\.message\)/);
   assert.match(source, /const shadowFeed = \(input[\s\S]{0,400}shouldWriteStormShadowAudit/);
@@ -754,6 +754,21 @@ const realRun = {
 let realRows = [];
 let realResult = null;
 
+// S4 STORM-ENFORCE is enabled by default; this S3 shadow-only proof must run
+// with enforce disabled so would_abort verdicts provably never change control
+// flow (the S4 smoke covers the authorized consecutive-branch abort). The
+// settings override is scoped to this process via a temp HOME.
+const shadowOnlyHome = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-shadow-home-"));
+const shadowOnlyAgentDir = path.join(shadowOnlyHome, ".pi", "agent");
+fs.mkdirSync(shadowOnlyAgentDir, { recursive: true });
+fs.writeFileSync(path.join(shadowOnlyAgentDir, "pi-astack-settings.json"), JSON.stringify({
+  dispatch: { workerRunGovernor: { toolObservers: { schemaErrorStorm: { enforceConsecutiveExact: false } } } },
+}));
+const prevHome = process.env.HOME;
+const prevUserprofile = process.env.USERPROFILE;
+process.env.HOME = shadowOnlyHome;
+process.env.USERPROFILE = shadowOnlyHome;
+
 try {
   await check("real SDK: same-run collision pair never merges, then 4 same exact identity rejections reach would_abort=true (first_trip); worker continues and completes normally", async () => {
     // The SAME real event stream, all in one run:
@@ -804,11 +819,14 @@ try {
 
     const auditPath = path.join(sdkTempRoot, ".pi-astack", "dispatch", "audit.jsonl");
     assert.ok(fs.existsSync(auditPath), `audit.jsonl missing at ${auditPath}`);
+    // Wait for the run's task row (written after every worker event row) so the
+    // full shadow sequence — including the post-trip progress/visible rows — is
+    // flushed before assertions; breaking on the would_abort row alone races
+    // the async audit append chain.
     const deadline = Date.now() + 4000;
     while (Date.now() < deadline) {
       realRows = fs.readFileSync(auditPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      const stormRows = realRows.filter((row) => row.signal === "storm_shadow" && row.dispatch_run_id === realRun.runId);
-      if (stormRows.some((row) => row.would_abort === true)) break;
+      if (realRows.some((row) => row.dispatch_run_id === realRun.runId && row.row_kind === "task")) break;
       await sleep(25);
     }
     const shadowRows = realRows.filter((row) => row.signal === "storm_shadow" && row.dispatch_run_id === realRun.runId);
@@ -1006,6 +1024,9 @@ try {
     }
   });
 } finally {
+  process.env.HOME = prevHome;
+  process.env.USERPROFILE = prevUserprofile;
+  fs.rmSync(shadowOnlyHome, { recursive: true, force: true });
   sdkFaux.unregister();
   sdkModelRuntime.unregisterProvider(sdkFauxModel.provider);
   fs.rmSync(sdkTempRoot, { recursive: true, force: true });

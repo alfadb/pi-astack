@@ -88,6 +88,8 @@ import {
 } from "../_shared/visible-text-repeat-detector";
 import {
   WorkerRunGovernor,
+  buildStormEnforceDegradedAuditEvent,
+  buildStormEnforceUnsupportedCapAuditEvent,
   buildWorkerRunAuditEvent,
   buildWorkerRunRetryOutcomeAuditEvent,
   buildWorkerRunRetryStartAuditEvent,
@@ -987,6 +989,7 @@ type FailureType =
   | "provider_retry_budget_exceeded"
   | "empty_visible_retry_budget_exceeded"
   | "full_output_cap_budget_exceeded"
+  | "schema_rejection_storm_enforced"
   // lifecycle
   | "timeout"           // dispatch tool timed out (no output captured)
   | "timeout_partial"   // dispatch tool timed out but some output was captured
@@ -1181,6 +1184,28 @@ export function projectAssistantMessageViewSafe(message: unknown): StormShadowAs
   }
 }
 
+/** Safe closed eligibility reason for a failed tool result (S4). Raw text /
+ *  field path / tool args / the normalized descriptor never leave the
+ *  classifier — only this closed category. */
+export type SchemaRejectionEligibilityReason =
+  | "eligible"
+  | "not_schema_rejection"
+  | "strict_key_unavailable";
+
+export interface SchemaRejectionShadowInput {
+  schemaRejection: boolean;
+  signature?: StormShadowObservation["signature_hmac"];
+  /** "eligible": real schema rejection signed with the strict persistent
+   *  project key. "not_schema_rejection": the failed tool result is not
+   *  schema-rejection shaped (or the classifier itself failed open).
+   *  "strict_key_unavailable": the strict persistent project key is
+   *  unavailable (unsafe directory / wrong mode / owner / symlink) and the
+   *  event failed open to not-a-rejection with NO signature — the shadow
+   *  candidate is not eligible and enforce never triggers (the wiring writes
+   *  at most one worker_run_enforce_event degradation row per run). */
+  eligibility: SchemaRejectionEligibilityReason;
+}
+
 /**
  * S3 shadow pre-projection: classify a failed tool result with the governor's
  * own schema-error classifier and build the opaque project-audit HMAC of the
@@ -1195,23 +1220,29 @@ export function projectAssistantMessageViewSafe(message: unknown): StormShadowAs
  * the persistent project audit key (auditHmacHexStrict) — cross-process
  * stable, never the process-random ephemeral fallback. If the persistent key
  * is unavailable (unsafe directory / wrong mode / owner / symlink / any
- * strict-key failure), this fails open to { schemaRejection: false } with NO
- * signature: the event is not eligible for the shadow candidate and the
- * worker continues normally. An ephemeral key is never generated and never
- * accepted as eligible. Fail-open: classifier or strict HMAC throws (e.g.
- * hostile getters on the result, or persistent key unavailable) degrade to
- * not-a-schema-rejection.
+ * strict-key failure), this fails open to { schemaRejection: false,
+ * eligibility: "strict_key_unavailable" } with NO signature: the event is not
+ * eligible for the shadow candidate and the worker continues normally. An
+ * ephemeral key is never generated and never accepted as eligible. Fail-open:
+ * classifier or strict HMAC throws (e.g. hostile getters on the result, or
+ * persistent key unavailable) degrade to not-a-schema-rejection.
  */
 export function buildSchemaRejectionShadowInput(
   result: unknown,
   toolName: unknown,
   projectRoot: string,
-): { schemaRejection: boolean; signature?: StormShadowObservation["signature_hmac"] } {
+): SchemaRejectionShadowInput {
+  let descriptor: { errorClass: string; fieldPath: string; normalized: string } | null;
   try {
-    const descriptor = classifySchemaErrorToolResult(result);
-    if (!descriptor) return { schemaRejection: false };
+    descriptor = classifySchemaErrorToolResult(result);
+  } catch {
+    return { schemaRejection: false, eligibility: "not_schema_rejection" };
+  }
+  if (!descriptor) return { schemaRejection: false, eligibility: "not_schema_rejection" };
+  try {
     return {
       schemaRejection: true,
+      eligibility: "eligible",
       signature: auditHmacHexStrict(
         projectRoot,
         STORM_SHADOW_SIGNATURE_DOMAIN,
@@ -1219,7 +1250,7 @@ export function buildSchemaRejectionShadowInput(
       ),
     };
   } catch {
-    return { schemaRejection: false };
+    return { schemaRejection: false, eligibility: "strict_key_unavailable" };
   }
 }
 
@@ -1292,6 +1323,7 @@ function governanceFailureMessage(decision: WorkerRunGovernorDecision): string {
     case "provider_retry_budget_exceeded": return `provider retry budget exceeded: ${decision.count} retries > limit ${decision.limit}`;
     case "empty_visible_retry_budget_exceeded": return `empty visible output retry budget exceeded: ${decision.count} failures > limit ${decision.limit}`;
     case "full_output_cap_budget_exceeded": return `full output cap budget exceeded: ${decision.count} cap hits > limit ${decision.limit}`;
+    case "schema_rejection_storm_enforced": return `schema rejection storm enforced: ${decision.count} consecutive same-signature rejections > limit ${decision.limit}`;
     default: return "worker run governor stopped the session; bounded partial output returned";
   }
 }
@@ -2333,22 +2365,56 @@ export async function runInProcess(
       buildStormShadowAuditEvent(workerGovernor.workerRunId, workerAuditCorrelation, observation),
     ).catch(() => { /* audit is best-effort */ });
   };
+  // S4 degradation audit singleflight: at most one worker_run_enforce_event
+  // degradation row per run (strict persistent project key unavailable → the
+  // shadow candidate was not eligible and enforce never triggered).
+  let stormEnforceDegradedAudited = false;
+  const emitStormEnforceDegradedAudit = (): void => {
+    if (stormEnforceDegradedAudited) return;
+    stormEnforceDegradedAudited = true;
+    void appendDispatchAudit(
+      heartbeatProjectRoot,
+      heartbeatAnchor,
+      buildStormEnforceDegradedAuditEvent(workerGovernor.snapshot(), Date.now() - start, workerAuditCorrelation),
+    ).catch(() => { /* audit is best-effort */ });
+  };
   // Fail-open shadow feed: classification / feed / audit construction must
   // never throw into the session callback, and audit rows stay bounded by
   // only writing state-relevant events (schema rejection, progress/reset,
-  // first trip, already-tripped episode transition).
+  // first trip, already-tripped episode transition). Returns the observation
+  // (or undefined on fail-open) so the S4 enforce predicate can read the
+  // full composite verdict — the audit itself stays fail-open.
   let lastShadowObservation: StormShadowObservation | undefined;
-  const shadowFeed = (input: StormShadowEventInput): void => {
+  const shadowFeed = (input: StormShadowEventInput): StormShadowObservation | undefined => {
     try {
       const observation = stormShadow.feed(input);
       if (shouldWriteStormShadowAudit(lastShadowObservation, observation, input)) {
         lastShadowObservation = observation;
         emitStormShadowAudit(observation);
       }
+      return observation;
     } catch {
       // S3 shadow is strictly fail-open: a throw here must not affect the run.
+      return undefined;
     }
   };
+  // S4 unsupported-cap marker: enforce is enabled but observeAfter !== 3, so
+  // the production-supported consecutive branch is unsupported and never
+  // aborts. Exactly one worker_run_enforce_event marker per run; enforce
+  // disabled / unsupported cap produce no noise.
+  const stormEnforceCfg = dispatchSettings.workerRunGovernor.toolObservers.schemaErrorStorm;
+  const stormEnforceEnabled =
+    dispatchSettings.workerRunGovernor.enabled &&
+    dispatchSettings.workerRunGovernor.toolObservers.enabled &&
+    stormEnforceCfg.enabled &&
+    stormEnforceCfg.enforceConsecutiveExact;
+  if (stormEnforceEnabled && stormEnforceCfg.observeAfter !== 3) {
+    void appendDispatchAudit(
+      heartbeatProjectRoot,
+      heartbeatAnchor,
+      buildStormEnforceUnsupportedCapAuditEvent(workerGovernor.snapshot(), 0, workerAuditCorrelation),
+    ).catch(() => { /* audit is best-effort */ });
+  }
   if (effectiveMaxOutputTokens !== undefined) {
     emitWorkerRunDecision(workerGovernor.observe({
       signal: "requested_output_cap",
@@ -2788,17 +2854,54 @@ export async function runInProcess(
           // path); only the project audit HMAC (key_id + digest) is fed to the
           // pure state machine, never raw text / field path / tool args.
           // Fail-open: a classifier/HMAC throw degrades to not-a-rejection.
-          const schemaShadow = event.isError === true
+          const schemaShadow: SchemaRejectionShadowInput = event.isError === true
             ? buildSchemaRejectionShadowInput(event.result, event.toolName, heartbeatProjectRoot)
-            : { schemaRejection: false };
+            : { schemaRejection: false, eligibility: "not_schema_rejection" };
           // S3 shadow candidate B: successful tool responses are effective
           // progress; failed responses (incl. schema rejections) are not.
-          shadowFeed({
+          const shadowObservation = shadowFeed({
             kind: "tool_execution_end",
             isError: event.isError === true,
             schemaRejection: schemaShadow.schemaRejection,
             ...(schemaShadow.signature ? { signature: schemaShadow.signature } : {}),
           });
+          // S4 single-rule enforce (STORM-ENFORCE): the ONLY production-supported
+          // branch of the authorized rule — the exact consecutive branch. The
+          // predicate is the full composite (same strict exact composite
+          // signature in the same segment, consecutive_count===4 && cap_after===3
+          // && would_abort_basis==='consecutive') — never would_abort / first_trip
+          // alone. Rolling-window trips never enter control. The real abort
+          // decision flows through the governor's dedicated method →
+          // emitWorkerRunDecision → requestGovernorTermination →
+          // FirstWriterTermination; no direct abort / tryClaim / new promise.
+          //
+          // Seal gate: enforce only fires while the run is genuinely live. If
+          // the run terminal is already sealed (run-owned terminal outcome
+          // determined — normal prompt return / tool_rejected / crash) or any
+          // owner has already claimed (parent / timeout / governor), the run is
+          // already terminal for another reason — building and persisting an
+          // abort decision here would be a fake abort. FirstWriterTermination is
+          // untouched: the seal already blocks external claims; this gate
+          // prevents the fake decision from being constructed and audited in
+          // the first place.
+          if (shadowObservation && schemaShadow.signature && !runTerminalSealed && termination.claim === undefined) {
+            const enforceDecision = workerGovernor.enforceSchemaRejectionStorm({
+              signature: schemaShadow.signature,
+              segment: shadowObservation.segment,
+              consecutiveCount: shadowObservation.consecutive_count,
+              capAfter: shadowObservation.cap_after,
+              wouldAbortBasis: shadowObservation.would_abort_basis,
+            });
+            if (enforceDecision) emitWorkerRunDecision(enforceDecision);
+          }
+          // S4 degradation audit: strict persistent project key unavailable →
+          // the shadow candidate was not eligible and enforce never triggered.
+          // At most one worker_run_enforce_event degradation row per run, and
+          // only when enforce is fully enabled with the supported cap
+          // (enforce disabled / unsupported cap produce no noise).
+          if (schemaShadow.eligibility === "strict_key_unavailable" && stormEnforceEnabled && stormEnforceCfg.observeAfter === 3) {
+            emitStormEnforceDegradedAudit();
+          }
         }
 
         recordProgress(`event:${eventType}`);
@@ -3310,6 +3413,7 @@ const PARTIAL_OUTPUT_FAILURES: ReadonlySet<FailureType> = new Set([
   "provider_retry_budget_exceeded",
   "empty_visible_retry_budget_exceeded",
   "full_output_cap_budget_exceeded",
+  "schema_rejection_storm_enforced",
   "aborted",
 ]);
 

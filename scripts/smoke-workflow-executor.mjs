@@ -228,6 +228,84 @@ await check("governance terminal is non-retryable and governance fields reach st
   assert(row?.worker_run_governance?.rule_version === "dispatch-worker-run-governor/v2" && row?.worker_run_governance?.terminal?.budget_kind === "consecutive", JSON.stringify(row));
 });
 
+await check("S4 storm-enforce governance terminal is non-retryable in serial retry (called once, not max_retries+1)", async () => {
+  const runDir = tmpRunDir();
+  let calls = 0;
+  const governance = {
+    worker_run_id: "worker-gov-storm",
+    rule_version: "dispatch-worker-run-governor/v2",
+    profile: "read_only",
+    counters: {
+      provider_request_count: 4,
+      provider_retry_count: 0,
+      provider_retry_consecutive_count: 0,
+      provider_retry_window_observation_count: 0,
+      provider_retry_window_retry_count: 0,
+      provider_retry_window_progress_count: 0,
+    },
+    thresholds: { provider_retry_limit: 7, provider_retry_window_size: 14, provider_retry_window_limit: 10 },
+    terminal: {
+      signal: "schema_rejection_storm_enforce",
+      termination_source: "worker_run_governor",
+      failureType: "schema_rejection_storm_enforced",
+      count: 4,
+      limit: 3,
+      budget_kind: "consecutive",
+      action: "abort_session_return_bounded_partial",
+      rule_id: "storm/post-cap-schema-rejection-signature/v1",
+      enforce_rule_version: "dispatch-storm-enforce/v1",
+    },
+  };
+  const r = await E.executeWorkflow({
+    doc: doc([agent("a", { on_fail: "retry", max_retries: 3 })]),
+    ...baseOpts(runDir, async () => {
+      calls++;
+      return {
+        output: "bounded partial",
+        error: "schema rejection storm enforced: 4 consecutive same-signature rejections > limit 3",
+        failureType: "schema_rejection_storm_enforced",
+        durationMs: 2,
+        workerRunGovernance: governance,
+      };
+    }),
+  });
+  assert(calls === 1, `storm-enforce governance terminal must not retry (calls=${calls}, expected 1 not 4)`);
+  assert(r.stages.a.attempts === 1, `attempts=${r.stages.a.attempts} (expected 1, not 4)`);
+  assert(r.stages.a.status === "failed" && r.stages.a.failure_type === "schema_rejection_storm_enforced", JSON.stringify(r.stages.a));
+  assert(r.stages.a.failure_source === "runner_terminal", r.stages.a.failure_source);
+  assert(r.stages.a.worker_run_governance?.terminal?.enforce_rule_version === "dispatch-storm-enforce/v1", JSON.stringify(r.stages.a));
+});
+
+await check("S4 storm-enforce governance terminal is non-retryable in parallel child retry (child called once, not max_retries+1)", async () => {
+  const runDir = tmpRunDir();
+  const { runner, calls } = makeRunner({ c1: { fail: true, error: "c1 broke" } });
+  let c2Calls = 0;
+  const r = await E.executeWorkflow({
+    doc: doc([{ id: "p", kind: "parallel", on_fail: "retry", max_retries: 2, children: [agent("c1"), agent("c2")] }]),
+    ...baseOpts(runDir, async (req) => {
+      if (req.stageId === "c2") {
+        c2Calls++;
+        return {
+          output: "bounded partial",
+          error: "schema rejection storm enforced: 4 consecutive same-signature rejections > limit 3",
+          failureType: "schema_rejection_storm_enforced",
+          durationMs: 2,
+        };
+      }
+      return runner(req);
+    }),
+  });
+  // c2 (storm-enforce governance terminal) must run exactly once across all
+  // waves — never replayed by the parallel retry policy.
+  assert(c2Calls === 1, `storm-enforce child must not retry (c2 calls=${c2Calls}, expected 1 not 3)`);
+  assert(r.stages.c2.attempts === 1, `c2 attempts=${r.stages.c2.attempts} (expected 1, not 3)`);
+  assert(r.stages.c2.status === "failed" && r.stages.c2.failure_type === "schema_rejection_storm_enforced", JSON.stringify(r.stages.c2));
+  // c1 is a plain agent error → the retry machinery still replays it (3 waves).
+  assert(calls.filter((c) => c.stageId === "c1").length === 3, `plain-error child retried (c1 calls=${calls.filter((c) => c.stageId === "c1").length}, expected 3)`);
+  assert(r.stages.c1.attempts === 3, `c1 attempts=${r.stages.c1.attempts} (expected 3)`);
+  assert(r.stages.p.status === "failed", JSON.stringify(r.stages.p));
+});
+
 await check("retired cumulative tool budget is not an active workflow governance terminal", async () => {
   assert(!E.isNonRetryableGovernanceFailure("tool_budget_exceeded"), "retired tool budget must not remain in the active non-retryable set");
   assert(E.isNonRetryableGovernanceFailure("guardrail_stop"), "historical guardrail result parsing remains supported");

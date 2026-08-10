@@ -13,11 +13,25 @@ import * as path from "node:path";
 export const WORKER_RUN_GOVERNOR_RULE_VERSION = "dispatch-worker-run-governor/v2";
 export const TOOL_OBSERVER_COVERAGE = "post_execution_only";
 
+/** S4 single-rule enforce (living plan 2026-08-10 STORM-ENFORCE): the ONLY
+ *  production-supported branch of the authorized rule
+ *  storm/post-cap-schema-rejection-signature/v1 — the exact consecutive
+ *  branch (consecutive_count===4 && cap_after===3 && would_abort_basis===
+ *  "consecutive"). Rolling-window trips never enter control; there is no
+ *  total tool cap. */
+export const WORKER_RUN_STORM_ENFORCE_RULE_VERSION = "dispatch-storm-enforce/v1";
+export const STORM_ENFORCE_RULE_ID = "storm/post-cap-schema-rejection-signature/v1";
+export const STORM_ENFORCE_ROW_KIND = "worker_run_enforce_event";
+export const STORM_ENFORCE_SIGNAL = "schema_rejection_storm_enforce";
+export const STORM_ENFORCE_DEGRADED_SIGNAL = "schema_rejection_storm_enforce_degraded";
+export const STORM_ENFORCE_UNSUPPORTED_CAP_SIGNAL = "schema_rejection_storm_enforce_unsupported_cap";
+
 export type WorkerGovernorFailureType =
   | "repetitive_output"
   | "provider_retry_budget_exceeded"
   | "empty_visible_retry_budget_exceeded"
-  | "full_output_cap_budget_exceeded";
+  | "full_output_cap_budget_exceeded"
+  | "schema_rejection_storm_enforced";
 
 export type WorkerGovernorSignal =
   | "requested_output_cap"
@@ -28,7 +42,8 @@ export type WorkerGovernorSignal =
   | "full_output_cap_hit"
   | "repetitive_output"
   | "same_file_small_read_churn"
-  | "schema_error_storm";
+  | "schema_error_storm"
+  | "schema_rejection_storm_enforce";
 
 export interface WorkerRunGovernorCounters {
   provider_request_count: number;
@@ -85,6 +100,9 @@ export interface WorkerRunGovernorSettings {
       enabled: boolean;
       observeAfter: number;
       maxTrackedShapes: number;
+      /** S4: enforce the production-supported exact consecutive branch of
+       *  storm/post-cap-schema-rejection-signature/v1 (default true). */
+      enforceConsecutiveExact: boolean;
     };
   };
 }
@@ -114,6 +132,7 @@ export const DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS: WorkerRunGovernorSettings = {
       enabled: true,
       observeAfter: 3,
       maxTrackedShapes: 64,
+      enforceConsecutiveExact: true,
     },
   },
 };
@@ -137,6 +156,11 @@ export interface WorkerRunGovernorDecision {
   shape?: string;
   coverage?: typeof TOOL_OBSERVER_COVERAGE;
   toolCallId?: string;
+  /** S4 enforce additive fields (only on schema_rejection_storm_enforce). */
+  rule_id?: string;
+  enforce_rule_version?: string;
+  signature_hmac?: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+  segment?: number;
 }
 
 export interface WorkerRunAuditCorrelation {
@@ -209,6 +233,10 @@ export function buildWorkerRunAuditEvent(
     ...(decision.shape ? { shape: decision.shape } : {}),
     ...(decision.coverage ? { coverage: decision.coverage } : {}),
     ...(decision.toolCallId ? { tool_call_id: decision.toolCallId } : {}),
+    ...(decision.rule_id ? { rule_id: decision.rule_id } : {}),
+    ...(decision.enforce_rule_version ? { enforce_rule_version: decision.enforce_rule_version } : {}),
+    ...(decision.signature_hmac ? { signature_hmac: decision.signature_hmac } : {}),
+    ...(decision.segment !== undefined ? { segment: decision.segment } : {}),
     ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
     ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
     ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
@@ -290,6 +318,77 @@ export function buildWorkerRunRetryOutcomeAuditEvent(
   };
 }
 
+/** S4 audit-only projection: the strict persistent project key was unavailable
+ *  (unsafe directory / wrong mode / owner / symlink), so the schema classifier
+ *  failed open to not-a-rejection with a closed eligibility reason — the
+ *  shadow candidate was not eligible and enforce never triggered. Written at
+ *  most once per run (wiring singleflight). Never mutates counters, never
+ *  triggers termination. */
+export function buildStormEnforceDegradedAuditEvent(
+  summary: WorkerRunGovernanceSummary,
+  elapsedMs: number,
+  correlation: WorkerRunAuditCorrelation = {},
+): Record<string, unknown> {
+  return {
+    operation: "worker_run_event",
+    row_kind: STORM_ENFORCE_ROW_KIND,
+    worker_run_id: summary.worker_run_id,
+    rule_version: summary.rule_version,
+    signal: STORM_ENFORCE_DEGRADED_SIGNAL,
+    mode: "observe",
+    counters: summary.counters,
+    thresholds: summary.thresholds,
+    elapsed_ms: Math.max(0, Math.floor(elapsedMs)),
+    termination_source: "none",
+    action: "audit_storm_enforce_degraded_strict_key_unavailable",
+    rule_id: STORM_ENFORCE_RULE_ID,
+    enforce_rule_version: WORKER_RUN_STORM_ENFORCE_RULE_VERSION,
+    ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
+    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
+    ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
+    ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
+    ...(correlation.task ? { task: correlation.task } : {}),
+    ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
+    ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
+    ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
+  };
+}
+
+/** S4 audit-only marker: enforce is enabled but observeAfter !== 3, so the
+ *  production-supported consecutive branch is unsupported and never aborts.
+ *  Written exactly once per run (at run start). Never mutates counters, never
+ *  triggers termination. */
+export function buildStormEnforceUnsupportedCapAuditEvent(
+  summary: WorkerRunGovernanceSummary,
+  elapsedMs: number,
+  correlation: WorkerRunAuditCorrelation = {},
+): Record<string, unknown> {
+  return {
+    operation: "worker_run_event",
+    row_kind: STORM_ENFORCE_ROW_KIND,
+    worker_run_id: summary.worker_run_id,
+    rule_version: summary.rule_version,
+    signal: STORM_ENFORCE_UNSUPPORTED_CAP_SIGNAL,
+    mode: "observe",
+    counters: summary.counters,
+    thresholds: summary.thresholds,
+    elapsed_ms: Math.max(0, Math.floor(elapsedMs)),
+    termination_source: "none",
+    action: "audit_storm_enforce_unsupported_cap_no_abort",
+    rule_id: STORM_ENFORCE_RULE_ID,
+    enforce_rule_version: WORKER_RUN_STORM_ENFORCE_RULE_VERSION,
+    observe_after: summary.thresholds.schema_error_storm_observe_after,
+    ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
+    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
+    ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
+    ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
+    ...(correlation.task ? { task: correlation.task } : {}),
+    ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
+    ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
+    ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
+  };
+}
+
 export interface WorkerRunGovernanceSummary {
   worker_run_id: string;
   rule_version: typeof WORKER_RUN_GOVERNOR_RULE_VERSION;
@@ -308,6 +407,11 @@ export interface WorkerRunGovernanceSummary {
     action: string;
     hash?: string;
     shape?: string;
+    /** S4 enforce additive fields (only on schema_rejection_storm_enforce). */
+    rule_id?: string;
+    enforce_rule_version?: string;
+    signature_hmac?: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+    segment?: number;
   };
 }
 
@@ -638,6 +742,67 @@ export class WorkerRunGovernor {
     });
   }
 
+  /**
+   * S4 single-rule enforce (living plan 2026-08-10 STORM-ENFORCE): the ONLY
+   * production-supported branch of the authorized rule
+   * storm/post-cap-schema-rejection-signature/v1 — the exact consecutive
+   * branch. The wiring feeds the pure storm-shadow observation (same strict
+   * exact composite signature in the same segment) here; this method builds
+   * the REAL abort decision WITHOUT re-applying or incrementing any governor
+   * counter (the shadow state machine already counted; the governor's own
+   * schema observer stays observe-only and untouched). The decision flows
+   * through the existing emitWorkerRunDecision → requestGovernorTermination →
+   * FirstWriterTermination chain — never a direct abort / tryClaim / new
+   * promise. Rolling-window trips never enter control (basis must be
+   * "consecutive"). Post-terminal / already-governor-terminal runs emit
+   * nothing.
+   */
+  enforceSchemaRejectionStorm(
+    input: {
+      signature: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+      segment: number;
+      consecutiveCount: number;
+      capAfter: number;
+      wouldAbortBasis: "consecutive" | "rolling_window" | null;
+    },
+    now = Date.now(),
+  ): WorkerRunGovernorDecision | undefined {
+    if (this.terminal) return undefined;
+    const cfg = this.settings.toolObservers.schemaErrorStorm;
+    if (!this.settings.enabled || !this.settings.toolObservers.enabled || !cfg.enabled || !cfg.enforceConsecutiveExact) return undefined;
+    // Only the production-supported cap (observeAfter === 3) is enforced; any
+    // other cap is unsupported and never aborts (the wiring writes one
+    // unsupported_cap marker per run).
+    if (cfg.observeAfter !== 3) return undefined;
+    // Trigger: the same strict exact composite signature in the same segment
+    // with consecutive_count === 4 && cap_after === 3 && would_abort_basis ===
+    // "consecutive". Never would_abort / first_trip alone; rolling-window
+    // trips never enter control.
+    if (input.consecutiveCount !== 4 || input.capAfter !== 3 || input.wouldAbortBasis !== "consecutive") return undefined;
+    const decision: WorkerRunGovernorDecision = {
+      worker_run_id: this.workerRunId,
+      rule_version: WORKER_RUN_GOVERNOR_RULE_VERSION,
+      signal: "schema_rejection_storm_enforce",
+      mode: "abort",
+      counters: { ...this.counters },
+      thresholds: { ...this.thresholds },
+      elapsed_ms: Math.max(0, now - this.startedAt),
+      termination_source: "worker_run_governor",
+      failureType: "schema_rejection_storm_enforced",
+      count: input.consecutiveCount,
+      limit: input.capAfter,
+      budget_kind: "consecutive",
+      action: "abort_session_return_bounded_partial",
+      rule_id: STORM_ENFORCE_RULE_ID,
+      enforce_rule_version: WORKER_RUN_STORM_ENFORCE_RULE_VERSION,
+      signature_hmac: input.signature,
+      segment: input.segment,
+    };
+    this.terminal = decision;
+    this.resolveTermination(decision);
+    return decision;
+  }
+
   snapshot(): WorkerRunGovernanceSummary {
     const terminal = this.terminal;
     return {
@@ -658,6 +823,10 @@ export class WorkerRunGovernor {
           action: terminal.action,
           ...(terminal.hash ? { hash: terminal.hash } : {}),
           ...(terminal.shape ? { shape: terminal.shape } : {}),
+          ...(terminal.rule_id ? { rule_id: terminal.rule_id } : {}),
+          ...(terminal.enforce_rule_version ? { enforce_rule_version: terminal.enforce_rule_version } : {}),
+          ...(terminal.signature_hmac ? { signature_hmac: terminal.signature_hmac } : {}),
+          ...(terminal.segment !== undefined ? { segment: terminal.segment } : {}),
         },
       } : {}),
     };
