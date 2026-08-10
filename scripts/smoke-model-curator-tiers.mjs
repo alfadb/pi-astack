@@ -17,6 +17,18 @@
  *    mid-level execution route under precise specs + adversarial acceptance and must not
  *    enter generic automatic model fallback; deepseek-v4-pro is absent from live
  *    providers/hints/tiers; every other curated non-GPT model remains judgment-only.
+ * 7. Flash task sizing is semantic, not numeric: the hint's self-contained segment from
+ *    "Task sizing" through "Output discipline:" is extracted and must contain no ASCII
+ *    digit at all (not just no legacy 80/30/10 thresholds) while locking the full
+ *    boundary semantics — wide file surfaces/long runs fine, coherence/ownership/
+ *    reviewability over counts, bounded recon + implementation + focused verification
+ *    in the same increment, split scope not phases, split only for multiple independent
+ *    outcomes / separate-adjudication ownership/contract boundaries / a mid-run
+ *    main-session decision, multiple Flash dispatches with main-session review per step,
+ *    never pre-bundle dependent increments, no numeric per-dispatch/serial/total caps,
+ *    no size-only escalation — while the real 65536 output cap and the 2026-08-18
+ *    routing window (both after the segment) survive the digit exclusion; escalation
+ *    re-dispatches once with clarified scope and acceptance, never as a smaller task.
  */
 
 import { createRequire } from "node:module";
@@ -260,6 +272,65 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
       flashHint.includes("Do not add this model to generic automatic model fallback") &&
       !flashHint.includes("manual/explicit invocation only") &&
       !flashHint.includes("no auto hot-path or execution fallback"));
+  // Flash task sizing is locked as the hint's self-contained segment from
+  // "Task sizing" through "Output discipline:". The extracted segment must
+  // carry the full semantic-not-numeric boundary semantics AND contain NO
+  // ASCII digit at all (not just no legacy 80/30/10 thresholds), while the
+  // real 65536 output cap and the 2026-08-18 routing window — which live
+  // AFTER the segment — must survive that digit exclusion untouched.
+  const sizingStart = typeof flashHint === "string" ? flashHint.indexOf("Task sizing") : -1;
+  const sizingEnd = typeof flashHint === "string" ? flashHint.indexOf("Output discipline:") : -1;
+  const taskSizing = (sizingStart !== -1 && sizingEnd !== -1 && sizingStart < sizingEnd)
+    ? flashHint.slice(sizingStart, sizingEnd)
+    : "";
+  check("live deepseek-v4-flash hint delimits the task-sizing segment (Task sizing through Output discipline:)",
+    taskSizing.length > 0);
+  check("live task-sizing segment opens with the semantic-not-numeric clause",
+    taskSizing.startsWith("Task sizing (semantic, not numeric)"));
+  check("live task-sizing segment contains no ASCII digit (no numeric thresholds, not just 80/30/10)",
+    !/\d/.test(taskSizing));
+  check("live task sizing = one coherent, independently reviewable vertical increment per dispatch",
+    taskSizing.includes("one dispatch = one coherent, independently reviewable vertical increment"));
+  check("live task sizing allows wide file surfaces and long runs",
+    taskSizing.includes("wide file surfaces and long runs are fine"));
+  check("live task-sizing boundaries follow coherence, ownership, and reviewability, not counts",
+    taskSizing.includes("boundaries follow coherence, ownership, and reviewability, not file/tool/time/diff/context counts"));
+  check("live task sizing keeps bounded recon + implementation + focused verification in the same increment",
+    taskSizing.includes("keep bounded recon + implementation + focused verification for one increment in the same dispatch"));
+  check("live task sizing splits scope, not phases",
+    taskSizing.includes("split scope, not phases"));
+  check("live task sizing splits only for multiple independent outcomes",
+    taskSizing.includes("split only for multiple independent outcomes"));
+  check("live task sizing splits ownership/contract boundaries for separate adjudication",
+    taskSizing.includes("ownership/contract boundaries needing separate adjudication"));
+  check("live task sizing splits on a mid-run main-session decision",
+    taskSizing.includes("mid-run main-session decision"));
+  check("live larger efforts continue as multiple Flash dispatches with main-session review per step",
+    taskSizing.includes("multiple Flash dispatches with main-session review after each step"));
+  check("live task sizing never pre-bundles dependent increments",
+    taskSizing.includes("never pre-bundle dependent increments"));
+  check("live task sizing sets no numeric per-dispatch/serial/total caps",
+    taskSizing.includes("set no numeric per-dispatch/serial/total caps"));
+  check("live task sizing never escalates models just because the overall effort is large",
+    taskSizing.includes("do not escalate models just because the overall effort is large"));
+  check("live 65536 output cap survives the digit exclusion (sits after the sizing segment)",
+    typeof flashHint === "string" &&
+      sizingEnd !== -1 &&
+      flashHint.includes("(65536 output cap)") &&
+      flashHint.indexOf("(65536 output cap)") > sizingEnd);
+  check("live 2026-08-18 routing window survives the digit exclusion (sits after the sizing segment)",
+    typeof flashHint === "string" &&
+      flashHint.includes("through 2026-08-18") &&
+      flashHint.indexOf("through 2026-08-18") > sizingEnd);
+  check("live deepseek-v4-flash hint retains no legacy 'calibrated on 2026' threshold annotation",
+    typeof flashHint === "string" && !flashHint.includes("calibrated on 2026"));
+  check("live deepseek-v4-flash hint escalates with clarified scope, not smaller tasks",
+    typeof flashHint === "string" &&
+      flashHint.includes("re-dispatch once with clarified scope and acceptance at most") &&
+      !flashHint.includes("re-dispatch once as a smaller task at most") &&
+      flashHint.includes("output truncation, schema-error storm, or timeout") &&
+      flashHint.includes("xai/grok-4.5") &&
+      flashHint.includes("GPT-5.6 execution route"));
 
   const otherNonGptHints = Object.entries(liveHints).filter(
     ([model]) =>
