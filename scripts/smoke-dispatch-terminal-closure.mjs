@@ -54,6 +54,21 @@ function assertAttribution(result, source) {
   assert(result.cancelSource === source, `cancelSource=${result.cancelSource}, expected ${source}`);
   assert(result.terminationSource === source, `terminationSource=${result.terminationSource}, expected ${source}`);
 }
+function assertClosureEvidence(result, owner, lifecyclePath, closureStatus, runSettled = true) {
+  const evidence = result.terminationClosure;
+  assert(evidence, `terminationClosure missing: ${JSON.stringify(result)}`);
+  assert(evidence.termination_owner === owner, `termination_owner=${evidence.termination_owner}, expected ${owner}`);
+  assert(evidence.lifecycle_path === lifecyclePath, `lifecycle_path=${evidence.lifecycle_path}, expected ${lifecyclePath}`);
+  assert(evidence.closure_status === closureStatus, `closure_status=${evidence.closure_status}, expected ${closureStatus}`);
+  assert(evidence.run_settled === runSettled, `run_settled=${evidence.run_settled}, expected ${runSettled}`);
+  assert(evidence.cleanup_done === result.cleanupDone, `cleanup evidence mismatch: ${JSON.stringify(evidence)}`);
+  assert(evidence.post_claim_provider_start_count === 0, `post-claim provider starts: ${JSON.stringify(evidence)}`);
+  assert(evidence.post_claim_tool_start_count === 0, `post-claim tool starts: ${JSON.stringify(evidence)}`);
+  assert(
+    JSON.stringify(result.workerRunGovernance?.termination_closure) === JSON.stringify(evidence),
+    "governance summary must project the same lifecycle evidence values",
+  );
+}
 async function assertObservationWindow(faux, providerCount, label) {
   await sleep(150);
   assert(faux.state.callCount === providerCount, `${label}: provider grew ${providerCount}->${faux.state.callCount}`);
@@ -259,6 +274,7 @@ try {
       assert(run.result.failureType === "aborted", JSON.stringify(run.result));
       assertAttribution(run.result, "parent");
       assert(run.result.cleanupDone === true, `cleanupDone=${run.result.cleanupDone}`);
+      assertClosureEvidence(run.result, "parent", "abnormal", "complete");
       await assertObservationWindow(faux, run.providerAfter, "preflight parent claim");
     } finally {
       AgentSession.prototype.dispose = originalDispose;
@@ -305,6 +321,7 @@ try {
     assert(!run.result.error, JSON.stringify(run.result));
     assert(run.result.toolCallCount === 1, `toolCallCount=${run.result.toolCallCount}`);
     assert(run.result.cleanupDone === true, `cleanupDone=${run.result.cleanupDone}`);
+    assertClosureEvidence(run.result, "run", "normal", "complete");
     assert(run.providerAfter === run.providerBefore + 2, `provider calls=${run.providerAfter - run.providerBefore}`);
   });
 
@@ -342,6 +359,7 @@ try {
     assert(result.failureType === "aborted", JSON.stringify(result));
     assertAttribution(result, "parent");
     assert(result.cleanupDone === true, `cleanupDone=${result.cleanupDone}`);
+    assertClosureEvidence(result, "parent", "abnormal", "complete");
     assert(result.output.includes("partial before stuck bash"), `partial=${JSON.stringify(result.output)}`);
     assert(result.toolCallCount === 1, `toolCallCount=${result.toolCallCount}`);
     await waitUntil(() => pids.every((pid) => !processExists(pid)), 3000, `bash pid tree exit ${pids.join(",")}`);
@@ -363,6 +381,7 @@ try {
     assert(run.result.timeoutKind === "idle", `timeoutKind=${run.result.timeoutKind}`);
     assertAttribution(run.result, "timeout");
     assert(run.result.cleanupDone === false, `cleanupDone=${run.result.cleanupDone}`);
+    assertClosureEvidence(run.result, "timeout", "abnormal", "complete", false);
     assert(elapsed >= D.TERMINAL_CLOSURE_WAIT_MS, `returned before bounded join: ${elapsed}ms`);
     assert(elapsed < D.TERMINAL_CLOSURE_WAIT_MS + 1500, `bounded join exceeded: ${elapsed}ms`);
     assert(run.providerAfter === run.providerBefore + 1, `provider calls=${run.providerAfter - run.providerBefore}`);
@@ -400,6 +419,7 @@ try {
       assertAttribution(result, "timeout");
       assert(result.output.length > 0, "partial output was dropped");
       assert(result.cleanupDone === true, `cleanupDone=${result.cleanupDone}`);
+      assertClosureEvidence(result, "timeout", "abnormal", "complete");
       assert(slowFaux.state.callCount === before + 1, `provider calls=${slowFaux.state.callCount - before}`);
       await assertObservationWindow(slowFaux, slowFaux.state.callCount, "max runtime");
     } finally {
@@ -420,6 +440,7 @@ try {
     assert(run.result.cancelSource === undefined || run.result.cancelSource === "unknown", `cancelSource=${run.result.cancelSource}`);
     assert(run.result.output.length > 0, "governor partial was dropped");
     assert(run.result.cleanupDone === true, `cleanupDone=${run.result.cleanupDone}`);
+    assertClosureEvidence(run.result, "worker_run_governor", "abnormal", "complete");
     assert(run.providerAfter === run.providerBefore + 1, `provider calls=${run.providerAfter - run.providerBefore}`);
     await assertObservationWindow(faux, run.providerAfter, "governor terminal");
   });
@@ -431,6 +452,7 @@ try {
     });
     assert(run.result.failureType === "tool_rejected", JSON.stringify(run.result));
     assert(run.result.cleanupDone === true, `cleanupDone=${run.result.cleanupDone}`);
+    assertClosureEvidence(run.result, "run", "normal", "complete");
     assert(run.providerAfter === run.providerBefore, `provider calls=${run.providerAfter - run.providerBefore}`);
   });
 
@@ -466,6 +488,7 @@ try {
       assert(!run.result.error, JSON.stringify(run.result));
       assert(run.result.output.includes("success despite hanging shutdown"), `output=${JSON.stringify(run.result.output)}`);
       assert(run.result.cleanupDone === false, `cleanupDone=${run.result.cleanupDone} (hanging shutdown must stay honest)`);
+      assertClosureEvidence(run.result, "run", "normal", "incomplete");
       assert(elapsed >= D.SESSION_SHUTDOWN_WAIT_MS - 100, `returned before bounded shutdown wait: ${elapsed}ms`);
       assert(elapsed < D.SESSION_SHUTDOWN_WAIT_MS + 1500, `bounded shutdown wait exceeded: ${elapsed}ms`);
     });

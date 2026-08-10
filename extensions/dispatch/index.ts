@@ -89,9 +89,14 @@ import {
 import {
   WorkerRunGovernor,
   buildWorkerRunAuditEvent,
+  buildWorkerRunRetryOutcomeAuditEvent,
+  buildWorkerRunRetryStartAuditEvent,
+  type WorkerRunAuditCorrelation,
   type WorkerRunGovernanceSummary,
   type WorkerRunGovernorDecision,
+  type WorkerTerminationClosureEvidence,
 } from "./worker-run-governor";
+import { providerRetryAuditFields } from "./audit-v5";
 import { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR } from "../empty-visible-output-retry/index";
 import {
   captureParentContextFilesSnapshot,
@@ -185,6 +190,7 @@ export type WorkerTerminationOwner = "run" | "parent" | "timeout" | "worker_run_
 export interface WorkerTerminationClaim<T> {
   owner: WorkerTerminationOwner;
   evidence?: AbortEvidenceKind;
+  claimedAtMs: number;
   value: T;
 }
 
@@ -217,7 +223,12 @@ export class FirstWriterTermination<T> {
   tryClaim(owner: WorkerTerminationOwner, value: T, evidence?: AbortEvidenceKind): boolean {
     if (this.current) return false;
     if (this.sealed && owner !== "run") return false;
-    const claim: WorkerTerminationClaim<T> = { owner, value, ...(evidence ? { evidence } : {}) };
+    const claim: WorkerTerminationClaim<T> = {
+      owner,
+      value,
+      claimedAtMs: Date.now(),
+      ...(evidence ? { evidence } : {}),
+    };
     this.current = claim;
     try { this.onClaim?.(claim); } catch { /* termination must still resolve */ }
     this.resolveTermination(claim);
@@ -248,7 +259,7 @@ const DISABLED_SUBAGENT_TOOL_NAMES = new Set<string>(DISABLED_SUBAGENT_TOOLS);
 
 // ── ADR 0027 C6a: dispatch audit log ────────────────────────────
 
-/** Audit row schema version. Increment when adding non-additive fields.
+/** Audit row schema version. Increment when publishing a versioned field set.
  *
  *  v1 → v2 (ADR 0027 §C5 v1, 2026-05-28): added `terminal_state` taxonomy
  *  + per-state side-effect fields (cancel_source / cleanup_done /
@@ -264,8 +275,11 @@ const DISABLED_SUBAGENT_TOOL_NAMES = new Set<string>(DISABLED_SUBAGENT_TOOLS);
  *
  *  v3 → v4: additive terminal observability fields on dispatch audit rows:
  *  termination_source / active_tool_count / active_tools / last_tool.
- *  Readers that only accepted v3 should accept 3|4 (additive, no migration). */
-const DISPATCH_AUDIT_VERSION = 4;
+ *
+ *  v4 → v5: additive worker_run_id joins, termination/closure evidence, and
+ *  privacy-safe provider retry lifecycle classification. Every v4 field keeps
+ *  its original meaning; readers may accept 4|5 without migration. */
+export const DISPATCH_AUDIT_VERSION = 5;
 
 const _DISPATCH_AUDIT_SINGLEFLIGHT_KEY = Symbol.for("pi-astack/dispatch/audit-singleflight/v1");
 
@@ -1195,6 +1209,8 @@ export interface AgentResult {
   terminationSource?: TerminationSource;
   /** True only when worker settlement and session closure were both proven within the bound. */
   cleanupDone?: boolean;
+  /** Additive audit-v5 evidence from the shared lifecycle authority. */
+  terminationClosure?: WorkerTerminationClosureEvidence;
   /** Bounded last/active tool snapshot (safe metadata only). */
   toolSnapshot?: ToolRunSnapshotSummary;
   workerRunGovernance?: WorkerRunGovernanceSummary;
@@ -1250,6 +1266,49 @@ export interface AgentResult {
 export function dispatchGovernanceFields(result: unknown): Record<string, unknown> {
   const governance = (result as { workerRunGovernance?: WorkerRunGovernanceSummary } | undefined)?.workerRunGovernance;
   return governance ? { worker_run_governance: governance } : {};
+}
+
+export function dispatchAuditV5Fields(result: unknown): Record<string, unknown> {
+  const value = result as Pick<AgentResult, "workerRunGovernance" | "terminationClosure"> | undefined;
+  return {
+    ...(value?.workerRunGovernance?.worker_run_id
+      ? { worker_run_id: value.workerRunGovernance.worker_run_id }
+      : {}),
+    ...(value?.terminationClosure ? { termination_closure: value.terminationClosure } : {}),
+  };
+}
+
+export function dispatchDetailsV5Fields(result: unknown): Record<string, unknown> {
+  const value = result as Pick<AgentResult, "workerRunGovernance" | "terminationClosure"> | undefined;
+  return {
+    ...(value?.workerRunGovernance?.worker_run_id
+      ? { workerRunId: value.workerRunGovernance.worker_run_id }
+      : {}),
+    ...(value?.terminationClosure ? { terminationClosure: value.terminationClosure } : {}),
+  };
+}
+
+function preflightTerminationClosureEvidence(input: {
+  owner?: WorkerTerminationOwner | "preflight";
+  cleanupDone: boolean;
+  lifecyclePath?: "preflight" | "abnormal";
+}): WorkerTerminationClosureEvidence {
+  return {
+    lifecycle_path: input.lifecyclePath ?? "preflight",
+    termination_owner: input.owner ?? "preflight",
+    // Preflight returns do not pass through FirstWriterTermination; do not
+    // fabricate a claim timestamp.
+    termination_claimed_at_ms: null,
+    closure_status: "not_applicable",
+    closure_completed_at_ms: null,
+    bounded_wait_ms: 0,
+    bounded_wait_limit_ms: 0,
+    run_settled: true,
+    session_closure_done: null,
+    cleanup_done: input.cleanupDone,
+    post_claim_provider_start_count: 0,
+    post_claim_tool_start_count: 0,
+  };
 }
 
 export function dispatchToolSnapshotAuditFields(result: unknown): Record<string, unknown> {
@@ -2026,6 +2085,8 @@ export async function runInProcess(
       failureType: "context_files_snapshot_missing",
       durationMs: Date.now() - start,
       toolCallCount: 0,
+      cleanupDone: true,
+      terminationClosure: preflightTerminationClosureEvidence({ cleanupDone: true }),
     }));
   }
 
@@ -2043,6 +2104,8 @@ export async function runInProcess(
       failureType: "tool_rejected",
       durationMs: Date.now() - start,
       toolCallCount: 0,
+      cleanupDone: true,
+      terminationClosure: preflightTerminationClosureEvidence({ cleanupDone: true }),
     }));
   }
 
@@ -2064,6 +2127,8 @@ export async function runInProcess(
       failureType: "model_not_found",
       durationMs: Date.now() - start,
       toolCallCount,
+      cleanupDone: true,
+      terminationClosure: preflightTerminationClosureEvidence({ cleanupDone: true }),
     }));
   }
 
@@ -2105,11 +2170,26 @@ export async function runInProcess(
     heartbeatProjectRoot,
     start,
   );
+  const trace = executionContext?.reasoningTrace;
+  const workerAuditCorrelation: WorkerRunAuditCorrelation = {
+    ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
+    ...(dispatchTrace?.runId ? { dispatchRunId: dispatchTrace.runId } : {}),
+    ...(trace?.taskIndex !== undefined ? { taskIndex: trace.taskIndex } : {}),
+    ...(trace?.taskCount !== undefined ? { taskCount: trace.taskCount } : {}),
+    task: trace?.taskIndex !== undefined ? `dispatch[${trace.taskIndex}]` : "dispatch_agent",
+    ...(trace?.workflowRunId ? { workflowRunId: trace.workflowRunId } : {}),
+    ...(trace?.workflowStageId ? {
+      workflowStageId: trace.workflowStageId,
+      workflow: trace.workflowRunId ?? "workflow",
+    } : {}),
+  };
   let requestGovernorTermination = (_decision: WorkerRunGovernorDecision): void => {};
-  const emitWorkerRunDecision = (decision: WorkerRunGovernorDecision | undefined): void => {
+  const emitWorkerRunDecision = (
+    decision: WorkerRunGovernorDecision | undefined,
+    retry?: ReturnType<typeof providerRetryAuditFields>,
+  ): void => {
     if (!decision) return;
     if (decision.mode === "abort") requestGovernorTermination(decision);
-    const trace = executionContext?.reasoningTrace;
     try {
       dispatchTrace?.emitGovernor({
         signal: decision.signal,
@@ -2120,17 +2200,11 @@ export async function runInProcess(
         ...(typeof decision.limit === "number" ? { limit: decision.limit } : {}),
       });
     } catch { /* never throw into governor path */ }
-    void appendDispatchAudit(heartbeatProjectRoot, heartbeatAnchor, buildWorkerRunAuditEvent(decision, {
-      ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
-      ...(trace?.taskIndex !== undefined ? { taskIndex: trace.taskIndex } : {}),
-      ...(trace?.taskCount !== undefined ? { taskCount: trace.taskCount } : {}),
-      task: trace?.taskIndex !== undefined ? `dispatch[${trace.taskIndex}]` : "dispatch_agent",
-      ...(trace?.workflowRunId ? { workflowRunId: trace.workflowRunId } : {}),
-      ...(trace?.workflowStageId ? {
-        workflowStageId: trace.workflowStageId,
-        workflow: trace.workflowRunId ?? "workflow",
-      } : {}),
-    })).catch(() => { /* audit is best-effort */ });
+    void appendDispatchAudit(
+      heartbeatProjectRoot,
+      heartbeatAnchor,
+      buildWorkerRunAuditEvent(decision, workerAuditCorrelation, retry),
+    ).catch(() => { /* audit is best-effort */ });
   };
   if (effectiveMaxOutputTokens !== undefined) {
     emitWorkerRunDecision(workerGovernor.observe({
@@ -2156,6 +2230,9 @@ export async function runInProcess(
   let deferHardCloseForClaim = false;
   let sessionClosurePromise: Promise<boolean> | undefined;
   let sessionClosureDone: boolean | undefined;
+  let sessionClosureStartedAt: number | undefined;
+  let sessionClosureCompletedAt: number | undefined;
+  let sessionClosureWaitMs: number | undefined;
   let resolveClosureEvidence!: (done: boolean) => void;
   let closureEvidenceResolved = false;
   const closureEvidence = new Promise<boolean>((resolve) => { resolveClosureEvidence = resolve; });
@@ -2170,15 +2247,18 @@ export async function runInProcess(
     // immediate synchronous dispose. The helper's state owns singleflight.
     const requested = disposeSubAgentSession(session, { immediate });
     if (!sessionClosurePromise) {
-      sessionClosurePromise = requested.then((done) => {
+      sessionClosureStartedAt = Date.now();
+      const completeClosure = (done: boolean): boolean => {
         sessionClosureDone = done;
+        sessionClosureCompletedAt = Date.now();
+        sessionClosureWaitMs = Math.max(0, sessionClosureCompletedAt - sessionClosureStartedAt!);
         noteClosureEvidence(done);
         return done;
-      }, () => {
-        sessionClosureDone = false;
-        noteClosureEvidence(false);
-        return false;
-      });
+      };
+      sessionClosurePromise = requested.then(
+        (done) => completeClosure(done),
+        () => completeClosure(false),
+      );
     } else {
       void requested.catch(() => { /* reflected by the original closure promise */ });
     }
@@ -2235,7 +2315,8 @@ export async function runInProcess(
   // Bounded tool_execution_* snapshot (safe metadata only). Heartbeat alive
   // is NOT tool progress and never enters this tracker.
   const toolTracker = new ToolRunTracker();
-  let postClaimStartCount = 0;
+  let postClaimProviderStartCount = 0;
+  let postClaimToolStartCount = 0;
 
   const termination = new FirstWriterTermination<AgentResult>((claim) => {
     terminationRequested = true;
@@ -2280,7 +2361,27 @@ export async function runInProcess(
     } catch { /* never throw */ }
     return finalizeReasoningTrace(
       enrichResultAttribution(
-        { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount, cleanupDone: true },
+        {
+          output: "",
+          error: "aborted before start",
+          failureType: "aborted",
+          durationMs: Date.now() - start,
+          toolCallCount,
+          cleanupDone: true,
+          workerRunGovernance: {
+            ...workerGovernor.snapshot(),
+            termination_closure: preflightTerminationClosureEvidence({
+              owner: "parent",
+              cleanupDone: true,
+              lifecyclePath: "abnormal",
+            }),
+          },
+          terminationClosure: preflightTerminationClosureEvidence({
+            owner: "parent",
+            cleanupDone: true,
+            lifecyclePath: "abnormal",
+          }),
+        },
         { abortEvidence: preEvidence, toolSnapshot: toolTracker.snapshot() },
       ),
       { forceIncomplete: true },
@@ -2472,12 +2573,14 @@ export async function runInProcess(
           // Preserve bounded post-claim evidence and tool closure state without
           // re-entering governor/session disposal from late SDK events.
           if (
-            (eventType === "message_start" && event.message?.role === "assistant" && event.message?.stopReason === "pending")
-            || eventType === "tool_execution_start"
+            eventType === "message_start" &&
+            event.message?.role === "assistant" &&
+            event.message?.stopReason === "pending"
           ) {
-            postClaimStartCount = Math.min(1_000, postClaimStartCount + 1);
+            postClaimProviderStartCount = Math.min(1_000, postClaimProviderStartCount + 1);
           }
           if (eventType === "tool_execution_start") {
+            postClaimToolStartCount = Math.min(1_000, postClaimToolStartCount + 1);
             toolTracker.onStart(event.toolName, event.toolCallId);
           } else if (eventType === "tool_execution_update") {
             toolTracker.onUpdate(event.toolName, event.toolCallId);
@@ -2603,6 +2706,7 @@ export async function runInProcess(
         }
 
         if (eventType === "auto_retry_start") {
+          const retryAudit = providerRetryAuditFields(heartbeatProjectRoot, "start", event);
           retryHistory.entries.push({
             attempt: typeof event.attempt === "number" ? event.attempt : retryHistory.entries.length + 1,
             errorPreview: typeof event.errorMessage === "string"
@@ -2611,10 +2715,31 @@ export async function runInProcess(
             delayMs: typeof event.delayMs === "number" ? event.delayMs : undefined,
             startedAt: Date.now(),
           });
-          emitWorkerRunDecision(workerGovernor.observe({
+          const startDecision = workerGovernor.observe({
             signal: "provider_retry",
             action: "audit_provider_retry_against_consecutive_and_rolling_budgets",
-          }));
+          });
+          if (startDecision) {
+            emitWorkerRunDecision(startDecision, retryAudit);
+          } else {
+            // observe() returned undefined because the governor is disabled
+            // (settings.enabled=false) or already terminal. The retry
+            // lifecycle audit must NOT depend on the governor enable switch:
+            // write the start row as a dedicated audit-only projection that
+            // never mutates governor counters and never triggers termination,
+            // so it always pairs with the provider_retry_end row on the same
+            // worker_run_id / dispatch joins.
+            void appendDispatchAudit(
+              heartbeatProjectRoot,
+              heartbeatAnchor,
+              buildWorkerRunRetryStartAuditEvent(
+                workerGovernor.snapshot(),
+                Date.now() - start,
+                retryAudit,
+                workerAuditCorrelation,
+              ),
+            ).catch(() => { /* audit is best-effort */ });
+          }
         }
         if (eventType === "auto_retry_end") {
           retryHistory.finalOutcome = event.success ? "succeeded" : "exhausted";
@@ -2622,6 +2747,17 @@ export async function runInProcess(
           if (typeof event.finalError === "string" && event.finalError) {
             retryHistory.finalError = event.finalError.slice(0, 200);
           }
+          const retryAudit = providerRetryAuditFields(heartbeatProjectRoot, "end", event);
+          void appendDispatchAudit(
+            heartbeatProjectRoot,
+            heartbeatAnchor,
+            buildWorkerRunRetryOutcomeAuditEvent(
+              workerGovernor.snapshot(),
+              Date.now() - start,
+              retryAudit,
+              workerAuditCorrelation,
+            ),
+          ).catch(() => { /* audit is best-effort */ });
         }
       });
 
@@ -2805,25 +2941,53 @@ export async function runInProcess(
   const boundedJoinRequired = abnormalClaim || runPromiseRejected;
   let joinedClosureDone = sessionClosureDone === true || (!session && runPromiseSettled);
   let joinedWithinBound = !boundedJoinRequired;
+  let boundedWaitMs = sessionClosureWaitMs ?? 0;
   if (boundedJoinRequired) {
+    const boundedWaitStartedAt = Date.now();
     joinedWithinBound = await boundedPromiseResult(
       Promise.all([trackedRunPromise, closureEvidence]).then(([, closureDone]) => {
         joinedClosureDone = closureDone;
       }),
       TERMINAL_CLOSURE_WAIT_MS,
     );
+    boundedWaitMs = Math.max(0, Date.now() - boundedWaitStartedAt);
   }
 
   // cleanupDone is true only with both run settlement and positive closure
   // evidence. Any observed post-claim provider/tool start makes the verdict
   // false even if it later drains, because the terminal fence was crossed.
+  const cleanupDone =
+    runPromiseSettled
+    && joinedWithinBound
+    && joinedClosureDone
+    && postClaimProviderStartCount === 0
+    && postClaimToolStartCount === 0;
+  const terminationClosure: WorkerTerminationClosureEvidence = {
+    lifecycle_path: abnormalClaim ? "abnormal" : "normal",
+    termination_owner: winningClaim.owner,
+    termination_claimed_at_ms: winningClaim.claimedAtMs,
+    closure_status: !session
+      ? "not_applicable"
+      : sessionClosureDone === true
+        ? "complete"
+        : sessionClosureDone === false || !joinedWithinBound
+          ? "incomplete"
+          : "unknown",
+    closure_completed_at_ms: sessionClosureCompletedAt ?? null,
+    bounded_wait_ms: boundedWaitMs,
+    bounded_wait_limit_ms: boundedJoinRequired
+      ? TERMINAL_CLOSURE_WAIT_MS
+      : session ? SESSION_SHUTDOWN_WAIT_MS : 0,
+    run_settled: runPromiseSettled,
+    session_closure_done: session ? sessionClosureDone ?? null : null,
+    cleanup_done: cleanupDone,
+    post_claim_provider_start_count: postClaimProviderStartCount,
+    post_claim_tool_start_count: postClaimToolStartCount,
+  };
   result = {
     ...result,
-    cleanupDone:
-      runPromiseSettled
-      && joinedWithinBound
-      && joinedClosureDone
-      && postClaimStartCount === 0,
+    cleanupDone,
+    terminationClosure,
   };
 
   // Final attribution comes only from the winning claim or explicit result
@@ -2835,10 +2999,15 @@ export async function runInProcess(
     abortEvidence: settlementEvidence,
     toolSnapshot: result.toolSnapshot ?? toolTracker.snapshot(),
   });
+  const governance = attributed.workerRunGovernance ?? workerGovernor.snapshot();
   const resultWithBudget: AgentResult = {
     ...attributed,
     ...(effectiveMaxOutputTokens === undefined ? {} : { maxOutputTokens: effectiveMaxOutputTokens }),
-    workerRunGovernance: attributed.workerRunGovernance ?? workerGovernor.snapshot(),
+    terminationClosure,
+    workerRunGovernance: {
+      ...governance,
+      termination_closure: terminationClosure,
+    },
   };
   const abortRace = abnormalClaim ||
     resultWithBudget.failureType === "guardrail_stop" ||
@@ -3174,6 +3343,8 @@ export default function (pi: ExtensionAPI) {
             error: `tool_rejected: ${toolCheck.reason}`,
             failureType: "tool_rejected",
             durationMs: 0,
+            cleanupDone: true,
+            terminationClosure: preflightTerminationClosureEvidence({ cleanupDone: true }),
           },
           rejectTrace,
           { reason: toolCheck.reason, terminalState: "failed" },
@@ -3204,6 +3375,7 @@ export default function (pi: ExtensionAPI) {
           duration_ms: 0,
           result: "fail",
           ...rejectTsFields,
+          ...dispatchAuditV5Fields(rejectResult),
           failure_type: "tool_rejected",
           output_chars: 0,
         });
@@ -3234,6 +3406,7 @@ export default function (pi: ExtensionAPI) {
             dispatch_tool_call_id: toolCallId,
             runId: rejectRunId,
             ...dispatchProgressDetails(rejectProgressSnapshot),
+            ...dispatchDetailsV5Fields(rejectResult),
             ...dispatchTraceSummaryFields(rejectTraceSummary),
             ...(rejectAnchor ? { anchor: rejectAnchor } : {}),
           },
@@ -3428,6 +3601,7 @@ export default function (pi: ExtensionAPI) {
           duration_ms: durationMs,
           result: result.error ? "fail" : "ok",
           ...tsFields,
+          ...dispatchAuditV5Fields(result),
           ...(result.failureType ? { failure_type: result.failureType } : {}),
           ...(result.timeoutKind ? { timeout_kind: result.timeoutKind } : {}),
           ...(result.lastProgressReason ? { last_progress_reason: result.lastProgressReason } : {}),
@@ -3463,6 +3637,7 @@ export default function (pi: ExtensionAPI) {
           dispatch_tool_call_id: toolCallId,
           runId: result.dispatch_run_id ?? runId,
           ...dispatchTraceResultFields(result),
+          ...dispatchDetailsV5Fields(result),
           ...(result.workerRunGovernance ? { workerRunGovernance: result.workerRunGovernance } : {}),
           ...dispatchReasoningTraceFields(result),
           // ADR 0027 §C5 v1: surface terminal_state so the caller LLM can
@@ -3727,6 +3902,8 @@ export default function (pi: ExtensionAPI) {
                   error: `task[${i}] rejected: ${toolCheck.reason}`,
                   failureType: "tool_rejected",
                   durationMs: 0,
+                  cleanupDone: true,
+                  terminationClosure: preflightTerminationClosureEvidence({ cleanupDone: true }),
                 },
                 taskTrace,
                 { reason: toolCheck.reason, terminalState: "failed" },
@@ -3758,6 +3935,7 @@ export default function (pi: ExtensionAPI) {
                 duration_ms: 0,
                 result: "fail",
                 ...rejectedTsFields,
+                ...dispatchAuditV5Fields(res),
                 failure_type: "tool_rejected",
                 ...(res.heartbeat_trace_path ? { heartbeat_trace_path: res.heartbeat_trace_path } : {}),
                 ...(res.heartbeat_liveness ? { heartbeat_liveness: res.heartbeat_liveness } : {}),
@@ -3856,6 +4034,7 @@ export default function (pi: ExtensionAPI) {
             duration_ms: Date.now() - taskStart,
             result: res.error ? "fail" : "ok",
             ...taskTsFields,
+            ...dispatchAuditV5Fields(res),
             ...(res.failureType ? { failure_type: res.failureType } : {}),
             ...(res.timeoutKind ? { timeout_kind: res.timeoutKind } : {}),
             ...(res.lastProgressReason ? { last_progress_reason: res.lastProgressReason } : {}),
@@ -3921,6 +4100,11 @@ export default function (pi: ExtensionAPI) {
           failureType: "aborted",
           durationMs: 0,
           cleanupDone: true,
+          terminationClosure: preflightTerminationClosureEvidence({
+            owner: "parent",
+            cleanupDone: true,
+            lifecyclePath: "abnormal",
+          }),
         }, { abortEvidence: parallelSignalEvidence ?? "parent" });
         try {
           taskTraces[i]?.emitLifecycle("never_started", {
@@ -4011,6 +4195,8 @@ export default function (pi: ExtensionAPI) {
         max_single_ms: Math.max(0, ...materializedResults.map((r) => r.durationMs)),
         result: aggregateLegacyResult,
         worker_run_governance: materializedResults.flatMap((r) => r.workerRunGovernance ? [r.workerRunGovernance] : []),
+        worker_run_ids: materializedResults.flatMap((r) => r.workerRunGovernance?.worker_run_id ? [r.workerRunGovernance.worker_run_id] : []),
+        termination_closures: materializedResults.flatMap((r) => r.terminationClosure ? [r.terminationClosure] : []),
         ...aggregateTsFields,
       });
 
@@ -4116,6 +4302,8 @@ export default function (pi: ExtensionAPI) {
           serialEstimateMs: serialEstimate,
           maxSingleMs: maxSingle,
           workerRunGovernance: materializedResults.flatMap((r) => r.workerRunGovernance ? [r.workerRunGovernance] : []),
+          workerRunIds: materializedResults.flatMap((r) => r.workerRunGovernance?.worker_run_id ? [r.workerRunGovernance.worker_run_id] : []),
+          terminationClosures: materializedResults.flatMap((r) => r.terminationClosure ? [r.terminationClosure] : []),
           // ADR 0027 §C5 v1: surface aggregate terminal_state to the
           // caller LLM so it can read the dispatch outcome (degraded /
           // failed) without re-aggregating per-task error fields.
@@ -4141,6 +4329,7 @@ export default function (pi: ExtensionAPI) {
               // liveTail stays only under dispatchProgress.tasks[].liveTail
               // (not duplicated on details.tasks[]).
               ...dispatchTraceResultFields(r),
+              ...dispatchDetailsV5Fields(r),
               ...(r.error ? { error: r.error, failureType: r.failureType } : {}),
               ...(r.usage ? { usage: r.usage } : {}),
               ...(r.maxOutputTokens ? { maxOutputTokens: r.maxOutputTokens } : {}),

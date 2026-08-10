@@ -106,6 +106,12 @@ const workerGovernorOut = ts.transpileModule(fs.readFileSync(workerGovernorSrc, 
 });
 fs.writeFileSync(path.join(tmpDir, "worker-run-governor.js"), workerGovernorOut.outputText);
 
+// Audit-v5 retry classification is runtime-only for this pure formatter smoke.
+fs.writeFileSync(
+  path.join(tmpDir, "audit-v5.js"),
+  `module.exports = { providerRetryAuditFields: () => ({ retry_phase: "start", retry_outcome: "unknown", error_classification: "unknown" }) };\n`,
+);
+
 // ADR 0027 §C5 v1: stage terminal-state.ts (real module, no external deps).
 // dispatch/index.ts imports buildTerminalStateFields/inferParallelTerminalState/
 // inferTerminalState at module-load time. The terminal-state.ts source

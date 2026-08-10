@@ -141,6 +141,7 @@ export interface WorkerRunGovernorDecision {
 
 export interface WorkerRunAuditCorrelation {
   dispatchToolCallId?: string;
+  dispatchRunId?: string;
   taskIndex?: number;
   taskCount?: number;
   task?: string;
@@ -149,9 +150,43 @@ export interface WorkerRunAuditCorrelation {
   workflow?: string;
 }
 
+export interface WorkerProviderRetryAuditFields {
+  retry_phase: "start" | "end";
+  retry_attempt?: number;
+  retry_max_attempts?: number;
+  retry_delay_ms?: number;
+  retry_outcome: "retrying" | "recovered" | "exhausted" | "unknown";
+  error_classification: "none" | "auth" | "rate_limit" | "network" | "server_error" | "context_overflow" | "unknown";
+  error_fingerprint?: {
+    algorithm: "hmac-sha256";
+    key_id: string;
+    digest: string;
+  };
+  http_status?: number;
+}
+
+// Note: on the normal path closure may complete before the synchronous run
+// claim; measure the elapsed wait by bounded_wait_ms, not by the delta of
+// termination_claimed_at_ms / closure_completed_at_ms timestamps.
+export interface WorkerTerminationClosureEvidence {
+  lifecycle_path: "normal" | "preflight" | "abnormal" | "unknown";
+  termination_owner: "run" | "parent" | "timeout" | "worker_run_governor" | "preflight" | "unknown";
+  termination_claimed_at_ms: number | null;
+  closure_status: "complete" | "incomplete" | "not_applicable" | "unknown";
+  closure_completed_at_ms: number | null;
+  bounded_wait_ms: number;
+  bounded_wait_limit_ms: number;
+  run_settled: boolean;
+  session_closure_done: boolean | null;
+  cleanup_done: boolean;
+  post_claim_provider_start_count: number;
+  post_claim_tool_start_count: number;
+}
+
 export function buildWorkerRunAuditEvent(
   decision: WorkerRunGovernorDecision,
   correlation: WorkerRunAuditCorrelation = {},
+  retry?: WorkerProviderRetryAuditFields,
 ): Record<string, unknown> {
   return {
     operation: "worker_run_event",
@@ -175,12 +210,83 @@ export function buildWorkerRunAuditEvent(
     ...(decision.coverage ? { coverage: decision.coverage } : {}),
     ...(decision.toolCallId ? { tool_call_id: decision.toolCallId } : {}),
     ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
+    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
     ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
     ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
     ...(correlation.task ? { task: correlation.task } : {}),
     ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
     ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
     ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
+    ...(retry ?? {}),
+  };
+}
+
+/**
+ * Audit-only provider_retry start row for paths where the governor never
+ * observed the retry (settings.enabled=false, or already terminal). It is a
+ * dedicated builder, NOT a fabricated WorkerRunGovernorDecision: it projects
+ * the honest summary snapshot (counters stay untouched — all-zero when the
+ * governor is disabled), never mutates counters, never triggers termination,
+ * and pairs with the end row via worker_run_id + correlation joins. The
+ * `no_governor_transition` action keeps the semantics explicit.
+ */
+export function buildWorkerRunRetryStartAuditEvent(
+  summary: WorkerRunGovernanceSummary,
+  elapsedMs: number,
+  retry: WorkerProviderRetryAuditFields,
+  correlation: WorkerRunAuditCorrelation = {},
+): Record<string, unknown> {
+  return {
+    operation: "worker_run_event",
+    row_kind: "worker_run_event",
+    worker_run_id: summary.worker_run_id,
+    rule_version: summary.rule_version,
+    signal: "provider_retry_start",
+    mode: "observe",
+    counters: summary.counters,
+    thresholds: summary.thresholds,
+    elapsed_ms: Math.max(0, Math.floor(elapsedMs)),
+    termination_source: "none",
+    action: "audit_provider_retry_start_no_governor_transition",
+    ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
+    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
+    ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
+    ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
+    ...(correlation.task ? { task: correlation.task } : {}),
+    ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
+    ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
+    ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
+    ...retry,
+  };
+}
+
+export function buildWorkerRunRetryOutcomeAuditEvent(
+  summary: WorkerRunGovernanceSummary,
+  elapsedMs: number,
+  retry: WorkerProviderRetryAuditFields,
+  correlation: WorkerRunAuditCorrelation = {},
+): Record<string, unknown> {
+  return {
+    operation: "worker_run_event",
+    row_kind: "worker_run_event",
+    worker_run_id: summary.worker_run_id,
+    rule_version: summary.rule_version,
+    signal: "provider_retry_end",
+    mode: summary.terminal ? "abort" : "observe",
+    counters: summary.counters,
+    thresholds: summary.thresholds,
+    elapsed_ms: Math.max(0, Math.floor(elapsedMs)),
+    termination_source: summary.terminal?.termination_source ?? "none",
+    action: "audit_provider_retry_end_no_governor_transition",
+    ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
+    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
+    ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
+    ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
+    ...(correlation.task ? { task: correlation.task } : {}),
+    ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
+    ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
+    ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
+    ...retry,
   };
 }
 
@@ -190,6 +296,7 @@ export interface WorkerRunGovernanceSummary {
   counters: WorkerRunGovernorCounters;
   thresholds: WorkerRunGovernorThresholds;
   requested_output_cap?: number;
+  termination_closure?: WorkerTerminationClosureEvidence;
   terminal?: {
     signal: WorkerGovernorSignal;
     termination_source: "worker_run_governor";

@@ -19,7 +19,7 @@
  *   1. Reordering ...tsFields and failure_type so one stomps the other
  *   2. Dropping ...tsFields from one audit site but keeping in another
  *   3. aggregateAnchor.subturn=0 and sub_agent_label being refactored away
- *   4. audit_version: 4 bump being silently rolled back
+ *   4. audit_version: 5 bump being silently rolled back
  *   5. PR-C heartbeat trace enrichment missing from audit rows
  *   6. PR-C per-file audit singleFlight chain missing from append path
  *   7. v4 additive fields: termination_source / active_tool_count / last_tool
@@ -107,13 +107,13 @@ check("message_end and agent_end await summary flush before terminal append", ()
 
 console.log("Section: audit version bump");
 
-check("DISPATCH_AUDIT_VERSION = 4 (termination_source + tool snapshot fields)", () => {
-  if (!/const DISPATCH_AUDIT_VERSION = 4;/.test(dispatchSrc)) {
-    throw new Error("expected DISPATCH_AUDIT_VERSION = 4; v4 adds termination_source/active_tool_count/active_tools/last_tool");
+check("DISPATCH_AUDIT_VERSION = 5 (additive joins + closure/retry evidence)", () => {
+  if (!/export const DISPATCH_AUDIT_VERSION = 5;/.test(dispatchSrc)) {
+    throw new Error("expected DISPATCH_AUDIT_VERSION = 5");
   }
-  // Comment documents v3→v4 and 3|4 reader compatibility.
-  if (!/v3 → v4/.test(dispatchSrc) || !/3\|4/.test(dispatchSrc)) {
-    throw new Error("DISPATCH_AUDIT_VERSION comment must document v3→v4 and 3|4 reader compatibility");
+  // History retains v3→v4 semantics and documents additive v4→v5 compatibility.
+  if (!/v3 → v4/.test(dispatchSrc) || !/v4 → v5/.test(dispatchSrc) || !/4\|5/.test(dispatchSrc)) {
+    throw new Error("DISPATCH_AUDIT_VERSION comment must retain v4 history and document 4|5 compatibility");
   }
 });
 

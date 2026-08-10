@@ -1,0 +1,216 @@
+{
+  "title": "S2 dispatch audit v5 — production runs + human-approved retry equivalent evidence",
+  "mode": "production_and_human_approved_equivalent_evidence",
+  "archive_note": "Structured archive of verified facts from three real production audit v5 runs (fresh-pi normal / timeout / parallel) plus the human-approved equivalent for the retry-classification branch that live production cannot directly evidence (raw SDK end/error not persisted). Extracted identifiers, states, closure evidence and hashes only; no prompt content, raw errors, tool args or outputs. Audit rows live in the local untracked .pi-astack/ directory (gitignored) and are referenced by path, not embedded in this dossier.",
+  "method": "production_audit_v5_rows_in_local_gitignored_audit_jsonl + human_approved_equivalent",
+  "generated_at_utc": "2026-08-10T06:18:07.000Z",
+  "git": {
+    "head": "e35f211",
+    "worktree_dirty": true,
+    "note": "evidence dossier itself is uncommitted; no commit/push performed"
+  },
+  "audit_paths": [
+    ".pi-astack/dispatch/audit.jsonl"
+  ],
+  "audit_paths_note": "Local untracked .pi-astack/ directory (gitignored mutable source); referenced by path, not embedded. task-row hashes below are sha256 of `jq -cS .` over the row, recomputable from this file.",
+  "hash_method": "sha256 over `jq -cS .` output bytes of the audit row",
+
+  "production": {
+    "A_fresh_pi_normal": {
+      "kind": "production",
+      "run": "dtr_f59fb7e27aafc755356dcead",
+      "worker_run_id": "b34363ef-a8de-4916-ae19-9b5f615528bc",
+      "task_timestamp_utc": "2026-08-10T05:10:59.945Z",
+      "audit_version": 5,
+      "terminal_state": "completed",
+      "closure": {
+        "lifecycle_path": "normal",
+        "termination_owner": "run",
+        "closure_status": "complete",
+        "cleanup_done": true,
+        "run_settled": true,
+        "session_closure_done": true,
+        "bounded_wait_ms": 1,
+        "bounded_wait_limit_ms": 3000,
+        "post_claim_provider_start_count": 0,
+        "post_claim_tool_start_count": 0
+      },
+      "event_joins": "3 worker_run_event rows joined on worker_run_id / dispatch_run_id / dispatch_tool_call_id / task_index",
+      "postterminal_events": 0,
+      "task_row_canonical_jq_cS_hash_sha256": "6d75805029e9e534546ef0fc047b81cc63aab69ea4ef6072c7650100432aa217",
+      "verification": "hash recomputed by executor via jq -cS, matches; closure/join facts match audit rows"
+    },
+    "B_timeout": {
+      "kind": "production",
+      "run": "dtr_5c96a18a72a76f651c1e6c76",
+      "worker_run_id": "141196f8-a255-4c17-9abd-a95519866c12",
+      "task_timestamp_utc": "2026-08-10T05:15:00.811Z",
+      "audit_version": 5,
+      "terminal_state": "cancelled",
+      "cancellation": {
+        "termination_source": "timeout",
+        "timeout_kind": "idle"
+      },
+      "closure": {
+        "lifecycle_path": "abnormal",
+        "termination_owner": "timeout",
+        "closure_status": "complete",
+        "cleanup_done": true,
+        "run_settled": true,
+        "session_closure_done": true,
+        "bounded_wait_ms": 9,
+        "bounded_wait_limit_ms": 3000,
+        "post_claim_provider_start_count": 0,
+        "post_claim_tool_start_count": 0
+      },
+      "marker_pid": 1635970,
+      "marker_absent_after_15s_observation_window": true,
+      "postterminal_events": 0,
+      "task_row_canonical_jq_cS_hash_sha256": "a6e032ca587d003ac819a40c575534d4de5e0a5467335f55c8e8ce4787cec084",
+      "verification": "hash recomputed by executor via jq -cS, matches; closure/join facts match audit rows; marker PID observation from parent-session record"
+    },
+    "parallel": {
+      "kind": "production",
+      "session_id": "019fea3e-560f-79d9-aa67-e9a65db87886",
+      "dispatch_tool_call_id": "call_06jJyEYWDkEgOLZXFnrqVXDF|fc_096d001dc24acbbf016a79680b87e0819981aeac06bdcc3494",
+      "run0": {
+        "run": "dtr_acd20cd9e523e48031bd0176",
+        "worker_run_id": "099d68a7-6a7e-4fac-9beb-77b3c5db920c",
+        "task_timestamp_utc": "2026-08-10T05:56:32.664Z",
+        "terminal_state": "completed",
+        "task_row_canonical_jq_cS_hash_sha256": "75e4c0bb9595e441e06de10f170dac41fec880d509084ed064ee9c84a7b76781"
+      },
+      "run1": {
+        "run": "dtr_48316538a9f67a94f275b1a7",
+        "worker_run_id": "c0d4ad16-7cea-4b99-95f6-2e58aedb8356",
+        "task_timestamp_utc": "2026-08-10T05:56:31.931Z",
+        "terminal_state": "completed",
+        "task_row_canonical_jq_cS_hash_sha256": "23eb90f9d88c514f1780101e38ba79f7c67c98f579a210bf0d853a41c9908f56"
+      },
+      "aggregate": {
+        "row_kind": "dispatch_parallel.summary",
+        "timestamp_utc": "2026-08-10T05:56:32.672Z",
+        "task_count": 2,
+        "worker_run_ids": ["099d68a7-6a7e-4fac-9beb-77b3c5db920c", "c0d4ad16-7cea-4b99-95f6-2e58aedb8356"],
+        "canonical_jq_cS_hash_sha256": "23b1b3860a17a215bd984d566461a829ee55b19faa6cafe442c0dbbb57cae0c9"
+      },
+      "summary": {
+        "completed_runs": 2,
+        "joined_worker_events": 6,
+        "aggregate_ids_and_closures_exact": true,
+        "outer_exit": 0,
+        "outer_duration_s_approx": 14,
+        "closure_evidence": [
+          {
+            "worker_run_id": "099d68a7-6a7e-4fac-9beb-77b3c5db920c",
+            "lifecycle_path": "normal",
+            "termination_owner": "run",
+            "closure_status": "complete",
+            "cleanup_done": true,
+            "run_settled": true,
+            "session_closure_done": true,
+            "bounded_wait_ms": 0,
+            "bounded_wait_limit_ms": 3000,
+            "post_claim_provider_start_count": 0,
+            "post_claim_tool_start_count": 0
+          },
+          {
+            "worker_run_id": "c0d4ad16-7cea-4b99-95f6-2e58aedb8356",
+            "lifecycle_path": "normal",
+            "termination_owner": "run",
+            "closure_status": "complete",
+            "cleanup_done": true,
+            "run_settled": true,
+            "session_closure_done": true,
+            "bounded_wait_ms": 1,
+            "bounded_wait_limit_ms": 3000,
+            "post_claim_provider_start_count": 0,
+            "post_claim_tool_start_count": 0
+          }
+        ]
+      },
+      "verification": "all hashes recomputed by executor via jq -cS, match; join fields and closures match audit rows"
+    }
+  },
+
+  "outer_pi_timeout_note": "In production A the outer pi shell timed out (180s) after the task row was written; recorded honestly. It does not invalidate the audit row, but attribution of that shell timeout is uncertain (not part of the audited worker run).",
+
+  "historical_production_retry_observations": {
+    "kind": "production",
+    "scope": "session files under agent/sessions, exact JSON parse of dispatchProgress.tasks[].lastProgressReason == event:auto_retry_start",
+    "task_level_auto_retry_start_count": 220,
+    "session_files_count": 67,
+    "dispatch_calls_count": 192,
+    "date_range_utc": "2026-07-04..2026-08-09",
+    "same_call_start_eventual_success_with_retry_counters": 23,
+    "raw_sdk_end_or_error_persisted": false,
+    "raw_sdk_end_or_error_note": "raw SDK retry end/error events are not persisted in the session files, therefore the v5 classification cannot be directly recomputed from historical production data",
+    "representative_rows": [
+      {
+        "label": "A",
+        "path": "/home/worker/.pi/agent/sessions/--home-worker-workspace--/2026-07-28T11-14-45-269Z_019fa86f-2995-77da-a42e-ff8036d310cc.jsonl",
+        "line": 26,
+        "body_hash_sha256": "4dc4fc780b453b1e0afcbcea9ddf967784e4ef7ae236bb9a585857f2b03c2de9"
+      },
+      {
+        "label": "B",
+        "path": "/home/worker/.pi/agent/sessions/--home-worker-work-components-pi-router--/2026-07-18T14-45-29-826Z_019f75b0-8262-7ccf-9fca-d10afabf2810.jsonl",
+        "line": 106,
+        "body_hash_sha256": "f388ff6a9c668a0b3b05a18393278fd592310a1a4c442e671d6c15a9acc5a453"
+      }
+    ],
+    "verification": {
+      "executor_recomputed": {
+        "task_level_count": 220,
+        "session_files_count": 67,
+        "dispatch_calls_count": 192,
+        "date_range_utc": "2026-07-04..2026-08-09",
+        "method": "python exact JSON parse of toolResult message.details.dispatchProgress.tasks[].lastProgressReason",
+        "matches": true
+      },
+      "same_call_recomputed": {
+        "count": 23,
+        "recomputed": true,
+        "method": "jq over all agent/sessions/**/*.jsonl, toolResult messages with object details only: select(.type==\"message\" and .message.role==\"toolResult\" and (.message.details|type)==\"object\") | select(((.message.details.dispatchProgress.tasks // []) | any(.lastProgressReason==\"event:auto_retry_start\")) and ((.message.details.tasks // []) | any(.ok==true and ((.workerRunGovernance.counters.provider_retry_count // 0)>0))))",
+        "matches": true
+      },
+      "representative_row_hashes_recomputed": {
+        "recomputed": true,
+        "method": "sha256 over the exact line body without trailing newline: `awk 'NR==<line> {printf \"%s\",$0}' <path> | sha256sum`",
+        "matches": true
+      },
+      "executor_notes": [
+        "220/67/192 and date range recomputed exactly and match."
+      ]
+    }
+  },
+
+  "equivalent_test": {
+    "kind": "human_approved_equivalent",
+    "synthetic_equivalent_not_production": true,
+    "command": "npm run smoke:dispatch-audit-v5",
+    "checks": 12,
+    "result": "PASS",
+    "method": "real SDK runInProcess + faux provider deterministically triggers AgentSession auto_retry_start/auto_retry_end",
+    "verified_aspects": [
+      "retry classification on real start/end lifecycle",
+      "HMAC fingerprint keyed on actual error text; raw error not persisted to audit",
+      "no raw error/prompt/tool args/output in audit jsonl",
+      "end row does not increment governor counters",
+      "worker/dispatch run/call join integrity",
+      "stream attribution stays unknown without explicit lifecycle evidence",
+      "real SDK disabled-governor config: start/end rows still pair, governor count stays 0, no termination side effects"
+    ]
+  },
+
+  "human_approval": {
+    "approved_by": "current session user",
+    "selected_option": "批准等价证据，按此完成 S2 审查与提交（推荐）",
+    "scope": "retry classification branch only: the combination of production observations plus the sdk-equivalent runInProcess evidence above",
+    "live_v5_provider_retry_observed": false,
+    "live_v5_provider_retry_observed_note": "must not be rewritten; no live provider v5 retry end/classification observation exists"
+  },
+
+  "result": "accepted_with_human_approved_retry_equivalent",
+  "acceptance_scope": "S2 additive audit v5 evidence dossier: production A/B/parallel runs verified; retry classification branch accepted via human-approved equivalent (synthetic-equivalent, not production acceptance); AUDITV5-* criteria remain unchecked pending review"
+}

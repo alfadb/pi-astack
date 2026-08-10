@@ -91,6 +91,8 @@ export interface StageRunResult {
   terminationSource?: string;
   /** Bounded worker/session closure verdict from shared worker. */
   cleanupDone?: boolean;
+  /** Shared dispatch lifecycle evidence; workflow does not recompute it. */
+  terminationClosure?: import("../dispatch/worker-run-governor").WorkerTerminationClosureEvidence;
   /** Bounded last/active tool snapshot (safe metadata only). */
   toolSnapshot?: import("../dispatch/tool-run-snapshot").ToolRunSnapshotSummary;
   durationMs: number;
@@ -149,6 +151,10 @@ export interface StageRecord {
   termination_source?: string;
   /** Bounded worker/session closure verdict when supplied by dispatch. */
   cleanup_done?: boolean;
+  /** Direct joins and shared lifecycle evidence from runInProcess. */
+  worker_run_id?: string;
+  worker_run_ids?: string[];
+  termination_closure?: import("../dispatch/worker-run-governor").WorkerTerminationClosureEvidence | import("../dispatch/worker-run-governor").WorkerTerminationClosureEvidence[];
   /** Safe last-tool metadata at terminal (name/id/status/timestamps only). */
   last_tool?: Record<string, unknown>;
   active_tool_count?: number;
@@ -459,6 +465,9 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(rec.cancel_source ? { cancel_source: rec.cancel_source } : {}),
       ...(rec.termination_source ? { termination_source: rec.termination_source } : {}),
       ...(typeof rec.cleanup_done === "boolean" ? { cleanup_done: rec.cleanup_done } : {}),
+      ...(rec.worker_run_id ? { worker_run_id: rec.worker_run_id } : {}),
+      ...(rec.worker_run_ids ? { worker_run_ids: rec.worker_run_ids } : {}),
+      ...(rec.termination_closure ? { termination_closure: rec.termination_closure } : {}),
       ...(rec.last_tool ? { last_tool: rec.last_tool } : {}),
       ...(typeof rec.active_tool_count === "number" ? { active_tool_count: rec.active_tool_count } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
@@ -588,6 +597,8 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(res.cancelSource ? { cancel_source: res.cancelSource } : {}),
       ...(res.terminationSource ? { termination_source: res.terminationSource } : {}),
       ...(typeof res.cleanupDone === "boolean" ? { cleanup_done: res.cleanupDone } : {}),
+      ...(res.workerRunGovernance?.worker_run_id ? { worker_run_id: res.workerRunGovernance.worker_run_id } : {}),
+      ...(res.terminationClosure ? { termination_closure: res.terminationClosure } : {}),
       ...(lastTool ? { last_tool: lastTool } : {}),
       ...(typeof res.toolSnapshot?.active_count === "number"
         ? { active_tool_count: res.toolSnapshot.active_count }
@@ -764,6 +775,15 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
         worker_run_governance: childList.flatMap((r) => {
           const governance = r.worker_run_governance;
           return governance ? (Array.isArray(governance) ? governance : [governance]) : [];
+        }),
+      } : {}),
+      ...(childList.some((r) => r.worker_run_id) ? {
+        worker_run_ids: childList.flatMap((r) => r.worker_run_id ? [r.worker_run_id] : []),
+      } : {}),
+      ...(childList.some((r) => r.termination_closure) ? {
+        termination_closure: childList.flatMap((r) => {
+          const evidence = r.termination_closure;
+          return evidence ? (Array.isArray(evidence) ? evidence : [evidence]) : [];
         }),
       } : {}),
       ...(degradedUps.length > 0 ? { degraded_upstreams: degradedUps } : {}),
