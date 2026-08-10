@@ -415,7 +415,7 @@ function toolErrorText(result: unknown): string {
   return "unknown tool error";
 }
 
-function schemaErrorDescriptor(text: string): { errorClass: string; fieldPath: string; hash: string } {
+function schemaErrorDescriptor(text: string): { errorClass: string; fieldPath: string; normalized: string; hash: string } {
   const lower = text.toLowerCase();
   const errorClass = /required|missing/.test(lower) ? "missing_required"
     : /unknown|additional propert|unexpected field/.test(lower) ? "unknown_field"
@@ -429,8 +429,26 @@ function schemaErrorDescriptor(text: string): { errorClass: string; fieldPath: s
   return {
     errorClass,
     fieldPath,
+    normalized,
     hash: privateCorrelationHash(`${errorClass}\0${fieldPath}\0${normalized}`),
   };
+}
+
+/** Additive S3 export: the governor's schema-error classifier result for a
+ *  failed tool result, SAME-SOURCE as the governor's own exact identity
+ *  (schemaErrorDescriptor). Returns the CLOSED error class, the field path,
+ *  and the bounded whitespace-normalized descriptor (<=4096 chars) that the
+ *  governor's exact identity already keys on — the raw error text is
+ *  classified inside and never returned, so a shadow evaluator can build an
+ *  unambiguous exact identity (tool name + error class + field path +
+ *  normalized descriptor) without ever persisting raw text. Returns null when
+ *  the error is not schema-rejection shaped (the same decision the governor
+ *  makes in observeToolEnd). */
+export function classifySchemaErrorToolResult(result: unknown): { errorClass: string; fieldPath: string; normalized: string } | null {
+  const descriptor = schemaErrorDescriptor(toolErrorText(result));
+  return descriptor.errorClass === "tool_error"
+    ? null
+    : { errorClass: descriptor.errorClass, fieldPath: descriptor.fieldPath, normalized: descriptor.normalized };
 }
 
 export class WorkerRunGovernor {

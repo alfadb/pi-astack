@@ -562,6 +562,49 @@ check("legacy failure_type retained on error-path audit rows", () => {
   }
 });
 
+console.log("\nSection: S3 storm-shadow audit row (worker_run_shadow_event)");
+
+check("S3 storm-shadow rows carry an independent row_kind and counterfactual-only action", () => {
+  // S3 STORM-SHADOW appends additive worker_run_shadow_event rows with an
+  // explicit rule id/version and a counterfactual action that can never be
+  // mistaken for a real abort action.
+  const shadowSrc = fs.readFileSync(
+    path.join(repoRoot, "extensions/dispatch/storm-shadow.ts"),
+    "utf-8",
+  );
+  if (!/row_kind: STORM_SHADOW_ROW_KIND/.test(shadowSrc)) {
+    throw new Error("shadow audit row must use the dedicated row_kind (worker_run_shadow_event)");
+  }
+  if (!/counterfactual_action: STORM_SHADOW_COUNTERFACTUAL_ACTION/.test(shadowSrc)) {
+    throw new Error("shadow audit row must carry the counterfactual-only action");
+  }
+  if (!/buildStormShadowAuditEvent\(workerGovernor\.workerRunId, workerAuditCorrelation, observation\)/.test(dispatchSrc)) {
+    throw new Error("shadow audit row must join the worker run and dispatch correlation");
+  }
+  // The shadow verdict must never be routed through the governor decision
+  // sink (which can request termination): the shadow sink is invoked exactly
+  // once, inside the fail-open shadowFeed helper, whose body never references
+  // the governor decision path.
+  const shadowFeedStart = dispatchSrc.indexOf("const shadowFeed = (input: StormShadowEventInput)");
+  const shadowFeedEnd = dispatchSrc.indexOf("if (effectiveMaxOutputTokens !== undefined)");
+  if (shadowFeedStart < 0 || shadowFeedEnd <= shadowFeedStart) {
+    throw new Error("shadowFeed fail-open sink missing");
+  }
+  const shadowFeedBody = dispatchSrc.slice(shadowFeedStart, shadowFeedEnd);
+  if (!shadowFeedBody.includes("emitStormShadowAudit(observation)")) {
+    throw new Error("shadowFeed must route verdicts only to the shadow audit sink");
+  }
+  for (const forbidden of ["emitWorkerRunDecision", "requestGovernorTermination", "tryClaim", ".abort(", ".dispose("]) {
+    if (shadowFeedBody.includes(forbidden)) {
+      throw new Error(`shadowFeed must never reach ${forbidden}`);
+    }
+  }
+  const shadowSinkCalls = [...dispatchSrc.matchAll(/emitStormShadowAudit\(/g)];
+  if (shadowSinkCalls.length !== 1) {
+    throw new Error(`emitStormShadowAudit must be called exactly once (inside shadowFeed), got ${shadowSinkCalls.length}`);
+  }
+});
+
 if (failures.length > 0) {
   console.log(`\n❌ ${failures.length} failure(s)`);
   process.exit(1);

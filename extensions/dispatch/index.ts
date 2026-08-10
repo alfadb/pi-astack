@@ -91,11 +91,22 @@ import {
   buildWorkerRunAuditEvent,
   buildWorkerRunRetryOutcomeAuditEvent,
   buildWorkerRunRetryStartAuditEvent,
+  classifySchemaErrorToolResult,
   type WorkerRunAuditCorrelation,
   type WorkerRunGovernanceSummary,
   type WorkerRunGovernorDecision,
   type WorkerTerminationClosureEvidence,
 } from "./worker-run-governor";
+import {
+  StormShadow,
+  buildStormShadowAuditEvent,
+  shouldWriteStormShadowAudit,
+  DEFAULT_STORM_SHADOW_SETTINGS,
+  STORM_SHADOW_SIGNATURE_DOMAIN,
+  type StormShadowEventInput,
+  type StormShadowObservation,
+} from "./storm-shadow";
+import { auditHmacHexStrict } from "../_shared/audit-hmac";
 import { providerRetryAuditFields } from "./audit-v5";
 import { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR } from "../empty-visible-output-retry/index";
 import {
@@ -1119,6 +1130,97 @@ export function isProviderProgressAssistantMessage(message: {
   return typeof message.stopReason === "string" &&
     NORMAL_PROVIDER_STOP_REASONS.has(message.stopReason) &&
     assistantVisibleText(message).trim().length > 0;
+}
+
+/**
+ * S3 shadow pre-projection: the safe view of an assistant message that is
+ * handed to the pure storm-shadow state machine. No raw text, content parts
+ * or error message ever leave this function — only booleans. "completed"
+ * means the assistant turn reached a normal terminal stop reason ("stop" /
+ * "end_turn"); toolUse (turn continues), length/max_tokens (truncated) and
+ * error/aborted are not completed. A pure tool-use message (no visible text,
+ * stopReason "toolUse") is explicitly never progress.
+ */
+export interface StormShadowAssistantView {
+  hasVisibleText: boolean;
+  completed: boolean;
+  errorResponse: boolean;
+  emptyVisibleRetry: boolean;
+  toolUseOnly: boolean;
+}
+
+export function projectAssistantMessageView(message: unknown): StormShadowAssistantView {
+  const rec = message && typeof message === "object" && !Array.isArray(message)
+    ? (message as Record<string, unknown>)
+    : {};
+  const stopReason = typeof rec.stopReason === "string" ? rec.stopReason : "";
+  const hasError = rec.errorMessage !== undefined && rec.errorMessage !== null;
+  const content = Array.isArray(rec.content) ? rec.content : [];
+  let hasVisibleText = false;
+  let hasToolUse = false;
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    if (p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0) hasVisibleText = true;
+    else if (p.type === "toolCall" || p.type === "tool_use") hasToolUse = true;
+  }
+  const completed = stopReason === "stop" || stopReason === "end_turn";
+  const errorResponse = hasError || stopReason === "error";
+  const emptyVisibleRetry = rec.errorMessage === RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR;
+  const toolUseOnly = !hasVisibleText && hasToolUse && stopReason === "toolUse";
+  return { hasVisibleText, completed, errorResponse, emptyVisibleRetry, toolUseOnly };
+}
+
+/** Fail-open wrapper: a hostile message object (throwing getters) degrades to
+ *  the neutral view and can never throw into the session callback. */
+export function projectAssistantMessageViewSafe(message: unknown): StormShadowAssistantView {
+  try {
+    return projectAssistantMessageView(message);
+  } catch {
+    return { hasVisibleText: false, completed: false, errorResponse: false, emptyVisibleRetry: false, toolUseOnly: false };
+  }
+}
+
+/**
+ * S3 shadow pre-projection: classify a failed tool result with the governor's
+ * own schema-error classifier and build the opaque project-audit HMAC of the
+ * EXACT identity (tool name + closed error class + field path + bounded
+ * normalized descriptor). The HMAC input is an unambiguous structured/framed
+ * tuple (JSON.stringify([toolName, errorClass, fieldPath, normalized])) so
+ * same class/path with different normalized descriptors never merge. Only
+ * key_id + digest are returned — raw text / field path / tool args / the
+ * normalized descriptor never leave this function.
+ *
+ * STRICT KEY ELIGIBILITY PREREQUISITE (v4): the signature is built ONLY with
+ * the persistent project audit key (auditHmacHexStrict) — cross-process
+ * stable, never the process-random ephemeral fallback. If the persistent key
+ * is unavailable (unsafe directory / wrong mode / owner / symlink / any
+ * strict-key failure), this fails open to { schemaRejection: false } with NO
+ * signature: the event is not eligible for the shadow candidate and the
+ * worker continues normally. An ephemeral key is never generated and never
+ * accepted as eligible. Fail-open: classifier or strict HMAC throws (e.g.
+ * hostile getters on the result, or persistent key unavailable) degrade to
+ * not-a-schema-rejection.
+ */
+export function buildSchemaRejectionShadowInput(
+  result: unknown,
+  toolName: unknown,
+  projectRoot: string,
+): { schemaRejection: boolean; signature?: StormShadowObservation["signature_hmac"] } {
+  try {
+    const descriptor = classifySchemaErrorToolResult(result);
+    if (!descriptor) return { schemaRejection: false };
+    return {
+      schemaRejection: true,
+      signature: auditHmacHexStrict(
+        projectRoot,
+        STORM_SHADOW_SIGNATURE_DOMAIN,
+        JSON.stringify([String(toolName ?? "unknown"), descriptor.errorClass, descriptor.fieldPath, descriptor.normalized]),
+      ),
+    };
+  } catch {
+    return { schemaRejection: false };
+  }
 }
 
 function appendUtf8Bounded(
@@ -2170,6 +2272,21 @@ export async function runInProcess(
     heartbeatProjectRoot,
     start,
   );
+  // S3 storm-rule shadow (STORM-SHADOW): pure observe-only evaluator. Its
+  // verdicts are appended to the dispatch audit as worker_run_shadow_event
+  // rows and NEVER enter requestGovernorTermination / termination claims /
+  // session disposal. Candidate A's cap is a READ-ONLY MIRROR of the existing
+  // governor toolObservers.schemaErrorStorm.observeAfter (the governor keeps
+  // its own copy; its observer stays observe-only and its abort behavior is
+  // unchanged). The shadow state machine only ever receives pre-projected
+  // safe fields and opaque signature HMACs (see buildSchemaRejectionShadowInput
+  // / projectAssistantMessageViewSafe); raw event payloads never reach it.
+  const stormShadow = new StormShadow({
+    ...DEFAULT_STORM_SHADOW_SETTINGS,
+    capAfter:
+      dispatchSettings.workerRunGovernor.toolObservers.schemaErrorStorm.observeAfter ??
+      DEFAULT_STORM_SHADOW_SETTINGS.capAfter,
+  });
   const trace = executionContext?.reasoningTrace;
   const workerAuditCorrelation: WorkerRunAuditCorrelation = {
     ...(trace?.dispatchToolCallId ? { dispatchToolCallId: trace.dispatchToolCallId } : {}),
@@ -2205,6 +2322,32 @@ export async function runInProcess(
       heartbeatAnchor,
       buildWorkerRunAuditEvent(decision, workerAuditCorrelation, retry),
     ).catch(() => { /* audit is best-effort */ });
+  };
+  const emitStormShadowAudit = (observation: StormShadowObservation): void => {
+    // Shadow-only sink: audit append only. would_abort is a counterfactual
+    // signal with no control-flow effect — audit append is the ONLY destination
+    // of shadow verdicts.
+    void appendDispatchAudit(
+      heartbeatProjectRoot,
+      heartbeatAnchor,
+      buildStormShadowAuditEvent(workerGovernor.workerRunId, workerAuditCorrelation, observation),
+    ).catch(() => { /* audit is best-effort */ });
+  };
+  // Fail-open shadow feed: classification / feed / audit construction must
+  // never throw into the session callback, and audit rows stay bounded by
+  // only writing state-relevant events (schema rejection, progress/reset,
+  // first trip, already-tripped episode transition).
+  let lastShadowObservation: StormShadowObservation | undefined;
+  const shadowFeed = (input: StormShadowEventInput): void => {
+    try {
+      const observation = stormShadow.feed(input);
+      if (shouldWriteStormShadowAudit(lastShadowObservation, observation, input)) {
+        lastShadowObservation = observation;
+        emitStormShadowAudit(observation);
+      }
+    } catch {
+      // S3 shadow is strictly fail-open: a throw here must not affect the run.
+    }
   };
   if (effectiveMaxOutputTokens !== undefined) {
     emitWorkerRunDecision(workerGovernor.observe({
@@ -2599,6 +2742,7 @@ export async function runInProcess(
             signal: "provider_request",
             action: "audit_provider_request_proxy_no_abort",
           }));
+          shadowFeed({ kind: "provider_request" });
         }
 
         if (
@@ -2639,6 +2783,22 @@ export async function runInProcess(
             event.isError === true,
             typeof event.toolCallId === "string" ? event.toolCallId : undefined,
           ));
+          // S3 shadow candidate A: reuse the governor's schema-error classifier
+          // for the exact identity (tool name + closed error class + field
+          // path); only the project audit HMAC (key_id + digest) is fed to the
+          // pure state machine, never raw text / field path / tool args.
+          // Fail-open: a classifier/HMAC throw degrades to not-a-rejection.
+          const schemaShadow = event.isError === true
+            ? buildSchemaRejectionShadowInput(event.result, event.toolName, heartbeatProjectRoot)
+            : { schemaRejection: false };
+          // S3 shadow candidate B: successful tool responses are effective
+          // progress; failed responses (incl. schema rejections) are not.
+          shadowFeed({
+            kind: "tool_execution_end",
+            isError: event.isError === true,
+            schemaRejection: schemaShadow.schemaRejection,
+            ...(schemaShadow.signature ? { signature: schemaShadow.signature } : {}),
+          });
         }
 
         recordProgress(`event:${eventType}`);
@@ -2671,6 +2831,13 @@ export async function runInProcess(
           }
           stopReason = event.message.stopReason;
           const providerProgress = isProviderProgressAssistantMessage(event.message);
+          const emptyVisibleRetry = event.message.errorMessage === RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR;
+          const fullOutputCapHit = isFullOutputCapHit(
+            stopReason,
+            event.message.usage?.output,
+            effectiveMaxOutputTokens,
+            dispatchSettings.workerRunGovernor.providerBudgets.fullOutputUsageRatio,
+          );
           emitWorkerRunDecision(workerGovernor.observe({
             signal: "assistant_response",
             providerProgress,
@@ -2678,7 +2845,13 @@ export async function runInProcess(
               ? "audit_provider_progress_reset_retry_streak"
               : "audit_assistant_response_no_provider_progress",
           }));
-          if (event.message.errorMessage === RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR) {
+          // S3 storm-rule shadow: the same real message_end evidence is
+          // PRE-PROJECTED to safe booleans (visible text / completed / error /
+          // empty retry / pure toolUse) before entering the pure state machine
+          // — the raw message never reaches it. Cap hits are no longer part of
+          // the candidate; a completed visible response is effective progress.
+          shadowFeed({ kind: "assistant_response", ...projectAssistantMessageViewSafe(event.message) });
+          if (emptyVisibleRetry) {
             const emptyDecision = workerGovernor.observe({
               signal: "empty_visible_retry",
               action: "count_empty_visible_retry",
@@ -2692,12 +2865,7 @@ export async function runInProcess(
             }
             emitWorkerRunDecision(emptyDecision);
           }
-          if (isFullOutputCapHit(
-            stopReason,
-            event.message.usage?.output,
-            effectiveMaxOutputTokens,
-            dispatchSettings.workerRunGovernor.providerBudgets.fullOutputUsageRatio,
-          )) {
+          if (fullOutputCapHit) {
             emitWorkerRunDecision(workerGovernor.observe({
               signal: "full_output_cap_hit",
               action: "count_full_output_cap_hit",
@@ -2740,6 +2908,9 @@ export async function runInProcess(
               ),
             ).catch(() => { /* audit is best-effort */ });
           }
+          // S3 shadow: provider retries are NOT effective progress (they do
+          // not reset the post-cap storm candidate).
+          shadowFeed({ kind: "provider_retry" });
         }
         if (eventType === "auto_retry_end") {
           retryHistory.finalOutcome = event.success ? "succeeded" : "exhausted";

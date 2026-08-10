@@ -1,0 +1,1090 @@
+{
+  "title": "S3 storm rule shadow — production canary evidence (dispatch-storm-shadow/v4, rule storm/post-cap-schema-rejection-signature/v1, signature domain dispatch/storm-shadow/schema-rejection-signature/v2)",
+  "mode": "production_acceptance_evidence",
+  "result": "accepted_impl_evidence_review_waiting_subcommit",
+  "acceptance_scope": "v4 — exact identity includes the bounded whitespace-normalized descriptor (<=4096); HMAC input is the unambiguous framed tuple JSON.stringify([toolName, errorClass, fieldPath, normalized]); signature domain dispatch/storm-shadow/schema-rejection-signature/v2; signature built ONLY via auditHmacHexStrict (persistent project key, strict path) — strict key availability is an eligibility prerequisite, an ephemeral key is never generated and never accepted as eligible; the state machine compares the unambiguous composite key_id:digest, never the digest alone. The v4 production canary below is the UNIQUE FINAL primary evidence for STORM-SHADOW-* review. The v3 canary is retained as history (behavior/identity correct, but the v4 strict-key contract supersedes it: v3 signed with the fallback-capable auditHmacHex and compared digest only). The v2 canary is retained as older history (its exact identity dropped the bounded normalized descriptor). Final T0+/cross-vendor T0 review GREEN (Fable/Opus/Grok/OpenAI, no P0/P1): STORM-SHADOW-IMPL / -EVIDENCE / -REVIEW accepted (13/20); STORM-SHADOW-SUBCOMMIT / -PARENT and S4 remain unchecked; no commit/push; S4 not entered.",
+  "production_canary": {
+    "kind": "production",
+    "rule_version": "dispatch-storm-shadow/v4",
+    "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+    "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+    "setup": {
+      "worktree": "fresh pi no-session worktree",
+      "main_model": "openai/gpt-5.6-luna",
+      "worker_model": "deepseek/deepseek-v4-flash",
+      "worker_thinking": "medium",
+      "worker_tools": "read",
+      "task_prompt_chars": 1970,
+      "task_output_chars": 24
+    },
+    "session_id": "019feb26-6262-73da-903f-5f5e03a6206a",
+    "run": "dtr_a73709635757e21af3f32744",
+    "worker_run_id": "9f239a2e-b5d9-439c-83a9-a3aa016d8c6e",
+    "dispatch_tool_call_id": "call_lw0QfjApHrDC7eDDDn1ytQ99|fc_0ab7467799c2e3ac016a79a378d11c8199beffdbc5acec2fb0",
+    "task_index": 0,
+    "task_count": 1,
+    "task_timestamp_utc": "2026-08-10T10:10:10.396Z",
+    "audit_version": 5,
+    "outer_dispatch": {
+      "exit_code": 0,
+      "worker_duration_ms": 18917,
+      "note": "worker duration from the audited task row (duration_ms=18917)"
+    },
+    "tool_calls": {
+      "tool_call_count": 8,
+      "shape": "real read tool: collision pair (read({}) vs read({limit:5}) — same tool/class/path, different bounded normalized descriptor) each count 1, never merged; success reset seg1; then 4 consecutive same-exact-identity (A1) read schema rejections -> would_abort=true/first_trip on the 4th; already_tripped marker; success reset seg2; final visible completion",
+      "last_tool": {
+        "tool_name": "read",
+        "tool_call_id": "call_rqq4kdzx",
+        "status": "completed",
+        "started_at_utc": "2026-08-10T10:10:27.539Z",
+        "completed_at_utc": "2026-08-10T10:10:27.551Z"
+      }
+    },
+    "terminal_state": "completed",
+    "result": "ok",
+    "stop_reason": "stop",
+    "closure": {
+      "lifecycle_path": "normal",
+      "termination_owner": "run",
+      "termination_claimed_at_ms": 1786356629218,
+      "closure_status": "complete",
+      "closure_completed_at_ms": 1786356629218,
+      "bounded_wait_ms": 1,
+      "bounded_wait_limit_ms": 3000,
+      "run_settled": true,
+      "session_closure_done": true,
+      "cleanup_done": true,
+      "post_claim_provider_start_count": 0,
+      "post_claim_tool_start_count": 0
+    },
+    "task_row_canonical_jq_cS_hash_sha256": "b62e20533baafc688db82b008449f5885f55594c42b62418f5761ca3bfb38801",
+    "shadow_rows_total": 11,
+    "shadow_row_timeline": {
+      "row_0_tool_use_only_marker": {
+        "timestamp_utc": "2026-08-10T10:10:17.307Z",
+        "event_kind": "assistant_response",
+        "progress_verdict": "not_progress",
+        "progress_basis": "tool_use_only",
+        "segment": 0,
+        "hash_sha256": "8054721d196a544392634f457a732b8ec871763d9674556d07ed9b4e4912382e"
+      },
+      "collision_pair_rows": [
+        {
+          "timestamp_utc": "2026-08-10T10:10:17.313Z",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "label": "A1",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "00518bcb5be34b0a98df9adad2f6bdce6cb73a6ee065ca24bdf554dff877e9aa"
+        },
+        {
+          "timestamp_utc": "2026-08-10T10:10:18.549Z",
+          "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+          "label": "A2",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "8746b092711f81cf3254be3b940629d9bede399c39bef5646ba8c7ea3afa3d39"
+        }
+      ],
+      "collision_pair_note": "A1/A2 = same tool (read) + same closed error class + same field path, DIFFERENT bounded normalized descriptor (the real read tool's 'Received arguments' JSON differs: read({}) vs read({limit:5})). Under v4 exact identity they are two DISTINCT digests that never merge — each count 1, neither trips. Same digests/key_id as the v3 canary (v3_digests_still_recomputable_under_v4: same persistent key, auditHmacHex and auditHmacHexStrict produce the same digest).",
+      "success_reset_seg1": {
+        "timestamp_utc": "2026-08-10T10:10:19.905Z",
+        "event_kind": "tool_execution_end",
+        "progress_verdict": "progress",
+        "progress_basis": "successful_tool_response",
+        "segment": 1,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "post_cap": false,
+        "hash_sha256": "eabb1434064a7486984756eb6408cd1314ed73bfd219178b094ef8bf8632e32b"
+      },
+      "exact4_same_identity_A1": [
+        {
+          "timestamp_utc": "2026-08-10T10:10:21.978Z",
+          "consecutive_count": 1,
+          "window_count": 1,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "6f262d4842756e3ad624f6bc308735c6e3d93ade547da6fd938a78b00684f854"
+        },
+        {
+          "timestamp_utc": "2026-08-10T10:10:23.318Z",
+          "consecutive_count": 2,
+          "window_count": 2,
+          "post_cap": false,
+          "would_abort": false,
+          "hash_sha256": "3606a522692522b6d1e2ea042c8efa7f6504bd94cdebe01ce04f185368c2d249"
+        },
+        {
+          "timestamp_utc": "2026-08-10T10:10:24.470Z",
+          "consecutive_count": 3,
+          "window_count": 3,
+          "post_cap": true,
+          "would_abort": false,
+          "hash_sha256": "4c9fc1f9e2624899d51ebc44bee78d7a794e121ed818c5df383f0807df2d8aae"
+        },
+        {
+          "timestamp_utc": "2026-08-10T10:10:25.824Z",
+          "consecutive_count": 4,
+          "window_count": 4,
+          "post_cap": true,
+          "would_abort": true,
+          "would_abort_basis": "consecutive",
+          "first_trip": true,
+          "already_tripped": false,
+          "hash_sha256": "dde91c6eb1ea22961e9d25e76866c541a9f7763690a68ecd74a5ad693b1dde3d"
+        }
+      ],
+      "exact4_note": "4 consecutive same-exact-identity (A1) schema rejections: counts 1..4; the 3rd reaches the cap boundary (post_cap=true, no abort); the 4th EXCEEDS the cap -> would_abort=true / first_trip=true / basis consecutive.",
+      "post_4th_row_7_rows": {
+        "count": 7,
+        "composition": "4 governor worker_run_event rows + 3 shadow rows, then the task row; 0 rows after the task row for this run",
+        "provider_request_already_tripped_marker": {
+          "timestamp_utc": "2026-08-10T10:10:27.070Z",
+          "event_kind": "provider_request",
+          "progress_basis": "provider_request",
+          "already_tripped": true,
+          "would_abort": false,
+          "hash_sha256": "0f32f49a383c1f5a1a0538d150df578ef4f247ecc88eef7618ca5dea1c91cca9",
+          "note": "anti-sticky: after the first trip, neutral events report already_tripped=true instead of repeating would_abort"
+        },
+        "success_progress_reset_seg2": {
+          "timestamp_utc": "2026-08-10T10:10:27.557Z",
+          "event_kind": "tool_execution_end",
+          "progress_verdict": "progress",
+          "progress_basis": "successful_tool_response",
+          "segment": 2,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "post_cap": false,
+          "hash_sha256": "a8d7ed8487484547bc3fa3cbb37449f1f177c6f17ef45fd56b2fdf66b7832461"
+        },
+        "final_visible_assistant_response": {
+          "timestamp_utc": "2026-08-10T10:10:29.212Z",
+          "event_kind": "assistant_response",
+          "progress_verdict": "progress",
+          "progress_basis": "visible_assistant_response",
+          "segment": 3,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "post_cap": false,
+          "hash_sha256": "54a96cd7378d1a58ad74598c8ca54989c905fa5594cd7c602d48537445028807"
+        }
+      },
+      "post_terminal_events": 0
+    },
+    "shadow_rule": {
+      "rule_version": "dispatch-storm-shadow/v4",
+      "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+      "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+      "signal": "storm_shadow",
+      "mode": "observe",
+      "cap_after": 3,
+      "window_size": 6,
+      "window_limit": 4,
+      "counterfactual_action": "would_abort_only_no_control_effect",
+      "signature_hmac": {
+        "algorithm": "hmac-sha256",
+        "key_id": "7a2e3c8c55f261fb329ab4b3",
+        "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+        "digest_note": "A1 — the exact identity that tripped (4 consecutive same-signature rejections). A2 (f39283b5...) is the collision-pair sibling that never merged. Same key_id + digests as the v3 canary (persistent project key; auditHmacHex and auditHmacHexStrict produce the same digest for the same domain + framed value)."
+      },
+      "collision_pair": {
+        "A1": {
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "count": 1,
+          "note": "read({}) — same tool/class/path, different normalized descriptor"
+        },
+        "A2": {
+          "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+          "count": 1,
+          "note": "read({limit:5}) — same tool/class/path, different normalized descriptor"
+        },
+        "never_merged": true,
+        "note": "v4 exact identity includes the bounded normalized descriptor; the two digests are distinct and each counts separately (count 1 each, neither trips)."
+      },
+      "shadow_rows_join": "all 11 shadow rows join on the same worker_run_id / dispatch_run_id / dispatch_tool_call_id / task_index=0 / task_count=1 as the governor and task rows"
+    },
+    "governor_schema_error_storm": {
+      "row_count": 2,
+      "rows": [
+        {
+          "timestamp_utc": "2026-08-10T10:10:24.464Z",
+          "count": 3,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "c2ab05ecb999db05468aa389e03f7f5e7191d8e83615c93ed643608047ba1a3e",
+          "governor_schema_identity_hash": "685266d8b22d4b6b3043d0b11af0d23f044d071e56e25a0fe979654aa4b56ef7",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_xgx9x2vo"
+        },
+        {
+          "timestamp_utc": "2026-08-10T10:10:25.820Z",
+          "count": 4,
+          "limit": 3,
+          "mode": "observe",
+          "action": "audit_observation_no_abort",
+          "termination_source": "none",
+          "hash_sha256": "72614cbc1a17926a05ce133471d8f1d560a149146e9091114d6d6c997439d80b",
+          "governor_schema_identity_hash": "685266d8b22d4b6b3043d0b11af0d23f044d071e56e25a0fe979654aa4b56ef7",
+          "shape": "missing_required",
+          "coverage": "post_execution_only",
+          "tool_call_id": "call_qtve5975"
+        }
+      ],
+      "final_schema_error_storm_count": 2,
+      "note": "governor stays observe-only (no abort, no termination) while the shadow would_abort fires on the same 4th same-identity event; the two governor rows share the same closed-identity hash"
+    },
+    "control_flow_zero_impact": {
+      "would_abort_never_changed_real_execution": true,
+      "evidence": "shadow would_abort=true fired on the 4th same-identity schema rejection (10:10:25.824Z) yet the run continued: provider_request at 10:10:27.064Z, successful read completed at 10:10:27.551Z, visible final assistant response at 10:10:29.212Z, task row result=ok / terminal_state=completed / closure normal with cleanup_done=true; governor termination_source=none throughout"
+    },
+    "audit_privacy": {
+      "no_raw_content": true,
+      "note": "shadow rows carry only closed progress classification + opaque HMAC signature (key_id + digest); no prompt / raw error text / field path / normalized descriptor / tool args / output / file contents in any shadow or governor row for this run"
+    },
+    "verification": {
+      "jq_empty_parse": "PASS (jq empty over .pi-astack/dispatch/audit.jsonl: every line parses)",
+      "row_hashes_recomputed": "all 14 recorded row hashes (11 shadow rows + 2 governor rows + task row) recomputed via `jq -cS . | tr -d '\\n' | sha256sum` and match exactly",
+      "replay_verdict_equality": "PASS — replayStormShadow(v4, DEFAULT settings) over the 11 written rows' reconstructed inputs reproduces every observation field exactly (post_cap, would_abort, progress_basis, consecutive_count, window_count, segment, first_trip, already_tripped, would_abort_basis)",
+      "opaque_digest_equality": "PASS — collision pair A1/A2 are two distinct digests (never merged); the 4 tripping rows all share digest d4072bcf... / key_id 7a2e3c8c55f261fb329ab4b3",
+      "final_snapshot": "segment=3, post_cap=false, consecutive_count=0, window_count=0 (progress reset after successful tool response)",
+      "post_terminal_zero": "PASS — 0 rows after the task row for this run/worker"
+    }
+  },
+
+  "replay_projection": {
+    "schema_version": "storm-shadow-replay-projection/v1",
+    "status": "production_data",
+    "note": "Self-contained sanitized replay projection of the v4 production canary: the exact pre-projected StormShadowEventInput sequence (safe booleans + opaque signature key_id/digest) reconstructed from the 11 written audit rows, plus each expected observation. No raw error text / field path / normalized descriptor / tool args are included — only the opaque HMAC digest the state machine compares. Replaying these 11 inputs with replayStormShadow(events, {capAfter:3, windowSize:6, windowLimit:4}) must reproduce every expected observation exactly. This makes the dossier recomputable even after the gitignored audit file disappears.",
+    "settings": {
+      "capAfter": 3,
+      "windowSize": 6,
+      "windowLimit": 4
+    },
+    "events": [
+      {
+        "seq": 1,
+        "kind": "assistant_response",
+        "hasVisibleText": false,
+        "completed": false,
+        "errorResponse": false,
+        "emptyVisibleRetry": false,
+        "toolUseOnly": true
+      },
+      {
+        "seq": 2,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+        }
+      },
+      {
+        "seq": 3,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e"
+        }
+      },
+      {
+        "seq": 4,
+        "kind": "tool_execution_end",
+        "isError": false,
+        "schemaRejection": false
+      },
+      {
+        "seq": 5,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+        }
+      },
+      {
+        "seq": 6,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+        }
+      },
+      {
+        "seq": 7,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+        }
+      },
+      {
+        "seq": 8,
+        "kind": "tool_execution_end",
+        "isError": true,
+        "schemaRejection": true,
+        "signature": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c"
+        }
+      },
+      {
+        "seq": 9,
+        "kind": "provider_request"
+      },
+      {
+        "seq": 10,
+        "kind": "tool_execution_end",
+        "isError": false,
+        "schemaRejection": false
+      },
+      {
+        "seq": 11,
+        "kind": "assistant_response",
+        "hasVisibleText": true,
+        "completed": true,
+        "errorResponse": false,
+        "emptyVisibleRetry": false,
+        "toolUseOnly": false
+      }
+    ],
+    "expected_verdicts": [
+      {
+        "seq": 1,
+        "progress_verdict": "not_progress",
+        "progress_basis": "tool_use_only",
+        "segment": 0,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 2,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 0,
+        "post_cap": false,
+        "consecutive_count": 1,
+        "window_count": 1,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 3,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 0,
+        "post_cap": false,
+        "consecutive_count": 1,
+        "window_count": 1,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 4,
+        "progress_verdict": "progress",
+        "progress_basis": "successful_tool_response",
+        "segment": 1,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 5,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 1,
+        "post_cap": false,
+        "consecutive_count": 1,
+        "window_count": 1,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 6,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 1,
+        "post_cap": false,
+        "consecutive_count": 2,
+        "window_count": 2,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 7,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 1,
+        "post_cap": true,
+        "consecutive_count": 3,
+        "window_count": 3,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 8,
+        "progress_verdict": "not_progress",
+        "progress_basis": "schema_rejection",
+        "segment": 1,
+        "post_cap": true,
+        "consecutive_count": 4,
+        "window_count": 4,
+        "would_abort": true,
+        "would_abort_basis": "consecutive",
+        "first_trip": true,
+        "already_tripped": false
+      },
+      {
+        "seq": 9,
+        "progress_verdict": "not_progress",
+        "progress_basis": "provider_request",
+        "segment": 1,
+        "post_cap": true,
+        "consecutive_count": 4,
+        "window_count": 4,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": true
+      },
+      {
+        "seq": 10,
+        "progress_verdict": "progress",
+        "progress_basis": "successful_tool_response",
+        "segment": 2,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      },
+      {
+        "seq": 11,
+        "progress_verdict": "progress",
+        "progress_basis": "visible_assistant_response",
+        "segment": 3,
+        "post_cap": false,
+        "consecutive_count": 0,
+        "window_count": 0,
+        "would_abort": false,
+        "first_trip": false,
+        "already_tripped": false
+      }
+    ],
+    "replay_verification": "replayStormShadow(events, {capAfter:3, windowSize:6, windowLimit:4}) must reproduce every expected_verdicts field exactly (post_cap, would_abort, progress_basis, consecutive_count, window_count, segment, first_trip, already_tripped, would_abort_basis). Executed: node scripts/.replay-v4-shadow.tmp.mjs (jiti-imported extensions/dispatch/storm-shadow.ts, inputs reconstructed from the 11 written audit rows) — result: 11/11 rows reproduced exactly, 0 mismatches, final snapshot segment=3/post_cap=false/consecutive=0/window=0, digest distribution A1=5/A2=1, exit 0.",
+    "privacy": "events carry only safe booleans + opaque signature (key_id + digest); no raw error text / field path / normalized descriptor / tool args / prompt / output in the projection."
+  },
+
+  "strict_key_cross_process_evidence": {
+    "status": "PASS",
+    "method": "two INDEPENDENT node processes, each jiti-importing the real extensions/_shared/audit-hmac.ts and calling auditHmacHexStrict(projectRoot, 'dispatch/storm-shadow/schema-rejection-signature/v2', fixed probe value); outputs compared across processes; key file / dir modes checked via stat only — key content never read",
+    "process_1": {
+      "algorithm": "hmac-sha256",
+      "key_id": "7a2e3c8c55f261fb329ab4b3",
+      "digest": "33712cc209a982261dc078629280d54bb1dd202ded9b4723334c4991da3fbdeb",
+      "note": "probe value 'probe-value-v4-cross-process' (fixed, not the canary identity — the raw identity is never persisted)"
+    },
+    "process_2": {
+      "algorithm": "hmac-sha256",
+      "key_id": "7a2e3c8c55f261fb329ab4b3",
+      "digest": "33712cc209a982261dc078629280d54bb1dd202ded9b4723334c4991da3fbdeb"
+    },
+    "cross_process_identical": true,
+    "non_ephemeral": true,
+    "non_ephemeral_note": "key_id has no 'ephemeral-' prefix; it is the persistent project key derived from the on-disk key file (deriveKeyId), stable across processes — the signature is reproducible across processes (the v4 strict contract; contrast the v2-era rejected first run with ephemeral key_id).",
+    "key_id_matches_canary": true,
+    "key_id_matches_canary_note": "the strict key_id equals the canary's key_id 7a2e3c8c55f261fb329ab4b3, so the canary's shadow signatures were produced by the persistent strict key (auditHmacHexStrict), not an ephemeral fallback",
+    "key_file": {
+      "path": ".pi-astack/llm-audit/.audit-hmac-key",
+      "exists": true,
+      "mode": 600,
+      "size_bytes": 32,
+      "note": "mode/size via stat only; key content never read"
+    },
+    "directories": {
+      ".pi-astack": 700,
+      ".pi-astack/llm-audit": 700,
+      ".pi-astack/dispatch": 700
+    },
+    "key_content_never_read": true,
+    "executed_at_utc": "2026-08-10T10:18:25.000Z"
+  },
+
+  "superseded_by_v4_strict_contract": {
+    "status": "history_only_not_final",
+    "superseded_at_utc": "2026-08-10T10:18:25.000Z",
+    "reason": "The v3 canary below demonstrated the same shadow behavior and exact identity (collision pair A1/A2 never merged; 4 consecutive same-exact-identity rejections -> would_abort=true/first_trip; success progress reset; visible completion; control-flow zero impact) and is retained as history. Its behavior and identity semantics are CORRECT, but the v4 strict-key contract supersedes it as primary evidence: v3 signed the shadow signature with auditHmacHex, which falls back to a per-process random ephemeral key when the persistent project key is unavailable (unsafe directory / wrong mode / owner / symlink) — cross-process unstable, so the signature is not reproducible across processes; and the v3 state machine compared only the digest, ignoring key_id. Fixed in dispatch-storm-shadow/v4: (1) the wiring signs ONLY with auditHmacHexStrict (persistent project key, strict path); when the persistent key is unavailable, buildSchemaRejectionShadowInput fails open to { schemaRejection: false } with NO signature — the event is not eligible and the worker continues; an ephemeral key is never generated and never accepted as eligible; (2) the state machine compares the unambiguous composite key_id:digest (algorithm fixed), never the digest alone, so different keys with the same digest never merge; (3) rule_version bumped to dispatch-storm-shadow/v4; the signature domain stays dispatch/storm-shadow/schema-rejection-signature/v2 because the HMAC material (domain + framed value) is unchanged — only the key-source API changed from fallback-capable to strict. Strict key availability is now an explicit eligibility prerequisite documented in storm-shadow.ts / index.ts. The v4 production canary above is the UNIQUE FINAL primary evidence; the v3 rows below cannot gate any criterion.",
+    "v3_digests_still_recomputable_under_v4": true,
+    "v3_digests_note": "For a project with a persistent key (like this canary's key_id 7a2e3c8c55f261fb329ab4b3), auditHmacHex and auditHmacHexStrict produce the SAME digest (same domain, same framed value, same persistent key material) — so the v3 canary's digests remain recomputable under v4 semantics, and the v4 canary's digests are identical to v3's (A1=d4072bcf.../A2=f39283b5...). They are nevertheless NOT the primary evidence: the v3 canary was signed through the fallback-capable API and the state machine compared digest only.",
+    "embedded_replay_retained": true,
+    "embedded_replay_note": "The v3 replay_projection is retained as history: its 11 pre-projected inputs + expected verdicts are still recomputable via replayStormShadow (the state machine semantics for the composite key are unchanged for these rows because all 11 rows share the same key_id). It documents the v3 canary's behavior and must not be used to gate any criterion.",
+    "criteria_impact": "STORM-SHADOW-* criteria remain unchecked; the v3 canary below cannot gate any criterion. The v4 production canary above is the required primary evidence for the pending T0+/cross-vendor T0 review.",
+    "history_retained": true,
+    "v3_primary_canary": {
+      "kind": "production",
+      "setup": {
+        "worktree": "fresh pi no-session worktree",
+        "main_model": "openai/gpt-5.6-luna",
+        "worker_model": "deepseek/deepseek-v4-flash",
+        "worker_thinking": "medium",
+        "worker_tools": "read",
+        "task_prompt_chars": 1969,
+        "task_output_chars": 24
+      },
+      "session_id": "019feb03-c679-7f01-a9c9-b609193e98e7",
+      "run": "dtr_a4fe3d683b91013832260e73",
+      "worker_run_id": "eb746366-8c0a-4608-825d-b726853b8fc0",
+      "dispatch_tool_call_id": "call_PHr6xcfLqCqFyQ1Dw0QQ1wFD|fc_0c4f8e9a79bf5b8c016a799a9750dc8195bff0ff21e475c2b3",
+      "task_index": 0,
+      "task_count": 1,
+      "task_timestamp_utc": "2026-08-10T09:34:09.092Z",
+      "audit_version": 5,
+      "outer_dispatch": {
+        "exit_code": 0,
+        "duration_s_approx": 159,
+        "worker_duration_ms": 110362,
+        "note": "outer exit/duration from parent-session dispatch record; worker duration from the audited task row (duration_ms=110362)"
+      },
+      "tool_calls": {
+        "tool_call_count": 8,
+        "shape": "real read tool: collision pair (read({}) vs read({limit:5}) — same tool/class/path, different bounded normalized descriptor) each count 1, never merged; success reset seg1; then 4 consecutive same-exact-identity (A1) read schema rejections -> would_abort=true/first_trip on the 4th; already_tripped marker; success reset seg2; final visible completion",
+        "last_tool": {
+          "tool_name": "read",
+          "tool_call_id": "call_9fyc3z5y",
+          "status": "completed",
+          "started_at_utc": "2026-08-10T09:33:16.057Z",
+          "completed_at_utc": "2026-08-10T09:33:16.070Z"
+        }
+      },
+      "terminal_state": "completed",
+      "result": "ok",
+      "stop_reason": "stop",
+      "closure": {
+        "lifecycle_path": "normal",
+        "termination_owner": "run",
+        "termination_claimed_at_ms": 1786354449081,
+        "closure_status": "complete",
+        "closure_completed_at_ms": 1786354449081,
+        "bounded_wait_ms": 1,
+        "bounded_wait_limit_ms": 3000,
+        "run_settled": true,
+        "session_closure_done": true,
+        "cleanup_done": true,
+        "post_claim_provider_start_count": 0,
+        "post_claim_tool_start_count": 0
+      },
+      "task_row_canonical_jq_cS_hash_sha256": "28559bfc26bd14b22c6dacba775dff7281428160f966262b46a13941c2b7bf4b",
+      "shadow_rows_total": 11,
+      "shadow_row_timeline": {
+        "row_0_tool_use_only_marker": {
+          "timestamp_utc": "2026-08-10T09:33:03.540Z",
+          "event_kind": "assistant_response",
+          "progress_verdict": "not_progress",
+          "progress_basis": "tool_use_only",
+          "segment": 0,
+          "hash_sha256": "114a293eb719db511a9baf2e2bc9fd103ff5683e8844cd084d7827ae981f6e36"
+        },
+        "collision_pair_rows": [
+          {
+            "timestamp_utc": "2026-08-10T09:33:03.544Z",
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+            "label": "A1",
+            "consecutive_count": 1,
+            "window_count": 1,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "8d7f5f10ecc388595d0fa5dff0d41839d5a4deb4d6ed680e8d8429f6e606e177"
+          },
+          {
+            "timestamp_utc": "2026-08-10T09:33:04.912Z",
+            "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+            "label": "A2",
+            "consecutive_count": 1,
+            "window_count": 1,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "c9775112a7883149a63f6d445a6459ec0fe453c8ec70d380dbf9c5b74615a2a3"
+          }
+        ],
+        "collision_pair_note": "A1/A2 = same tool (read) + same closed error class + same field path, DIFFERENT bounded normalized descriptor (the real read tool's 'Received arguments' JSON differs: read({}) vs read({limit:5})). Under v3 exact identity they are two DISTINCT digests that never merge — each count 1, neither trips. This is the P1 fix over v2 (which dropped the normalized descriptor and would have merged them).",
+        "success_reset_seg1": {
+          "timestamp_utc": "2026-08-10T09:33:06.382Z",
+          "event_kind": "tool_execution_end",
+          "progress_verdict": "progress",
+          "progress_basis": "successful_tool_response",
+          "segment": 1,
+          "consecutive_count": 0,
+          "window_count": 0,
+          "post_cap": false,
+          "hash_sha256": "64d3b8a97df61ba2d8704bd431c6ca693c2d7c7ee9274eafcdf41165d0933a3b"
+        },
+        "exact4_same_identity_A1": [
+          {
+            "timestamp_utc": "2026-08-10T09:33:08.068Z",
+            "consecutive_count": 1,
+            "window_count": 1,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "4d7c6aae83cb3f71410adc51027b6829feb795fa2d343e9351c5828fc2eaf1be"
+          },
+          {
+            "timestamp_utc": "2026-08-10T09:33:11.499Z",
+            "consecutive_count": 2,
+            "window_count": 2,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "87d8c5017e30f6c4b65908c475c0c16033dd08d64afd249abd344009e13d95b8"
+          },
+          {
+            "timestamp_utc": "2026-08-10T09:33:12.771Z",
+            "consecutive_count": 3,
+            "window_count": 3,
+            "post_cap": true,
+            "would_abort": false,
+            "hash_sha256": "2e9201587e295a9cfc4bb58bc39931a6d9982ffc4f8d5242110b45cc450da5f3"
+          },
+          {
+            "timestamp_utc": "2026-08-10T09:33:14.090Z",
+            "consecutive_count": 4,
+            "window_count": 4,
+            "post_cap": true,
+            "would_abort": true,
+            "would_abort_basis": "consecutive",
+            "first_trip": true,
+            "already_tripped": false,
+            "hash_sha256": "8cfcedd75e6fab710f897c384a1043e4d36a1f2321ab0088c6c67e9c04a1f4f0"
+          }
+        ],
+        "exact4_note": "4 consecutive same-exact-identity (A1) schema rejections: counts 1..4; the 3rd reaches the cap boundary (post_cap=true, no abort); the 4th EXCEEDS the cap -> would_abort=true / first_trip=true / basis consecutive.",
+        "post_4th_row_7_rows": {
+          "count": 7,
+          "composition": "4 governor worker_run_event rows + 3 shadow rows, then the task row; 0 rows after the task row for this run",
+          "provider_request_already_tripped_marker": {
+            "timestamp_utc": "2026-08-10T09:33:15.644Z",
+            "event_kind": "provider_request",
+            "progress_basis": "provider_request",
+            "already_tripped": true,
+            "would_abort": false,
+            "hash_sha256": "7ac57172ad92893ad6a01a91eb5db5724dba585aaccda6d586f7d5c399b8db17",
+            "note": "anti-sticky: after the first trip, neutral events report already_tripped=true instead of repeating would_abort"
+          },
+          "success_progress_reset_seg2": {
+            "timestamp_utc": "2026-08-10T09:33:16.075Z",
+            "event_kind": "tool_execution_end",
+            "progress_verdict": "progress",
+            "progress_basis": "successful_tool_response",
+            "segment": 2,
+            "consecutive_count": 0,
+            "window_count": 0,
+            "post_cap": false,
+            "hash_sha256": "80f71d4934e475aa24dfb81f8012b5717700fc3aa00ece80d6fd60e40f6f30eb"
+          },
+          "final_visible_assistant_response": {
+            "timestamp_utc": "2026-08-10T09:34:09.076Z",
+            "event_kind": "assistant_response",
+            "progress_verdict": "progress",
+            "progress_basis": "visible_assistant_response",
+            "segment": 3,
+            "consecutive_count": 0,
+            "window_count": 0,
+            "post_cap": false,
+            "hash_sha256": "280a4bca08f05b452f4337474a35655902ae09abafcc8f1f39f1d5efc5865b4a"
+          }
+        },
+        "post_terminal_events": 0
+      },
+      "shadow_rule": {
+        "rule_version": "dispatch-storm-shadow/v3",
+        "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+        "signature_domain": "dispatch/storm-shadow/schema-rejection-signature/v2",
+        "signal": "storm_shadow",
+        "mode": "observe",
+        "cap_after": 3,
+        "window_size": 6,
+        "window_limit": 4,
+        "counterfactual_action": "would_abort_only_no_control_effect",
+        "signature_hmac": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+          "digest_note": "A1 — the exact identity that tripped (4 consecutive same-signature rejections). A2 (f39283b5...) is the collision-pair sibling that never merged."
+        },
+        "collision_pair": {
+          "A1": {
+            "digest": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c",
+            "count": 1,
+            "note": "read({}) — same tool/class/path, different normalized descriptor"
+          },
+          "A2": {
+            "digest": "f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e",
+            "count": 1,
+            "note": "read({limit:5}) — same tool/class/path, different normalized descriptor"
+          },
+          "never_merged": true,
+          "note": "v3 exact identity includes the bounded normalized descriptor; the two digests are distinct and each counts separately (count 1 each, neither trips)."
+        },
+        "shadow_rows_join": "all 11 shadow rows join on the same worker_run_id / dispatch_run_id / dispatch_tool_call_id / task_index=0 / task_count=1 as the governor and task rows"
+      },
+      "governor_schema_error_storm": {
+        "row_count": 2,
+        "rows": [
+          {
+            "timestamp_utc": "2026-08-10T09:33:12.765Z",
+            "count": 3,
+            "limit": 3,
+            "mode": "observe",
+            "action": "audit_observation_no_abort",
+            "termination_source": "none",
+            "hash_sha256": "72fdd9ef190d9dd9497c8de4a2ededd9595ad53c3536be459f5cfe15e9e521b5",
+            "governor_schema_identity_hash": "8834bae5a79f3594a7f496ee092a622e85e86d58bb111dd0497345096dfcde89",
+            "shape": "missing_required",
+            "coverage": "post_execution_only",
+            "tool_call_id": "call_imo0ig7j"
+          },
+          {
+            "timestamp_utc": "2026-08-10T09:33:14.086Z",
+            "count": 4,
+            "limit": 3,
+            "mode": "observe",
+            "action": "audit_observation_no_abort",
+            "termination_source": "none",
+            "hash_sha256": "ce4c8c415c67066031e906ddca921be8b89e8a97f33ebd6b3974d48af465a00e",
+            "governor_schema_identity_hash": "8834bae5a79f3594a7f496ee092a622e85e86d58bb111dd0497345096dfcde89",
+            "shape": "missing_required",
+            "coverage": "post_execution_only",
+            "tool_call_id": "call_gn71a28k"
+          }
+        ],
+        "final_schema_error_storm_count": 2,
+        "note": "governor stays observe-only (no abort, no termination) while the shadow would_abort fires on the same 4th same-identity event; the two governor rows share the same closed-identity hash"
+      },
+      "control_flow_zero_impact": {
+        "would_abort_never_changed_real_execution": true,
+        "evidence": "shadow would_abort=true fired on the 4th same-identity schema rejection (09:33:14.090Z) yet the run continued: provider_request at 09:33:15.639Z, successful read completed at 09:33:16.070Z, visible final assistant response at 09:34:09.076Z, task row result=ok / terminal_state=completed / closure normal with cleanup_done=true; governor termination_source=none throughout"
+      },
+      "audit_privacy": {
+        "no_raw_content": true,
+        "note": "shadow rows carry only closed progress classification + opaque HMAC signature (key_id + digest); no prompt / raw error text / field path / normalized descriptor / tool args / output / file contents in any shadow or governor row for this run"
+      },
+      "verification": {
+        "jq_empty_parse": "PASS (jq empty over .pi-astack/dispatch/audit.jsonl: every line parses)",
+        "row_hashes_recomputed": "all 14 recorded row hashes (11 shadow rows + 2 governor rows + task row) recomputed via `jq -cS . | tr -d '\\n' | sha256sum` and match exactly",
+        "replay_verdict_equality": "PASS — replayStormShadow(v3, DEFAULT settings) over the 11 written rows' reconstructed inputs reproduces every observation field exactly (post_cap, would_abort, progress_basis, consecutive_count, window_count, segment, first_trip, already_tripped, would_abort_basis)",
+        "opaque_digest_equality": "PASS — collision pair A1/A2 are two distinct digests (never merged); the 4 tripping rows all share digest d4072bcf... / key_id 7a2e3c8c55f261fb329ab4b3",
+        "final_snapshot": "segment=3, post_cap=false, consecutive_count=0, window_count=0 (progress reset after successful tool response)",
+        "post_terminal_zero": "PASS — 0 rows after the task row for this run/worker"
+      }
+    }
+  },
+
+  "succeeded_behavior_but_superseded_by_v3_exact_identity": {
+    "status": "history_only_not_final",
+    "superseded_at_utc": "2026-08-10T09:30:00.000Z",
+    "reason": "The v2 canary below demonstrated the same shadow behavior (4 identical schema rejections -> would_abort=true/first_trip, success progress reset, visible completion, control-flow zero impact) and is retained as older history. However, its exact identity was only tool name + closed error class + field path, DROPPING the governor's bounded normalized descriptor: two real schema rejections with the SAME tool/class/path but DIFFERENT normalized error text (e.g. read({}) vs read({limit:5}) — the 'Received arguments' JSON differs) would merge into one signature and could trip together. Fixed in dispatch-storm-shadow/v3: the exact identity now includes the bounded whitespace-normalized descriptor (<=4096), the HMAC input is the unambiguous framed tuple JSON.stringify([toolName, errorClass, fieldPath, normalized]), and the signature domain is dispatch/storm-shadow/schema-rejection-signature/v2. The v2 rows' digests are NOT recomputable under v3/v4 semantics and MUST NOT be used to check any criterion — the v4 canary above is the primary evidence.",
+    "old_hashes_not_final": true,
+    "criteria_impact": "STORM-SHADOW-* criteria remain unchecked; the v2 rows below cannot gate any criterion. The v4 canary above is the primary evidence for the pending T0+/cross-vendor T0 review.",
+    "history_retained": true,
+    "v2_primary_canary": {
+      "kind": "production",
+      "setup": {
+        "worktree": "fresh pi no-session worktree",
+        "main_model": "openai/gpt-5.6-luna",
+        "worker_model": "deepseek/deepseek-v4-flash",
+        "worker_thinking": "medium",
+        "worker_tools": "read",
+        "task_prompt_chars": 1191,
+        "task_output_chars": 17
+      },
+      "session_id": "019fead7-3b03-7de5-96f3-9f44096eb3ce",
+      "run": "dtr_ab7570e3432c0229b1521ca8",
+      "worker_run_id": "56b23153-0ff5-4708-90db-36fab1f66816",
+      "dispatch_tool_call_id": "call_oaFPUlhWltAoIIQqxKxr2hP4|fc_05f66375a85d70d6016a798f2fb10081989f0d0eb10848abe7",
+      "task_index": 0,
+      "task_count": 1,
+      "task_timestamp_utc": "2026-08-10T08:43:57.336Z",
+      "audit_version": 5,
+      "outer_dispatch": {
+        "exit_code": 0,
+        "duration_s_approx": 39,
+        "worker_duration_ms": 23956,
+        "note": "outer exit/duration from parent-session dispatch record; worker duration from the audited task row"
+      },
+      "tool_calls": {
+        "tool_call_count": 5,
+        "shape": "4 identical real read schema rejections (same closed error class + field path, same opaque signature digest) followed by 1 successful read",
+        "last_tool": {
+          "tool_name": "read",
+          "tool_call_id": "call_svuhfm4c",
+          "status": "completed",
+          "started_at_utc": "2026-08-10T08:43:53.643Z",
+          "completed_at_utc": "2026-08-10T08:43:53.660Z"
+        }
+      },
+      "terminal_state": "completed",
+      "result": "ok",
+      "stop_reason": "stop",
+      "closure": {
+        "lifecycle_path": "normal",
+        "termination_owner": "run",
+        "termination_claimed_at_ms": 1786351437321,
+        "closure_status": "complete",
+        "closure_completed_at_ms": 1786351437321,
+        "bounded_wait_ms": 1,
+        "bounded_wait_limit_ms": 3000,
+        "run_settled": true,
+        "session_closure_done": true,
+        "cleanup_done": true,
+        "post_claim_provider_start_count": 0,
+        "post_claim_tool_start_count": 0
+      },
+      "task_row_canonical_jq_cS_hash_sha256": "d0af526a1722928cb90ca3404292bdae780576b5183fe2a0508442d176f7a083",
+      "shadow_rows_total": 8,
+      "shadow_row_timeline": {
+        "row_0_tool_use_only_marker": {
+          "timestamp_utc": "2026-08-10T08:43:51.947Z",
+          "event_kind": "assistant_response",
+          "progress_verdict": "not_progress",
+          "progress_basis": "tool_use_only",
+          "segment": 0
+        },
+        "signature_rows": [
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.951Z",
+            "consecutive_count": 1,
+            "window_count": 1,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "b031e8db4975fe4d311563bacb8ea5f09b9c962fbb0608e1ea150b3a4f2104c7"
+          },
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.955Z",
+            "consecutive_count": 2,
+            "window_count": 2,
+            "post_cap": false,
+            "would_abort": false,
+            "hash_sha256": "46ca50241f2dd7e6091d69547df189270eaa0f56000d487b0f9c805df5efa0e4"
+          },
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.965Z",
+            "consecutive_count": 3,
+            "window_count": 3,
+            "post_cap": true,
+            "would_abort": false,
+            "hash_sha256": "32c9bd6007b1cd20966feb10ecbc874f70f2bbd5e651a12dc75d784a6dc3019b"
+          },
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.976Z",
+            "consecutive_count": 4,
+            "window_count": 4,
+            "post_cap": true,
+            "would_abort": true,
+            "would_abort_basis": "consecutive",
+            "first_trip": true,
+            "already_tripped": false,
+            "hash_sha256": "e5d0aba624d27c9536f4a42850f75e26f031ae186c71f4ae8da268adf137e992"
+          }
+        ],
+        "post_4th_row_7_rows": {
+          "count": 7,
+          "composition": "4 governor worker_run_event rows + 3 shadow rows, then the task row; 0 rows after the task row for this run",
+          "provider_request_already_tripped_marker": {
+            "timestamp_utc": "2026-08-10T08:43:53.085Z",
+            "event_kind": "provider_request",
+            "progress_basis": "provider_request",
+            "already_tripped": true,
+            "would_abort": false,
+            "note": "anti-sticky: after the first trip, neutral events report already_tripped=true instead of repeating would_abort"
+          },
+          "success_progress_reset": {
+            "timestamp_utc": "2026-08-10T08:43:53.665Z",
+            "event_kind": "tool_execution_end",
+            "progress_verdict": "progress",
+            "progress_basis": "successful_tool_response",
+            "segment": 1,
+            "consecutive_count": 0,
+            "window_count": 0,
+            "post_cap": false
+          },
+          "final_visible_assistant_response": {
+            "timestamp_utc": "2026-08-10T08:43:57.327Z",
+            "event_kind": "assistant_response",
+            "progress_verdict": "progress",
+            "progress_basis": "visible_assistant_response",
+            "segment": 2,
+            "consecutive_count": 0,
+            "window_count": 0,
+            "post_cap": false
+          }
+        },
+        "post_terminal_events": 0
+      },
+      "shadow_rule": {
+        "rule_version": "dispatch-storm-shadow/v2",
+        "rule_id": "storm/post-cap-schema-rejection-signature/v1",
+        "signal": "storm_shadow",
+        "mode": "observe",
+        "cap_after": 3,
+        "window_size": 6,
+        "window_limit": 4,
+        "counterfactual_action": "would_abort_only_no_control_effect",
+        "signature_hmac": {
+          "algorithm": "hmac-sha256",
+          "key_id": "7a2e3c8c55f261fb329ab4b3",
+          "digest": "f24f9f5a4347380fac481562a1d34b4d688116d3934580908ae961e5e44daaf9",
+          "digest_note": "identical opaque digest across all four schema-rejection rows (same closed error class + field path), verified exact equality"
+        },
+        "shadow_rows_join": "all 8 shadow rows join on the same worker_run_id / dispatch_run_id / dispatch_tool_call_id / task_index=0 / task_count=1 as the governor and task rows"
+      },
+      "governor_schema_error_storm": {
+        "row_count": 2,
+        "rows": [
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.960Z",
+            "count": 3,
+            "limit": 3,
+            "mode": "observe",
+            "action": "audit_observation_no_abort",
+            "termination_source": "none",
+            "hash_sha256": "dd6be391e7b8656864bbe91da77753b484fb5061ab1299808ab8ebacbb8ac9f1",
+            "governor_schema_identity_hash": "15570906508493747fc877f1ba2caeef2fa5c288a29167503db570556ef218b8",
+            "shape": "missing_required",
+            "coverage": "post_execution_only"
+          },
+          {
+            "timestamp_utc": "2026-08-10T08:43:51.971Z",
+            "count": 4,
+            "limit": 3,
+            "mode": "observe",
+            "action": "audit_observation_no_abort",
+            "termination_source": "none",
+            "hash_sha256": "7cfc9e8914f4142ff32b9917a25987758569762716b920f70c37195cd63a9a37",
+            "governor_schema_identity_hash": "15570906508493747fc877f1ba2caeef2fa5c288a29167503db570556ef218b8",
+            "shape": "missing_required",
+            "coverage": "post_execution_only"
+          }
+        ],
+        "final_schema_error_storm_count": 2,
+        "note": "governor stays observe-only (no abort, no termination) while the shadow would_abort fires on the same 4th event; the two governor rows share the same closed-identity hash"
+      },
+      "control_flow_zero_impact": {
+        "would_abort_never_changed_real_execution": true,
+        "evidence": "shadow would_abort=true fired on the 4th schema rejection (08:43:51.976Z) yet the run continued: provider_request at 08:43:53.079Z, successful read completed at 08:43:53.660Z, visible final assistant response at 08:43:57.327Z, task row result=ok / terminal_state=completed / closure normal with cleanup_done=true; governor termination_source=none throughout"
+      },
+      "audit_privacy": {
+        "no_raw_content": true,
+        "note": "shadow rows carry only closed progress classification + opaque HMAC signature (key_id + digest); no prompt / raw error text / field path / tool args / output / file contents in any shadow or governor row for this run"
+      },
+      "verification": {
+        "jq_empty_parse": "PASS (jq empty over .pi-astack/dispatch/audit.jsonl: every line parses)",
+        "row_hashes_recomputed": "all 7 recorded row hashes (4 signature rows + 2 governor rows + task row) recomputed via `jq -cS . | tr -d '\\n' | sha256sum` and match exactly",
+        "replay_verdict_equality": "PASS — replayStormShadow(v2, DEFAULT settings) over the 8 written rows' reconstructed inputs reproduces every observation field exactly (post_cap, would_abort, progress_basis, consecutive_count, window_count, segment, first_trip, already_tripped, would_abort_basis)",
+        "opaque_digest_equality": "PASS — all four schema-rejection rows share the identical digest f24f9f5a4347380fac481562a1d34b4d688116d3934580908ae961e5e44daaf9 / key_id 7a2e3c8c55f261fb329ab4b3",
+        "final_snapshot": "segment=2, post_cap=false, consecutive_count=0, window_count=0 (progress reset after successful tool response)",
+        "post_terminal_zero": "PASS — 0 rows after the task row for this run/worker"
+      }
+    },
+    "rejected_first_run": {
+      "kind": "production",
+      "run": "dtr_051a959a5f6a8fb9ebdf9fa9",
+      "worker_run_id": "484047d9-b0cb-4677-82d5-7519740ea3bf",
+      "task_timestamp_utc": "2026-08-10T08:38:24.731Z",
+      "behavior_passed": true,
+      "behavior_summary": "same shadow shape as the v2 primary canary: 4 identical schema rejections -> would_abort=true/first_trip on the 4th, success progress reset, visible completion, task result=ok / terminal completed / closure normal / cleanup_done=true / tool_call_count=5 / schema_error_storm_count=2",
+      "rejected_as_primary_evidence": true,
+      "rejection_reason": "signature_hmac.key_id = 'ephemeral-3f2314c299fecb97d00add58' (ephemeral fallback key from the projectKey fallback path in extensions/_shared/audit-hmac.ts, per-process random) — cross-process unstable, digest not reproducible across processes; cannot serve as primary evidence",
+      "ephemeral_key_id": "ephemeral-3f2314c299fecb97d00add58",
+      "ephemeral_digest": "ecc969fe842bb777052ce4bb52e3a6f172071a78e3800f7d9b4afa12c367c46b",
+      "remediation": "chmod 700 on .pi-astack and .pi-astack/llm-audit so openPrivateChild/verifyDirectoryIdentity accept the exact 0700 mode and the persistent project key path succeeds; the canary was then re-run (dtr_ab7570e3432c0229b1521ca8) with persistent key_id 7a2e3c8c55f261fb329ab4b3 — that run was the v2 primary evidence (now superseded by the v3 and then v4 canaries)",
+      "task_row_canonical_jq_cS_hash_sha256": "3a9265e1ec7427fa22d4af421eeb4c30289ed58c63ed43a24f21d09a29ce80ee"
+    }
+  },
+
+  "runtime_hmac_security_state": {
+    "observed_at_utc": "2026-08-10T10:18:25.000Z",
+    ".pi-astack_mode": 700,
+    ".pi-astack/llm-audit_mode": 700,
+    ".pi-astack/dispatch_mode": 700,
+    "key_file": {
+      "path": ".pi-astack/llm-audit/.audit-hmac-key",
+      "exists": true,
+      "mode": 600,
+      "size_bytes": 32,
+      "note": "key content never recorded; path/mode/size only. 32 bytes matches KEY_BYTES in extensions/_shared/audit-hmac.ts (persistentProjectKey: .pi-astack and llm-audit must be exact mode 700 via openPrivateChild, key file created 0600 O_EXCL + fchmod)"
+    },
+    "key_id": "7a2e3c8c55f261fb329ab4b3",
+    "key_id_kind": "non-ephemeral",
+    "key_id_kind_note": "persistent project key derived from the on-disk key file (deriveKeyId); no 'ephemeral-' prefix, stable across processes (contrast the rejected v2-era first run below)",
+    "signature_digest_seen_in_rows": "d4072bcfc74714a4f0a4d3d5bf57079b2cecdaa43045e1f68a684585af92433c (A1, the tripping exact identity) and f39283b53d9be4b7b6a1aa74806f4bfbfec1b0f6a988f1e8cfabe174f13dda9e (A2, the collision-pair sibling) — the opaque HMAC digests of the schema-rejection identities written to shadow rows, not the key material"
+  },
+
+  "archive_note": "Structured archive of verified facts from one real production dispatch canary run (fresh pi no-session worktree; main openai/gpt-5.6-luna; worker deepseek/deepseek-v4-flash; real read tool) that reached would_abort=true in shadow on the 4th consecutive same-exact-identity schema rejection, with a real collision pair (same tool/class/path, different bounded normalized descriptor) that never merged. The v4 canary is the UNIQUE FINAL primary evidence: signed ONLY via auditHmacHexStrict (persistent project key, strict path; strict key availability is an eligibility prerequisite, ephemeral keys never generated/accepted), and the state machine compares the unambiguous composite key_id:digest. Extracted identifiers, states, counters, HMAC key_id/digest and canonical hashes only; no prompt content, raw errors, tool args, outputs or file contents. The dossier embeds a self-contained sanitized replay projection (11 pre-projected safe inputs + expected verdicts) so the verdicts are recomputable via replayStormShadow() even after the gitignored audit disappears, plus strict-key cross-process evidence (two independent processes, identical non-ephemeral key_id + digest; key file 0600/32B, dirs 0700; key content never read). Audit rows live in the local untracked .pi-astack/ directory (gitignored mutable source) and are referenced by path, not embedded. Final T0+/cross-vendor T0 review GREEN (Fable/Opus/Grok/OpenAI, no P0/P1): STORM-SHADOW-IMPL / -EVIDENCE / -REVIEW accepted (13/20); STORM-SHADOW-SUBCOMMIT / -PARENT and S4 remain unchecked; no commit/push; S4 not entered.",
+  "method": "jq-select rows for worker/run, order by timestamp, rebuild StormShadow v4 event inputs from written rows' progress_basis (same reconstruction as scripts/smoke-dispatch-storm-shadow.mjs), replayStormShadow with DEFAULT_STORM_SHADOW_SETTINGS (capAfter=3, windowSize=6, windowLimit=4), assert exact verdict equality on all observation fields plus opaque signature digest equality; hash = sha256 over `jq -cS .` output bytes of the audit row with the trailing newline stripped (verified to reproduce every recorded row hash byte-for-byte).",
+  "generated_at_utc": "2026-08-10T10:18:25.000Z",
+  "git": {
+    "head": "9ef4b4d",
+    "worktree_dirty": true,
+    "note": "S3 implementation is uncommitted (storm-shadow.ts + smoke-dispatch-storm-shadow.mjs untracked, plus tracked edits); this evidence dossier itself is uncommitted; no commit/push performed"
+  },
+  "audit_paths": [
+    ".pi-astack/dispatch/audit.jsonl"
+  ],
+  "audit_paths_note": "Local untracked .pi-astack/ directory (gitignored mutable source); referenced by path, not embedded. Row hashes are sha256 over `jq -cS .` output (trailing newline stripped), recomputable from this file. The embedded replay_projection makes the verdicts recomputable even without the audit file.",
+  "hash_method": "sha256 over `jq -cS .` output bytes of the audit row, trailing newline stripped (jq -cS . | tr -d '\\n')",
+
+  "verification": {
+    "json_valid": "PASS (jq empty over the dossier file)",
+    "row_hashes_recomputed": "all 14 recorded v4 row hashes (11 shadow rows + 2 governor rows + task row) recomputed via `jq -cS . | tr -d '\\n' | sha256sum` from .pi-astack/dispatch/audit.jsonl and match exactly",
+    "embedded_replay": "PASS — node scripts/.replay-v4-shadow.tmp.mjs: 11/11 rows reproduced exactly, 0 mismatches, final snapshot segment=3/post_cap=false/consecutive=0/window=0, digest distribution A1=5/A2=1, exit 0",
+    "strict_key_cross_process": "PASS — two independent processes produce identical non-ephemeral key_id 7a2e3c8c55f261fb329ab4b3 + digest; key file 0600/32B, dirs 0700; key content never read",
+    "privacy": "PASS — no raw error text / field path / normalized descriptor / tool args / prompt / output in any shadow or governor row for the v4 run (grep verified)",
+    "diffcheck": "PASS — git diff --check clean"
+  },
+
+  "strict_key_cache_reverification_p1": {
+    "status": "fixed_reviewed_green",
+    "p1": "OpenAI final review RED (single P1): extensions/_shared/audit-hmac.ts strictProjectKey returned cached material from KEY_CACHE without re-verifying the key file — after a first safe strict call filled the cache, a same-process change of the key file or its directories to an unsafe state (llm-audit 0755, key file 0644, key file replaced by a symlink) was NOT detected by auditHmacHexStrict, which kept serving the cached key (security checks bypassed).",
+    "fix": "strictProjectKey now ALWAYS re-verifies root/.pi-astack/llm-audit/key file mode/owner/symlink/identity via persistentProjectKey and reads the strong key on every call; the cache is only updated with the freshly verified value and cached material is never trusted to skip re-verification. The ordinary projectKey/auditHmacHex path keeps its cache-first + ephemeral fallback contract unchanged (S2 retry HMACs stay cheap, no per-call disk read; cache miss performs the full strict verification and fills the cache; strict failure still falls back to a per-process ephemeral key).",
+    "rule_version_unchanged": "dispatch-storm-shadow/v4 (signature domain dispatch/storm-shadow/schema-rejection-signature/v2 unchanged) — the fix is a key-source API hardening inside audit-hmac.ts, not a rule semantic change.",
+    "evidence_status": "v4 production evidence above remains VALID in the stable safe state (key file 0600/32B, .pi-astack/llm-audit/dispatch 0700, persistent key_id 7a2e3c8c55f261fb329ab4b3) — NOT marked stale; final T0+/cross-vendor T0 review GREEN (Fable/Opus/Grok/OpenAI, no P0/P1); accepted for STORM-SHADOW-IMPL / -EVIDENCE / -REVIEW.",
+    "criteria_impact": "STORM-SHADOW-IMPL / -EVIDENCE / -REVIEW checked (13/20); STORM-SHADOW-SUBCOMMIT / -PARENT and S4 remain unchecked; no commit/push; S4 not entered.",
+    "regression_test": "smoke-dispatch-storm-shadow 34/34 — new P1 regression check: safe first strict fills cache → same process chmod llm-audit 0755 → second buildSchemaRejectionShadowInput must fail open {schemaRejection:false} with NO signature, direct auditHmacHexStrict throws, independent process (fresh, no cache) also rejects; restore 0700 → strict recovers with SAME key_id+digest; key file 0600→0644 same cache-then-reject/recover (same key/digest); key file replaced by symlink → strict rejects (cache does not bypass the symlink check), after removal strict recovers with a fresh persistent key. RED verified: with the old cache-first strictProjectKey the new check fails ('cached strict key must not bypass the directory mode re-verification').",
+    "smoke_rerun": "smoke-dispatch-storm-shadow 34/34, smoke-llm-audit 16/16, smoke-llm-audit-budget 4/4, audit-log rotation/maintenance/prune (10/19/27), terminal-closure 22/22, dispatch-audit-v5 12/12, worker governor 90/90, C5 audit-row-schema, dispatch output-format 72/72, dispatch trace 25/25, reasoning trace 19/19 — all PASS; git diff --check clean; changed files LSP 0 diagnostics; focused tsc passes (full-entry 9 pre-existing baseline errors unchanged).",
+    "recorded_at_utc": "2026-08-10T10:25:00.000Z"
+  }
+}

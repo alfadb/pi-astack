@@ -104,6 +104,7 @@
     "smoke:dispatch-tool-run-snapshot": "node scripts/smoke-dispatch-tool-run-snapshot.mjs",
     "smoke:dispatch-terminal-closure": "node scripts/smoke-dispatch-terminal-closure.mjs",
     "smoke:dispatch-audit-v5": "node scripts/smoke-dispatch-audit-v5.mjs",
+    "smoke:dispatch-storm-shadow": "node scripts/smoke-dispatch-storm-shadow.mjs",
     "smoke:worker-run-governor": "node scripts/smoke-worker-run-governor.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:vision": "node scripts/smoke-vision.mjs",

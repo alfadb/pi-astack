@@ -189,18 +189,34 @@ function persistentProjectKey(projectRoot: string, createIfMissing = true): Audi
   }
 }
 
+/**
+ * Strict persistent project key: ALWAYS re-verifies the on-disk key file
+ * (mode/owner/symlink/identity) via persistentProjectKey and reads the strong
+ * key material on every call. The KEY_CACHE is only ever updated with the
+ * freshly verified value — cached material is never trusted to skip
+ * re-verification, so a directory/key-file permission or identity change is
+ * detected on the next strict call (P1: cached material must not bypass the
+ * mode/owner/symlink checks).
+ */
 function strictProjectKey(projectRoot: string): AuditHmacKey {
+  const cacheKey = path.resolve(projectRoot);
+  const value = persistentProjectKey(cacheKey);
+  globalMap(KEY_CACHE).set(cacheKey, value);
+  return value;
+}
+
+/**
+ * Ordinary project key: keeps the existing cache/fallback contract. Reads the
+ * KEY_CACHE first (no disk read on the hot path — S2 retry HMACs stay cheap);
+ * on a cache miss it performs the full strict verification and fills the
+ * cache; if the persistent key is unavailable it falls back to a per-process
+ * ephemeral key (unchanged contract).
+ */
+function projectKey(projectRoot: string): AuditHmacKey {
   const cacheKey = path.resolve(projectRoot);
   const cache = globalMap(KEY_CACHE);
   const cached = cache.get(cacheKey);
   if (cached) return cached;
-  const value = persistentProjectKey(cacheKey);
-  cache.set(cacheKey, value);
-  return value;
-}
-
-function projectKey(projectRoot: string): AuditHmacKey {
-  const cacheKey = path.resolve(projectRoot);
   try {
     return strictProjectKey(cacheKey);
   } catch {

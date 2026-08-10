@@ -112,6 +112,27 @@ fs.writeFileSync(
   `module.exports = { providerRetryAuditFields: () => ({ retry_phase: "start", retry_outcome: "unknown", error_classification: "unknown" }) };\n`,
 );
 
+// S3 storm-shadow is runtime-only for this pure formatter smoke; module-load
+// resolve is required because dispatch/index.ts imports it at load time.
+fs.writeFileSync(
+  path.join(tmpDir, "storm-shadow.js"),
+  `module.exports = {
+  STORM_SHADOW_RULE_VERSION: "dispatch-storm-shadow/v4",
+  STORM_SHADOW_RULE_ID: "storm/post-cap-schema-rejection-signature/v1",
+  STORM_SHADOW_SIGNATURE_DOMAIN: "dispatch/storm-shadow/schema-rejection-signature/v2",
+  STORM_SHADOW_ROW_KIND: "worker_run_shadow_event",
+  STORM_SHADOW_SIGNAL: "storm_shadow",
+  STORM_SHADOW_COUNTERFACTUAL_ACTION: "would_abort_only_no_control_effect",
+  STORM_SHADOW_WINDOW_SIZE: 6,
+  STORM_SHADOW_WINDOW_LIMIT: 4,
+  DEFAULT_STORM_SHADOW_SETTINGS: { capAfter: 3, windowSize: 6, windowLimit: 4 },
+  shouldWriteStormShadowAudit: () => true,
+  StormShadow: class { constructor() {} feed() { return { would_abort: false, first_trip: false, already_tripped: false, progress_verdict: "not_progress" }; } snapshot() { return { segment: 0, post_cap: false, consecutive_count: 0, window_count: 0, window: [], tripped: false }; } },
+  buildStormShadowAuditEvent: () => ({}),
+  replayStormShadow: () => ({ observations: [], final: {} }),
+};\n`,
+);
+
 // ADR 0027 §C5 v1: stage terminal-state.ts (real module, no external deps).
 // dispatch/index.ts imports buildTerminalStateFields/inferParallelTerminalState/
 // inferTerminalState at module-load time. The terminal-state.ts source
@@ -238,6 +259,14 @@ fs.writeFileSync(
 
 const sharedDir = path.join(tmpDir, "..", "_shared");
 fs.mkdirSync(sharedDir, { recursive: true });
+
+// S3 storm-shadow pre-projections audit-HMAC failed tool identities via the
+// project audit key; runtime-only for this pure formatter smoke (module-load
+// resolve only).
+fs.writeFileSync(
+  path.join(sharedDir, "audit-hmac.js"),
+  `module.exports = { auditHmacHex: () => ({ algorithm: "hmac-sha256", key_id: "stub", digest: "0".repeat(64) }) };\n`,
+);
 
 // Visible repeat detection and empty-output categorization are runtime-only for
 // this format smoke; module-load stubs keep the pure formatter harness narrow.
