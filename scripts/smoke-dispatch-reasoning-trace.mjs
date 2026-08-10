@@ -722,9 +722,8 @@ await check("dispatch terminal audit/details helper emits trace completeness fie
   const pkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
   assert.match(source, /operation: "dispatch_agent"[\s\S]{0,2200}?\.\.\.dispatchReasoningTraceFields\(result\)/);
   assert.match(source, /operation: "dispatch_parallel\.task"[\s\S]{0,2200}?\.\.\.dispatchReasoningTraceFields\(res\)/);
-  assert.match(source, /const ABORT_TRACE_DRAIN_MS = 3_000;/);
-  assert.match(source, /timer = setTimeout\(finish, ABORT_TRACE_DRAIN_MS\)/);
-  assert.match(source, /trackedRunPromise\.then\(finish, finish\)/);
+  // Termination closure behavior is exercised through production runInProcess
+  // in smoke-dispatch-terminal-closure; this smoke only owns trace projection.
   assert.match(source, /forceIncomplete: abortRace/);
   assert.match(source, /if \(executionContext\?\.reasoningTrace\) \{[\s\S]{0,700}?createDispatchReasoningTrace/);
   assert.doesNotMatch(source, /auditSessionEvent/);

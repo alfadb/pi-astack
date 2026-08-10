@@ -89,15 +89,15 @@ check(
 
 const createIndex = src.indexOf("const result = await createAgentSession({");
 const registryIndex = src.indexOf("validateSessionToolRegistry(session, tools)", createIndex);
-const promptIndex = src.indexOf("await session.prompt(prompt)", createIndex);
+const promptIndex = src.indexOf("await session.prompt(prompt", createIndex);
 check(
   createIndex >= 0 && registryIndex > createIndex && promptIndex > registryIndex,
   "target-session registry validation runs after creation and before prompt",
 );
 const rejectionBlock = src.slice(registryIndex, promptIndex);
 check(
-  /await disposeSubAgentSession\(session\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
-  "registry rejection emits shutdown, disposes the target session, and returns tool_rejected",
+  /startSessionClosure\(\)/.test(rejectionBlock) && /failureType:\s*"tool_rejected"/.test(rejectionBlock),
+  "registry rejection starts bounded closure, disposes the target session, and returns tool_rejected",
 );
 check(
   /SettingsManager\.create[\s\S]*?projectTrusted:\s*false/.test(src),

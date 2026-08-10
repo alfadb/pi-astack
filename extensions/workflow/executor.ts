@@ -89,6 +89,8 @@ export interface StageRunResult {
   cancelSource?: string;
   /** Structured termination origin from shared worker. */
   terminationSource?: string;
+  /** Bounded worker/session closure verdict from shared worker. */
+  cleanupDone?: boolean;
   /** Bounded last/active tool snapshot (safe metadata only). */
   toolSnapshot?: import("../dispatch/tool-run-snapshot").ToolRunSnapshotSummary;
   durationMs: number;
@@ -145,6 +147,8 @@ export interface StageRecord {
   cancel_source?: string;
   /** Structured termination origin from shared worker. */
   termination_source?: string;
+  /** Bounded worker/session closure verdict when supplied by dispatch. */
+  cleanup_done?: boolean;
   /** Safe last-tool metadata at terminal (name/id/status/timestamps only). */
   last_tool?: Record<string, unknown>;
   active_tool_count?: number;
@@ -454,6 +458,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(rec.failure_type ? { failure_type: rec.failure_type } : {}),
       ...(rec.cancel_source ? { cancel_source: rec.cancel_source } : {}),
       ...(rec.termination_source ? { termination_source: rec.termination_source } : {}),
+      ...(typeof rec.cleanup_done === "boolean" ? { cleanup_done: rec.cleanup_done } : {}),
       ...(rec.last_tool ? { last_tool: rec.last_tool } : {}),
       ...(typeof rec.active_tool_count === "number" ? { active_tool_count: rec.active_tool_count } : {}),
       ...(typeof rec.cost === "number" ? { cost: rec.cost } : {}),
@@ -582,6 +587,7 @@ export async function executeWorkflow(opts: WorkflowRunOptions): Promise<Workflo
       ...(res.failureType ? { failure_type: res.failureType } : {}),
       ...(res.cancelSource ? { cancel_source: res.cancelSource } : {}),
       ...(res.terminationSource ? { termination_source: res.terminationSource } : {}),
+      ...(typeof res.cleanupDone === "boolean" ? { cleanup_done: res.cleanupDone } : {}),
       ...(lastTool ? { last_tool: lastTool } : {}),
       ...(typeof res.toolSnapshot?.active_count === "number"
         ? { active_tool_count: res.toolSnapshot.active_count }

@@ -51,12 +51,12 @@ const dispatchSrc = fs.readFileSync(
 
 console.log("Section: dense materializedResults exists and is used everywhere");
 
-check("materializedResults array is constructed via tasks.map (dense, no holes)", () => {
-  // R7 invariant: dense array constructed via tasks.map iterating
-  // tasks.length, providing a fallback when results[i] is undefined.
-  if (!/const materializedResults:\s*AgentResult\[\]\s*=\s*tasks\.map/.test(dispatchSrc)) {
+check("materializedResults array is densely constructed across tasks.length", () => {
+  const denseLoop = /const materializedResults:\s*AgentResult\[\]\s*=\s*\[\];[\s\S]{0,200}?for \(let i = 0; i < tasks\.length; i\+\+\)/.test(dispatchSrc);
+  const denseMap = /const materializedResults:\s*AgentResult\[\]\s*=\s*tasks\.map/.test(dispatchSrc);
+  if (!denseLoop && !denseMap) {
     throw new Error(
-      "missing dense materializedResults array (R7 P1-A fix). " +
+      "missing dense materializedResults construction (R7 P1-A fix). " +
       "Without it, downstream surfaces see sparse results[] and produce " +
       "contradictory state for hole slots.",
     );
@@ -168,16 +168,13 @@ check("hasErrors derives from aggregate terminal_state", () => {
 
 check("details.success / details.failed match audit counters", () => {
   // Same counters everywhere — caller-visible and audit-visible must agree.
-  // R7: the dispatch_parallel_summary details block grew (tasks: tasks.map
-  // construction adds ~25 lines). Widen the regex window.
-  const block = dispatchSrc.match(
-    /kind:\s*"dispatch_parallel_summary"[\s\S]{0,3000}?\}\s*,/,
-  );
-  if (!block) throw new Error("could not locate dispatch_parallel_summary details");
-  if (!/success:\s*successCount/.test(block[0])) {
+  const start = dispatchSrc.search(/kind:\s*"dispatch_parallel_summary"/);
+  if (start < 0) throw new Error("could not locate dispatch_parallel_summary details");
+  const block = dispatchSrc.slice(start, start + 5000);
+  if (!/success:\s*successCount/.test(block)) {
     throw new Error("details.success must use successCount (consistent with audit)");
   }
-  if (!/failed:\s*failedCount/.test(block[0])) {
+  if (!/failed:\s*failedCount/.test(block)) {
     throw new Error("details.failed must use failedCount (consistent with audit)");
   }
 });

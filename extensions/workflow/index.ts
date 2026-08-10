@@ -281,6 +281,7 @@ function makeProductionRunner(modelRegistry: unknown, projectRoot: string): Stag
       ...(result.failureType ? { failureType: result.failureType } : {}),
       ...(result.cancelSource ? { cancelSource: result.cancelSource } : {}),
       ...(result.terminationSource ? { terminationSource: result.terminationSource } : {}),
+      ...(typeof result.cleanupDone === "boolean" ? { cleanupDone: result.cleanupDone } : {}),
       ...(result.toolSnapshot ? { toolSnapshot: result.toolSnapshot } : {}),
       durationMs: result.durationMs,
       ...(result.usage ? { usage: result.usage } : {}),

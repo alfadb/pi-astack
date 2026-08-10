@@ -1,0 +1,52 @@
+{
+  "title": "S1 dispatch terminal closure — production canary acceptance evidence",
+  "mode": "production_acceptance_evidence",
+  "archive_note": "Structured archive of a real production canary: a fresh `pi --no-session` process loading the current worktree extension. Extracted facts and hashes only; no prompt content. Audit rows live in the local untracked .pi-astack/ directory (gitignored) and are referenced by path, not embedded in this dossier.",
+  "method": "production_canary_fresh_pi_no_session_worktree_extension",
+  "generated_at_utc": "2026-08-10T03:37:33.053Z",
+  "git": {
+    "head": "e7dc27c",
+    "worktree_dirty": true
+  },
+  "canary": {
+    "process": "fresh `pi --no-session` process loading current worktree extension",
+    "main_model": "openai/gpt-5.6-luna",
+    "worker_model": "openai/gpt-5.3-codex-spark",
+    "run_id": "dtr_66bb99e28dff042b789992cc",
+    "worker_run_id": "20f7dce5-85a5-44d8-b9b4-64f34886f05f",
+    "task_timestamp_utc": "2026-08-10T03:33:47.420Z",
+    "duration_ms": 12838,
+    "terminal_state": "cancelled",
+    "failure_type": "timeout",
+    "timeout_kind": "idle",
+    "cancel_source": "timeout",
+    "termination_source": "timeout",
+    "cleanup_done": true,
+    "tool_call_count": 1,
+    "active_bash_age_ms_at_trigger": 5001,
+    "marker_pid": 1572609,
+    "marker_absent_after_15s_observation_window": true,
+    "events_after_terminal_state": 0,
+    "task_row_canonical_jq_hash_sha256": "2523f19a1df80ff97d6708e36a07e4a61b113a3356829bec903cd7daf084598a"
+  },
+  "rejected_canary": {
+    "run_id": "dtr_c4a1fc58389b761b47866e6c",
+    "reason": "worker backgrounded the command; run completed and left marker PID 1571580 behind",
+    "rejected_as_acceptance": true,
+    "cleanup": "killed by this session; PID 1571580 no longer present",
+    "counts_toward_acceptance": false
+  },
+  "audit_paths": [
+    ".pi-astack/dispatch/audit.jsonl",
+    ".pi-astack/dispatch/heartbeat/019fe9bb-679f-796a-b09b-034d89eb072d_0_1_1572308.jsonl",
+    ".pi-astack/llm-audit/dispatch-reasoning/trace-1786332814586-1572308-c8e1ef2f-63a3-457f-a2da-a2b3a14a06d3.jsonl"
+  ],
+  "audit_paths_note": "Local untracked .pi-astack/ directory (gitignored); referenced by path, not embedded.",
+  "smoke": {
+    "closure_smoke_script": "scripts/smoke-dispatch-terminal-closure.mjs",
+    "checks": 22,
+    "result": "PASS"
+  },
+  "result": "accepted",
+  "acceptance_scope": "S1 five behaviors: unique termination claim; post-terminal provider/tool creation blocked; abort/dispose covers bash-derived child processes; bounded quiescence; honest cleanup/closure"
+}

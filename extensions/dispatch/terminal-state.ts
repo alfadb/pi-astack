@@ -8,9 +8,8 @@
  * removed (swarm workers may edit/write/bash via explicit tools=). The
  * terminal_state SCHEMA landed, but there is no rollback ENGINE — partial
  * writes from a failed mutating worker are recovered via git
- * (INV-GIT-IS-RECOVERY), not an undo path; the per-state side-effect flags
- * below are best-effort/optimistic v1 values (accepted residual under the
- * single-user threat model).
+ * (INV-GIT-IS-RECOVERY), not an undo path. rollback_done retains the v1
+ * optimistic value; cleanup_done is evidence-based from bounded closure.
  *
  * # ADR §C5 field contract (normative)
  *
@@ -170,10 +169,10 @@ export interface TerminalStateFields {
    *  even when the row is `failed` rather than `cancelled`. */
   termination_source?: TerminationSource;
   /** ADR §C5 field for `cancelled` ONLY (per the normative table at the
-   *  top of this file). v1 read-only dispatch: always `true` vacuously
-   *  when present. NOT set on degraded (R7 Opus P1-B fix: previously
-   *  degraded carried it, contradicting the file's own strict-scope
-   *  declaration). NOT set on failed (R6 Opus P1-2 fix). */
+   *  top of this file). True only when the worker run and session disposal
+   *  actually closed within the bounded quiescence window; false means hard
+   *  close was requested but could not be proven complete. NOT set on
+   *  degraded or failed. */
   cleanup_done?: boolean;
   /** ADR §C5 field for `degraded` ONLY. Human-readable identifiers of the
    *  capability dimensions that were dropped. In v1 dispatch_parallel,
@@ -209,6 +208,8 @@ export interface ResultLike {
   cancelSource?: CancelSource;
   /** Pre-resolved termination attribution from runInProcess. */
   terminationSource?: TerminationSource;
+  /** Actual bounded worker/session closure verdict. */
+  cleanupDone?: boolean;
 }
 
 /** Optional context the caller can pass when building terminal-state fields. */
@@ -401,7 +402,7 @@ export function buildTerminalStateFields(
     // paths resolve to "unknown" — never guess from fuzzy error strings.
     out.cancel_source = resolveCancelSource(result, ctx);
     out.termination_source = resolveTerminationSource(result, ctx) ?? out.cancel_source;
-    out.cleanup_done = true;   // v1: no resources held
+    out.cleanup_done = result.cleanupDone === true;
   } else if (state === "failed") {
     out.reason = clipReason(result.error);
     out.rollback_done = true;  // v1: read-only, nothing to roll back
@@ -527,7 +528,7 @@ export function inferParallelTerminalState(
       terminal_state: "cancelled",
       cancel_source,
       termination_source: resolveAggregateTerminationSource() ?? cancel_source,
-      cleanup_done: true,
+      cleanup_done: tasks.every((task) => task.result.cleanupDone === true),
       tasks_not_completed: notCompleted,
       resumable: false,
     };
@@ -556,9 +557,8 @@ export function inferParallelTerminalState(
   // Partial success: 0 < ok < n → degraded
   //
   // R7 P1 fix (Opus P1-B): degraded no longer carries `cleanup_done` per
-  // ADR §C5 strict scope (cleanup_done is on cancelled only). The
-  // operational truth is the same — the dispatch process did clean up
-  // — but that's tracked at the cancellation site, not on degraded.
+  // ADR §C5 strict scope (cleanup_done is on cancelled only). Closure truth
+  // remains on each cancelled task rather than the degraded aggregate row.
   // For degraded, `what_dropped` + `alt_path` are the ADR-mandated
   // side-effect fields. When task-level evidence can be aggregated,
   // also stamp termination_source (additive observability).

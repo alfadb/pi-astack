@@ -455,14 +455,10 @@ check("dispatch_agent details include terminalState", () => {
 });
 
 check("dispatch_parallel summary details include terminalState", () => {
-  // R7: the details block now embeds tasks: tasks.map(...) which is
-  // longer; bumped block window so the aggregate terminalState assertion
-  // is captured before the closer.
-  const block = dispatchSrc.match(
-    /kind:\s*"dispatch_parallel_summary"[\s\S]{0,3000}?\}\s*,/,
-  );
-  if (!block) throw new Error("could not locate dispatch_parallel_summary details");
-  if (!/terminalState:\s*aggregateTsFields\.terminal_state/.test(block[0])) {
+  const start = dispatchSrc.search(/kind:\s*"dispatch_parallel_summary"/);
+  if (start < 0) throw new Error("could not locate dispatch_parallel_summary details");
+  const block = dispatchSrc.slice(start, start + 5000);
+  if (!/terminalState:\s*aggregateTsFields\.terminal_state/.test(block)) {
     throw new Error("dispatch_parallel details missing aggregate terminalState surface");
   }
 });

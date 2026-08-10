@@ -187,7 +187,7 @@ console.log("[10] terminalStateFromLiveness");
   check("stale → non-null", ts !== null);
   check("terminal_state cancelled", ts?.terminal_state === "cancelled");
   check("cancel_source timeout", ts?.cancel_source === "timeout");
-  check("cleanup_done true (v1 read-only)", ts?.cleanup_done === true);
+  check("cleanup_done false without observed session closure", ts?.cleanup_done === false);
   check("resumable false (v1)", ts?.resumable === false);
 
   check("alive → null", terminalStateFromLiveness(assessLiveness([beat({ interval_ms: INTERVAL, phase: "started", seq: 1 })], { now: T0 })) === null);

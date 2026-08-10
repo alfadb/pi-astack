@@ -405,6 +405,7 @@ await check("injected StageRunResult attribution + toolSnapshot reach stage reco
       failureType: "timeout",
       cancelSource: "timeout",
       terminationSource: "timeout",
+      cleanupDone: false,
       toolSnapshot,
       durationMs: 12,
       toolCallCount: 3,
@@ -413,6 +414,7 @@ await check("injected StageRunResult attribution + toolSnapshot reach stage reco
   assert(r.stages.a.status === "failed", JSON.stringify(r.stages.a));
   assert(r.stages.a.cancel_source === "timeout", `cancel_source=${r.stages.a.cancel_source}`);
   assert(r.stages.a.termination_source === "timeout", `termination_source=${r.stages.a.termination_source}`);
+  assert(r.stages.a.cleanup_done === false, `cleanup_done=${r.stages.a.cleanup_done}`);
   assert(r.stages.a.failure_type === "timeout", r.stages.a.failure_type);
   assert(r.stages.a.failure_source === "runner_terminal", r.stages.a.failure_source);
   assert(r.stages.a.last_tool?.tool_name === "bash", JSON.stringify(r.stages.a.last_tool));
@@ -425,6 +427,7 @@ await check("injected StageRunResult attribution + toolSnapshot reach stage reco
   const row = auditRows.find((item) => item.event === "stage_terminal" && item.stage === "a");
   assert(row, "missing stage_terminal audit row");
   assert(row.cancel_source === "timeout" && row.termination_source === "timeout", JSON.stringify(row));
+  assert(row.cleanup_done === false, JSON.stringify(row));
   assert(row.last_tool?.tool_name === "bash" && row.active_tool_count === 1, JSON.stringify(row));
   // Whitelist: no tool args/output keys on audit row.
   const rowRaw = JSON.stringify(row);

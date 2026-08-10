@@ -176,7 +176,54 @@ export const MAX_CONCURRENCY = 4;
 export const MAX_PROVIDER_CONCURRENCY = DEFAULT_DISPATCH_SETTINGS.maxProviderConcurrency;
 export const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes without progress
 const DEFAULT_MAX_RUNTIME_MULTIPLIER = 4;
-const ABORT_TRACE_DRAIN_MS = 3_000;
+export const TERMINAL_CLOSURE_WAIT_MS = 3_000;
+export const SESSION_SHUTDOWN_WAIT_MS = 3_000;
+export const TERMINATION_PREFLIGHT_ERROR = "dispatch_termination_requested_before_provider_start";
+
+export type WorkerTerminationOwner = "run" | "parent" | "timeout" | "worker_run_governor";
+
+export interface WorkerTerminationClaim<T> {
+  owner: WorkerTerminationOwner;
+  evidence?: AbortEvidenceKind;
+  value: T;
+}
+
+/** Single authority for run/parent/timeout/governor races. */
+export class FirstWriterTermination<T> {
+  readonly termination: Promise<WorkerTerminationClaim<T>>;
+  private resolveTermination!: (claim: WorkerTerminationClaim<T>) => void;
+  private current: WorkerTerminationClaim<T> | undefined;
+  private sealed = false;
+
+  constructor(private readonly onClaim?: (claim: WorkerTerminationClaim<T>) => void) {
+    this.termination = new Promise((resolve) => { this.resolveTermination = resolve; });
+  }
+
+  get claim(): WorkerTerminationClaim<T> | undefined {
+    return this.current;
+  }
+
+  /**
+   * Run-terminal seal. Called synchronously when any run-owned terminal
+   * outcome is determined (normal prompt return, tool_rejected, crash):
+   * external owners (parent/timeout/governor) can no longer claim, only the
+   * run owner may settle. Claims made before the seal keep first-writer
+   * priority — a pre-prompt abort/timeout is never undone.
+   */
+  sealExternalClaims(): void {
+    this.sealed = true;
+  }
+
+  tryClaim(owner: WorkerTerminationOwner, value: T, evidence?: AbortEvidenceKind): boolean {
+    if (this.current) return false;
+    if (this.sealed && owner !== "run") return false;
+    const claim: WorkerTerminationClaim<T> = { owner, value, ...(evidence ? { evidence } : {}) };
+    this.current = claim;
+    try { this.onClaim?.(claim); } catch { /* termination must still resolve */ }
+    this.resolveTermination(claim);
+    return true;
+  }
+}
 
 export function providerFromModel(model: string): string {
   const provider = String(model ?? "").split("/")[0]?.trim();
@@ -1146,6 +1193,8 @@ export interface AgentResult {
   cancelSource?: CancelSource;
   /** Structured termination origin for any non-success outcome. */
   terminationSource?: TerminationSource;
+  /** True only when worker settlement and session closure were both proven within the bound. */
+  cleanupDone?: boolean;
   /** Bounded last/active tool snapshot (safe metadata only). */
   toolSnapshot?: ToolRunSnapshotSummary;
   workerRunGovernance?: WorkerRunGovernanceSummary;
@@ -1658,51 +1707,116 @@ export async function createSubAgentSessionResources(
   return { settingsManager, resourceLoader };
 }
 
-const SUBAGENT_SESSION_DISPOSALS_KEY = Symbol.for("pi-astack/dispatch/subagent-session-disposals/v1");
+const SUBAGENT_SESSION_DISPOSALS_KEY = Symbol.for("pi-astack/dispatch/subagent-session-disposals/v3");
 
-function subAgentSessionDisposals(): WeakMap<object, Promise<void>> {
+type SubAgentSessionDisposalState = {
+  promise: Promise<boolean>;
+  resolve: (done: boolean) => void;
+  disposeCalled: boolean;
+  disposeDone: boolean;
+};
+
+function subAgentSessionDisposals(): WeakMap<object, SubAgentSessionDisposalState> {
   const root = globalThis as Record<symbol, unknown>;
-  let disposals = root[SUBAGENT_SESSION_DISPOSALS_KEY] as WeakMap<object, Promise<void>> | undefined;
+  let disposals = root[SUBAGENT_SESSION_DISPOSALS_KEY] as
+    | WeakMap<object, SubAgentSessionDisposalState>
+    | undefined;
   if (!(disposals instanceof WeakMap)) {
-    disposals = new WeakMap<object, Promise<void>>();
+    disposals = new WeakMap<object, SubAgentSessionDisposalState>();
     root[SUBAGENT_SESSION_DISPOSALS_KEY] = disposals;
   }
   return disposals;
 }
 
-/** Emit the sub-agent shutdown lifecycle exactly once, then dispose its session. */
-export async function disposeSubAgentSession(session: any): Promise<void> {
+function disposeSessionSynchronously(session: any, state: SubAgentSessionDisposalState): void {
+  if (state.disposeCalled) return;
+  state.disposeCalled = true;
+  try {
+    // AgentSession.dispose() synchronously aborts retries, compaction, session
+    // bash processes, and the active agent/tool/provider signal.
+    session.dispose();
+  } catch {
+    state.disposeDone = false;
+  }
+}
+
+async function boundedPromiseResult(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observed = promise.then(() => true, () => false);
+  const timed = new Promise<boolean>((resolve) => {
+    // Keep this timer referenced: callers are awaiting a bounded lifecycle
+    // verdict, so process exit must not replace the promised resolution.
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  const result = await Promise.race([observed, timed]);
+  if (timer) clearTimeout(timer);
+  return result;
+}
+
+/**
+ * Emit SDK shutdown once and dispose once. A later immediate caller upgrades a
+ * normal in-flight shutdown synchronously, so an old shutdown promise cannot
+ * swallow the hard close. Both normal and abnormal shutdown waits are bounded.
+ */
+export function disposeSubAgentSession(
+  session: any,
+  options: { immediate?: boolean } = {},
+): Promise<boolean> {
   if (session == null || (typeof session !== "object" && typeof session !== "function")) {
-    return;
+    return Promise.resolve(true);
   }
 
   const key = session as object;
-  const existing = subAgentSessionDisposals().get(key);
+  const disposals = subAgentSessionDisposals();
+  const existing = disposals.get(key);
   if (existing) {
-    await existing;
-    return;
+    if (options.immediate) disposeSessionSynchronously(session, existing);
+    return existing.promise;
   }
 
-  const disposal = (async () => {
-    try {
-      const runner = session.extensionRunner;
-      if (
-        runner
-        && typeof runner.hasHandlers === "function"
-        && runner.hasHandlers("session_shutdown")
-        && typeof runner.emit === "function"
-      ) {
-        await runner.emit({ type: "session_shutdown", reason: "quit" });
-      }
-    } catch {
-      // Extension cleanup is best-effort and must never block disposal.
-    } finally {
-      try { session.dispose(); } catch { /* best-effort */ }
-    }
-  })();
+  let resolveDisposal!: (done: boolean) => void;
+  const state: SubAgentSessionDisposalState = {
+    promise: new Promise<boolean>((resolve) => { resolveDisposal = resolve; }),
+    resolve: (done) => resolveDisposal(done),
+    disposeCalled: false,
+    disposeDone: true,
+  };
+  // Publish before extension emission so synchronous re-entry can upgrade.
+  disposals.set(key, state);
 
-  subAgentSessionDisposals().set(key, disposal);
-  await disposal;
+  let shutdownDone = true;
+  let shutdown: Promise<unknown> | undefined;
+  try {
+    const runner = session.extensionRunner;
+    if (
+      runner
+      && typeof runner.hasHandlers === "function"
+      && runner.hasHandlers("session_shutdown")
+      && typeof runner.emit === "function"
+    ) {
+      shutdown = Promise.resolve(runner.emit({ type: "session_shutdown", reason: "quit" }));
+    }
+  } catch {
+    shutdownDone = false;
+  }
+
+  if (options.immediate) disposeSessionSynchronously(session, state);
+  void (async () => {
+    if (shutdown) {
+      shutdownDone = await boundedPromiseResult(shutdown, SESSION_SHUTDOWN_WAIT_MS);
+    }
+    // Timeout/rejection never prevents the actual SDK dispose.
+    disposeSessionSynchronously(session, state);
+    state.resolve(shutdownDone && state.disposeDone);
+  })().catch(() => {
+    disposeSessionSynchronously(session, state);
+    state.resolve(false);
+  });
+
+  return state.promise;
 }
 
 /**
@@ -1991,8 +2105,10 @@ export async function runInProcess(
     heartbeatProjectRoot,
     start,
   );
+  let requestGovernorTermination = (_decision: WorkerRunGovernorDecision): void => {};
   const emitWorkerRunDecision = (decision: WorkerRunGovernorDecision | undefined): void => {
     if (!decision) return;
+    if (decision.mode === "abort") requestGovernorTermination(decision);
     const trace = executionContext?.reasoningTrace;
     try {
       dispatchTrace?.emitGovernor({
@@ -2014,7 +2130,7 @@ export async function runInProcess(
         workflowStageId: trace.workflowStageId,
         workflow: trace.workflowRunId ?? "workflow",
       } : {}),
-    }));
+    })).catch(() => { /* audit is best-effort */ });
   };
   if (effectiveMaxOutputTokens !== undefined) {
     emitWorkerRunDecision(workerGovernor.observe({
@@ -2029,17 +2145,45 @@ export async function runInProcess(
     parentContextFiles,
   });
 
-  // Local AbortController: merged from parent signal + timeout.
-  // P1 fix: this closes the window where timeout fires before createAgentSession()
-  // resolves. Without it, the agent would run a full turn and discard results.
-  // The local signal is checked after session creation — it does NOT get passed
-  // to createAgentSession() or prompt() (SDK doesn't accept AbortSignal).
-  // The actual in-flight abort is handled by session.abort().
+  // Local lifecycle fence. SDK prompt() has no AbortSignal parameter, so an
+  // abnormal first claim both aborts this fence and synchronously starts
+  // SDK session disposal, which covers abortBash()+agent.abort().
   const localCtl = new AbortController();
   const localSignal = localCtl.signal;
 
   let session: any = undefined;
-  let settled = false;
+  let terminationRequested = false;
+  let deferHardCloseForClaim = false;
+  let sessionClosurePromise: Promise<boolean> | undefined;
+  let sessionClosureDone: boolean | undefined;
+  let resolveClosureEvidence!: (done: boolean) => void;
+  let closureEvidenceResolved = false;
+  const closureEvidence = new Promise<boolean>((resolve) => { resolveClosureEvidence = resolve; });
+  const noteClosureEvidence = (done: boolean): void => {
+    if (closureEvidenceResolved) return;
+    closureEvidenceResolved = true;
+    resolveClosureEvidence(done);
+  };
+  const startSessionClosure = (immediate = false): Promise<boolean> | undefined => {
+    if (!session) return undefined;
+    // Always call the helper so a normal in-flight shutdown can be upgraded to
+    // immediate synchronous dispose. The helper's state owns singleflight.
+    const requested = disposeSubAgentSession(session, { immediate });
+    if (!sessionClosurePromise) {
+      sessionClosurePromise = requested.then((done) => {
+        sessionClosureDone = done;
+        noteClosureEvidence(done);
+        return done;
+      }, () => {
+        sessionClosureDone = false;
+        noteClosureEvidence(false);
+        return false;
+      });
+    } else {
+      void requested.catch(() => { /* reflected by the original closure promise */ });
+    }
+    return sessionClosurePromise;
+  };
 
   // Output collection.
   // finalOutput is the LAST assistant turn that produced text. Subscribe
@@ -2091,35 +2235,39 @@ export async function runInProcess(
   // Bounded tool_execution_* snapshot (safe metadata only). Heartbeat alive
   // is NOT tool progress and never enters this tracker.
   const toolTracker = new ToolRunTracker();
+  let postClaimStartCount = 0;
 
-  // Structured abort evidence: set only by known lifecycle owners
-  // (parent signal / idle|max-runtime timeout / governor). First writer wins
-  // so a later timeout racing a parent abort does not erase parent evidence
-  // when the parent listener already fired — but timeout path sets its own
-  // evidence on the timeout result directly.
-  let abortEvidence: AbortEvidenceKind | undefined;
-  const noteAbortEvidence = (kind: AbortEvidenceKind) => {
-    if (abortEvidence === undefined) abortEvidence = kind;
-  };
+  const termination = new FirstWriterTermination<AgentResult>((claim) => {
+    terminationRequested = true;
+    if (claim.owner !== "run") {
+      localCtl.abort({ kind: claim.evidence ?? claim.owner });
+      const hardClose = () => {
+        const closure = startSessionClosure(true);
+        if (closure) void closure.catch(() => { /* closure evidence records false */ });
+      };
+      // Governor claims originate inside an SDK event listener. Keep the claim
+      // and message seal synchronous, then leave SDK dispose to the next
+      // microtask to avoid invalidating the runner during its own callback.
+      if (deferHardCloseForClaim) queueMicrotask(hardClose);
+      else hardClose();
+    }
+  });
 
-  // Handle abort. Calls session.abort() (best-effort, fire-and-forget) +
-  // localCtl.abort() (checked post-session-creation).
-  // Cross-path idempotence: abortOnce guards prevent double-abort from onAbort
-  // + bail path + catch path all firing session.abort().
-  let abortOnce = false;
-  const abortSessionOnce = () => {
-    if (abortOnce) return;
-    abortOnce = true;
-    try { void session?.abort?.()?.catch?.(() => {}); } catch { /* best-effort */ }
-  };
+  const buildParentAbortResult = (evidence: AbortEvidenceKind): AgentResult =>
+    enrichResultAttribution({
+      output: finalOutput || responsePartial,
+      error: "aborted by parent signal",
+      failureType: "aborted",
+      durationMs: Date.now() - start,
+      toolCallCount,
+      usage,
+      stopReason,
+      retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+    }, { abortEvidence: evidence, toolSnapshot: toolTracker.snapshot() });
 
   const onAbort = () => {
-    if (settled) return;
-    // Parent/user AbortSignal — attribute from structured reason only.
-    noteAbortEvidence(abortEvidenceFromSignal(signal) ?? "parent");
-    settled = true;
-    localCtl.abort();
-    abortSessionOnce();
+    const evidence = abortEvidenceFromSignal(signal) ?? "parent";
+    termination.tryClaim("parent", buildParentAbortResult(evidence), evidence);
   };
 
   if (signal.aborted) {
@@ -2132,7 +2280,7 @@ export async function runInProcess(
     } catch { /* never throw */ }
     return finalizeReasoningTrace(
       enrichResultAttribution(
-        { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount },
+        { output: "", error: "aborted before start", failureType: "aborted", durationMs: Date.now() - start, toolCallCount, cleanupDone: true },
         { abortEvidence: preEvidence, toolSnapshot: toolTracker.snapshot() },
       ),
       { forceIncomplete: true },
@@ -2140,34 +2288,79 @@ export async function runInProcess(
   }
   signal.addEventListener("abort", onAbort, { once: true });
 
-  // Timeout: race against session.prompt(). The primary watchdog is an
-  // IDLE timeout: any meaningful AgentSession event, retry event, session
-  // creation, or prompt boundary records progress and re-arms the timer.
-  // A larger max-runtime cap remains as a safety boundary for pathological
-  // event streams that keep producing progress but never terminate.
-  //
-  // Note: Promise.race means timeout and normal completion may race; if the
-  // agent finishes in the same microtask as a watchdog, the winner is
-  // non-deterministic. When timeout wins but finalOutput has content, we
-  // surface it as a partial result rather than a bare timeout.
-  //
-  // Also non-deterministic by design: if agent reaches stopReason="length"
-  // (truncation) in the same microtask a watchdog fires, the result is
-  // either `truncated` (runPromise wins) or `timeout_partial` (watchdog wins).
-  // Both are correct — the partial output is preserved in either case, so the
-  // caller is not misled.
+  // Idle and max-runtime watchdogs compete through the same first-writer
+  // authority as parent/governor/run completion. Progress cannot re-arm once
+  // any terminal owner has claimed the run.
   let idleTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let maxRuntimeTimeoutId: ReturnType<typeof setTimeout> | undefined;
   let lastProgressAt = start;
   let lastProgressReason = "started";
+  // Set synchronously when a normal prompt return makes the run terminal;
+  // recordProgress must not re-arm the idle watchdog after the seal.
+  let runTerminalSealed = false;
   let recordProgress = (_reason: string) => {};
-  const governancePromise = workerGovernor.termination.then((decision): AgentResult => {
-    noteAbortEvidence("worker_run_governor");
-    localCtl.abort();
-    abortSessionOnce();
-    settled = true;
+  const resolveTimeout = (timeoutKind: "idle" | "max_runtime") => {
+    const now = Date.now();
+    const hasPartial = finalOutput.length > 0 || responsePartial.length > 0;
+    const limitMs = timeoutKind === "idle" ? idleTimeoutMs : maxRuntimeMs;
+    const idleForMs = Math.max(0, now - lastProgressAt);
+    const baseError = timeoutKind === "idle"
+      ? `idle timeout after ${limitMs}ms without progress (last progress: ${lastProgressReason}, ${idleForMs}ms ago)`
+      : `max runtime ${limitMs}ms exceeded`;
+    const result = enrichResultAttribution({
+      output: finalOutput || responsePartial,
+      error: hasPartial ? `${baseError} (partial output captured)` : baseError,
+      failureType: hasPartial ? "timeout_partial" : "timeout",
+      timeoutKind,
+      lastProgressReason,
+      durationMs: now - start,
+      toolCallCount,
+      usage,
+      stopReason,
+      retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+    }, { abortEvidence: "timeout", toolSnapshot: toolTracker.snapshot(now) });
+    termination.tryClaim("timeout", result, "timeout");
+  };
+  const armIdleTimeout = () => {
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    // This timer is the only guaranteed owner when a provider await has no
+    // socket/handle of its own. Keep it referenced so the promised timeout can
+    // actually settle; every terminal path clears it below.
+    idleTimeoutId = setTimeout(() => resolveTimeout("idle"), idleTimeoutMs);
+  };
+  recordProgress = (reason: string) => {
+    if (terminationRequested) return;
+    lastProgressAt = Date.now();
+    lastProgressReason = reason;
+    heartbeat.beat("alive", `progress:${reason}`);
+    try {
+      executionContext?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath, toolCallCount });
+    } catch { /* best-effort UI telemetry */ }
+    if (!runTerminalSealed) armIdleTimeout();
+  };
+  recordProgress("watchdog_started");
+  maxRuntimeTimeoutId = setTimeout(() => resolveTimeout("max_runtime"), maxRuntimeMs);
+
+  // Run-terminal seal. Any run-owned terminal outcome (normal prompt return,
+  // tool_rejected, crash/retry_exhausted from the catch path, late rejection)
+  // seals external parent/timeout/governor claims and stops the watchdogs
+  // synchronously BEFORE entering any closure await, so a late abort/timeout
+  // during closure cannot rewrite a run-owned failure as cancelled. Claims
+  // taken before the seal keep first-writer priority — abnormal bail paths
+  // (pre-aborted signal, timeout, governor) never call this. recordProgress
+  // must not re-arm the idle watchdog after the seal (prompt_end telemetry
+  // still fires, but no new timer).
+  const sealRunTerminal = () => {
+    if (runTerminalSealed) return;
+    runTerminalSealed = true;
+    termination.sealExternalClaims();
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
+  };
+
+  requestGovernorTermination = (decision) => {
     const output = governanceOutputOverride ?? boundedUtf8Prefix(finalOutput || responsePartial);
-    return enrichResultAttribution({
+    const result = enrichResultAttribution({
       output,
       error: governanceFailureMessage(decision),
       failureType: decision.failureType as FailureType,
@@ -2178,60 +2371,18 @@ export async function runInProcess(
       retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       workerRunGovernance: workerGovernor.snapshot(),
     }, { abortEvidence: "worker_run_governor", toolSnapshot: toolTracker.snapshot() });
-  });
-
-  const timeoutPromise = new Promise<AgentResult>((resolve) => {
-    const resolveTimeout = (timeoutKind: "idle" | "max_runtime") => {
-      // If parent already aborted, do not claim timeout ownership — the race
-      // loser may still resolve, but attribution should keep the first owner.
-      // When we are first, stamp timeout evidence before onAbort so a
-      // subsequent parent noteAbortEvidence (first-writer-wins) cannot steal it.
-      const alreadyOwned = abortEvidence !== undefined || settled;
-      if (!alreadyOwned) noteAbortEvidence("timeout");
-      const evidenceForResult: AbortEvidenceKind =
-        abortEvidence === "timeout" || !alreadyOwned ? "timeout" : (abortEvidence ?? "timeout");
-      onAbort();
-      const hasPartial = finalOutput.length > 0;
-      const now = Date.now();
-      const limitMs = timeoutKind === "idle" ? idleTimeoutMs : maxRuntimeMs;
-      const idleForMs = Math.max(0, now - lastProgressAt);
-      const baseError = timeoutKind === "idle"
-        ? `idle timeout after ${limitMs}ms without progress (last progress: ${lastProgressReason}, ${idleForMs}ms ago)`
-        : `max runtime ${limitMs}ms exceeded`;
-      // Only emit a timeout-shaped result when timeout is the lifecycle owner.
-      // If parent already settled the run, this resolve is a no-op race loser
-      // (Promise.race already took the other result) — still safe to resolve.
-      resolve(enrichResultAttribution({
-        output: finalOutput,
-        error: hasPartial ? `${baseError} (partial output captured)` : baseError,
-        failureType: hasPartial ? "timeout_partial" : "timeout",
-        timeoutKind,
-        lastProgressReason,
-        durationMs: now - start,
-        toolCallCount,
-        usage,
-        stopReason,
-        retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
-      }, { abortEvidence: evidenceForResult, toolSnapshot: toolTracker.snapshot(now) }));
-    };
-    const armIdleTimeout = () => {
-      if (idleTimeoutId) clearTimeout(idleTimeoutId);
-      idleTimeoutId = setTimeout(() => resolveTimeout("idle"), idleTimeoutMs);
-      idleTimeoutId.unref();
-    };
-    recordProgress = (reason: string) => {
-      if (settled) return;
-      lastProgressAt = Date.now();
-      lastProgressReason = reason;
-      heartbeat.beat("alive", `progress:${reason}`);
-      try {
-        executionContext?.onProgress?.({ reason, at: lastProgressAt, heartbeatTracePath: heartbeat.tracePath, toolCallCount });
-      } catch { /* best-effort UI telemetry */ }
-      armIdleTimeout();
-    };
-    recordProgress("watchdog_started");
-    maxRuntimeTimeoutId = setTimeout(() => resolveTimeout("max_runtime"), maxRuntimeMs);
-    maxRuntimeTimeoutId.unref();
+    deferHardCloseForClaim = true;
+    try {
+      termination.tryClaim("worker_run_governor", result, "worker_run_governor");
+    } finally {
+      deferHardCloseForClaim = false;
+    }
+  };
+  // Defensive fallback for a terminal decision created before the callback was
+  // installed; normal event paths claim synchronously inside emitWorkerRunDecision.
+  void workerGovernor.termination.then(requestGovernorTermination).catch(() => {
+    // Governor termination is internal and should not reject, but never leave a
+    // detached rejection attached to the long-lived dispatch process.
   });
 
   const runPromise = (async (): Promise<AgentResult> => {
@@ -2269,6 +2420,10 @@ export async function runInProcess(
         sessionManager: subAgentSm,
       });
       session = result.session;
+      if (terminationRequested) {
+        const closure = startSessionClosure(true);
+        if (closure) void closure.catch(() => { /* closure evidence records false */ });
+      }
       recordProgress("session_created");
 
       // SDK silently ignores unknown allowlist entries. Fail before prompt()
@@ -2276,7 +2431,12 @@ export async function runInProcess(
       // registry. This also verifies DEFAULT_SUBAGENT_TOOLS on default calls.
       const sessionToolCheck = validateSessionToolRegistry(session, tools);
       if (!sessionToolCheck.ok) {
-        await disposeSubAgentSession(session);
+        // Run-owned terminal outcome (tool_rejected): seal external claims and
+        // stop the watchdogs synchronously BEFORE the closure await so a late
+        // parent abort / idle / max-runtime cannot rewrite the failure as
+        // cancelled. Claims taken before this point keep first-writer priority.
+        sealRunTerminal();
+        const cleanupDone = await (startSessionClosure() ?? Promise.resolve(false));
         signal.removeEventListener("abort", onAbort);
         return {
           output: "",
@@ -2284,6 +2444,7 @@ export async function runInProcess(
           failureType: "tool_rejected",
           durationMs: Date.now() - start,
           toolCallCount,
+          cleanupDone,
         };
       }
       recordProgress("tool_registry_validated");
@@ -2293,11 +2454,10 @@ export async function runInProcess(
       // Check BOTH the parent signal AND our local signal (which timeout triggers).
       // P1 fix: without localSignal check, timeout that fires before this point
       // would be silently ignored and the agent would run a full turn.
-      if (signal.aborted || localSignal.aborted) {
-        abortSessionOnce();
-        await disposeSubAgentSession(session);
+      if (signal.aborted || localSignal.aborted || termination.claim?.owner !== undefined) {
+        const cleanupDone = await (startSessionClosure(true) ?? Promise.resolve(false));
         signal.removeEventListener("abort", onAbort);
-        return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start, toolCallCount };
+        return { output: "", error: "aborted", failureType: "aborted", durationMs: Date.now() - start, toolCallCount, cleanupDone };
       }
 
       // Subscribe to collect output and retry history.
@@ -2307,6 +2467,25 @@ export async function runInProcess(
         reasoningTrace?.handleSessionEvent(event);
         try { dispatchTrace?.handleSessionEvent(event); } catch { /* never throw into child */ }
         const eventType = String(event?.type ?? "unknown");
+
+        if (terminationRequested) {
+          // Preserve bounded post-claim evidence and tool closure state without
+          // re-entering governor/session disposal from late SDK events.
+          if (
+            (eventType === "message_start" && event.message?.role === "assistant" && event.message?.stopReason === "pending")
+            || eventType === "tool_execution_start"
+          ) {
+            postClaimStartCount = Math.min(1_000, postClaimStartCount + 1);
+          }
+          if (eventType === "tool_execution_start") {
+            toolTracker.onStart(event.toolName, event.toolCallId);
+          } else if (eventType === "tool_execution_update") {
+            toolTracker.onUpdate(event.toolName, event.toolCallId);
+          } else if (eventType === "tool_execution_end") {
+            toolTracker.onEnd(event.toolName, event.toolCallId, event.isError === true);
+          }
+          return;
+        }
 
         if (eventType === "message_start" && event.message?.role === "assistant") {
           visibleDetector.messageStart();
@@ -2446,13 +2625,27 @@ export async function runInProcess(
         }
       });
 
-      // Run agent (this blocks until agent finishes or aborts)
+      // Run agent (this blocks until agent finishes or aborts). The SDK invokes
+      // preflightResult(true) synchronously at its final accepted boundary,
+      // immediately before _runAgentPrompt(). Throwing here closes termination
+      // during any pre-run awaits without starting a provider request.
       recordProgress("prompt_start");
-      await session.prompt(prompt);
+      await session.prompt(prompt, {
+        preflightResult: (accepted: boolean) => {
+          if (accepted && terminationRequested) {
+            startSessionClosure(true);
+            throw new Error(TERMINATION_PREFLIGHT_ERROR);
+          }
+        },
+      });
+      // Run-terminal seal: prompt returned normally. Seal external claims and
+      // stop the watchdogs synchronously BEFORE prompt_end telemetry so a
+      // parent abort triggered from onProgress cannot rewrite the success.
+      sealRunTerminal();
       recordProgress("prompt_end");
 
       unsub();
-      await disposeSubAgentSession(session);
+      const promptCleanupDone = await (startSessionClosure() ?? Promise.resolve(false));
       signal.removeEventListener("abort", onAbort);
 
       const durationMs = Date.now() - start;
@@ -2492,14 +2685,17 @@ export async function runInProcess(
       // so lifecycle abort is not reclassified as stream/agent_error. Keep
       // partial output; settlement attributes parent/user/governor/unknown.
       if (isResolvedAbortStopReason(stopReason)) {
-        return agentResultFromResolvedAbort({
-          output: finalOutput,
-          errorMessage,
-          durationMs,
-          toolCallCount,
-          usage,
-          retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
-        });
+        return {
+          ...agentResultFromResolvedAbort({
+            output: finalOutput,
+            errorMessage,
+            durationMs,
+            toolCallCount,
+            usage,
+            retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+          }),
+          cleanupDone: promptCleanupDone,
+        };
       }
 
       const agentReportedError = stopReason === "error" || !!errorMessage;
@@ -2535,8 +2731,14 @@ export async function runInProcess(
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
       };
     } catch (err: any) {
-      abortSessionOnce();
-      await disposeSubAgentSession(session);
+      // Run-owned terminal outcome (crash / retry_exhausted / provider error):
+      // seal external claims and stop the watchdogs synchronously BEFORE the
+      // closure await so a late parent/timeout cannot rewrite the failure as
+      // cancelled. If an abnormal owner (parent/timeout/governor) already
+      // claimed first (e.g. TERMINATION_PREFLIGHT_ERROR bail), keep that
+      // first-writer owner — do not seal an abnormal bail path.
+      if (termination.claim?.owner === undefined) sealRunTerminal();
+      const cleanupDone = await (startSessionClosure(true) ?? Promise.resolve(true));
       signal.removeEventListener("abort", onAbort);
       const durationMs = Date.now() - start;
       const errMsg = err?.message ?? String(err);
@@ -2546,51 +2748,91 @@ export async function runInProcess(
       //   1. Use classifyWithRetry so retry_exhausted is actually reachable here
       //   2. Include retryHistory so callers can see what was tried
       return {
-        output: finalOutput,
+        output: finalOutput || responsePartial,
         error: errMsg,
         failureType: classifyWithRetry(errMsg, retryHistory, "crash"),
         durationMs,
         toolCallCount,
         usage,
         retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+        cleanupDone,
       };
     }
   })();
 
   let runPromiseSettled = false;
-  const trackedRunPromise = runPromise.finally(() => { runPromiseSettled = true; });
-  const result = await Promise.race([trackedRunPromise, timeoutPromise, governancePromise]);
-  // Final attribution: prefer evidence already on the result (timeout/governor
-  // paths stamp it); otherwise use lifecycle abortEvidence. Signal evidence is
-  // a safe fallback ONLY for cancelled/aborted lifecycle outcomes — never
-  // re-attribute an already-settled rate_limit/network/other failure just
-  // because the parent signal later aborted during audit/cleanup.
-  // Stream is never inferred from stopReason (SDK "aborted" is ambiguous).
-  // Tool snapshot always taken at settlement so idle-timeout audit sees the
-  // last/active tools even when the winning path didn't stamp one.
+  let runPromiseRejected = false;
+  const trackedRunPromise: Promise<AgentResult> = runPromise.then(
+    (runResult) => {
+      runPromiseSettled = true;
+      if (!session) noteClosureEvidence(true);
+      termination.tryClaim("run", runResult);
+      return runResult;
+    },
+    (error: unknown) => {
+      // Convert an unexpected late rejection into a claimable crash result and
+      // observe it here so no detached rejection reaches the process. Seal
+      // external claims first (unless an abnormal owner already claimed) so a
+      // late parent/timeout cannot rewrite the crash as cancelled.
+      if (termination.claim?.owner === undefined) sealRunTerminal();
+      runPromiseSettled = true;
+      runPromiseRejected = true;
+      const closure = startSessionClosure(true);
+      if (!session) noteClosureEvidence(true);
+      if (closure) void closure.catch(() => { /* closure evidence records false */ });
+      const crash: AgentResult = {
+        output: finalOutput || responsePartial,
+        error: error instanceof Error ? error.message : String(error),
+        failureType: "crash",
+        durationMs: Date.now() - start,
+        toolCallCount,
+        usage,
+        retryHistory: retryHistory.entries.length > 0 ? retryHistory : undefined,
+        cleanupDone: false,
+      };
+      termination.tryClaim("run", crash);
+      return crash;
+    },
+  );
+  const winningClaim = await termination.termination;
+  let result = winningClaim.value;
+
+  if (idleTimeoutId) clearTimeout(idleTimeoutId);
+  if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
+  signal.removeEventListener("abort", onAbort);
+
+  const abnormalClaim = winningClaim.owner !== "run";
+  const boundedJoinRequired = abnormalClaim || runPromiseRejected;
+  let joinedClosureDone = sessionClosureDone === true || (!session && runPromiseSettled);
+  let joinedWithinBound = !boundedJoinRequired;
+  if (boundedJoinRequired) {
+    joinedWithinBound = await boundedPromiseResult(
+      Promise.all([trackedRunPromise, closureEvidence]).then(([, closureDone]) => {
+        joinedClosureDone = closureDone;
+      }),
+      TERMINAL_CLOSURE_WAIT_MS,
+    );
+  }
+
+  // cleanupDone is true only with both run settlement and positive closure
+  // evidence. Any observed post-claim provider/tool start makes the verdict
+  // false even if it later drains, because the terminal fence was crossed.
+  result = {
+    ...result,
+    cleanupDone:
+      runPromiseSettled
+      && joinedWithinBound
+      && joinedClosureDone
+      && postClaimStartCount === 0,
+  };
+
+  // Final attribution comes only from the winning claim or explicit result
+  // evidence. A late parent/timeout loser cannot rewrite the owner.
   const settlementEvidence: AbortEvidenceKind | undefined =
-    result.terminationSource === "timeout" || result.failureType === "timeout" || result.failureType === "timeout_partial"
-      ? "timeout"
-      : result.terminationSource === "worker_run_governor" ||
-          result.failureType === "repetitive_output" ||
-          result.failureType === "provider_retry_budget_exceeded" ||
-          result.failureType === "empty_visible_retry_budget_exceeded" ||
-          result.failureType === "full_output_cap_budget_exceeded"
-        ? "worker_run_governor"
-        : result.terminationSource === "stream" || result.cancelSource === "stream"
-          ? "stream"
-          : abortEvidence;
-  const isCancelledLifecycle =
-    result.failureType === "aborted" ||
-    result.failureType === "timeout" ||
-    result.failureType === "timeout_partial" ||
-    result.failureType === "guardrail_stop";
-  const signalFallback =
-    isCancelledLifecycle && settlementEvidence === undefined
-      ? abortEvidenceFromSignal(signal)
-      : undefined;
+    winningClaim.evidence ??
+    (result.terminationSource === "stream" || result.cancelSource === "stream" ? "stream" : undefined);
   const attributed = enrichResultAttribution(result, {
-    abortEvidence: settlementEvidence ?? signalFallback,
+    abortEvidence: settlementEvidence,
     toolSnapshot: result.toolSnapshot ?? toolTracker.snapshot(),
   });
   const resultWithBudget: AgentResult = {
@@ -2598,38 +2840,9 @@ export async function runInProcess(
     ...(effectiveMaxOutputTokens === undefined ? {} : { maxOutputTokens: effectiveMaxOutputTokens }),
     workerRunGovernance: attributed.workerRunGovernance ?? workerGovernor.snapshot(),
   };
-  if (idleTimeoutId) clearTimeout(idleTimeoutId);
-  if (maxRuntimeTimeoutId) clearTimeout(maxRuntimeTimeoutId);
-  settled = true;
-  // Cross-vendor audit (ADR 0030 dogfood, opus 2.C): remove the abort listener
-  // on EVERY race-resolution path. The timeout path invokes onAbort() MANUALLY
-  // (not via the abort event), so `{ once: true }` never fires and the listener
-  // would leak on the long-lived parent signal (unbounded per fan-out →
-  // MaxListenersExceededWarning). Idempotent: a no-op if a runPromise terminal
-  // path already removed it.
-  signal.removeEventListener("abort", onAbort);
-  const abortRace = resultWithBudget.failureType === "timeout" ||
-    resultWithBudget.failureType === "timeout_partial" ||
+  const abortRace = abnormalClaim ||
     resultWithBudget.failureType === "guardrail_stop" ||
-    resultWithBudget.failureType === "repetitive_output" ||
-    resultWithBudget.failureType === "provider_retry_budget_exceeded" ||
-    resultWithBudget.failureType === "empty_visible_retry_budget_exceeded" ||
-    resultWithBudget.failureType === "full_output_cap_budget_exceeded" ||
     resultWithBudget.failureType === "aborted";
-  if (abortRace && !runPromiseSettled) {
-    await new Promise<void>((resolve) => {
-      let done = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        if (timer) clearTimeout(timer);
-        resolve();
-      };
-      timer = setTimeout(finish, ABORT_TRACE_DRAIN_MS);
-      trackedRunPromise.then(finish, finish);
-    });
-  }
   const resultWithHeartbeat = enrichHeartbeat(resultWithBudget);
   return finalizeReasoningTrace(resultWithHeartbeat, {
     forceIncomplete: abortRace,
@@ -2757,6 +2970,7 @@ const PARTIAL_OUTPUT_FAILURES: ReadonlySet<FailureType> = new Set([
   "provider_retry_budget_exceeded",
   "empty_visible_retry_budget_exceeded",
   "full_output_cap_budget_exceeded",
+  "aborted",
 ]);
 
 export function formatResult(
@@ -3257,6 +3471,11 @@ export default function (pi: ExtensionAPI) {
           terminalState: tsFields.terminal_state,
           ...(tsFields.cancel_source ? { cancelSource: tsFields.cancel_source } : {}),
           ...(tsFields.termination_source ? { terminationSource: tsFields.termination_source } : {}),
+          ...(typeof result.cleanupDone === "boolean"
+            ? { cleanupDone: result.cleanupDone }
+            : tsFields.cleanup_done !== undefined
+              ? { cleanupDone: tsFields.cleanup_done }
+              : {}),
           ...dispatchToolSnapshotDetailsFields(result),
           ...(subAnchor ? { anchor: subAnchor } : {}),
           ...(result.error ? { error: result.error, failureType: result.failureType } : {}),
@@ -3701,6 +3920,7 @@ export default function (pi: ExtensionAPI) {
           error: "task did not start (parent abort before worker claim)",
           failureType: "aborted",
           durationMs: 0,
+          cleanupDone: true,
         }, { abortEvidence: parallelSignalEvidence ?? "parent" });
         try {
           taskTraces[i]?.emitLifecycle("never_started", {
@@ -3902,6 +4122,7 @@ export default function (pi: ExtensionAPI) {
           terminalState: aggregateTsFields.terminal_state,
           ...(aggregateTsFields.cancel_source ? { cancelSource: aggregateTsFields.cancel_source } : {}),
           ...(aggregateTsFields.termination_source ? { terminationSource: aggregateTsFields.termination_source } : {}),
+          ...(aggregateTsFields.cleanup_done !== undefined ? { cleanupDone: aggregateTsFields.cleanup_done } : {}),
           ...(aggregateTsFields.what_dropped ? { whatDropped: aggregateTsFields.what_dropped } : {}),
           ...(aggregateTsFields.alt_path ? { altPath: aggregateTsFields.alt_path } : {}),
           // R7 P1 fix (Opus P1-A + GPT-5.5 P1-1 + DeepSeek P2-1):
@@ -3930,6 +4151,11 @@ export default function (pi: ExtensionAPI) {
               terminalState: taskFields.terminal_state,
               ...(taskFields.cancel_source ? { cancelSource: taskFields.cancel_source } : {}),
               ...(taskFields.termination_source ? { terminationSource: taskFields.termination_source } : {}),
+              ...(typeof r.cleanupDone === "boolean"
+                ? { cleanupDone: r.cleanupDone }
+                : taskFields.cleanup_done !== undefined
+                  ? { cleanupDone: taskFields.cleanup_done }
+                  : {}),
             };
           }),
         },

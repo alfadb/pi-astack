@@ -269,7 +269,7 @@ check("failed: reason is clipped at 500 chars", () => {
 });
 
 check("cancelled (timeout failureType) → cancel_source=timeout + cleanup_done", () => {
-  const f = buildTerminalStateFields({ error: "t", failureType: "timeout" });
+  const f = buildTerminalStateFields({ error: "t", failureType: "timeout", cleanupDone: true });
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "timeout",
@@ -279,10 +279,15 @@ check("cancelled (timeout failureType) → cancel_source=timeout + cleanup_done"
   });
 });
 
-check("cancelled (aborted failureType, no evidence) → cancel_source=unknown + cleanup_done", () => {
+check("cancelled without closure evidence reports cleanup_done=false", () => {
+  const f = buildTerminalStateFields({ error: "t", failureType: "timeout" });
+  assertEq(f.cleanup_done, false);
+});
+
+check("cancelled (aborted failureType, no attribution evidence) keeps unknown but proven cleanup", () => {
   // Evidence-first: bare aborted without structured trigger is unknown,
   // never invent "user" from fuzzy strings.
-  const f = buildTerminalStateFields({ error: "a", failureType: "aborted" });
+  const f = buildTerminalStateFields({ error: "a", failureType: "aborted", cleanupDone: true });
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "unknown",
@@ -310,7 +315,7 @@ check("cancelled (aborted + user evidence) → cancel_source=user", () => {
 });
 
 check("cancelled (guardrail_stop failureType) → cancel_source=guardrail + cleanup_done", () => {
-  const f = buildTerminalStateFields({ error: "g", failureType: "guardrail_stop" });
+  const f = buildTerminalStateFields({ error: "g", failureType: "guardrail_stop", cleanupDone: true });
   assertEq(f, {
     terminal_state: "cancelled",
     cancel_source: "guardrail",
@@ -323,7 +328,7 @@ check("cancelled (guardrail_stop failureType) → cancel_source=guardrail + clea
 check("cancelled with explicit cancelSource=user override (parent signal)", () => {
   // dispatch may override when stronger evidence is available.
   const f = buildTerminalStateFields(
-    { error: "t", failureType: "timeout" },
+    { error: "t", failureType: "timeout", cleanupDone: true },
     { cancelSource: "user" },
   );
   assertEq(f.cancel_source, "user");
@@ -392,8 +397,8 @@ console.log("\nSection: inferParallelTerminalState (aggregate)");
 
 const ok = { output: "yes" };
 const failed = { error: "boom", failureType: "agent_error" };
-const cancelledTimeout = { error: "t", failureType: "timeout" };
-const cancelledAbort = { error: "a", failureType: "aborted" };
+const cancelledTimeout = { error: "t", failureType: "timeout", cleanupDone: true };
+const cancelledAbort = { error: "a", failureType: "aborted", cleanupDone: true };
 
 check("all 3 ok → completed (no tasks_not_completed)", () => {
   const r = inferParallelTerminalState([

@@ -81,10 +81,8 @@ await check("production resources and disposal are session-owned", () => {
     /extensionFactories: \[\s*\.\.\.\(options\.extensionFactories \?\? \[\]\),\s*subAgentBoundarySentinelExtension,\s*\]/.test(dispatchSource),
     "caller factories are not merged with the sentinel factory",
   );
-  const runBlock = dispatchSource.match(/export async function runInProcess\([\s\S]*?\n}\n\n\/\/ ── Result formatting/);
-  assert(runBlock, "could not locate runInProcess source block");
-  assert(!/session(?:\?\.)?\.dispose\s*\(/.test(runBlock[0]), "runInProcess still directly disposes a session");
-  assert(/await disposeSubAgentSession\(session(?:, subAgentSm)?\)/.test(runBlock[0]), "runInProcess does not use production disposal helper");
+  // Disposal behavior is verified below with real SDK sessions and by the
+  // production runInProcess terminal-closure smoke; do not lock call syntax.
 });
 
 await check("legacy activation timing cannot bind the main runtime sentinel", async () => {

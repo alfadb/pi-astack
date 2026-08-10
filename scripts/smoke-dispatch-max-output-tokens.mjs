@@ -131,7 +131,7 @@ check("runInProcess resolves model maxTokens and installs it on createLoopConfig
   }
   const createSessionIdx = dispatchSrc.search(/await createAgentSession\(/);
   const installIdx = dispatchSrc.search(/installMaxOutputTokensOnSession\(session, effectiveMaxOutputTokens\)/);
-  const promptIdx = dispatchSrc.search(/await session\.prompt\(prompt\)/);
+  const promptIdx = dispatchSrc.search(/await session\.prompt\(prompt/);
   if (createSessionIdx < 0 || installIdx < 0 || promptIdx < 0) throw new Error("could not locate session lifecycle sites");
   if (!(createSessionIdx < installIdx && installIdx < promptIdx)) {
     throw new Error("maxTokens must be installed after session creation and before prompt execution");
