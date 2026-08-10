@@ -7,7 +7,7 @@ updated: 2026-08-10
 
 # pi-astack dispatch 生命周期闭环 · 四阶段 Living Plan
 
-**状态：Active；S1 implementation/evidence/review passed（3/20 criteria 勾选）；等待 S1 submodule commit/push 与父仓 gitlink；S2–S4 not started。**
+**状态：Active；S1 五门全部完成（5/20 criteria 勾选）；S2 not started 但已具备进入前置（S1 全部 gate 通过）；S3–S4 not started。**
 
 本计划是 dispatch/agent 生命周期闭环任务的**唯一 living plan / 执行 SOT**。已确认目标与门禁（2026-08-10）冻结于下：分四阶段**严格串行**，阶段完成定义为「实现 + 真实生产数据或人批等价证据验收 + T0+/跨厂商 T0 审查无 blocker + 修复复审 + pi-astack 子模块 commit/push + 父仓仅 gitlink commit/push」；前一阶段全部 gate 通过后才进入下一阶段。本计划只承载执行目标、阶段边界与验收门，**不镜像技术细节到方向文档**（README §6 / REQ-006：实现机制属代码 + abrain 域）；实现现状以代码与 abrain 为准。
 
@@ -58,19 +58,20 @@ updated: 2026-08-10
 
 > 本节是 living plan 的可重写热区。阶段切换、发现现场冲突或形成新阻塞时整节更新。
 
-- 当前阶段：**S1 implementation/evidence/review passed**；等待 S1 submodule commit/push 与父仓 gitlink；S2/S3/S4 均 not started。
-- TERM-CLOSURE-IMPL / TERM-CLOSURE-EVIDENCE / TERM-CLOSURE-REVIEW 已勾选（3/20）；TERM-CLOSURE-SUBCOMMIT / TERM-CLOSURE-PARENT 与 S2–S4 全部 criteria 保持未勾选。
+- 当前阶段：**S1 全部五项 gate 完成（5/20 criteria 勾选）**；S2 not started 但已具备进入前置；S3/S4 均 not started。
+- TERM-CLOSURE-IMPL / TERM-CLOSURE-EVIDENCE / TERM-CLOSURE-REVIEW / TERM-CLOSURE-SUBCOMMIT / TERM-CLOSURE-PARENT 全部已勾选（5/20）；S2–S4 全部 criteria 保持未勾选。
 - 四轮 T0+/跨厂商 T0 审查收敛：首轮 4 RED（pre-run / no-e2e / shutdown / singleflight）；二轮 3 RED+1 GREEN（P1-A stale smokes、P1-B prompt-success 抢 claim）；三轮 Fable/Opus/Kimi GREEN、Grok RED（tool_rejected/catch seal 覆盖）；最终收口 Fable/Grok/Kimi GREEN、Opus timeout 无裁决、补充 OpenAI gpt-5.6-sol T0 GREEN。最终有效门：T0+ Fable + cross-vendor Grok/Kimi/OpenAI 均 GREEN，无 P0/P1；Opus timeout 不当同意也不当反对。审查确认唯一 termination claim 与诚实 cleanup 语义未被放宽。
 - S1 证据：production canary dossier `docs/evidence/2026-08-10-dispatch-terminal-closure-s1-production-canary.json`（run_id `dtr_66bb99e28dff042b789992cc`，terminal cancelled / failure_type timeout / timeout_kind idle / cleanup_done true / tool_call_count 1 / active bash age 5001ms / marker PID 1572609 在 15s 观察窗后 absent / 终态后 event count=0 / task 行 canonical jq hash `2523f19a…84598a`；首个 canary `dtr_c4a1fc58389b761b47866e6c` 因 worker 后台化命令 completed 且留下 PID 1571580，rejected_as_acceptance 并由本会话 kill 清理，不计入通过）；closure smoke 22 checks 全部 PASS（含四条 RED-first 回归），tool-allowlist（82 checks）、max-output-tokens、terminal-state、workflow executor/dsl/tools、worker governor（90 checks）等既有 smoke 全部通过；`git diff --check` 干净。
 - 当前修复范围（S1 已收口）：SDK 最终 preflight provider-start 闸门、shutdown/dispose 有界与可升级 singleflight、run+closure 双证据 join、governor listener 重入规避、evidence-first partial/attribution/cleanup 投影、run-terminal seal（泛化：任何 run-owned 终态在 closure await 前同步 seal，abnormal bail 保留 first-writer），以及真实 `runInProcess` faux-provider 回归。
 - 父仓 `/home/worker/.pi` 的既有 `M agent/settings.json` 必须原样保留；本阶段不 commit/push。
+- S1 子模块 commit `3b845aa928318ef28e10bdba72b16b509069aff7`（fix(dispatch): close worker lifecycle before terminal，含本阶段实现与证据）已 push；父仓仅 gitlink commit `48cd816eef1449f2ea76c1f2478815d0db66cd57`（chore: update pi-astack for dispatch closure，仅更新子模块指针，不含其他文件改动）已 push。
 
 ## Phase Table
 
 | Phase | 名称 | 状态 | 前置 | 退出证据 | 下一动作 |
 |---|---|---|---|---|---|
-| S1 | 生命周期闭环 | implementation/evidence/review passed；等待 submodule commit/push 与父仓 gitlink | 本计划生效；无前置阶段 | TERM-CLOSURE-* 五项全部通过 | 进入 S2（依赖 S1 全部 gate） |
-| S2 | additive audit v5 | not started | S1 全部五项 gate 通过 | AUDITV5-* 五项全部通过 | 进入 S3（依赖 S1+S2 全部 gate） |
+| S1 | 生命周期闭环 | 完成（TERM-CLOSURE-* 五项全部通过） | 本计划生效；无前置阶段 | TERM-CLOSURE-* 五项全部通过 | 已满足，可进入 S2 |
+| S2 | additive audit v5 | not started（已具备进入前置：S1 全部五项 gate 通过） | S1 全部五项 gate 通过（已满足） | AUDITV5-* 五项全部通过 | 进入 S3（依赖 S1+S2 全部 gate） |
 | S3 | 风暴规则 shadow | not started | S2 全部五项 gate 通过 | STORM-SHADOW-* 五项全部通过 | 进入 S4（依赖 S1+S2+S3 全部 gate） |
 | S4 | 单规则 enforce | not started | S3 全部五项 gate 通过 | ENFORCE-* 五项全部通过 | 计划完成 |
 
@@ -89,8 +90,8 @@ updated: 2026-08-10
 - [x] (TERM-CLOSURE-IMPL) S1 实现完成且行为符合契约：存在唯一 termination claim（终止判定收敛到单一权威，无相互矛盾的终止判定源并存）；post-terminal 状态下新 provider/tool 的创建与派发被阻止；abort/dispose 覆盖经 bash 派生的子进程（不止直接 tool 调用）；quiescence 有界（不无限等待）；cleanup/closure 诚实（不虚构已完成/已清理状态）。行为由代码审查 + 针对性 smoke/测试佐证。
 - [x] (TERM-CLOSURE-EVIDENCE) 真实生产数据或人批等价证据验收：在真实运行或人批等价证据上证明 S1 五条行为成立（termination claim 唯一、post-terminal 阻止、bash 子进程被 abort/dispose 覆盖、quiescence 有界、cleanup 诚实）；模型自述 / synthetic-only 不计。
 - [x] (TERM-CLOSURE-REVIEW) T0+/跨厂商 T0 审查无 blocker，且修复后复审通过；审查确认唯一 termination claim 与诚实 cleanup 语义未被放宽。
-- [ ] (TERM-CLOSURE-SUBCOMMIT) pi-astack 子模块 commit/push 完成，包含本阶段实现与证据。
-- [ ] (TERM-CLOSURE-PARENT) 父仓仅 gitlink commit/push 完成（只更新子模块指针，不含其他文件改动）。
+- [x] (TERM-CLOSURE-SUBCOMMIT) pi-astack 子模块 commit/push 完成，包含本阶段实现与证据。
+- [x] (TERM-CLOSURE-PARENT) 父仓仅 gitlink commit/push 完成（只更新子模块指针，不含其他文件改动）。
 
 ### S2 — additive audit v5
 
@@ -124,7 +125,7 @@ updated: 2026-08-10
 
 ## Current Blockers
 
-- 无已确认 blocker。S1 implementation/evidence/review 已通过，等待 submodule commit/push 与父仓 gitlink；S2–S4 未开始，受 Frozen Constraints 严格串行约束。
+- 无已确认 blocker。S1 全部五项 gate 已完成（子模块 commit/push 与父仓仅 gitlink commit/push 均已落地）；S2 not started 但已具备进入前置；S3–S4 未开始，受 Frozen Constraints 严格串行约束。
 
 ## Execution Order (Planned)
 
@@ -144,3 +145,4 @@ updated: 2026-08-10
 - 2026-08-10：第二轮复审为 RED，两个 P1 已修复（仍不勾任何 criterion、不 commit/push）。P1-A：`scripts/smoke-dispatch-max-output-tokens.mjs` 与 `scripts/smoke-dispatch-subagent-tool-allowlist.mjs` 因源码字面锚点 stale 变红（`await session.prompt(prompt)` 已带 options 对象、tool rejection 改走 `startSessionClosure()`），已更新为鲁棒但不放宽语义的顺序/regex 锚点：仍证明 registry validation 与 maxTokens 安装发生在 prompt 前、tool rejection 走 bounded closure/dispose。P1-B：`session.prompt()` 成功返回后到 run owner claim 前的 normal closure 窗口，parent/idle/max-runtime 可抢 claim 把成功标 cancelled；已实现 run-terminal seal——prompt 正常返回的同步下一步（`sealRunTerminal()`）立即封住后续 external parent/timeout/governor claim（`FirstWriterTermination.sealExternalClaims()`，seal 后仅 run owner 可 claim）并停止/禁止 watchdog 重 arm（清 idle/max-runtime timer，`recordProgress` 在 seal 后不再 re-arm）；prompt 返回前已取得的 abnormal claim 保留 first-writer；不提前伪造最终 AgentResult，正常结果仍走 stopReason/error/truncated 分类与 closure。新增两条真实 `runInProcess` 回归：1) onProgress 在 `prompt_end` 触发 parent abort，结果仍为原成功（非 aborted）；2) session_shutdown 挂/慢 + 短 idle/maxRuntime，prompt 已成功时不得变 timeout，normal cleanup 仍有界（SESSION_SHUTDOWN_WAIT_MS）且 cleanup 诚实（挂起 shutdown → cleanupDone=false）。已运行：新增 closure smoke（17 checks 含两条新回归）、两处旧 smoke（max-output-tokens all ok；tool-allowlist 82 checks）、worker governor（90 checks）、terminal-state、workflow executor/dsl/tools、其余首轮修改 smoke，全部通过；`git diff --check` 干净。RED 验证：临时禁用 seal 后两条新回归均失败（成功被改写为 aborted / timeout_partial），恢复后通过。
 - 2026-08-10：第三轮复审为 RED，单票 P1 已修复（仍不勾任何 criterion、不 commit/push）。P1：run-terminal seal 此前只在 `session.prompt()` 正常返回后调用，run-owned 终态已确定但先 await closure 的 `tool_rejected` 与 runPromise catch/crash 路径仍可被 late parent/timeout 抢 claim 把 failed 改写为 cancelled。修复：seal 语义泛化为「任何 run-owned 终态一旦确定、进入任何 closure await 之前，同步 seal external claims 并停止 watchdog」——统一 helper `sealRunTerminal()` 在 tool_rejected 路径（closure await 前）、catch 路径与 trackedRunPromise 拒绝处理调用（后两者带 `termination.claim?.owner === undefined` 守卫，不 seal 已有 abnormal bail 路径，如 pre-aborted signal / timeout / governor / TERMINATION_PREFLIGHT_ERROR）；prompt 返回前已取得的 abnormal claim 保留 first-writer。补四条真实 `runInProcess` RED-first 回归：1) tool_rejected + 挂起 session_shutdown + late parent abort 或短 idle timeout，最终仍 tool_rejected failed；2) prompt throw（rate_limit）+ 挂起 closure + late parent/timeout，最终仍原 provider failure；3) 既有 parent pre-run 先赢仍 parent。RED 验证：修复前四条新回归均失败（tool_rejected/rate_limit 被改写为 aborted/timeout），修复后通过。已运行：closure smoke（22 checks 含四条新回归）、tool-allowlist（82 checks）、max-output-tokens、terminal-state、workflow executor/dsl/tools、worker governor（90 checks），全部通过；`git diff --check` 干净。
 - 2026-08-10：S1 四轮 T0+/跨厂商 T0 审查收敛，最终有效门通过（T0+ Fable + cross-vendor Grok/Kimi/OpenAI 均 GREEN，无 P0/P1；Opus 最终收口轮审查自身 timeout 无裁决，不当同意也不当反对）。首轮 4 RED 暴露 pre-run / no-e2e / shutdown / singleflight；二轮 3 RED+1 GREEN 暴露 stale smokes（P1-A 两处既有 smoke 源码字面锚点 stale，已更新为鲁棒但不放宽语义的顺序/regex 锚点）与 prompt-success 抢 claim（P1-B run-terminal seal）；三轮 Fable/Opus/Kimi GREEN、Grok RED 暴露 tool_rejected/catch seal 覆盖（seal 泛化为任何 run-owned 终态在 closure await 前同步 seal，abnormal bail 保留 first-writer，补四条 RED-first 回归）；最终收口 Fable/Grok/Kimi GREEN、Opus timeout 无裁决、补充 OpenAI gpt-5.6-sol T0 GREEN。S1 production canary 证据已固化（`docs/evidence/2026-08-10-dispatch-terminal-closure-s1-production-canary.json`；首个 canary `dtr_c4a1fc58389b761b47866e6c` 因 worker 后台化命令 completed 且留下 PID 1571580，rejected_as_acceptance 并由本会话 kill 清理，不计入通过），closure smoke 22 checks 全部 PASS。据此勾选 TERM-CLOSURE-IMPL / TERM-CLOSURE-EVIDENCE / TERM-CLOSURE-REVIEW（3/20）；TERM-CLOSURE-SUBCOMMIT / TERM-CLOSURE-PARENT 与 S2–S4 全部 criteria 保持未勾选；不 commit/push，不进入 S2。
+- 2026-08-10：S1 收尾双仓提交完成并已 push。pi-astack 子模块实现与证据 commit `3b845aa928318ef28e10bdba72b16b509069aff7`（fix(dispatch): close worker lifecycle before terminal）已 push；父仓仅 gitlink commit `48cd816eef1449f2ea76c1f2478815d0db66cd57`（chore: update pi-astack for dispatch closure，仅更新子模块指针，不含其他文件改动）已 push，父仓既有 `M agent/settings.json` 原样保留未混入。据此勾选 TERM-CLOSURE-SUBCOMMIT / TERM-CLOSURE-PARENT，S1 五门全部完成（5/20）；S2 not started 但已具备进入前置；不进入 S2 实现。
