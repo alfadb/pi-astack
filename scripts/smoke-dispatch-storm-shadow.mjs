@@ -2,15 +2,19 @@
 /**
  * S3 STORM-SHADOW smoke (living plan 2026-08-10).
  *
- * Candidate A — post-cap exact schema-rejection signature: the cap is the
+ * Candidate A — post-cap exact schema-rejection identity: the cap is the
  * READ-ONLY MIRROR of the governor toolObservers.schemaErrorStorm.observeAfter
  * (default 3). Every real tool_execution_end schema rejection reuses the
  * governor's own classifier for the exact identity (tool name + closed error
- * class + field path); only the project audit HMAC (key_id + digest) is
- * persisted / compared. Reaching the cap boundary on one signature sets
- * post_cap (no abort); EXCEEDING it on subsequent same-signature rejections
+ * class + field path); only the keyless identity checksum (digest) is
+ * persisted / compared. Reaching the cap boundary on one identity sets
+ * post_cap (no abort); EXCEEDING it on subsequent same-identity rejections
  * produces would_abort (consecutive count > capAfter, or window density
- * >= windowLimit). Different signatures never merge.
+ * >= windowLimit). Different identities never merge.
+ *
+ * The identity checksum is keyless and deterministic (ADR 0027 C6): no key
+ * material, no strict-key eligibility prerequisite, no degradation branch —
+ * the same identity always produces the same digest in every process.
  *
  * Candidate B — effective progress semantics: successful tool result and
  * visible COMPLETED assistant responses are progress (reset/segment); pure
@@ -28,7 +32,7 @@
  * reproduces the written verdicts exactly.
  *
  * Real SDK runInProcess + faux provider: the SAME run's real event stream
- * drives four consecutive same-signature schema rejections until
+ * drives four consecutive same-identity schema rejections until
  * would_abort=true (first_trip), then the worker continues (successful tool →
  * progress reset → final visible completion) and completes normally — shadow
  * verdicts never touch control flow.
@@ -49,7 +53,7 @@ const S = await jiti.import(path.join(root, "extensions/dispatch/storm-shadow.ts
 const G = await jiti.import(path.join(root, "extensions/dispatch/worker-run-governor.ts"));
 const D = await jiti.import(path.join(root, "extensions/dispatch/index.ts"));
 const DT = await jiti.import(path.join(root, "extensions/dispatch/dispatch-trace.ts"));
-const AH = await jiti.import(path.join(root, "extensions/_shared/audit-hmac.ts"));
+const AH = await jiti.import(path.join(root, "extensions/_shared/audit-checksum.ts"));
 
 let passed = 0;
 const failures = [];
@@ -73,16 +77,15 @@ const settings = {
   windowLimit: S.STORM_SHADOW_WINDOW_LIMIT,
 };
 
-// ── Opaque signatures (pre-projected exactly like the wiring builds them) ──
-// The wiring HMAC input is the unambiguous structured/framed tuple
+// ── Opaque checksums (pre-projected exactly like the wiring builds them) ──
+// The wiring checksum input is the unambiguous structured/framed tuple
 // JSON.stringify([toolName, errorClass, fieldPath, normalized]) — same
 // class/path with different normalized descriptors must never merge. The
-// wiring signs ONLY with the strict persistent project key (auditHmacHexStrict,
-// v4 eligibility prerequisite): when the persistent key is unavailable the
-// wiring fails open to schemaRejection=false with no signature — an ephemeral
-// key is never generated and never accepted as eligible.
+// checksum is keyless and deterministic (ADR 0027 C6): the same identity
+// always produces the same digest in every process, with no key material
+// and no eligibility prerequisite.
 const sig = (toolName, errorClass, fieldPath, normalized) =>
-  AH.auditHmacHexStrict(tempRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, JSON.stringify([toolName, errorClass, fieldPath, normalized]));
+  AH.auditChecksumHex(S.STORM_SHADOW_CHECKSUM_DOMAIN, JSON.stringify([toolName, errorClass, fieldPath, normalized]));
 const A = sig("read", "missing_required", "path", "schema validation: required property 'path' is missing");
 const B = sig("write", "missing_required", "path", "schema validation: required property 'path' is missing");
 const C = sig("read", "invalid_type", "limit", "schema validation: expected number for property 'limit'");
@@ -94,7 +97,7 @@ const A1 = sig("read", "missing_required", "must", "Validation failed for tool \
 const A2 = sig("read", "missing_required", "must", "Validation failed for tool \"read\": - path: must have required properties path Received arguments: { \"limit\": 5 }");
 
 // ── Pre-projected event factories (what the wiring feeds the state machine) ──
-const rej = (signature = A) => ({ kind: "tool_execution_end", isError: true, schemaRejection: true, signature });
+const rej = (checksum = A) => ({ kind: "tool_execution_end", isError: true, schemaRejection: true, checksum });
 const toolOk = () => ({ kind: "tool_execution_end", isError: false, schemaRejection: false });
 const toolFail = () => ({ kind: "tool_execution_end", isError: true, schemaRejection: false });
 const visible = () => ({ kind: "assistant_response", hasVisibleText: true, completed: true, errorResponse: false, emptyVisibleRetry: false, toolUseOnly: false });
@@ -138,29 +141,12 @@ await check("different signatures never merge (consecutive restarts; no cross-si
   const { observations } = run([rej(A), rej(A), rej(B), rej(A)]);
   assert.deepEqual(observations.map((o) => o.consecutive_count), [1, 2, 1, 1], "different signature restarts the streak");
   assert.ok(observations.every((o) => o.would_abort === false), "no same-signature streak of 4 exists");
-  const a1 = run([rej(A)]).observations[0].signature_hmac;
-  const a2 = run([rej(A)]).observations[0].signature_hmac;
-  const b1 = run([rej(B)]).observations[0].signature_hmac;
+  const a1 = run([rej(A)]).observations[0].identity_checksum;
+  const a2 = run([rej(A)]).observations[0].identity_checksum;
+  const b1 = run([rej(B)]).observations[0].identity_checksum;
   assert.deepEqual(a1, a2, "identical identity must hash identically");
   assert.notEqual(a1.digest, b1.digest, "different identity must hash differently");
   assert.notEqual(a1.digest, C.digest, "same tool, different error class/field must hash differently");
-});
-
-await check("same digest with DIFFERENT key_ids never merges (comparison key is key_id+digest, not digest alone)", () => {
-  // Two opaque signatures with the SAME digest but different key_ids: the
-  // state machine must treat them as distinct signatures (never merge).
-  const sameDigest = "a".repeat(64);
-  const keyA = { algorithm: "hmac-sha256", key_id: "key-a", digest: sameDigest };
-  const keyB = { algorithm: "hmac-sha256", key_id: "key-b", digest: sameDigest };
-  const { observations } = run([rej(keyA), rej(keyB), rej(keyA), rej(keyB)]);
-  assert.deepEqual(observations.map((o) => o.consecutive_count), [1, 1, 1, 1], "same digest + different key must restart the streak (no merge)");
-  assert.deepEqual(observations.map((o) => o.window_count), [1, 1, 2, 2], "each key accumulates its own window density");
-  assert.ok(observations.every((o) => o.would_abort === false && o.first_trip === false), "no same key+digest density of 4 exists");
-  // Same key_id + same digest still counts as ONE signature and trips on the 4th.
-  const sameKey = run([rej(keyA), rej(keyA), rej(keyA), rej(keyA)]);
-  assert.deepEqual(sameKey.observations.map((o) => o.consecutive_count), [1, 2, 3, 4]);
-  assert.equal(sameKey.observations[3].would_abort, true, "same key_id+digest is one signature and trips on the 4th");
-  assert.equal(sameKey.observations[3].first_trip, true);
 });
 
 await check("same tool/class/path with different normalized descriptors never merge (A/B/A/B, each count 2, never trip)", () => {
@@ -359,13 +345,13 @@ await check("already_tripped episode marker is written once, then neutral events
 
 console.log("\n[privacy + fail-open pre-projection]");
 
-await check("signature HMAC is recomputable and opaque; the exact identity never appears in the audit row", () => {
+await check("identity checksum is recomputable and opaque; the exact identity never appears in the audit row", () => {
   const { observations } = run([rej(A1), rej(A2)]);
-  assert.deepEqual(observations[0].signature_hmac, A1, "observation carries exactly the pre-projected project audit HMAC");
-  assert.deepEqual(observations[1].signature_hmac, A2, "collision pair keeps two distinct opaque signatures");
-  assert.match(observations[0].signature_hmac?.digest ?? "", /^[0-9a-f]{64}$/);
-  assert.equal(observations[0].signature_hmac?.algorithm, "hmac-sha256");
-  assert.equal(typeof observations[0].signature_hmac?.key_id, "string");
+  assert.deepEqual(observations[0].identity_checksum, A1, "observation carries exactly the pre-projected keyless identity checksum");
+  assert.deepEqual(observations[1].identity_checksum, A2, "collision pair keeps two distinct opaque checksums");
+  assert.match(observations[0].identity_checksum?.digest ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(observations[0].identity_checksum?.algorithm, "sha256");
+  assert.ok(!Object.hasOwn(observations[0].identity_checksum ?? {}, "key_id"), "keyless checksum must not carry a key_id");
   const row = S.buildStormShadowAuditEvent("worker-secret", {}, observations[0]);
   const serialized = JSON.stringify(row);
   const identity = "read\u0000missing_required\u0000path";
@@ -378,48 +364,44 @@ await check("signature HMAC is recomputable and opaque; the exact identity never
 
 await check("classifier fail-open: hostile result (throwing getters) degrades without throwing", () => {
   const throwing = { get content() { throw new Error("hostile getter"); } };
-  const result = D.buildSchemaRejectionShadowInput(throwing, "read", tempRoot);
+  const result = D.buildSchemaRejectionShadowInput(throwing, "read");
   assert.deepEqual(result, { schemaRejection: false, eligibility: "not_schema_rejection" }, "classifier throw must fail open to not-a-rejection");
   const proxy = new Proxy({}, { get() { throw new Error("hostile proxy"); } });
-  assert.deepEqual(D.buildSchemaRejectionShadowInput(proxy, "read", tempRoot), { schemaRejection: false, eligibility: "not_schema_rejection" });
+  assert.deepEqual(D.buildSchemaRejectionShadowInput(proxy, "read"), { schemaRejection: false, eligibility: "not_schema_rejection" });
   // A normal schema rejection still classifies deterministically.
   const normal = D.buildSchemaRejectionShadowInput(
     { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
     "read",
-    tempRoot,
   );
   assert.equal(normal.schemaRejection, true);
-  assert.equal(typeof normal.signature?.digest, "string");
-  const expected = AH.auditHmacHexStrict(
-    tempRoot,
-    S.STORM_SHADOW_SIGNATURE_DOMAIN,
+  assert.equal(typeof normal.checksum?.digest, "string");
+  const expected = AH.auditChecksumHex(
+    S.STORM_SHADOW_CHECKSUM_DOMAIN,
     JSON.stringify(["read", "missing_required", "path", "schema validation: required property 'path' is missing"]),
   );
-  assert.deepEqual(normal.signature, expected, "wiring identity (tool + class + field + normalized) must be recomputable");
+  assert.deepEqual(normal.checksum, expected, "wiring identity (tool + class + field + normalized) must be recomputable");
   // P1 regression: same tool/class/path with different normalized descriptors
   // (the real read tool's "Received arguments" JSON differs) must NOT merge.
   const realA = D.buildSchemaRejectionShadowInput(
     { content: [{ type: "text", text: "Validation failed for tool \"read\":\n  - path: must have required properties path\n\nReceived arguments:\n{}" }] },
     "read",
-    tempRoot,
   );
   const realB = D.buildSchemaRejectionShadowInput(
     { content: [{ type: "text", text: "Validation failed for tool \"read\":\n  - path: must have required properties path\n\nReceived arguments:\n{\n  \"limit\": 5\n}" }] },
     "read",
-    tempRoot,
   );
   assert.equal(realA.schemaRejection, true);
   assert.equal(realB.schemaRejection, true);
-  assert.notEqual(realA.signature?.digest, realB.signature?.digest, "same class/path, different normalized must hash differently");
-  assert.deepEqual(realA.signature, A1, "wiring digest must equal the pre-projected A1 signature");
-  assert.deepEqual(realB.signature, A2, "wiring digest must equal the pre-projected A2 signature");
+  assert.notEqual(realA.checksum?.digest, realB.checksum?.digest, "same class/path, different normalized must hash differently");
+  assert.deepEqual(realA.checksum, A1, "wiring digest must equal the pre-projected A1 checksum");
+  assert.deepEqual(realB.checksum, A2, "wiring digest must equal the pre-projected A2 checksum");
 });
 
-console.log("\n[strict project key eligibility (v4)]");
+console.log("\n[keyless checksum cross-process stability]");
 
-await check("strict key is cross-process stable: two independent processes produce the same non-ephemeral key_id + digest", () => {
+await check("keyless checksum is cross-process stable: two independent processes produce the same digest (no key material)", () => {
   const crossRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-shadow-cross-"));
-  const childScript = path.join(crossRoot, "strict-hmac-child.mjs");
+  const childScript = path.join(crossRoot, "checksum-child.mjs");
   const material = JSON.stringify(["read", "missing_required", "path", "schema validation: required property 'path' is missing"]);
   fs.writeFileSync(childScript, `
 import { createRequire } from "node:module";
@@ -429,172 +411,21 @@ const root = ${JSON.stringify(root)};
 const require = createRequire(pathToFileURL(path.join(root, "package.json")));
 const { createJiti } = require("jiti");
 const jiti = createJiti(pathToFileURL(path.join(root, "package.json")).href, { moduleCache: false });
-const AH = await jiti.import(path.join(root, "extensions/_shared/audit-hmac.ts"));
-const sig = AH.auditHmacHexStrict(process.argv[2], ${JSON.stringify(S.STORM_SHADOW_SIGNATURE_DOMAIN)}, ${JSON.stringify(material)});
+const AH = await jiti.import(path.join(root, "extensions/_shared/audit-checksum.ts"));
+const sig = AH.auditChecksumHex(${JSON.stringify(S.STORM_SHADOW_CHECKSUM_DOMAIN)}, ${JSON.stringify(material)});
 console.log(JSON.stringify(sig));
 `);
-  const runChild = () => JSON.parse(execFileSync(process.execPath, [childScript, crossRoot], { encoding: "utf8" }).trim());
+  const runChild = () => JSON.parse(execFileSync(process.execPath, [childScript], { encoding: "utf8" }).trim());
   try {
     const first = runChild();
     const second = runChild();
-    assert.ok(!first.key_id.startsWith("ephemeral-"), "strict key must never be ephemeral");
-    assert.equal(first.key_id, second.key_id, "key_id must be identical across independent processes");
     assert.equal(first.digest, second.digest, "digest must be identical across independent processes");
-    assert.equal(first.algorithm, "hmac-sha256");
-    // The persistent key file exists with the strict layout (32 bytes, 0600).
-    const keyFile = path.join(crossRoot, ".pi-astack", "llm-audit", ".audit-hmac-key");
-    assert.ok(fs.existsSync(keyFile), "persistent key file must exist");
-    assert.equal(fs.statSync(keyFile).size, 32, "key file must be 32 bytes");
-    assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600, "key file must be 0600");
+    assert.equal(first.algorithm, "sha256");
+    assert.ok(!Object.hasOwn(first, "key_id"), "keyless checksum must not carry a key_id");
+    // No key file is ever created by the checksum path.
+    assert.ok(!fs.existsSync(path.join(crossRoot, ".pi-astack")), "keyless checksum must never create key material");
   } finally {
     fs.rmSync(crossRoot, { recursive: true, force: true });
-  }
-});
-
-await check("strict key unavailable (unsafe dir) fails open: schemaRejection false, no signature, no ephemeral key", () => {
-  const unsafeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-shadow-unsafe-"));
-  // .pi-astack is fine (0700) but llm-audit has the WRONG mode (0755): the
-  // strict persistent-key path must refuse it (openPrivateChild requires
-  // exact 0700). No chmod on any real project dir — this is a fresh temp dir.
-  fs.mkdirSync(path.join(unsafeRoot, ".pi-astack"), { mode: 0o700 });
-  fs.mkdirSync(path.join(unsafeRoot, ".pi-astack", "llm-audit"), { mode: 0o755 });
-  try {
-    // The strict API must throw (no ephemeral fallback).
-    assert.throws(
-      () => AH.auditHmacHexStrict(unsafeRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, "x"),
-      /mode must be 700/,
-      "strict key must refuse the unsafe directory",
-    );
-    // The wiring fails open: schemaRejection false, NO signature.
-    const result = D.buildSchemaRejectionShadowInput(
-      { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
-      "read",
-      unsafeRoot,
-    );
-    assert.deepEqual(result, { schemaRejection: false, eligibility: "strict_key_unavailable" }, "strict-key failure must fail open to not-a-rejection with a closed eligibility reason and no signature");
-    // Sanity: the non-strict API WOULD have produced an ephemeral key here —
-    // proving the wiring must never use it for the shadow signature.
-    const fallback = AH.auditHmacHex(unsafeRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, "x");
-    assert.ok(fallback.key_id.startsWith("ephemeral-"), "sanity: the fallback API is ephemeral in this dir (wiring must not use it)");
-    // A schemaRejection without a signature is NOT eligible in the state machine.
-    const o = new S.StormShadow(settings).feed({ kind: "tool_execution_end", isError: true, schemaRejection: false });
-    assert.equal(o.consecutive_count, 0, "fail-open event must not count toward the candidate");
-    assert.equal(o.would_abort, false);
-  } finally {
-    fs.rmSync(unsafeRoot, { recursive: true, force: true });
-  }
-});
-
-await check("strict key re-verifies on EVERY call: cached material never bypasses mode/owner/symlink checks (P1 regression)", () => {
-  const cacheRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-shadow-cache-"));
-  const sink = path.join(cacheRoot, ".pi-astack", "llm-audit");
-  fs.mkdirSync(sink, { recursive: true, mode: 0o700 });
-  const keyFile = path.join(sink, ".audit-hmac-key");
-  const material = JSON.stringify(["read", "missing_required", "path", "schema validation: required property 'path' is missing"]);
-  const childScript = path.join(cacheRoot, "strict-hmac-reject-child.mjs");
-  fs.writeFileSync(childScript, `
-import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
-import path from "node:path";
-const root = ${JSON.stringify(root)};
-const require = createRequire(pathToFileURL(path.join(root, "package.json")));
-const { createJiti } = require("jiti");
-const jiti = createJiti(pathToFileURL(path.join(root, "package.json")).href, { moduleCache: false });
-const AH = await jiti.import(path.join(root, "extensions/_shared/audit-hmac.ts"));
-try {
-  AH.auditHmacHexStrict(process.argv[2], ${JSON.stringify(S.STORM_SHADOW_SIGNATURE_DOMAIN)}, ${JSON.stringify(material)});
-  console.error("strict key unexpectedly accepted the unsafe directory");
-  process.exit(1);
-} catch (error) {
-  if (!/mode must be 700/.test(String(error?.message ?? error))) {
-    console.error("unexpected error:", error);
-    process.exit(1);
-  }
-  console.log("rejected");
-}
-`);
-  try {
-    // 1. Safe first strict call fills the KEY_CACHE with the verified key.
-    const first = AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material);
-    assert.ok(!first.key_id.startsWith("ephemeral-"), "first strict call must produce the persistent key");
-    // The wiring path also fills the cache (same process, shared Symbol cache).
-    const wired = D.buildSchemaRejectionShadowInput(
-      { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
-      "read",
-      cacheRoot,
-    );
-    assert.equal(wired.schemaRejection, true);
-    assert.equal(wired.signature?.key_id, first.key_id, "wiring signature must use the same persistent key");
-
-    // 2. Same process: llm-audit directory mode becomes unsafe (0755).
-    fs.chmodSync(sink, 0o755);
-
-    // 3. The wiring must fail open: schemaRejection false, NO signature — the
-    //    strict key must NOT be served from the cache (P1 regression).
-    const after = D.buildSchemaRejectionShadowInput(
-      { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
-      "read",
-      cacheRoot,
-    );
-    assert.deepEqual(after, { schemaRejection: false, eligibility: "strict_key_unavailable" }, "cached strict key must not bypass the directory mode re-verification");
-
-    // 4. Direct strict also throws (no ephemeral fallback).
-    assert.throws(
-      () => AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material),
-      /mode must be 700/,
-      "strict key must re-verify the directory mode on every call",
-    );
-
-    // 5. Independent process (fresh, no cache) also rejects.
-    const out = execFileSync(process.execPath, [childScript, cacheRoot], { encoding: "utf8" }).trim();
-    assert.equal(out, "rejected", "independent process must also reject the unsafe directory");
-
-    // 6. Restore 0700: strict recovers with the SAME key_id + digest.
-    fs.chmodSync(sink, 0o700);
-    const recovered = AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material);
-    assert.equal(recovered.key_id, first.key_id, "recovered key_id must equal the original");
-    assert.equal(recovered.digest, first.digest, "recovered digest must equal the original");
-
-    // 7. Key file mode 0600 -> 0644: same cache-then-reject/recover cycle.
-    const keyFirst = AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material);
-    assert.equal(keyFirst.key_id, first.key_id, "key file mode cycle must keep the same key");
-    fs.chmodSync(keyFile, 0o644);
-    assert.throws(
-      () => AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material),
-      /mode must be 600/,
-      "strict key must re-verify the key file mode on every call",
-    );
-    assert.deepEqual(
-      D.buildSchemaRejectionShadowInput(
-        { content: [{ type: "text", text: "schema validation: required property 'path' is missing" }] },
-        "read",
-        cacheRoot,
-      ),
-      { schemaRejection: false, eligibility: "strict_key_unavailable" },
-      "0644 key file must fail open in the wiring too",
-    );
-    fs.chmodSync(keyFile, 0o600);
-    const keyRecovered = AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material);
-    assert.equal(keyRecovered.key_id, first.key_id, "recovered key_id after 0600 restore must equal the original");
-    assert.equal(keyRecovered.digest, first.digest, "recovered digest after 0600 restore must equal the original");
-
-    // 8. Key file replaced by a symlink: cached material must not bypass the
-    //    symlink check; after removing the symlink strict recovers (new key).
-    const external = path.join(cacheRoot, "external-hmac-key");
-    fs.writeFileSync(external, Buffer.alloc(32, 0x33), { mode: 0o644 });
-    fs.rmSync(keyFile);
-    fs.symlinkSync(external, keyFile);
-    assert.throws(
-      () => AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material),
-      /invalid audit HMAC key file/,
-      "strict key must re-verify the key file is not a symlink on every call",
-    );
-    fs.rmSync(keyFile);
-    const afterSymlink = AH.auditHmacHexStrict(cacheRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, material);
-    assert.ok(!afterSymlink.key_id.startsWith("ephemeral-"), "strict recovers with a fresh persistent key after the symlink is removed");
-    assert.notEqual(afterSymlink.key_id, first.key_id, "a fresh key file yields a fresh key_id");
-  } finally {
-    fs.rmSync(cacheRoot, { recursive: true, force: true });
   }
 });
 
@@ -613,15 +444,15 @@ await check("assistant pre-projection fail-open: hostile message degrades to the
   assert.equal(pureTool.completed, false);
 });
 
-await check("malformed pre-projected inputs never throw and never count (schemaRejection without signature)", () => {
+await check("malformed pre-projected inputs never throw and never count (schemaRejection without checksum)", () => {
   const shadow = new S.StormShadow(settings);
   const malformed = { kind: "tool_execution_end", isError: true, schemaRejection: true };
   const o = shadow.feed(malformed);
-  assert.equal(o.consecutive_count, 0, "missing opaque signature must not be eligible");
+  assert.equal(o.consecutive_count, 0, "missing opaque checksum must not be eligible");
   assert.equal(o.post_cap, false);
   assert.equal(o.would_abort, false);
-  const after = shadow.feed({ kind: "tool_execution_end", isError: true, schemaRejection: true, signature: A });
-  assert.equal(after.consecutive_count, 1, "a real signature after the malformed input starts clean");
+  const after = shadow.feed({ kind: "tool_execution_end", isError: true, schemaRejection: true, checksum: A });
+  assert.equal(after.consecutive_count, 1, "a real checksum after the malformed input starts clean");
 });
 
 console.log("\n[source/behavior control-flow assertions]");
@@ -634,28 +465,30 @@ await check("storm-shadow.ts has no termination/abort/dispose/tool-cap surface a
   ]) {
     assert.ok(!source.includes(forbidden), `storm-shadow.ts must not reference ${forbidden}`);
   }
-  // No audit-HMAC call surface in the pure module (the wiring signs outside).
-  assert.ok(!/auditHmacHex(?:Strict)?\(/.test(source), "storm-shadow.ts must not call any audit-HMAC API");
+  // No audit-checksum call surface in the pure module (the wiring computes outside).
+  assert.ok(!/auditChecksumHex\(/.test(source), "storm-shadow.ts must not call any audit-checksum API");
   for (const toolCap of ["toolCallCount", "tool_call_count", "totalToolCap", "total_tool_cap"]) {
     assert.ok(!source.includes(toolCap), `storm-shadow.ts must have no total tool cap: ${toolCap}`);
   }
-  // The pure state machine only accepts pre-projected booleans / opaque signatures.
+  // The pure state machine only accepts pre-projected booleans / opaque checksums.
   assert.ok(source.includes("hasVisibleText") && source.includes("toolUseOnly"), "pre-projected assistant view fields present");
-  assert.ok(source.includes("signature?: OpaqueSignature"), "opaque signature input present");
+  assert.ok(source.includes("checksum?: OpaqueChecksum"), "opaque checksum input present");
 });
 
-await check("wiring signs the shadow signature ONLY with the strict persistent project key (v4 eligibility prerequisite)", () => {
+await check("wiring computes the shadow identity checksum with the keyless audit-checksum API (no key material)", () => {
   const source = fs.readFileSync(path.join(root, "extensions/dispatch/index.ts"), "utf8");
   const start = source.indexOf("export function buildSchemaRejectionShadowInput");
   const end = source.indexOf("function appendUtf8Bounded");
   assert.ok(start > 0 && end > start, "buildSchemaRejectionShadowInput missing");
   const body = source.slice(start, end);
-  assert.ok(body.includes("auditHmacHexStrict("), "shadow signature must use the strict persistent project key API");
-  assert.ok(!body.includes("auditHmacHex("), "shadow signature must never use the ephemeral-fallback auditHmacHex API");
-  assert.ok(!body.includes("ephemeral"), "shadow signature path must never mention/generate an ephemeral key");
-  // S2 retry HMAC semantics are untouched: audit-v5 still uses auditHmacHex.
+  assert.ok(body.includes("auditChecksumHex("), "shadow identity must use the keyless audit-checksum API");
+  assert.ok(!body.includes("auditHmac"), "shadow identity path must never reference any HMAC API");
+  assert.ok(!body.includes("ephemeral"), "shadow identity path must never mention/generate an ephemeral key");
+  assert.ok(!body.includes("projectRoot"), "shadow identity must not depend on any project key material");
+  // S2 retry fingerprint semantics are untouched: audit-v5 still uses the
+  // keyless audit-checksum API for the retry error fingerprint.
   const auditV5 = fs.readFileSync(path.join(root, "extensions/dispatch/audit-v5.ts"), "utf8");
-  assert.ok(auditV5.includes("auditHmacHex("), "S2 retry HMAC must keep its auditHmacHex semantics");
+  assert.ok(auditV5.includes("auditChecksumHex("), "S2 retry fingerprint must keep its audit-checksum semantics");
 });
 
 await check("runInProcess routes shadow verdicts only to the audit sink, never to termination", () => {
@@ -675,9 +508,9 @@ await check("runInProcess routes shadow verdicts only to the audit sink, never t
 
 await check("shadow feed sites are fail-open and pre-project safe fields only (no raw event payloads)", () => {
   const source = fs.readFileSync(path.join(root, "extensions/dispatch/index.ts"), "utf8");
-  // Fail-open boundaries: classifier + HMAC, assistant projection, feed+audit.
+  // Fail-open boundaries: classifier + checksum, assistant projection, feed+audit.
   assert.match(source, /const shadowFeed = \(input: StormShadowEventInput\): StormShadowObservation \| undefined => \{[\s\S]*?try \{[\s\S]*?stormShadow\.feed\(input\)[\s\S]*?\} catch \{/);
-  assert.match(source, /buildSchemaRejectionShadowInput\(event\.result, event\.toolName, heartbeatProjectRoot\)/);
+  assert.match(source, /buildSchemaRejectionShadowInput\(event\.result, event\.toolName\)/);
   assert.match(source, /projectAssistantMessageViewSafe\(event\.message\)/);
   assert.match(source, /const shadowFeed = \(input[\s\S]{0,400}shouldWriteStormShadowAudit/);
   // The raw event payloads never reach the state machine.
@@ -834,7 +667,7 @@ try {
     assert.equal(rejections.length, 6, `expected 6 schema-rejection rows, got ${JSON.stringify(shadowRows.map((r) => [r.event_kind, r.progress_basis, r.consecutive_count, r.would_abort]))}`);
     // Collision pair (rows 0-1): same tool/class/path, different normalized →
     // two distinct digests, each count 1, never trip (P1 regression).
-    assert.notEqual(rejections[0].signature_hmac?.digest, rejections[1].signature_hmac?.digest, "collision pair must NOT merge into one signature");
+    assert.notEqual(rejections[0].identity_checksum?.digest, rejections[1].identity_checksum?.digest, "collision pair must NOT merge into one identity");
     assert.equal(rejections[0].consecutive_count, 1);
     assert.equal(rejections[1].consecutive_count, 1);
     assert.equal(rejections[0].would_abort, false);
@@ -849,10 +682,10 @@ try {
     assert.equal(rejections[5].would_abort_basis, "consecutive");
     assert.equal(rejections[5].cap_after, 3, "cap_after mirrors governor observeAfter");
     assert.equal(rejections[2].segment, 1, "the 4 same exact identity rejections live in segment 1 (after the progress reset)");
-    const digests = new Set(rejections.map((r) => r.signature_hmac?.digest));
-    assert.equal(digests.size, 2, `expected exactly 2 distinct opaque signatures (A1 ×5 + A2 ×1), got ${digests.size}`);
-    const a1Rows = rejections.filter((r) => r.signature_hmac?.digest === rejections[0].signature_hmac?.digest);
-    const a2Rows = rejections.filter((r) => r.signature_hmac?.digest === rejections[1].signature_hmac?.digest);
+    const digests = new Set(rejections.map((r) => r.identity_checksum?.digest));
+    assert.equal(digests.size, 2, `expected exactly 2 distinct opaque checksums (A1 ×5 + A2 ×1), got ${digests.size}`);
+    const a1Rows = rejections.filter((r) => r.identity_checksum?.digest === rejections[0].identity_checksum?.digest);
+    const a2Rows = rejections.filter((r) => r.identity_checksum?.digest === rejections[1].identity_checksum?.digest);
     assert.equal(a1Rows.length, 5, "A1 (read({})) appears 5 times");
     assert.equal(a2Rows.length, 1, "A2 (read({limit:5})) appears once and never merges into A1");
     for (const row of rejections) {
@@ -860,9 +693,9 @@ try {
       assert.equal(row.row_kind, "worker_run_shadow_event");
       assert.equal(row.counterfactual_action, "would_abort_only_no_control_effect");
       assert.equal(row.mode, "observe");
-      assert.equal(row.rule_version, "dispatch-storm-shadow/v4");
+      assert.equal(row.rule_version, "dispatch-storm-shadow/v5");
       assert.equal(row.rule_id, "storm/post-cap-schema-rejection-signature/v1");
-      assert.match(row.signature_hmac?.digest ?? "", /^[0-9a-f]{64}$/);
+      assert.match(row.identity_checksum?.digest ?? "", /^[0-9a-f]{64}$/);
     }
     // Pure toolUse assistant messages are classified neutral (never progress) —
     // the toolUse-miscount fix, visible in the real audit as one marker per segment.
@@ -898,7 +731,7 @@ try {
     assert.ok(shadowRows.length >= 6, "no shadow rows to replay (previous check failed)");
     const inputs = shadowRows.map((row) => {
       if (row.progress_basis === "schema_rejection") {
-        return { kind: "tool_execution_end", isError: true, schemaRejection: true, signature: row.signature_hmac };
+        return { kind: "tool_execution_end", isError: true, schemaRejection: true, checksum: row.identity_checksum };
       }
       if (row.progress_basis === "successful_tool_response" || row.progress_basis === "failed_tool_response") {
         return { kind: "tool_execution_end", isError: row.progress_basis === "failed_tool_response", schemaRejection: false };
@@ -936,91 +769,11 @@ try {
     const secretFile = "ok.txt";
     assert.ok(!serialized.includes(secretFile), "tool args must not leak into shadow rows");
     for (const row of realRows.filter((r) => r.signal === "storm_shadow")) {
-      if (row.signature_hmac) {
-        assert.match(row.signature_hmac.digest, /^[0-9a-f]{64}$/);
-        assert.equal(typeof row.signature_hmac.key_id, "string");
+      if (row.identity_checksum) {
+        assert.match(row.identity_checksum.digest, /^[0-9a-f]{64}$/);
+        assert.equal(row.identity_checksum.algorithm, "sha256");
+        assert.ok(!Object.hasOwn(row.identity_checksum, "key_id"), "keyless checksum must not carry a key_id");
       }
-    }
-  });
-
-  await check("real SDK in an unsafe dir (strict key unavailable): schema rejections fail open, run/control unaffected, audit has NO ephemeral signature", async () => {
-    // Fresh temp dir with .pi-astack (0700) but llm-audit at the WRONG mode
-    // (0755): the strict persistent-key path refuses it, so every schema
-    // rejection fails open to schemaRejection=false with no signature. No
-    // chmod on any real project dir — this is a fresh temp dir.
-    const unsafeSdkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-shadow-unsafe-sdk-"));
-    fs.writeFileSync(path.join(unsafeSdkRoot, "ok.txt"), "hello storm shadow\n");
-    fs.mkdirSync(path.join(unsafeSdkRoot, ".pi-astack"), { mode: 0o700 });
-    fs.mkdirSync(path.join(unsafeSdkRoot, ".pi-astack", "llm-audit"), { mode: 0o755 });
-    const unsafeRun = {
-      runId: "dtr-storm-shadow-unsafe",
-      callId: "call-storm-shadow-unsafe",
-      sessionId: "session-storm-shadow-unsafe",
-    };
-    try {
-      // 4 consecutive read({}) schema rejections (would trip under a working
-      // key) + 1 success + final visible completion.
-      sdkFaux.setResponses([
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", { path: "ok.txt", limit: 5 })], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage("final normal completion"),
-      ]);
-      const dispatchTrace = DT.createDispatchTraceSink({
-        runId: unsafeRun.runId,
-        parentSessionId: unsafeRun.sessionId,
-        parentToolCallId: unsafeRun.callId,
-        taskIndex: 0,
-      });
-      const unsafeResult = await D.runInProcess(
-        sdkModelName, "off", "execute the scripted storm", new AbortController().signal, 8000, sdkRegistry, "read",
-        {
-          projectRoot: unsafeSdkRoot,
-          parentContextFiles: [],
-          maxRuntimeMs: 20000,
-          reasoningTrace: { dispatchToolCallId: unsafeRun.callId, taskIndex: 0, taskCount: 1 },
-          dispatchTrace,
-        },
-      );
-      // Control flow is unaffected: the run completes normally even though the
-      // strict key is unavailable and every schema rejection failed open.
-      assert.equal(unsafeResult.error, undefined, JSON.stringify(unsafeResult.error));
-      assert.equal(unsafeResult.failureType, undefined, JSON.stringify(unsafeResult.failureType));
-      assert.equal(unsafeResult.output, "final normal completion", JSON.stringify(unsafeResult.output));
-      assert.equal(unsafeResult.toolCallCount, 5, JSON.stringify(unsafeResult.toolCallCount));
-      assert.equal(unsafeResult.terminationClosure?.lifecycle_path, "normal", JSON.stringify(unsafeResult.terminationClosure));
-      assert.equal(unsafeResult.terminationClosure?.cleanup_done, true, JSON.stringify(unsafeResult.terminationClosure));
-
-      const auditPath = path.join(unsafeSdkRoot, ".pi-astack", "dispatch", "audit.jsonl");
-      assert.ok(fs.existsSync(auditPath), `audit.jsonl missing at ${auditPath}`);
-      const deadline = Date.now() + 4000;
-      let unsafeRows = [];
-      while (Date.now() < deadline) {
-        unsafeRows = fs.readFileSync(auditPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-        if (unsafeRows.some((row) => row.dispatch_run_id === unsafeRun.runId && row.row_kind === "task")) break;
-        await sleep(25);
-      }
-      const shadowRows = unsafeRows.filter((row) => row.signal === "storm_shadow" && row.dispatch_run_id === unsafeRun.runId);
-      // No schema-rejection shadow rows at all: the strict key was unavailable,
-      // so every rejection failed open to schemaRejection=false (classified as
-      // a neutral failed tool, never written).
-      assert.equal(
-        shadowRows.filter((row) => row.progress_basis === "schema_rejection").length,
-        0,
-        `no schema-rejection shadow rows expected, got ${JSON.stringify(shadowRows.map((r) => [r.event_kind, r.progress_basis]))}`,
-      );
-      // No shadow row carries ANY signature — and in particular no ephemeral
-      // key_id ever appears in the audit for this run.
-      assert.equal(shadowRows.filter((row) => row.signature_hmac).length, 0, "no shadow signature may exist when the strict key is unavailable");
-      const serialized = JSON.stringify(shadowRows);
-      assert.ok(!serialized.includes("ephemeral-"), "no ephemeral key_id may ever reach the audit");
-      // The governor still observed the schema errors (observe-only) and the
-      // run completed — control flow untouched.
-      assert.equal(unsafeResult.workerRunGovernance?.counters?.schema_error_storm_count, 2, "governor still counts the storm (observe-only)");
-    } finally {
-      fs.rmSync(unsafeSdkRoot, { recursive: true, force: true });
     }
   });
 } finally {

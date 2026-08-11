@@ -206,7 +206,7 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
         vector_count: 0,
         dimension: 0,
         ok: false,
-        error: controlledLlmAuditError(projectRoot, failure),
+        error: controlledLlmAuditError(failure),
       });
       throw failure;
     }
@@ -223,7 +223,7 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
         vector_count: 0,
         dimension: 0,
         ok: false,
-        error: controlledLlmAuditError(projectRoot, error),
+        error: controlledLlmAuditError(error),
       });
       throw error;
     }
@@ -239,7 +239,7 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
         dimension: 0,
         usage: controlledLlmAuditUsage(data.usage),
         ok: false,
-        error: controlledLlmAuditError(projectRoot, failure),
+        error: controlledLlmAuditError(failure),
       });
       throw failure;
     }
@@ -264,7 +264,7 @@ async function embedBatch(chunk: string[], cfg: EmbeddingProviderConfig, attempt
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: controlledLlmAuditError(projectRoot, error),
+      error: controlledLlmAuditError(error),
     });
     if (attempt < cfg.maxRetries) {
       await sleep(1000 * (attempt + 1));

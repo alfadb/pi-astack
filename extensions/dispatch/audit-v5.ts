@@ -1,4 +1,4 @@
-import { auditHmacHex } from "../_shared/audit-hmac";
+import { auditChecksumHex } from "../_shared/audit-checksum";
 import type { WorkerProviderRetryAuditFields } from "./worker-run-governor";
 
 const HTTP_STATUS_FIELDS = ["httpStatus", "http_status", "statusCode", "status_code"] as const;
@@ -63,10 +63,9 @@ export function classifyProviderRetryError(
 
 /**
  * Privacy-safe additive projection of SDK auto_retry_* fields. Raw error text
- * is used only as an HMAC input and is never returned to worker_run_event.
+ * is used only as a checksum input and is never returned to worker_run_event.
  */
 export function providerRetryAuditFields(
-  projectRoot: string,
   phase: "start" | "end",
   event: unknown,
 ): WorkerProviderRetryAuditFields {
@@ -79,7 +78,7 @@ export function providerRetryAuditFields(
       ? "retrying"
       : success === true ? "recovered" : success === false ? "exhausted" : "unknown";
     const fingerprint = rawError
-      ? auditHmacHex(projectRoot, "dispatch/provider-retry-error/v1", rawError)
+      ? auditChecksumHex("dispatch/provider-retry-error/v1", rawError)
       : undefined;
     return {
       retry_phase: phase,

@@ -188,7 +188,7 @@ if (settings.shadow.enabled && settings.shadow.provider === "serper" && serperRe
       assert(!rawLog.includes(sampleSnippet), "snippet fragment NOT in shadow log");
     }
     const allowed = new Set([
-      "schemaVersion", "timestamp", "hmac", "queryHash", "callIdHash",
+      "schemaVersion", "timestamp", "checksum", "queryHash", "callIdHash",
       "primaryProvider", "shadowProvider", "opts", "primary", "shadow",
       "topK", "effectiveTopK", "overlap",
       "primaryUrlHashes", "shadowUrlHashes", "primaryDomains", "shadowDomains",

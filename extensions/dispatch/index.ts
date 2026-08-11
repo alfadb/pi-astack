@@ -88,7 +88,6 @@ import {
 } from "../_shared/visible-text-repeat-detector";
 import {
   WorkerRunGovernor,
-  buildStormEnforceDegradedAuditEvent,
   buildStormEnforceUnsupportedCapAuditEvent,
   buildWorkerRunAuditEvent,
   buildWorkerRunRetryOutcomeAuditEvent,
@@ -104,11 +103,11 @@ import {
   buildStormShadowAuditEvent,
   shouldWriteStormShadowAudit,
   DEFAULT_STORM_SHADOW_SETTINGS,
-  STORM_SHADOW_SIGNATURE_DOMAIN,
+  STORM_SHADOW_CHECKSUM_DOMAIN,
   type StormShadowEventInput,
   type StormShadowObservation,
 } from "./storm-shadow";
-import { auditHmacHexStrict } from "../_shared/audit-hmac";
+import { auditChecksumHex } from "../_shared/audit-checksum";
 import { providerRetryAuditFields } from "./audit-v5";
 import { RETRYABLE_EMPTY_VISIBLE_OUTPUT_ERROR } from "../empty-visible-output-retry/index";
 import {
@@ -1189,48 +1188,36 @@ export function projectAssistantMessageViewSafe(message: unknown): StormShadowAs
  *  classifier — only this closed category. */
 export type SchemaRejectionEligibilityReason =
   | "eligible"
-  | "not_schema_rejection"
-  | "strict_key_unavailable";
+  | "not_schema_rejection";
 
 export interface SchemaRejectionShadowInput {
   schemaRejection: boolean;
-  signature?: StormShadowObservation["signature_hmac"];
-  /** "eligible": real schema rejection signed with the strict persistent
-   *  project key. "not_schema_rejection": the failed tool result is not
-   *  schema-rejection shaped (or the classifier itself failed open).
-   *  "strict_key_unavailable": the strict persistent project key is
-   *  unavailable (unsafe directory / wrong mode / owner / symlink) and the
-   *  event failed open to not-a-rejection with NO signature — the shadow
-   *  candidate is not eligible and enforce never triggers (the wiring writes
-   *  at most one worker_run_enforce_event degradation row per run). */
+  checksum?: StormShadowObservation["identity_checksum"];
+  /** "eligible": real schema rejection with a keyless identity checksum.
+   *  "not_schema_rejection": the failed tool result is not schema-rejection
+   *  shaped (or the classifier itself failed open). */
   eligibility: SchemaRejectionEligibilityReason;
 }
 
 /**
  * S3 shadow pre-projection: classify a failed tool result with the governor's
- * own schema-error classifier and build the opaque project-audit HMAC of the
- * EXACT identity (tool name + closed error class + field path + bounded
- * normalized descriptor). The HMAC input is an unambiguous structured/framed
- * tuple (JSON.stringify([toolName, errorClass, fieldPath, normalized])) so
- * same class/path with different normalized descriptors never merge. Only
- * key_id + digest are returned — raw text / field path / tool args / the
- * normalized descriptor never leave this function.
+ * own schema-error classifier and build the keyless checksum of the EXACT
+ * identity (tool name + closed error class + field path + bounded normalized
+ * descriptor). The checksum input is an unambiguous structured/framed tuple
+ * (JSON.stringify([toolName, errorClass, fieldPath, normalized])) so same
+ * class/path with different normalized descriptors never merge. Only the
+ * digest is returned — raw text / field path / tool args / the normalized
+ * descriptor never leave this function.
  *
- * STRICT KEY ELIGIBILITY PREREQUISITE (v4): the signature is built ONLY with
- * the persistent project audit key (auditHmacHexStrict) — cross-process
- * stable, never the process-random ephemeral fallback. If the persistent key
- * is unavailable (unsafe directory / wrong mode / owner / symlink / any
- * strict-key failure), this fails open to { schemaRejection: false,
- * eligibility: "strict_key_unavailable" } with NO signature: the event is not
- * eligible for the shadow candidate and the worker continues normally. An
- * ephemeral key is never generated and never accepted as eligible. Fail-open:
- * classifier or strict HMAC throws (e.g. hostile getters on the result, or
- * persistent key unavailable) degrade to not-a-schema-rejection.
+ * Keyless (ADR 0027 C6): the checksum is deterministic and cross-process
+ * stable with no key material and no eligibility prerequisite — the same
+ * identity always produces the same digest in every process. Fail-open:
+ * classifier throws (e.g. hostile getters on the result) degrade to
+ * not-a-schema-rejection.
  */
 export function buildSchemaRejectionShadowInput(
   result: unknown,
   toolName: unknown,
-  projectRoot: string,
 ): SchemaRejectionShadowInput {
   let descriptor: { errorClass: string; fieldPath: string; normalized: string } | null;
   try {
@@ -1239,19 +1226,14 @@ export function buildSchemaRejectionShadowInput(
     return { schemaRejection: false, eligibility: "not_schema_rejection" };
   }
   if (!descriptor) return { schemaRejection: false, eligibility: "not_schema_rejection" };
-  try {
-    return {
-      schemaRejection: true,
-      eligibility: "eligible",
-      signature: auditHmacHexStrict(
-        projectRoot,
-        STORM_SHADOW_SIGNATURE_DOMAIN,
-        JSON.stringify([String(toolName ?? "unknown"), descriptor.errorClass, descriptor.fieldPath, descriptor.normalized]),
-      ),
-    };
-  } catch {
-    return { schemaRejection: false, eligibility: "strict_key_unavailable" };
-  }
+  return {
+    schemaRejection: true,
+    eligibility: "eligible",
+    checksum: auditChecksumHex(
+      STORM_SHADOW_CHECKSUM_DOMAIN,
+      JSON.stringify([String(toolName ?? "unknown"), descriptor.errorClass, descriptor.fieldPath, descriptor.normalized]),
+    ),
+  };
 }
 
 function appendUtf8Bounded(
@@ -1323,7 +1305,7 @@ function governanceFailureMessage(decision: WorkerRunGovernorDecision): string {
     case "provider_retry_budget_exceeded": return `provider retry budget exceeded: ${decision.count} retries > limit ${decision.limit}`;
     case "empty_visible_retry_budget_exceeded": return `empty visible output retry budget exceeded: ${decision.count} failures > limit ${decision.limit}`;
     case "full_output_cap_budget_exceeded": return `full output cap budget exceeded: ${decision.count} cap hits > limit ${decision.limit}`;
-    case "schema_rejection_storm_enforced": return `schema rejection storm enforced: ${decision.count} consecutive same-signature rejections > limit ${decision.limit}`;
+    case "schema_rejection_storm_enforced": return `schema rejection storm enforced: ${decision.count} consecutive same-identity rejections > limit ${decision.limit}`;
     default: return "worker run governor stopped the session; bounded partial output returned";
   }
 }
@@ -2311,7 +2293,7 @@ export async function runInProcess(
   // governor toolObservers.schemaErrorStorm.observeAfter (the governor keeps
   // its own copy; its observer stays observe-only and its abort behavior is
   // unchanged). The shadow state machine only ever receives pre-projected
-  // safe fields and opaque signature HMACs (see buildSchemaRejectionShadowInput
+  // safe fields and opaque identity checksums (see buildSchemaRejectionShadowInput
   // / projectAssistantMessageViewSafe); raw event payloads never reach it.
   const stormShadow = new StormShadow({
     ...DEFAULT_STORM_SHADOW_SETTINGS,
@@ -2363,19 +2345,6 @@ export async function runInProcess(
       heartbeatProjectRoot,
       heartbeatAnchor,
       buildStormShadowAuditEvent(workerGovernor.workerRunId, workerAuditCorrelation, observation),
-    ).catch(() => { /* audit is best-effort */ });
-  };
-  // S4 degradation audit singleflight: at most one worker_run_enforce_event
-  // degradation row per run (strict persistent project key unavailable → the
-  // shadow candidate was not eligible and enforce never triggered).
-  let stormEnforceDegradedAudited = false;
-  const emitStormEnforceDegradedAudit = (): void => {
-    if (stormEnforceDegradedAudited) return;
-    stormEnforceDegradedAudited = true;
-    void appendDispatchAudit(
-      heartbeatProjectRoot,
-      heartbeatAnchor,
-      buildStormEnforceDegradedAuditEvent(workerGovernor.snapshot(), Date.now() - start, workerAuditCorrelation),
     ).catch(() => { /* audit is best-effort */ });
   };
   // Fail-open shadow feed: classification / feed / audit construction must
@@ -2851,11 +2820,11 @@ export async function runInProcess(
           ));
           // S3 shadow candidate A: reuse the governor's schema-error classifier
           // for the exact identity (tool name + closed error class + field
-          // path); only the project audit HMAC (key_id + digest) is fed to the
+          // path); only the keyless identity checksum (digest) is fed to the
           // pure state machine, never raw text / field path / tool args.
-          // Fail-open: a classifier/HMAC throw degrades to not-a-rejection.
+          // Fail-open: a classifier throw degrades to not-a-rejection.
           const schemaShadow: SchemaRejectionShadowInput = event.isError === true
-            ? buildSchemaRejectionShadowInput(event.result, event.toolName, heartbeatProjectRoot)
+            ? buildSchemaRejectionShadowInput(event.result, event.toolName)
             : { schemaRejection: false, eligibility: "not_schema_rejection" };
           // S3 shadow candidate B: successful tool responses are effective
           // progress; failed responses (incl. schema rejections) are not.
@@ -2863,12 +2832,12 @@ export async function runInProcess(
             kind: "tool_execution_end",
             isError: event.isError === true,
             schemaRejection: schemaShadow.schemaRejection,
-            ...(schemaShadow.signature ? { signature: schemaShadow.signature } : {}),
+            ...(schemaShadow.checksum ? { checksum: schemaShadow.checksum } : {}),
           });
           // S4 single-rule enforce (STORM-ENFORCE): the ONLY production-supported
           // branch of the authorized rule — the exact consecutive branch. The
           // predicate is the full composite (same strict exact composite
-          // signature in the same segment, consecutive_count===4 && cap_after===3
+          // identity in the same segment, consecutive_count===4 && cap_after===3
           // && would_abort_basis==='consecutive') — never would_abort / first_trip
           // alone. Rolling-window trips never enter control. The real abort
           // decision flows through the governor's dedicated method →
@@ -2884,23 +2853,15 @@ export async function runInProcess(
           // untouched: the seal already blocks external claims; this gate
           // prevents the fake decision from being constructed and audited in
           // the first place.
-          if (shadowObservation && schemaShadow.signature && !runTerminalSealed && termination.claim === undefined) {
+          if (shadowObservation && schemaShadow.checksum && !runTerminalSealed && termination.claim === undefined) {
             const enforceDecision = workerGovernor.enforceSchemaRejectionStorm({
-              signature: schemaShadow.signature,
+              checksum: schemaShadow.checksum,
               segment: shadowObservation.segment,
               consecutiveCount: shadowObservation.consecutive_count,
               capAfter: shadowObservation.cap_after,
               wouldAbortBasis: shadowObservation.would_abort_basis,
             });
             if (enforceDecision) emitWorkerRunDecision(enforceDecision);
-          }
-          // S4 degradation audit: strict persistent project key unavailable →
-          // the shadow candidate was not eligible and enforce never triggered.
-          // At most one worker_run_enforce_event degradation row per run, and
-          // only when enforce is fully enabled with the supported cap
-          // (enforce disabled / unsupported cap produce no noise).
-          if (schemaShadow.eligibility === "strict_key_unavailable" && stormEnforceEnabled && stormEnforceCfg.observeAfter === 3) {
-            emitStormEnforceDegradedAudit();
           }
         }
 
@@ -2977,7 +2938,7 @@ export async function runInProcess(
         }
 
         if (eventType === "auto_retry_start") {
-          const retryAudit = providerRetryAuditFields(heartbeatProjectRoot, "start", event);
+          const retryAudit = providerRetryAuditFields("start", event);
           retryHistory.entries.push({
             attempt: typeof event.attempt === "number" ? event.attempt : retryHistory.entries.length + 1,
             errorPreview: typeof event.errorMessage === "string"
@@ -3021,7 +2982,7 @@ export async function runInProcess(
           if (typeof event.finalError === "string" && event.finalError) {
             retryHistory.finalError = event.finalError.slice(0, 200);
           }
-          const retryAudit = providerRetryAuditFields(heartbeatProjectRoot, "end", event);
+          const retryAudit = providerRetryAuditFields("end", event);
           void appendDispatchAudit(
             heartbeatProjectRoot,
             heartbeatAnchor,

@@ -266,7 +266,7 @@ async function editImage(
       row_type: "error",
       duration_ms: Date.now() - started,
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, e),
+      error: controlledLlmAuditError(e),
     });
     return { ok: false, error: `Image edit network error: ${msg}` };
   }
@@ -281,7 +281,7 @@ async function editImage(
       status: response.status,
       response_bytes: Buffer.byteLength(errText, "utf8"),
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, failure),
+      error: controlledLlmAuditError(failure),
       ok: false,
     });
     return {
@@ -305,7 +305,7 @@ async function editImage(
         response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
         ...imageResultAuditShape(output),
         usage: controlledLlmAuditUsage(data.usage),
-        error: controlledLlmAuditError(opts.cwd, failure),
+        error: controlledLlmAuditError(failure),
         ok: false,
       });
       return {
@@ -333,7 +333,7 @@ async function editImage(
       response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
       ...imageResultAuditShape(output),
       usage: controlledLlmAuditUsage(data.usage),
-      error: result.ok ? undefined : controlledLlmAuditError(opts.cwd, result.error),
+      error: result.ok ? undefined : controlledLlmAuditError(result.error),
       ok: result.ok,
     });
     return result;
@@ -343,7 +343,7 @@ async function editImage(
       row_type: "error",
       duration_ms: Date.now() - started,
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, e),
+      error: controlledLlmAuditError(e),
     });
     throw e;
   }
@@ -419,7 +419,7 @@ async function generateImage(
       row_type: "error",
       duration_ms: Date.now() - started,
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, e),
+      error: controlledLlmAuditError(e),
     });
     return { ok: false, error: `Image generation network error: ${msg}` };
   }
@@ -434,7 +434,7 @@ async function generateImage(
       status: response.status,
       response_bytes: Buffer.byteLength(errText, "utf8"),
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, failure),
+      error: controlledLlmAuditError(failure),
       ok: false,
     });
     return {
@@ -461,7 +461,7 @@ async function generateImage(
           status: response.status,
           response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
           ...emptyImageResultAuditShape(),
-          error: controlledLlmAuditError(opts.cwd, sse.error),
+          error: controlledLlmAuditError(sse.error),
           ok: false,
         });
         return { ok: false, error: sse.error };
@@ -496,7 +496,7 @@ async function generateImage(
         response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
         ...imageResultAuditShape(output),
         usage: controlledLlmAuditUsage(data.usage),
-        error: controlledLlmAuditError(opts.cwd, failure),
+        error: controlledLlmAuditError(failure),
         ok: false,
       });
       return {
@@ -526,7 +526,7 @@ async function generateImage(
       response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
       ...imageResultAuditShape(output),
       usage: controlledLlmAuditUsage(data.usage),
-      error: result.ok ? undefined : controlledLlmAuditError(opts.cwd, result.error),
+      error: result.ok ? undefined : controlledLlmAuditError(result.error),
       ok: result.ok,
     });
     return result;
@@ -536,7 +536,7 @@ async function generateImage(
       row_type: "error",
       duration_ms: Date.now() - started,
       ...emptyImageResultAuditShape(),
-      error: controlledLlmAuditError(opts.cwd, e),
+      error: controlledLlmAuditError(e),
     });
     throw e;
   }

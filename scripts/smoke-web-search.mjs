@@ -19,8 +19,8 @@
  *     mapping, HTTP error truncation + no key leak, date-range fail-closed
  *   - shadow A/B: default off, deterministic call-event sampling (query +
  *     tool-call id), tool-level failure-does-not-affect-main, log row
- *     shape, no raw query / key / snippet in log, HMAC digests (audit
- *     key) with algorithm/key_id recorded, logUrls=false → URL HMAC
+ *     shape, no raw query / key / snippet in log, keyless checksum digests
+ *     with algorithm recorded, logUrls=false → URL checksum digests
  *     digests + hostname domains (paths/queries never logged), logUrls=true
  *     → strictly normalized URLs (userinfo/fragment/all query params
  *     stripped), normalized errorKind (no raw provider error text),
@@ -418,22 +418,19 @@ assert(shadowMod.shouldSampleShadow("any query", "call-1", 1) === true, "sampleR
   assert(inSample !== null && outSample !== null, "sampling discriminates (found sampled + non-sampled probes at 0.5)");
 }
 
-// HMAC correlation values (audit key), NOT bare sha256: the log records
-// algorithm/key_id/digest and never claims irreversibility.
+// Keyless checksum correlation values (plain SHA-256, domain-framed): the
+// log records algorithm/digest and never claims irreversibility.
 {
-  const hmacTmp = fs.mkdtempSync(path.join(os.tmpdir(), "smoke-web-search-hmac-"));
-  const hmacRoot = path.join(hmacTmp, "hmac-probe");
-  fs.mkdirSync(hmacRoot, { recursive: true });
-  const h = shadowMod.auditHash(hmacRoot, "web-search-query", "secret query");
-  assert(h.algorithm === "hmac-sha256" && typeof h.key_id === "string" && h.key_id.length > 0 && /^[0-9a-f]{64}$/.test(h.digest),
-    "auditHash → algorithm + key_id + 64-hex digest");
-  const h2 = shadowMod.auditHash(hmacRoot, "web-search-query", "secret query");
-  assert(h.digest === h2.digest && h.key_id === h2.key_id, "auditHash deterministic for same project+domain+value");
-  const h3 = shadowMod.auditHash(hmacRoot, "web-search-query", "other query");
-  assert(h.digest !== h3.digest, "auditHash differs across values");
-  const h4 = shadowMod.auditHash(path.join(hmacTmp, "hmac-probe-2"), "web-search-query", "secret query");
-  assert(h.key_id !== h4.key_id || h.digest !== h4.digest, "auditHash differs across projects (project-bound key)");
-  fs.rmSync(hmacTmp, { recursive: true, force: true });
+  const h = shadowMod.checksumHex("web-search-query", "secret query");
+  assert(h.algorithm === "sha256" && /^[0-9a-f]{64}$/.test(h.digest),
+    "checksumHex → algorithm + 64-hex digest");
+  const h2 = shadowMod.checksumHex("web-search-query", "secret query");
+  assert(h.digest === h2.digest, "checksumHex deterministic for same domain+value");
+  const h3 = shadowMod.checksumHex("web-search-query", "other query");
+  assert(h.digest !== h3.digest, "checksumHex differs across values");
+  const h4 = shadowMod.checksumHex("web-search-url", "secret query");
+  assert(h.digest !== h4.digest, "checksumHex differs across domains (domain framing)");
+  assert(!Object.hasOwn(h, "key_id"), "keyless checksum must not carry a key_id");
 }
 
 // URL normalization: overlap form keeps non-utm query params; log form
@@ -512,12 +509,12 @@ assert(shadowMod.topKOverlap(
     }
     assert(!!rawA.trim(), "shadow log row appended to <cwd>/.pi-astack/web-search/shadow.jsonl");
     const row = JSON.parse(rawA.trim().split("\n")[0]);
-    assert(row.schemaVersion === 2, "log row: schemaVersion 2 (HMAC + call-event sampling)");
+    assert(row.schemaVersion === 3, "log row: schemaVersion 3 (keyless checksum + call-event sampling)");
     assert(typeof row.timestamp === "string" && !Number.isNaN(Date.parse(row.timestamp)) && row.timestamp.includes("T"), "log row: local ISO timestamp");
-    assert(typeof row.hmac === "object" && row.hmac.algorithm === "hmac-sha256" && typeof row.hmac.key_id === "string" && row.hmac.key_id.length > 0,
-      "log row: row-level hmac algorithm + key_id");
-    assert(/^[0-9a-f]{64}$/.test(row.queryHash) && row.queryHash !== query, "log row: queryHash is HMAC digest (never raw query)");
-    assert(/^[0-9a-f]{64}$/.test(row.callIdHash) && row.callIdHash !== "id-1", "log row: callIdHash is HMAC digest (causal anchor)");
+    assert(typeof row.checksum === "object" && row.checksum.algorithm === "sha256",
+      "log row: row-level checksum algorithm");
+    assert(/^[0-9a-f]{64}$/.test(row.queryHash) && row.queryHash !== query, "log row: queryHash is checksum digest (never raw query)");
+    assert(/^[0-9a-f]{64}$/.test(row.callIdHash) && row.callIdHash !== "id-1", "log row: callIdHash is checksum digest (causal anchor)");
     assert(row.primaryProvider === "brave" && row.shadowProvider === "serper", "log row: main + shadow provider names");
     assert(typeof row.opts === "object", "log row: opts present");
     assert(row.primary.status === "ok" && row.primary.resultCount === 2 && Number.isFinite(row.primary.latencyMs),
@@ -564,15 +561,15 @@ assert(shadowMod.topKOverlap(
     }
     const rowB = JSON.parse(rawB.trim().split("\n").slice(-1)[0]);
     assert(Array.isArray(rowB.primaryUrlHashes) && rowB.primaryUrls === undefined,
-      "logUrls=false → URL HMAC digests, no URLs");
+      "logUrls=false → URL checksum digests, no URLs");
     assert(!JSON.stringify(rowB).includes("https://brave.example/"), "logUrls=false → raw URLs absent from row");
-    // URL normalized BEFORE hashing; digest is an HMAC against the project
-    // audit key (same projectRoot the index used: tmp), not bare sha256.
-    const expectedHash = shadowMod.auditHash(tmp, "web-search-url", shadowMod.normalizeUrlForLog("https://brave.example/secret-path?utm_source=x&q=secret-query")).digest;
-    assert(/^[0-9a-f]{64}$/.test(expectedHash), "logUrls=false → URL digest is 64-hex HMAC");
-    assert(rowB.primaryUrlHashes.includes(expectedHash), "logUrls=false → digest matches hmac(normalizeUrlForLog(url))");
-    assert(rowB.hmac && rowB.hmac.algorithm === "hmac-sha256" && rowB.hmac.key_id === shadowMod.auditHash(tmp, "web-search-query", "x").key_id,
-      "logUrls=false → row-level hmac algorithm/key_id consistent with project audit key");
+    // URL normalized BEFORE hashing; digest is a keyless checksum of the
+    // normalized URL (domain-framed), not a keyed HMAC.
+    const expectedHash = shadowMod.checksumHex("web-search-url", shadowMod.normalizeUrlForLog("https://brave.example/secret-path?utm_source=x&q=secret-query")).digest;
+    assert(/^[0-9a-f]{64}$/.test(expectedHash), "logUrls=false → URL digest is 64-hex checksum");
+    assert(rowB.primaryUrlHashes.includes(expectedHash), "logUrls=false → digest matches checksum(normalizeUrlForLog(url))");
+    assert(rowB.checksum && rowB.checksum.algorithm === "sha256",
+      "logUrls=false → row-level checksum algorithm consistent");
     assert(Array.isArray(rowB.primaryDomains) && rowB.primaryDomains.includes("brave.example"),
       "logUrls=false → hostname domains present (authority analysis)");
     const rawBJson = JSON.stringify(rowB);
@@ -620,7 +617,7 @@ assert(shadowMod.topKOverlap(
         "errorKind: HTTP 429 → rate_limit (status kept, text dropped)");
       assert(row.overlap === null && row.effectiveTopK === null && row.topK === 10,
         "error row: overlap + effectiveTopK null, topK recorded");
-      assert(/^[0-9a-f]{64}$/.test(row.callIdHash), "error row: callIdHash present (HMAC causal anchor)");
+      assert(/^[0-9a-f]{64}$/.test(row.callIdHash), "error row: callIdHash present (checksum causal anchor)");
       for (const f of [errQuery, fakeKey, fakeSnippet, "boom", "Too Many Requests"]) {
         if (raw.includes(f)) failMsg(`shadow error log leaked error text: ${f}`);
         else ok(`shadow error log does not contain: ${f}`);
@@ -1065,7 +1062,7 @@ if (/scheduleShadowSearch/.test(indexSrc) && /shouldSampleShadow\(params\.query,
   ok("shadow scheduling wired into web_search execute (call-event sampling uses tool-call id)");
 } else failMsg("shadow scheduling not wired with call-id sampling");
 if (/callId: id/.test(indexSrc)) {
-  ok("tool-call id passed to shadow (HMAC causal anchor)");
+  ok("tool-call id passed to shadow (checksum causal anchor)");
 } else failMsg("tool-call id not passed to shadow");
 if (/primaryLatencyMs/.test(indexSrc) && /performance\.now\(\)/.test(indexSrc)) {
   ok("primary latency measured at tool layer (performance.now)");
@@ -1183,9 +1180,9 @@ if (ws?.shadow?.properties?.sampleRate?.minimum === 0 && ws?.shadow?.properties?
 if (ws?.shadow?.properties?.logUrls?.default === false) ok("schema: shadow.logUrls default false (hash mode)");
 else failMsg("schema: shadow.logUrls missing or wrong default");
 const shadowDesc = ws?.shadow?.description ?? "";
-if (/keyed HMAC/.test(shadowDesc) && !/sha256 of the query/.test(shadowDesc)) {
-  ok("schema: shadow description uses HMAC language (no bare-sha256 claim)");
-} else failMsg("schema: shadow description missing HMAC wording or still claims bare sha256");
+if (/keyless checksum/.test(shadowDesc) && !/sha256 of the query/.test(shadowDesc)) {
+  ok("schema: shadow description uses keyless-checksum language (no bare-sha256 claim)");
+} else failMsg("schema: shadow description missing keyless-checksum wording or still claims bare sha256");
 if (/may still reveal which sites are of interest/.test(shadowDesc)) {
   ok("schema: domain cleartext disclosure stated (authority-analysis signal)");
 } else failMsg("schema: missing domain-disclosure note");

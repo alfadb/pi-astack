@@ -18,7 +18,7 @@ const T = await jiti.import(path.join(root, "extensions/dispatch/terminal-state.
 const D = await jiti.import(path.join(root, "extensions/dispatch/index.ts"));
 const W = await jiti.import(path.join(root, "extensions/workflow/executor.ts"));
 const DT = await jiti.import(path.join(root, "extensions/dispatch/dispatch-trace.ts"));
-const AH = await jiti.import(path.join(root, "extensions/_shared/audit-hmac.ts"));
+const AH = await jiti.import(path.join(root, "extensions/_shared/audit-checksum.ts"));
 
 let passed = 0;
 const failures = [];
@@ -146,7 +146,7 @@ async function runDisabledChild(home, projectRoot) {
       assert.equal(startRows.length, 1, `provider_retry_start rows=${startRows.length}`);
       assert.equal(endRows.length, 1, `provider_retry_end rows=${endRows.length} (${rows.map((row) => row.signal).join(",")})`);
 
-      // Start row: real attempt/delay/outcome/classification/HMAC, honest
+      // Start row: real attempt/delay/outcome/classification/checksum, honest
       // audit-only projection (action says no governor transition).
       const startRow = startRows[0];
       assert.equal(startRow.retry_phase, "start");
@@ -164,7 +164,7 @@ async function runDisabledChild(home, projectRoot) {
       assert.equal(startRow.error_classification, A.classifyProviderRetryError(errorPreview, 503), `classification for observed error: ${errorPreview}`);
       assert.deepEqual(
         startRow.error_fingerprint,
-        AH.auditHmacHex(projectRoot, "dispatch/provider-retry-error/v1", errorPreview),
+        AH.auditChecksumHex("dispatch/provider-retry-error/v1", errorPreview),
         JSON.stringify(startRow.error_fingerprint),
       );
 
@@ -235,7 +235,7 @@ async function runDisabledChild(home, projectRoot) {
       const row = G.buildWorkerRunRetryStartAuditEvent(
         before,
         10,
-        A.providerRetryAuditFields(projectRoot, "start", {
+        A.providerRetryAuditFields("start", {
           attempt: 1,
           maxAttempts: 3,
           delayMs: 25,
@@ -287,7 +287,7 @@ const secretError = "HTTP 503 Bearer secret-token prompt=must-not-leak tool_args
 console.log("dispatch additive audit v5 smoke\n");
 
 await check("retry start carries real attempt/delay/classification and keyed fingerprint only", () => {
-  const fields = A.providerRetryAuditFields(tempRoot, "start", {
+  const fields = A.providerRetryAuditFields("start", {
     type: "auto_retry_start",
     attempt: 2,
     maxAttempts: 4,
@@ -301,19 +301,18 @@ await check("retry start carries real attempt/delay/classification and keyed fin
   assert.equal(fields.retry_outcome, "retrying");
   assert.equal(fields.error_classification, "server_error");
   assert.equal(fields.http_status, 503);
-  assert.equal(fields.error_fingerprint?.algorithm, "hmac-sha256");
+  assert.equal(fields.error_fingerprint?.algorithm, "sha256");
   assert.match(fields.error_fingerprint?.digest ?? "", /^[0-9a-f]{64}$/);
   const serialized = JSON.stringify(fields);
   for (const forbidden of ["secret-token", "must-not-leak", "password:x", "output=private", secretError]) {
     assert.ok(!serialized.includes(forbidden), `retry fields leaked ${forbidden}`);
   }
-  const again = A.providerRetryAuditFields(tempRoot, "start", { errorMessage: secretError });
+  const again = A.providerRetryAuditFields("start", { errorMessage: secretError });
   assert.equal(again.error_fingerprint?.digest, fields.error_fingerprint?.digest);
-  assert.equal(again.error_fingerprint?.key_id, fields.error_fingerprint?.key_id);
 });
 
 await check("retry end outcome is additive and absent HTTP status stays absent", () => {
-  const recovered = A.providerRetryAuditFields(tempRoot, "end", {
+  const recovered = A.providerRetryAuditFields("end", {
     type: "auto_retry_end",
     success: true,
     attempt: 2,
@@ -323,7 +322,7 @@ await check("retry end outcome is additive and absent HTTP status stays absent",
   assert.ok(!Object.hasOwn(recovered, "http_status"));
   assert.ok(!Object.hasOwn(recovered, "error_fingerprint"));
 
-  const exhausted = A.providerRetryAuditFields(tempRoot, "end", {
+  const exhausted = A.providerRetryAuditFields("end", {
     type: "auto_retry_end",
     success: false,
     attempt: 3,
@@ -333,7 +332,7 @@ await check("retry end outcome is additive and absent HTTP status stays absent",
   assert.equal(exhausted.error_classification, "rate_limit");
   assert.ok(!Object.hasOwn(exhausted, "http_status"), "must not fabricate an HTTP code");
 
-  const bareNumber = A.providerRetryAuditFields(tempRoot, "end", {
+  const bareNumber = A.providerRetryAuditFields("end", {
     success: false,
     finalError: "retry observation 503 had no HTTP/status label",
   });
@@ -342,7 +341,7 @@ await check("retry end outcome is additive and absent HTTP status stays absent",
   const hostile = Object.create(null, {
     errorMessage: { get() { throw new Error("hostile retry getter"); } },
   });
-  assert.deepEqual(A.providerRetryAuditFields(tempRoot, "start", hostile), {
+  assert.deepEqual(A.providerRetryAuditFields("start", hostile), {
     retry_phase: "start",
     retry_outcome: "retrying",
     error_classification: "unknown",
@@ -351,7 +350,7 @@ await check("retry end outcome is additive and absent HTTP status stays absent",
 
 await check("worker_run_event joins worker, dispatch run, and call without raw error", () => {
   const governor = new G.WorkerRunGovernor("worker-v5-join", G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS, tempRoot, 1000);
-  const retry = A.providerRetryAuditFields(tempRoot, "start", {
+  const retry = A.providerRetryAuditFields("start", {
     attempt: 1,
     delayMs: 25,
     errorMessage: secretError,
@@ -378,7 +377,7 @@ await check("auto_retry_end audit builder does not mutate governor counters or t
   const row = G.buildWorkerRunRetryOutcomeAuditEvent(
     before,
     50,
-    A.providerRetryAuditFields(tempRoot, "end", { success: false, attempt: 1, finalError: secretError }),
+    A.providerRetryAuditFields("end", { success: false, attempt: 1, finalError: secretError }),
     { dispatchToolCallId: "call-end", dispatchRunId: "dtr-end" },
   );
   const after = governor.snapshot();
@@ -501,7 +500,7 @@ await check("v5 source is additive: v4 fields and legacy row semantics remain", 
 // auto_retry_end event path through D.runInProcess with a faux provider and
 // asserts the provider_retry start/end audit rows written to
 // <projectRoot>/.pi-astack/dispatch/audit.jsonl: real attempt/delay/outcome,
-// closed error classification, keyed HMAC fingerprint (never raw text),
+// closed error classification, keyless checksum fingerprint (never raw text),
 // worker/run/call join, governor counting (start only), no prompt/tool
 // args/output leakage, and no stream attribution fabricated from error text.
 // It is equivalence evidence only: deterministic faux-provider inputs, no
@@ -549,7 +548,7 @@ let sdkErrorPreview = null;
 
 console.log("\n[sdk-equivalent runInProcess retry audit regression (not production acceptance)]");
 try {
-  await check("sdk-equivalent: auto_retry lifecycle writes provider_retry start/end audit rows with real attempt/delay/outcome/classification/HMAC (not production acceptance)", async () => {
+  await check("sdk-equivalent: auto_retry lifecycle writes provider_retry start/end audit rows with real attempt/delay/outcome/classification/checksum (not production acceptance)", async () => {
     const dispatchTrace = DT.createDispatchTraceSink({
       runId: "dtr-auditv5-retry-sdk",
       parentSessionId: "session-auditv5-retry-sdk",
@@ -596,7 +595,7 @@ try {
     assert.equal(startRows.length, 1, `provider_retry start rows=${startRows.length}`);
     assert.equal(endRows.length, 1, `provider_retry_end rows=${endRows.length} (${sdkRows.map((row) => row.signal).join(",")})`);
 
-    // Start row: real attempt/delay/outcome/classification/HMAC fields.
+    // Start row: real attempt/delay/outcome/classification/checksum fields.
     const startRow = startRows[0];
     assert.equal(startRow.retry_phase, "start");
     assert.equal(startRow.retry_attempt, 1);
@@ -612,7 +611,7 @@ try {
     assert.equal(startRow.error_classification, A.classifyProviderRetryError(sdkErrorPreview, 503), `classification for observed error: ${sdkErrorPreview}`);
     assert.deepEqual(
       startRow.error_fingerprint,
-      AH.auditHmacHex(sdkTempRoot, "dispatch/provider-retry-error/v1", sdkErrorPreview),
+      AH.auditChecksumHex("dispatch/provider-retry-error/v1", sdkErrorPreview),
       JSON.stringify(startRow.error_fingerprint),
     );
   });

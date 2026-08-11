@@ -43,7 +43,7 @@ export interface ShadowSettings {
    *  shadow.jsonl. Relative paths are rejected at load (fail closed to
    *  "" with a warning). Default: "". */
   logPath: string;
-  /** Log normalized result URLs (true) or URL HMAC digests + hostname
+  /** Log normalized result URLs (true) or URL checksum digests + hostname
    *  domains (false, default). URL normalization strips userinfo,
    *  fragments and ALL query parameters; raw query + snippets are never
    *  logged either way. Hostname domains are a deliberate authority-

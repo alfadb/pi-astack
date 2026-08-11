@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,10 +28,8 @@ const {
 } = jiti(path.join(repoRoot, "extensions/_shared/causal-anchor.ts"));
 const { embedTexts } = jiti(path.join(repoRoot, "extensions/memory/embedding.ts"));
 const {
-  auditHmacHex,
-  auditHmacHexStrict,
-  _resetAuditHmacCachesForTests,
-} = jiti(path.join(repoRoot, "extensions/_shared/audit-hmac.ts"));
+  auditChecksumHex,
+} = jiti(path.join(repoRoot, "extensions/_shared/audit-checksum.ts"));
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-llm-audit-"));
 process.env.ABRAIN_ROOT = path.join(tmpRoot, "abrain");
@@ -373,12 +370,10 @@ await check("1200 deltas produce one bounded summary before terminal without raw
   if (!summary.complete || summary.incomplete || summary.flush_reason !== "message_end") throw new Error("message_end summary completion flags are wrong");
   if (summary.session_id !== "11111111-1111-7111-8111-111111111111" || summary.turn_id !== 7) throw new Error("causal anchor missing from summary");
   if (summary.response_id !== "aggregate-response" || summary.provider !== "fake" || summary.model !== "fake-model") throw new Error("late stream identity was not merged into summary");
-  const hmac = summary.delta_stats?.total?.rolling_hmac;
-  if (hmac?.algorithm !== "hmac-sha256" || !/^[0-9a-f]{64}$/.test(hmac?.digest ?? "") || !hmac?.key_id) {
-    throw new Error(`opaque HMAC metadata missing: ${JSON.stringify(hmac)}`);
+  const checksum = summary.delta_stats?.total?.rolling_checksum;
+  if (checksum?.algorithm !== "sha256" || !/^[0-9a-f]{64}$/.test(checksum?.digest ?? "")) {
+    throw new Error(`opaque checksum metadata missing: ${JSON.stringify(checksum)}`);
   }
-  const keyFile = path.join(tmpRoot, ".pi-astack", "llm-audit", ".audit-hmac-key");
-  if (fs.statSync(keyFile).size !== 32 || (fs.statSync(keyFile).mode & 0o777) !== 0o600) throw new Error("project audit HMAC key is not a private 32-byte key");
   const raw = fs.readFileSync(auditFile, "utf8");
   for (const marker of ["thinking-raw-", "text-raw-", "tool-raw-", "cumulative-"]) {
     if (raw.includes(marker)) throw new Error(`stream summary leaked raw marker ${marker}`);
@@ -386,14 +381,14 @@ await check("1200 deltas produce one bounded summary before terminal without raw
   assertNoForbiddenAuditKeys(summary);
 });
 
-await check("rolling HMAC is stable for the same framed delta sequence", async () => {
+await check("rolling checksum is stable for the same framed delta sequence", async () => {
   const first = rows().find((row) => row.operation === "aggregate-1200" && row.row_type === "session_stream_summary");
   _resetLlmAuditStreamStateForTests();
   await emitStream(tmpRoot, "aggregate-1200-repeat", "different-response-id", 1200);
   const second = rows().find((row) => row.operation === "aggregate-1200-repeat" && row.row_type === "session_stream_summary");
-  if (!first || !second) throw new Error("missing stable-HMAC summaries");
-  if (first.delta_stats.total.rolling_hmac.digest !== second.delta_stats.total.rolling_hmac.digest) {
-    throw new Error("same delta sequence produced a different rolling HMAC");
+  if (!first || !second) throw new Error("missing stable-checksum summaries");
+  if (first.delta_stats.total.rolling_checksum.digest !== second.delta_stats.total.rolling_checksum.digest) {
+    throw new Error("same delta sequence produced a different rolling checksum");
   }
 });
 
@@ -471,70 +466,16 @@ await check("duplicate responseId ambiguity flushes associated orphans at messag
   assert.equal(summaries.filter((row) => row.orphan && row.delta_stats.total.count === 1).length, 1);
 });
 
-await check("weak and symlink HMAC keys fail open ephemerally while strict use rejects", async () => {
-  for (const [label, bytes] of [
-    ["zero", Buffer.alloc(32)],
-    ["repeated", Buffer.alloc(32, 0x5a)],
-    ["low-unique", Buffer.from(Array.from({ length: 32 }, (_, index) => index % 4))],
-    ["period-16", Buffer.from(Array.from({ length: 32 }, (_, index) => index % 16))],
-    ["monotonic", Buffer.from(Array.from({ length: 32 }, (_, index) => index))],
-  ]) {
-    const root = path.join(tmpRoot, `weak-key-${label}`);
-    const sink = path.join(root, ".pi-astack", "llm-audit");
-    fs.mkdirSync(sink, { recursive: true, mode: 0o700 });
-    const keyFile = path.join(sink, ".audit-hmac-key");
-    fs.writeFileSync(keyFile, bytes, { mode: 0o600 });
-    _resetAuditHmacCachesForTests();
-    const fallback = auditHmacHex(root, "smoke", "value");
-    if (!fallback.key_id.startsWith("ephemeral-")) throw new Error(`${label} weak key was accepted`);
-    let strictRejected = false;
-    try { auditHmacHexStrict(root, "smoke", "value"); } catch { strictRejected = true; }
-    if (!strictRejected || !fs.readFileSync(keyFile).equals(bytes)) throw new Error(`${label} strict key handling mutated or accepted weak material`);
-  }
-  const root = path.join(tmpRoot, "symlink-key");
-  const sink = path.join(root, ".pi-astack", "llm-audit");
-  const external = path.join(tmpRoot, "external-hmac-key");
-  fs.mkdirSync(sink, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(external, Buffer.alloc(32, 0x33), { mode: 0o644 });
-  fs.symlinkSync(external, path.join(sink, ".audit-hmac-key"));
-  _resetAuditHmacCachesForTests();
-  if (!auditHmacHex(root, "smoke", "value").key_id.startsWith("ephemeral-")) throw new Error("symlink key did not fail open ephemerally");
-  if ((fs.statSync(external).mode & 0o777) !== 0o644) throw new Error("external symlink target permissions were changed");
-
-  for (const part of ["module", "sink"]) {
-    const dirRoot = path.join(tmpRoot, `symlink-${part}-directory`);
-    const outside = path.join(tmpRoot, `external-${part}-directory`);
-    fs.mkdirSync(dirRoot, { mode: 0o700 });
-    fs.mkdirSync(outside, { mode: 0o755 });
-    if (part === "module") fs.symlinkSync(outside, path.join(dirRoot, ".pi-astack"));
-    else {
-      fs.mkdirSync(path.join(dirRoot, ".pi-astack"), { mode: 0o700 });
-      fs.symlinkSync(outside, path.join(dirRoot, ".pi-astack", "llm-audit"));
-    }
-    _resetAuditHmacCachesForTests();
-    if (!auditHmacHex(dirRoot, "smoke", "value").key_id.startsWith("ephemeral-")) throw new Error(`${part} directory symlink was accepted`);
-    if ((fs.statSync(outside).mode & 0o777) !== 0o755 || fs.readdirSync(outside).length !== 0) throw new Error(`${part} directory symlink target was modified`);
-  }
-
-  for (const [label, target] of [["module-mode", ".pi-astack"], ["sink-mode", path.join(".pi-astack", "llm-audit")]]) {
-    const modeRoot = path.join(tmpRoot, `unsafe-${label}`);
-    const sink = path.join(modeRoot, ".pi-astack", "llm-audit");
-    fs.mkdirSync(sink, { recursive: true, mode: 0o700 });
-    fs.chmodSync(path.join(modeRoot, target), 0o755);
-    _resetAuditHmacCachesForTests();
-    if (!auditHmacHex(modeRoot, "smoke", "value").key_id.startsWith("ephemeral-")) throw new Error(`${label} was accepted`);
-    if ((fs.statSync(path.join(modeRoot, target)).mode & 0o777) !== 0o755) throw new Error(`${label} was automatically chmodded`);
-  }
-
-  const modeKeyRoot = path.join(tmpRoot, "unsafe-key-mode");
-  const modeKeySink = path.join(modeKeyRoot, ".pi-astack", "llm-audit");
-  fs.mkdirSync(modeKeySink, { recursive: true, mode: 0o700 });
-  const modeKeyFile = path.join(modeKeySink, ".audit-hmac-key");
-  const modeKeyBytes = randomBytes(32);
-  fs.writeFileSync(modeKeyFile, modeKeyBytes, { mode: 0o644 });
-  _resetAuditHmacCachesForTests();
-  if (!auditHmacHex(modeKeyRoot, "smoke", "value").key_id.startsWith("ephemeral-")) throw new Error("0644 key was accepted");
-  if ((fs.statSync(modeKeyFile).mode & 0o777) !== 0o644 || !fs.readFileSync(modeKeyFile).equals(modeKeyBytes)) throw new Error("unsafe existing key was modified");
+await check("keyless checksum is deterministic and domain-framed (no key material)", async () => {
+  const a = auditChecksumHex("llm-audit/error/v1", "same error text");
+  const b = auditChecksumHex("llm-audit/error/v1", "same error text");
+  const c = auditChecksumHex("llm-audit/error/v1", "other error text");
+  const d = auditChecksumHex("llm-audit/error/v2", "same error text");
+  if (a.algorithm !== "sha256" || !/^[0-9a-f]{64}$/.test(a.digest)) throw new Error("checksum must be sha256 with a 64-hex digest");
+  if (a.digest !== b.digest) throw new Error("same (domain, value) must produce the same digest");
+  if (a.digest === c.digest) throw new Error("different values must produce different digests");
+  if (a.digest === d.digest) throw new Error("different domains must produce different digests (domain framing)");
+  if (Object.hasOwn(a, "key_id")) throw new Error("keyless checksum must not carry a key_id");
 });
 
 await check("append failures remain fail-open for stream aggregation", async () => {

@@ -117,9 +117,9 @@ fs.writeFileSync(
 fs.writeFileSync(
   path.join(tmpDir, "storm-shadow.js"),
   `module.exports = {
-  STORM_SHADOW_RULE_VERSION: "dispatch-storm-shadow/v4",
+  STORM_SHADOW_RULE_VERSION: "dispatch-storm-shadow/v5",
   STORM_SHADOW_RULE_ID: "storm/post-cap-schema-rejection-signature/v1",
-  STORM_SHADOW_SIGNATURE_DOMAIN: "dispatch/storm-shadow/schema-rejection-signature/v2",
+  STORM_SHADOW_CHECKSUM_DOMAIN: "dispatch/storm-shadow/schema-rejection-identity/v3",
   STORM_SHADOW_ROW_KIND: "worker_run_shadow_event",
   STORM_SHADOW_SIGNAL: "storm_shadow",
   STORM_SHADOW_COUNTERFACTUAL_ACTION: "would_abort_only_no_control_effect",
@@ -260,12 +260,12 @@ fs.writeFileSync(
 const sharedDir = path.join(tmpDir, "..", "_shared");
 fs.mkdirSync(sharedDir, { recursive: true });
 
-// S3 storm-shadow pre-projections audit-HMAC failed tool identities via the
-// project audit key; runtime-only for this pure formatter smoke (module-load
-// resolve only).
+// S3 storm-shadow pre-projections checksum failed tool identities via the
+// keyless audit-checksum API; runtime-only for this pure formatter smoke
+// (module-load resolve only).
 fs.writeFileSync(
-  path.join(sharedDir, "audit-hmac.js"),
-  `module.exports = { auditHmacHex: () => ({ algorithm: "hmac-sha256", key_id: "stub", digest: "0".repeat(64) }) };\n`,
+  path.join(sharedDir, "audit-checksum.js"),
+  `module.exports = { auditChecksumHex: () => ({ algorithm: "sha256", digest: "0".repeat(64) }) };\n`,
 );
 
 // Visible repeat detection and empty-output categorization are runtime-only for

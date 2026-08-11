@@ -13,10 +13,6 @@ const {
   BOUNDARY_PRECISION,
   rotateJsonlGenerationStrict,
 } = await jiti.import(path.join(repoRoot, "extensions/_shared/rotating-jsonl.ts"));
-const {
-  signAuditMaintenanceHmacStrict,
-  verifyAuditMaintenanceHmacStrict,
-} = await jiti.import(path.join(repoRoot, "extensions/_shared/audit-hmac.ts"));
 
 const TOOL_NAME = "pi-astack-audit-log-maintenance";
 const TOOL_VERSION = "2.1.0";
@@ -54,8 +50,6 @@ const MAX_MAINTENANCE_LOCK_TIMEOUT_MS = 60_000;
 const DEFAULT_STABLE_MS = 30_000;
 const MAX_STABLE_MS = 7 * 24 * 60 * 60 * 1000;
 const PRUNE_DELETION_SCHEMA_VERSION = "audit-prune-deletion-journal/v1";
-const SEAL_SIGNATURE_DOMAIN = "pi-astack/audit-seal-manifest/v2";
-const PRUNE_JOURNAL_SIGNATURE_DOMAIN = "audit-prune-journal/v1";
 const HARD_COMMAND_READ_ENTRIES = 100_000;
 const DEFAULT_PRUNE_READ_ENTRIES = 20_000;
 const DEFAULT_PIN_READ_ENTRIES = MAX_PIN_SOURCES + 1;
@@ -1251,17 +1245,6 @@ async function validateSealRoot(root, execute) {
   return { canonicalRoot, archiveDir, directory };
 }
 
-function sealHmacRoot(canonicalRoot) {
-  return path.basename(canonicalRoot) === "llm-audit" && path.basename(path.dirname(canonicalRoot)) === ".pi-astack"
-    ? projectRootForSink(canonicalRoot)
-    : canonicalRoot;
-}
-
-function signedSealManifest(canonicalRoot, unsigned) {
-  const signature = signAuditMaintenanceHmacStrict(sealHmacRoot(canonicalRoot), SEAL_SIGNATURE_DOMAIN, canonicalJson(unsigned));
-  return { ...unsigned, signature };
-}
-
 async function writeSealManifest(directory, archiveDir, manifest) {
   const basename = `archive-seal-manifest-${isoCompact()}-${randomUUID()}.json`;
   const manifestPath = path.join(archiveDir, basename);
@@ -1346,9 +1329,9 @@ async function seal(cli) {
         boundary_precision: BOUNDARY_PRECISION,
         entries,
       };
-      const manifest = execute ? signedSealManifest(canonicalRoot, unsigned) : null;
+      const manifest = execute ? unsigned : null;
       const manifestPath = execute ? await writeSealManifest(directory, archiveDir, manifest) : null;
-      rootResults.push({ root: canonicalRoot, manifest_path: manifestPath, entries, signature: manifest?.signature ?? null });
+      rootResults.push({ root: canonicalRoot, manifest_path: manifestPath, entries });
     }
 
     output({
@@ -1473,7 +1456,7 @@ function validateSealIdentity(valueToCheck, label) {
 }
 
 function validateSealManifest(parsed, rootInfo) {
-  closedObject(parsed, ["schema_version", "tool", "generated_at", "canonical_root", "archive_directory", "stable_window", "budgets", "boundary_precision", "entries", "signature"], [], "seal_manifest");
+  closedObject(parsed, ["schema_version", "tool", "generated_at", "canonical_root", "archive_directory", "stable_window", "budgets", "boundary_precision", "entries"], ["signature"], "seal_manifest");
   if (parsed.schema_version !== SEAL_SCHEMA_VERSION || parsed.canonical_root !== rootInfo.root || parsed.archive_directory !== path.join(rootInfo.root, "archive") || parsed.boundary_precision !== BOUNDARY_PRECISION) {
     throw new MaintenanceError("PRUNE_MANIFEST_INVALID", "seal manifest root, schema, or boundary is invalid");
   }
@@ -1514,11 +1497,12 @@ function validateSealManifest(parsed, rootInfo) {
       if (entry.boundary_precision !== BOUNDARY_PRECISION || entry.bytes !== entry.identity.size || !Number.isSafeInteger(entry.lines) || entry.lines < 0) throw new MaintenanceError("PRUNE_MANIFEST_INVALID", `verified seal entry is inconsistent at ${index}`);
     }
   }
-  closedObject(parsed.signature, ["algorithm", "key_id", "digest"], [], "seal_manifest.signature");
-  const { signature, ...unsigned } = parsed;
-  if (!verifyAuditMaintenanceHmacStrict(projectRootForSink(rootInfo.root), SEAL_SIGNATURE_DOMAIN, canonicalJson(unsigned), signature)) {
-    throw new MaintenanceError("PRUNE_MANIFEST_INVALID", "seal manifest signature verification failed");
-  }
+  // Legacy `signature` field (pre-ADR-0027-C6 manifests): accepted and
+  // ignored. The manifest-level HMAC signature was local-attacker
+  // authentication and is removed; per-entry sha256 + identity snapshots
+  // remain the integrity checks (verified against the actual archive file
+  // during prune). New manifests never carry a signature.
+  if (parsed.signature !== undefined) closedObject(parsed.signature, ["algorithm", "key_id", "digest"], [], "seal_manifest.signature");
   return parsed;
 }
 
@@ -1851,14 +1835,15 @@ function validateJournalTarget(target, kind, root, journalId, label) {
 }
 
 function validateDeletionJournal(journal, root, basename) {
-  closedObject(journal, ["schema_version", "journal_id", "state", "created_at", "updated_at", "canonical_root", "archive_directory", "reason", "archive", "sidecar", "archive_deleted", "sidecar_deleted", "raw_content_copied", "signature"], ["blocked_reason"], "deletion_journal");
+  closedObject(journal, ["schema_version", "journal_id", "state", "created_at", "updated_at", "canonical_root", "archive_directory", "reason", "archive", "sidecar", "archive_deleted", "sidecar_deleted", "raw_content_copied"], ["blocked_reason", "signature"], "deletion_journal");
   uuid(journal.journal_id, "deletion_journal.journal_id");
   if (basename !== `audit-prune-journal-${journal.journal_id}.json`) throw new MaintenanceError("PRUNE_JOURNAL_INVALID", "journal filename UUID does not match journal_id");
-  closedObject(journal.signature, ["algorithm", "key_id", "digest"], [], "deletion_journal.signature");
-  const { signature, ...unsigned } = journal;
-  if (!verifyAuditMaintenanceHmacStrict(projectRootForSink(root), PRUNE_JOURNAL_SIGNATURE_DOMAIN, canonicalJson(unsigned), signature)) {
-    throw new MaintenanceError("PRUNE_JOURNAL_INVALID", "deletion journal signature verification failed");
-  }
+  // Legacy `signature` field (pre-ADR-0027-C6 journals): accepted and
+  // ignored. The journal-level HMAC signature was local-attacker
+  // authentication and is removed; the per-target sha256 + identity are
+  // verified against the actual files during recovery. New journals never
+  // carry a signature.
+  if (journal.signature !== undefined) closedObject(journal.signature, ["algorithm", "key_id", "digest"], [], "deletion_journal.signature");
   if (journal.schema_version !== PRUNE_DELETION_SCHEMA_VERSION || journal.canonical_root !== root || journal.archive_directory !== path.join(root, "archive") || !["prepared", "archive_quarantined", "pair_quarantined", "deleted", "blocked"].includes(journal.state)) throw new MaintenanceError("PRUNE_JOURNAL_INVALID", "deletion journal schema/root/state is invalid");
   isoTimestamp(journal.created_at, "deletion_journal.created_at");
   isoTimestamp(journal.updated_at, "deletion_journal.updated_at");
@@ -1872,23 +1857,16 @@ function validateDeletionJournal(journal, root, basename) {
   return journal;
 }
 
-function signDeletionJournal(journal) {
-  const { signature: _discarded, ...unsigned } = journal;
-  const signature = signAuditMaintenanceHmacStrict(projectRootForSink(unsigned.canonical_root), PRUNE_JOURNAL_SIGNATURE_DOMAIN, canonicalJson(unsigned));
-  return { ...unsigned, signature };
-}
-
 async function writeJournal(directory, basename, journal, exclusive) {
-  const signed = signDeletionJournal(journal);
-  validateDeletionJournal(signed, signed.canonical_root, basename);
-  const bytes = Buffer.from(`${JSON.stringify(signed, null, 2)}\n`, "utf8");
+  validateDeletionJournal(journal, journal.canonical_root, basename);
+  const bytes = Buffer.from(`${JSON.stringify(journal, null, 2)}\n`, "utf8");
   if (bytes.length > 64 * 1024) throw new MaintenanceError("PRUNE_JOURNAL_INVALID", "deletion journal exceeds 64 KiB");
   if (exclusive) {
     await writeExclusiveFile(directory, basename, bytes);
     emitTestFsyncPhase("journal_file", { basename, exclusive: true });
     await directory.handle.sync();
     emitTestFsyncPhase("journal_parent", { basename, exclusive: true });
-    return signed;
+    return journal;
   }
   const tmp = `.${basename}.${process.pid}.${randomUUID()}.tmp`;
   await writeExclusiveFile(directory, tmp, bytes);
@@ -1897,7 +1875,7 @@ async function writeJournal(directory, basename, journal, exclusive) {
   emitTestFsyncPhase("journal_replace", { basename });
   await directory.handle.sync();
   emitTestFsyncPhase("journal_parent", { basename, exclusive: false });
-  return signed;
+  return journal;
 }
 
 async function updateJournal(directory, basename, journal, state, extra = {}) {

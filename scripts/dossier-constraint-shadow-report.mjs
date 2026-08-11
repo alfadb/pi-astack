@@ -140,7 +140,7 @@ for (const file of [
   "extensions/_shared/runtime.ts",
   "extensions/_shared/causal-anchor.ts",
   "extensions/_shared/durable-write.ts",
-  "extensions/_shared/audit-hmac.ts",
+  "extensions/_shared/audit-checksum.ts",
   "extensions/_shared/rotating-jsonl.ts",
   "extensions/_shared/llm-audit.ts",
   "extensions/_shared/jcs.ts",

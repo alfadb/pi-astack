@@ -441,7 +441,7 @@ let privacyObservation;
 for (let i = 0; i < 3; i++) privacyObservation = privacyGovernor.observeToolEnd("read", { content: [{ type: "text", text: fullSchemaError }] }, true, `privacy-${i}`) ?? privacyObservation;
 const privacyAuditJson = JSON.stringify(G.buildWorkerRunAuditEvent(privacyObservation));
 check("schema audit shape is a fixed errorClass category", privacyObservation?.shape === "missing_required", JSON.stringify(privacyObservation));
-check("schema audit HMAC correlation is opaque SHA-256", /^[0-9a-f]{64}$/.test(privacyObservation?.hash ?? ""), String(privacyObservation?.hash));
+check("schema audit correlation fingerprint is an opaque SHA-256 checksum", /^[0-9a-f]{64}$/.test(privacyObservation?.hash ?? ""), String(privacyObservation?.hash));
 check("schema audit excludes field token and complete error text", !privacyAuditJson.includes(secretToken) && !privacyAuditJson.includes(fullSchemaError), privacyAuditJson);
 const shapeEvictionSettings = structuredClone(defaults);
 shapeEvictionSettings.toolObservers.schemaErrorStorm.observeAfter = 2;

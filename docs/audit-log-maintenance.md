@@ -11,9 +11,9 @@ status: active
 
 A matching `message_end` emits one complete summary. An ambiguous end emits each candidate and any response-associated orphan separately as incomplete, and removes all of them before the terminal row; no associated orphan is deferred to `agent_end`. `agent_end` and LRU eviction also emit incomplete summaries. State is capped at 256 streams. Event/type maps contain at most 32 keys including `other`; content indices are capped at 64.
 
-Summaries contain only bounded counts, lengths, identity, completion state, and framed rolling HMAC-SHA-256 metadata. Delta text, cumulative partials, reasoning traces, tool payloads, signatures, encrypted content, prompts, and credentials are not retained.
+Summaries contain only bounded counts, lengths, identity, completion state, and framed rolling SHA-256 checksum metadata. Delta text, cumulative partials, reasoning traces, tool payloads, signatures, encrypted content, prompts, and credentials are not retained.
 
-The project HMAC key is a private 32-byte `0600` file under current-UID-owned `0700` `.pi-astack/llm-audit` directories. Key reads and creation use non-following opens and directory/file identity checks. Existing unsafe modes or owners are rejected and never automatically repaired. All-zero, low-diversity, monotonic, and repeated patterns with a period of 16 bytes or less are rejected; valid OS-random 32-byte keys are accepted. Weak or unsafe keys cause runtime audit HMAC to use a process-ephemeral fail-open key; maintenance signatures require a safe persistent key and fail closed.
+The rolling checksum is keyless and deterministic (ADR 0027 C6): a domain-framed SHA-256 over the framed delta sequence, identical in every process for the same input. There is no key material, no key file, no mode/owner/symlink verification, and no ephemeral fallback — the checksum is a correlation/change-detection fingerprint, not authentication.
 
 ## Maintenance locking
 
@@ -37,15 +37,9 @@ node scripts/audit-log-maintenance.mjs seal \
   --yes
 ```
 
-`audit-seal-manifest/v2` has a closed schema and includes:
+`audit-seal-manifest/v2` has a closed schema. Each verified entry carries the archive's identity (dev/ino/size/mtime/ctime), byte count, line count, and SHA-256. The manifest itself is NOT signed (ADR 0027 C6): the manifest-level HMAC signature was local-attacker authentication and is removed. Integrity is enforced by the per-entry SHA-256 + identity snapshots, which prune re-verifies against the actual archive file before any deletion. Legacy manifests that still carry a `signature` field are accepted and the field is ignored.
 
-```json
-{"signature":{"algorithm":"hmac-sha256","key_id":"...","digest":"..."}}
-```
-
-The digest covers a deterministic, recursively key-sorted JSON serialization of every manifest security field except `signature` itself: schema/tool, root and archive path, archive identity, size, mtime/ctime, hash, lines, verification time, stability window, boundary precision, and budgets. No secret is written to the manifest.
-
-Prune independently reads the protected project key, validates the closed schema, canonicalizes the unsigned manifest, and verifies algorithm, key ID, and digest. Unsigned manifests, unknown fields, field tampering, wrong keys, and root/path mismatches cannot authorize deletion. A current seal must match archive dev, ino, size, mtime, ctime, SHA-256, and byte count.
+Prune validates the closed schema and requires a current seal to match archive dev, ino, size, mtime, ctime, SHA-256, and byte count. Unknown fields, malformed entries, and root/path mismatches cannot authorize deletion.
 
 ## Command read budget
 
@@ -78,13 +72,13 @@ Retention defaults remain 30 days, 2 GiB archive capacity, latest 2 generations 
 Execution never directly unlinks an original archive path. For each pair it:
 
 1. creates `maintenance-manifests/` through the held sink directory fd, then fsyncs the parent sink and newly opened `0700` directory;
-2. exclusive-creates and fsyncs a `0600` `audit-prune-deletion-journal/v1` signed by the strict maintenance HMAC API under independent domain `audit-prune-journal/v1`;
+2. exclusive-creates and fsyncs a `0600` `audit-prune-deletion-journal/v1` (no signature — the journal-level HMAC was local-attacker authentication and is removed; per-target sha256 + identity are the integrity checks);
 3. atomically renames archive and its exact `.generation.json` sidecar within the archive directory to quarantine basenames derived only from `(journal_id, original_basename, pair_kind)`;
-4. persists `prepared -> archive_quarantined -> pair_quarantined` progress by re-signing every changed field, fsyncing the replacement file, renaming it, and fsyncing the journal directory;
+4. persists `prepared -> archive_quarantined -> pair_quarantined` progress by rewriting every changed field, fsyncing the replacement file, renaming it, and fsyncing the journal directory;
 5. opens quarantines with `O_NOFOLLOW`, then verifies inode, size, mtime, and SHA-256 against the intent;
 6. fsyncs each verified quarantine file before unlink, fsyncs the archive directory after unlink, records per-member durable progress, and persists terminal `deleted` state.
 
-The journal signature covers every field except `signature`. Recovery requires an exact `audit-prune-journal-<journal_id>.json` filename, a current nonlegacy helper archive basename, its exact sidecar, canonical logical paths, and exact derived quarantine basenames. Fake, unsigned, tampered, wrong-key, path-traversing, and cross-journal-colliding records are rejected before any pair mutation.
+Recovery requires an exact `audit-prune-journal-<journal_id>.json` filename, a current nonlegacy helper archive basename, its exact sidecar, canonical logical paths, and exact derived quarantine basenames. Fake, structurally-invalid, path-traversing, cross-journal-colliding, and target-mismatched records (per-target identity/hash verification against the actual files) are rejected before any pair mutation. Legacy journals that still carry a `signature` field are accepted and the field is ignored.
 
 Leaf swaps produce a persistent `blocked` journal while the unexpected object remains undeleted. Half-renamed pairs and the microstate where an archive or sidecar unlink is durable but its progress update was interrupted resume idempotently only when the exact counterpart state and identity make that inference safe. Missing, partial, colliding, or mismatched objects otherwise become `blocked` and require operator review.
 

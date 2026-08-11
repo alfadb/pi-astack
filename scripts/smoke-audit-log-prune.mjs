@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -14,9 +14,6 @@ const cli = path.join(repoRoot, "scripts", "audit-log-maintenance.mjs");
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const { appendRotatingJsonlLine, rotateJsonlGeneration } = await jiti.import(
   path.join(repoRoot, "extensions", "_shared", "rotating-jsonl.ts"),
-);
-const { signAuditMaintenanceHmacStrict } = await jiti.import(
-  path.join(repoRoot, "extensions", "_shared", "audit-hmac.ts"),
 );
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-audit-prune-"));
 process.on("exit", () => {
@@ -227,11 +224,11 @@ function canonicalJson(value) {
 }
 
 function signJournal(project, journal) {
-  const { signature: _discarded, ...unsigned } = journal;
-  return {
-    ...unsigned,
-    signature: signAuditMaintenanceHmacStrict(project, "audit-prune-journal/v1", canonicalJson(unsigned)),
-  };
+  // ADR 0027 C6: the journal-level HMAC signature is removed. Mutated
+  // journals are written as-is; safety-critical target fields (identity /
+  // sha256 / paths / quarantine basenames) are still verified against the
+  // actual files during recovery.
+  return journal;
 }
 
 function journalNames(sink) {
@@ -339,7 +336,7 @@ await check("recovery read-budget exhaustion propagates without rewriting journa
   }
 });
 
-await check("fake, tampered, and wrong-key journals are rejected in dry-run and --yes without pair mutation", async () => {
+await check("fake, structurally-invalid, and tampered-target journals are rejected in dry-run and --yes without pair mutation", async () => {
   const noKey = await fixture("fake-journal-no-key", 3);
   const noKeyDirectory = path.join(noKey.sink, "maintenance-manifests");
   fs.mkdirSync(noKeyDirectory, { mode: 0o700 });
@@ -358,11 +355,9 @@ await check("fake, tampered, and wrong-key journals are rejected in dry-run and 
     archive_deleted: false,
     sidecar_deleted: false,
     raw_content_copied: false,
-    signature: { algorithm: "hmac-sha256", key_id: "0".repeat(24), digest: "0".repeat(64) },
   });
   const noKeyDry = run(["prune", "--root", noKey.sink, "--retention-days", "1"]);
   assert.equal(noKeyDry.recovery_rejected.length, 1);
-  assert(!fs.existsSync(path.join(noKey.sink, ".audit-hmac-key")), "dry-run created a key while rejecting a fake journal");
   assert.equal(archiveNames(noKey.sink).length, 3);
 
   const fake = await fixture("fake-journal", 3);
@@ -370,7 +365,7 @@ await check("fake, tampered, and wrong-key journals are rejected in dry-run and 
   const fakeDirectory = path.join(fake.sink, "maintenance-manifests");
   fs.mkdirSync(fakeDirectory, { mode: 0o700 });
   const fakeId = randomUUID();
-  writeJson(path.join(fakeDirectory, `audit-prune-journal-${fakeId}.json`), { journal_id: fakeId, state: "pair_quarantined", signature: { algorithm: "hmac-sha256", key_id: "0".repeat(24), digest: "0".repeat(64) } });
+  writeJson(path.join(fakeDirectory, `audit-prune-journal-${fakeId}.json`), { journal_id: fakeId, state: "pair_quarantined" });
   const fakeBefore = archiveByCreatedAt(fake.sink).map((item) => [item.file, fs.readFileSync(item.file), item.sidecar, fs.readFileSync(item.sidecar)]);
   const fakeDry = run(["prune", "--root", fake.sink, "--retention-days", "1"]);
   assert.equal(fakeDry.recovery_rejected.length, 1);
@@ -385,19 +380,24 @@ await check("fake, tampered, and wrong-key journals are rejected in dry-run and 
   await crashPrune(tampered, "prepared", "tampered-journal");
   const tamperedPath = path.join(tampered.sink, "maintenance-manifests", journalNames(tampered.sink)[0]);
   const tamperedValue = JSON.parse(fs.readFileSync(tamperedPath, "utf8"));
-  tamperedValue.reason = "tampered";
+  // Tamper with a SAFETY-CRITICAL target field: the archive sha256 no longer
+  // matches the actual file, so recovery's per-target hash verification must
+  // reject the journal (the journal-level HMAC signature is removed — the
+  // per-target sha256 + identity are the integrity checks).
+  tamperedValue.archive.sha256 = "0".repeat(64);
   writeJson(tamperedPath, tamperedValue);
-  assert.equal(run(["prune", "--root", tampered.sink, "--retention-days", "1", "--lock-timeout-ms", "5000"]).recovery_rejected.length, 1);
-  assert.equal(run(["prune", "--root", tampered.sink, "--retention-days", "1", "--yes", "--lock-timeout-ms", "5000"], 1).code, "PRUNE_RECOVERY_REJECTED");
+  // Dry-run: the journal passes structural validation (sha256 format is
+  // valid) and is listed as recovery_required; the per-target hash mismatch
+  // is only detected during actual recovery.
+  const tamperedDry = run(["prune", "--root", tampered.sink, "--retention-days", "1", "--lock-timeout-ms", "5000"]);
+  assert.equal(tamperedDry.recovery_required.length, 1, JSON.stringify(tamperedDry.recovery_rejected));
+  // --yes: recovery re-hashes the actual archive; the tampered sha256 no
+  // longer matches → verifyJournalTarget fails, processDeletionJournal
+  // blockJournal's the recovery (PRUNE_RECOVERY_BLOCKED), and no pair is
+  // mutated. (PRUNE_QUARANTINE_MISMATCH is the internal mismatch code; the
+  // outer recovery surface is always blocked/rejected.)
+  assert.equal(run(["prune", "--root", tampered.sink, "--retention-days", "1", "--yes", "--lock-timeout-ms", "5000"], 1).code, "PRUNE_RECOVERY_BLOCKED");
   assert.equal(archiveNames(tampered.sink).length, 3);
-
-  const wrongKey = await fixture("wrong-key-journal", 3);
-  await seal(wrongKey.sink);
-  await crashPrune(wrongKey, "prepared", "wrong-key-journal");
-  fs.writeFileSync(path.join(wrongKey.sink, ".audit-hmac-key"), randomBytes(32), { mode: 0o600 });
-  assert.equal(run(["prune", "--root", wrongKey.sink, "--retention-days", "1", "--lock-timeout-ms", "5000"]).recovery_rejected.length, 1);
-  assert.equal(run(["prune", "--root", wrongKey.sink, "--retention-days", "1", "--yes", "--lock-timeout-ms", "5000"], 1).code, "PRUNE_RECOVERY_REJECTED");
-  assert.equal(archiveNames(wrongKey.sink).length, 3);
 });
 
 await check("signed filename, id, pair path, sidecar, and quarantine deviations are rejected", async () => {
@@ -451,9 +451,6 @@ await check("--yes deletes exact archive+sidecar pairs and writes a private dele
   assert.equal(manifest.archive_deleted, true);
   assert.equal(manifest.sidecar_deleted, true);
   assert.equal(manifest.raw_content_copied, false);
-  assert.equal(manifest.signature.algorithm, "hmac-sha256");
-  assert.match(manifest.signature.key_id, /^[0-9a-f]{24}$/);
-  assert.match(manifest.signature.digest, /^[0-9a-f]{64}$/);
   assert.equal(result.deletion_journal_paths.length, 3);
 });
 
@@ -489,7 +486,7 @@ await check("unsealed archives are rejected and no-op --yes creates no files", a
   assert(!fs.existsSync(path.join(f.sink, "maintenance-manifests")));
 });
 
-await check("unsigned, tampered, and wrong-key seal manifests cannot authorize deletion", async () => {
+await check("malformed and structurally-inconsistent seal manifests cannot authorize deletion", async () => {
   const unsigned = await fixture("fake-seal", 3);
   const oldestUnsigned = archiveByCreatedAt(unsigned.sink)[0];
   const fakeName = `archive-seal-manifest-${new Date().toISOString().replace(/[-:]/g, "").replace(".", "")}-${randomUUID()}.json`;
@@ -507,18 +504,25 @@ await check("unsigned, tampered, and wrong-key seal manifests cannot authorize d
   const sealed = await seal(tampered.sink);
   const sealPath = sealed.roots[0].manifest_path;
   const parsed = JSON.parse(fs.readFileSync(sealPath, "utf8"));
-  parsed.entries.find((entry) => entry.status === "snapshot_verified").lines += 1;
+  // Structurally-inconsistent tamper: entry.bytes must equal identity.size.
+  parsed.entries.find((entry) => entry.status === "snapshot_verified").bytes += 1;
   writeJson(sealPath, parsed);
   const tamperedResult = run(["prune", "--root", tampered.sink, "--retention-days", "1"]);
   assert.equal(tamperedResult.planned.length, 0);
   assert(tamperedResult.rejected.some((item) => item.path === sealPath && item.reason === "seal_manifest_rejected"));
 
-  const wrongKey = await fixture("wrong-key-seal", 3);
-  await seal(wrongKey.sink);
-  fs.writeFileSync(path.join(wrongKey.sink, ".audit-hmac-key"), randomBytes(32), { mode: 0o600 });
-  const wrongKeyResult = run(["prune", "--root", wrongKey.sink, "--retention-days", "1"]);
-  assert.equal(wrongKeyResult.planned.length, 0);
-  assert(wrongKeyResult.rejected.some((item) => item.reason === "seal_manifest_rejected"));
+  const wrongHash = await fixture("wrong-hash-seal", 3);
+  await seal(wrongHash.sink);
+  const wrongHashPath = path.join(wrongHash.sink, "archive", fs.readdirSync(path.join(wrongHash.sink, "archive")).find((name) => name.startsWith("archive-seal-manifest-")));
+  const wrongHashParsed = JSON.parse(fs.readFileSync(wrongHashPath, "utf8"));
+  // Valid-format but wrong sha256: the manifest still validates structurally,
+  // but the per-entry checksum no longer matches the actual archive file, so
+  // the archive is not sealed and cannot be pruned.
+  wrongHashParsed.entries.find((entry) => entry.status === "snapshot_verified").sha256 = "0".repeat(64);
+  writeJson(wrongHashPath, wrongHashParsed);
+  const wrongHashResult = run(["prune", "--root", wrongHash.sink, "--retention-days", "1"]);
+  assert.equal(wrongHashResult.planned.length, 0);
+  assert(wrongHashResult.rejected.some((item) => item.reason === "snapshot_verified_seal_required"));
 });
 
 await check("seal timestamp mismatch is untrusted and malformed sidecars remain capacity-accounted", async () => {

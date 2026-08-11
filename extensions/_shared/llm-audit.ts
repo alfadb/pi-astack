@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ensureProjectGitignoredOnce, formatLocalIsoTimestamp, piAstackModuleDir } from "./runtime";
 import { getCurrentAnchor, spreadAnchor, type CausalAnchor } from "./causal-anchor";
-import { auditHmacHex, createAuditRollingHmac, type AuditRollingHmac } from "./audit-hmac";
+import { auditChecksumHex, createAuditRollingChecksum, type AuditRollingChecksum } from "./audit-checksum";
 import {
   appendRotatingJsonlLine,
   resolveJsonlRotationSettings,
@@ -586,7 +586,7 @@ function errorCategory(value: unknown): string {
   return "other";
 }
 
-export function controlledLlmAuditError(projectRoot: string, value: unknown): Record<string, unknown> | undefined {
+export function controlledLlmAuditError(value: unknown): Record<string, unknown> | undefined {
   const shape = controlledErrorShape(value);
   if (!shape) return undefined;
   const record = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
@@ -598,7 +598,7 @@ export function controlledLlmAuditError(projectRoot: string, value: unknown): Re
   return {
     category: errorCategory(value),
     ...shape,
-    ...(detail ? { fingerprint: auditHmacHex(projectRoot, "llm-audit/error/v1", detail) } : {}),
+    ...(detail ? { fingerprint: auditChecksumHex("llm-audit/error/v1", detail) } : {}),
   };
 }
 
@@ -723,7 +723,7 @@ interface StreamDeltaStats {
   bytesTotal: number;
   charsMax: number;
   bytesMax: number;
-  hmac: AuditRollingHmac;
+  checksum: AuditRollingChecksum;
 }
 
 interface SessionStreamAggregate {
@@ -836,14 +836,14 @@ function incrementBoundedCount(record: Record<string, number>, rawKey: string, m
   record.other = (record.other ?? 0) + 1;
 }
 
-function newDeltaStats(projectRoot: string, domain: string): StreamDeltaStats {
+function newDeltaStats(domain: string): StreamDeltaStats {
   return {
     count: 0,
     charsTotal: 0,
     bytesTotal: 0,
     charsMax: 0,
     bytesMax: 0,
-    hmac: createAuditRollingHmac(projectRoot, domain),
+    checksum: createAuditRollingChecksum(domain),
   };
 }
 
@@ -855,9 +855,9 @@ function updateDeltaStats(stats: StreamDeltaStats, assistantType: string, conten
   stats.bytesTotal += bytes;
   stats.charsMax = Math.max(stats.charsMax, chars);
   stats.bytesMax = Math.max(stats.bytesMax, bytes);
-  stats.hmac.update("assistant_type", assistantType);
-  stats.hmac.update("content_index", contentIndex === undefined ? "absent" : String(contentIndex));
-  stats.hmac.update("delta", delta);
+  stats.checksum.update("assistant_type", assistantType);
+  stats.checksum.update("content_index", contentIndex === undefined ? "absent" : String(contentIndex));
+  stats.checksum.update("delta", delta);
 }
 
 function deltaStatsShape(stats: StreamDeltaStats): Record<string, unknown> {
@@ -867,10 +867,9 @@ function deltaStatsShape(stats: StreamDeltaStats): Record<string, unknown> {
     bytes_total: stats.bytesTotal,
     chars_max: stats.charsMax,
     bytes_max: stats.bytesMax,
-    rolling_hmac: {
-      algorithm: stats.hmac.algorithm,
-      key_id: stats.hmac.keyId,
-      digest: stats.hmac.digestHex(),
+    rolling_checksum: {
+      algorithm: stats.checksum.algorithm,
+      digest: stats.checksum.digestHex(),
     },
   };
 }
@@ -914,12 +913,12 @@ function createStreamAggregate(
     contentIndexOverflowCount: 0,
     firstTimestamp: timestamp,
     lastTimestamp: timestamp,
-    total: newDeltaStats(projectRoot, "llm-audit/session-stream/total/v1"),
+    total: newDeltaStats("llm-audit/session-stream/total/v1"),
     byKind: {
-      thinking: newDeltaStats(projectRoot, "llm-audit/session-stream/thinking/v1"),
-      text: newDeltaStats(projectRoot, "llm-audit/session-stream/text/v1"),
-      tool: newDeltaStats(projectRoot, "llm-audit/session-stream/tool/v1"),
-      generic: newDeltaStats(projectRoot, "llm-audit/session-stream/generic/v1"),
+      thinking: newDeltaStats("llm-audit/session-stream/thinking/v1"),
+      text: newDeltaStats("llm-audit/session-stream/text/v1"),
+      tool: newDeltaStats("llm-audit/session-stream/tool/v1"),
+      generic: newDeltaStats("llm-audit/session-stream/generic/v1"),
     },
   };
 }
@@ -1122,7 +1121,7 @@ export async function auditSessionEvent(projectRoot: string, meta: LlmAuditMeta,
   try {
     await auditSessionEventInternal(projectRoot, meta, event);
   } catch {
-    // Audit aggregation, shaping, HMAC, and append must never affect the event caller.
+    // Audit aggregation, shaping, checksum, and append must never affect the event caller.
   }
 }
 

@@ -7,7 +7,7 @@
  * enter here as signals; first terminal wins.
  */
 
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 
 export const WORKER_RUN_GOVERNOR_RULE_VERSION = "dispatch-worker-run-governor/v2";
@@ -23,7 +23,6 @@ export const WORKER_RUN_STORM_ENFORCE_RULE_VERSION = "dispatch-storm-enforce/v1"
 export const STORM_ENFORCE_RULE_ID = "storm/post-cap-schema-rejection-signature/v1";
 export const STORM_ENFORCE_ROW_KIND = "worker_run_enforce_event";
 export const STORM_ENFORCE_SIGNAL = "schema_rejection_storm_enforce";
-export const STORM_ENFORCE_DEGRADED_SIGNAL = "schema_rejection_storm_enforce_degraded";
 export const STORM_ENFORCE_UNSUPPORTED_CAP_SIGNAL = "schema_rejection_storm_enforce_unsupported_cap";
 
 export type WorkerGovernorFailureType =
@@ -159,7 +158,7 @@ export interface WorkerRunGovernorDecision {
   /** S4 enforce additive fields (only on schema_rejection_storm_enforce). */
   rule_id?: string;
   enforce_rule_version?: string;
-  signature_hmac?: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+  identity_checksum?: { algorithm: "sha256"; digest: string };
   segment?: number;
 }
 
@@ -182,8 +181,7 @@ export interface WorkerProviderRetryAuditFields {
   retry_outcome: "retrying" | "recovered" | "exhausted" | "unknown";
   error_classification: "none" | "auth" | "rate_limit" | "network" | "server_error" | "context_overflow" | "unknown";
   error_fingerprint?: {
-    algorithm: "hmac-sha256";
-    key_id: string;
+    algorithm: "sha256";
     digest: string;
   };
   http_status?: number;
@@ -235,7 +233,7 @@ export function buildWorkerRunAuditEvent(
     ...(decision.toolCallId ? { tool_call_id: decision.toolCallId } : {}),
     ...(decision.rule_id ? { rule_id: decision.rule_id } : {}),
     ...(decision.enforce_rule_version ? { enforce_rule_version: decision.enforce_rule_version } : {}),
-    ...(decision.signature_hmac ? { signature_hmac: decision.signature_hmac } : {}),
+    ...(decision.identity_checksum ? { identity_checksum: decision.identity_checksum } : {}),
     ...(decision.segment !== undefined ? { segment: decision.segment } : {}),
     ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
     ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
@@ -318,42 +316,6 @@ export function buildWorkerRunRetryOutcomeAuditEvent(
   };
 }
 
-/** S4 audit-only projection: the strict persistent project key was unavailable
- *  (unsafe directory / wrong mode / owner / symlink), so the schema classifier
- *  failed open to not-a-rejection with a closed eligibility reason — the
- *  shadow candidate was not eligible and enforce never triggered. Written at
- *  most once per run (wiring singleflight). Never mutates counters, never
- *  triggers termination. */
-export function buildStormEnforceDegradedAuditEvent(
-  summary: WorkerRunGovernanceSummary,
-  elapsedMs: number,
-  correlation: WorkerRunAuditCorrelation = {},
-): Record<string, unknown> {
-  return {
-    operation: "worker_run_event",
-    row_kind: STORM_ENFORCE_ROW_KIND,
-    worker_run_id: summary.worker_run_id,
-    rule_version: summary.rule_version,
-    signal: STORM_ENFORCE_DEGRADED_SIGNAL,
-    mode: "observe",
-    counters: summary.counters,
-    thresholds: summary.thresholds,
-    elapsed_ms: Math.max(0, Math.floor(elapsedMs)),
-    termination_source: "none",
-    action: "audit_storm_enforce_degraded_strict_key_unavailable",
-    rule_id: STORM_ENFORCE_RULE_ID,
-    enforce_rule_version: WORKER_RUN_STORM_ENFORCE_RULE_VERSION,
-    ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
-    ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
-    ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
-    ...(correlation.taskCount !== undefined ? { task_count: correlation.taskCount } : {}),
-    ...(correlation.task ? { task: correlation.task } : {}),
-    ...(correlation.workflowRunId ? { workflow_run_id: correlation.workflowRunId } : {}),
-    ...(correlation.workflowStageId ? { workflow_stage_id: correlation.workflowStageId } : {}),
-    ...(correlation.workflow ? { workflow: correlation.workflow } : {}),
-  };
-}
-
 /** S4 audit-only marker: enforce is enabled but observeAfter !== 3, so the
  *  production-supported consecutive branch is unsupported and never aborts.
  *  Written exactly once per run (at run start). Never mutates counters, never
@@ -410,7 +372,7 @@ export interface WorkerRunGovernanceSummary {
     /** S4 enforce additive fields (only on schema_rejection_storm_enforce). */
     rule_id?: string;
     enforce_rule_version?: string;
-    signature_hmac?: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+    identity_checksum?: { algorithm: "sha256"; digest: string };
     segment?: number;
   };
 }
@@ -460,11 +422,13 @@ function fnv1a32(value: string): string {
   return h.toString(16).padStart(8, "0");
 }
 
-const SCHEMA_AUDIT_HMAC_KEY = randomBytes(32);
 const READ_OVERLAP_EPSILON = 1e-12;
 
+/** Deterministic keyless correlation hash (plain SHA-256). Process-local
+ *  identity for the governor's own schema-error observer; NOT the shadow's
+ *  cross-process checksum (the shadow uses the keyless audit checksum). */
 function privateCorrelationHash(value: string): string {
-  return createHmac("sha256", SCHEMA_AUDIT_HMAC_KEY).update(value).digest("hex");
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -759,7 +723,7 @@ export class WorkerRunGovernor {
    */
   enforceSchemaRejectionStorm(
     input: {
-      signature: { algorithm: "hmac-sha256"; key_id: string; digest: string };
+      checksum: { algorithm: "sha256"; digest: string };
       segment: number;
       consecutiveCount: number;
       capAfter: number;
@@ -795,7 +759,7 @@ export class WorkerRunGovernor {
       action: "abort_session_return_bounded_partial",
       rule_id: STORM_ENFORCE_RULE_ID,
       enforce_rule_version: WORKER_RUN_STORM_ENFORCE_RULE_VERSION,
-      signature_hmac: input.signature,
+      identity_checksum: input.checksum,
       segment: input.segment,
     };
     this.terminal = decision;
@@ -825,7 +789,7 @@ export class WorkerRunGovernor {
           ...(terminal.shape ? { shape: terminal.shape } : {}),
           ...(terminal.rule_id ? { rule_id: terminal.rule_id } : {}),
           ...(terminal.enforce_rule_version ? { enforce_rule_version: terminal.enforce_rule_version } : {}),
-          ...(terminal.signature_hmac ? { signature_hmac: terminal.signature_hmac } : {}),
+          ...(terminal.identity_checksum ? { identity_checksum: terminal.identity_checksum } : {}),
           ...(terminal.segment !== undefined ? { segment: terminal.segment } : {}),
         },
       } : {}),

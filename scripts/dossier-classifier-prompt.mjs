@@ -138,7 +138,7 @@ async function callDeepSeek(systemPrompt, windowText) {
         status: res.status,
         response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
         choice_count: 0,
-        error: controlledLlmAuditError(repoRoot, failure),
+        error: controlledLlmAuditError(failure),
         ok: false,
       });
       throw failure;
@@ -155,7 +155,7 @@ async function callDeepSeek(systemPrompt, windowText) {
         status: res.status,
         response_bytes: Buffer.byteLength(rawResponseText, "utf8"),
         choice_count: 0,
-        error: controlledLlmAuditError(repoRoot, e),
+        error: controlledLlmAuditError(e),
         ok: false,
       });
       throw e;
@@ -181,7 +181,7 @@ async function callDeepSeek(systemPrompt, windowText) {
       ...auditBase,
       row_type: "error",
       duration_ms: Date.now() - started,
-      error: controlledLlmAuditError(repoRoot, e),
+      error: controlledLlmAuditError(e),
     });
     throw e;
   }

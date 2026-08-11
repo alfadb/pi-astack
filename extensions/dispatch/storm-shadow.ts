@@ -6,43 +6,38 @@
  * and NEVER changes control flow: no termination claim, no abort, no dispose,
  * no interception, no throttling, and no total tool cap. The runInProcess
  * wiring feeds real SDK events here (projected into safe fields + opaque
- * signature HMACs OUTSIDE this module) and appends verdicts to the dispatch
+ * identity checksums OUTSIDE this module) and appends verdicts to the dispatch
  * audit (row_kind=worker_run_shadow_event); the verdict is a shadow signal
  * only and can never influence termination claims or session disposal.
  *
  * This module imports nothing but a type: no crypto, no fs, no governor, no
  * control-flow surface. All classification of raw event payloads and all
- * audit-HMAC computation happen in the wiring (extensions/dispatch/index.ts)
+ * checksum computation happen in the wiring (extensions/dispatch/index.ts)
  * inside fail-open try/catch; feed() only ever receives safe booleans and an
- * opaque `{key_id, digest}` signature.
+ * opaque `{algorithm, digest}` checksum.
  *
- * Candidate A — post-cap exact schema-rejection signature:
+ * Candidate A — post-cap exact schema-rejection identity:
  *   The cap is a READ-ONLY MIRROR of the existing governor observer
  *   `toolObservers.schemaErrorStorm.observeAfter` (default 3; the governor
  *   itself keeps its own copy, stays observe-only, and is unchanged). Every
  *   REAL tool_execution_end schema rejection reuses the governor's own
  *   classifier to build an exact identity (tool name + closed error class +
  *   field path + bounded normalized descriptor), which the wiring persists
- *   and compares ONLY as the project audit HMAC (key_id + digest) — raw text /
+ *   and compares ONLY as the keyless audit checksum (digest) — raw text /
  *   field path / tool args / normalized descriptor never leave the wiring.
  *   The exact-identity fields are SAME-SOURCE with the governor's own
- *   classifier (schemaErrorDescriptor), but the project audit HMAC is
- *   cross-process stable (PERSISTENT project key, strict path only), NOT the
- *   governor's process-random privateCorrelationHash. STRICT KEY AVAILABILITY
- *   IS AN ELIGIBILITY PREREQUISITE: the wiring builds the signature only via
- *   auditHmacHexStrict; when the persistent key is unavailable it fails open
- *   to schemaRejection=false with no signature (the event is not eligible and
- *   the worker continues) — an ephemeral key is never generated and never
- *   accepted as eligible. The state machine compares the unambiguous composite
- *   key_id:digest (algorithm fixed), never the digest alone, so different keys
- *   with the same digest never merge. Different signatures never merge;
- *   the same signature is recounted consecutively and inside a rolling window
- *   (deterministic, so replay reproduces verdicts). Reaching observeAfter on
- *   one signature is the cap boundary (post_cap=true, no abort); EXCEEDING
- *   the cap on subsequent same-signature rejections produces would_abort
- *   (versioned equivalent boundaries: consecutive count > capAfter, or window
- *   count >= windowLimit). post_cap is a per-signature / per-segment state,
- *   so consecutive schema rejections in one production run genuinely reach it.
+ *   classifier (schemaErrorDescriptor). The keyless checksum is cross-process
+ *   stable and deterministic (no key material, no eligibility prerequisite):
+ *   the same identity always produces the same digest in every process. The
+ *   state machine compares the digest (algorithm fixed to "sha256");
+ *   different identities never merge; the same identity is recounted
+ *   consecutively and inside a rolling window (deterministic, so replay
+ *   reproduces verdicts). Reaching observeAfter on one identity is the cap
+ *   boundary (post_cap=true, no abort); EXCEEDING the cap on subsequent
+ *   same-identity rejections produces would_abort (versioned equivalent
+ *   boundaries: consecutive count > capAfter, or window count >= windowLimit).
+ *   post_cap is a per-identity / per-segment state, so consecutive schema
+ *   rejections in one production run genuinely reach it.
  *
  * Candidate B — effective progress semantics:
  *   Effective progress (successful tool result; assistant response with real
@@ -62,9 +57,9 @@
 
 import type { WorkerRunAuditCorrelation } from "./worker-run-governor";
 
-export const STORM_SHADOW_RULE_VERSION = "dispatch-storm-shadow/v4";
+export const STORM_SHADOW_RULE_VERSION = "dispatch-storm-shadow/v5";
 export const STORM_SHADOW_RULE_ID = "storm/post-cap-schema-rejection-signature/v1";
-export const STORM_SHADOW_SIGNATURE_DOMAIN = "dispatch/storm-shadow/schema-rejection-signature/v2";
+export const STORM_SHADOW_CHECKSUM_DOMAIN = "dispatch/storm-shadow/schema-rejection-identity/v3";
 export const STORM_SHADOW_ROW_KIND = "worker_run_shadow_event";
 export const STORM_SHADOW_SIGNAL = "storm_shadow";
 export const STORM_SHADOW_COUNTERFACTUAL_ACTION = "would_abort_only_no_control_effect";
@@ -91,29 +86,22 @@ export const DEFAULT_STORM_SHADOW_SETTINGS: StormShadowSettings = {
   windowLimit: STORM_SHADOW_WINDOW_LIMIT,
 };
 
-/** Opaque project-audit HMAC of an exact schema-rejection identity. The raw
+/** Opaque keyless checksum of an exact schema-rejection identity. The raw
  *  identity (tool name + error class + field path + bounded normalized
- *  descriptor) is never persisted — only key_id + digest. The digest is the
- *  project audit HMAC (cross-process stable PERSISTENT project key, strict
- *  path only — never the process-random ephemeral fallback), NOT the
- *  governor's process-random privateCorrelationHash. Strict key availability
- *  is an ELIGIBILITY PREREQUISITE: when the persistent key is unavailable the
- *  wiring fails open to schemaRejection=false with no signature, so an
- *  ephemeral key is never generated and never accepted as eligible. */
-export interface OpaqueSignature {
-  algorithm: "hmac-sha256";
-  key_id: string;
+ *  descriptor) is never persisted — only the digest. The digest is the
+ *  deterministic keyless audit checksum (cross-process stable, no key
+ *  material, no eligibility prerequisite): the same identity always produces
+ *  the same digest in every process. */
+export interface OpaqueChecksum {
+  algorithm: "sha256";
   digest: string;
 }
 
-/** Unambiguous internal comparison key for an opaque signature: key_id + digest
- *  (algorithm is fixed to "hmac-sha256" by the OpaqueSignature type, so it is
- *  not part of the key). Two signatures with the same digest but DIFFERENT
- *  key_ids NEVER merge — the state machine compares this composite key, never
- *  the digest alone. Both fields are hex strings, so the ":" separator is
- *  unambiguous. */
-function signatureComparisonKey(signature: OpaqueSignature): string {
-  return `${signature.key_id}:${signature.digest}`;
+/** Unambiguous internal comparison key for an opaque checksum: the digest
+ *  (algorithm is fixed to "sha256" by the OpaqueChecksum type). Two identities
+ *  with the same digest are the same identity; different digests never merge. */
+function signatureComparisonKey(checksum: OpaqueChecksum): string {
+  return checksum.digest;
 }
 
 /**
@@ -127,9 +115,10 @@ export type StormShadowEventInput =
       kind: "tool_execution_end";
       isError: boolean;
       schemaRejection: boolean;
-      /** Opaque HMAC of the exact schema-rejection identity. Present exactly
-       *  when schemaRejection === true (pre-projected by the wiring). */
-      signature?: OpaqueSignature;
+      /** Opaque keyless checksum of the exact schema-rejection identity.
+       *  Present exactly when schemaRejection === true (pre-projected by the
+       *  wiring). */
+      checksum?: OpaqueChecksum;
     }
   | {
       kind: "assistant_response";
@@ -190,7 +179,7 @@ export interface StormShadowObservation {
    *  cross the cap (neutral events report would_abort=false + already_tripped
    *  instead of sticky-repeating would_abort). */
   already_tripped: boolean;
-  signature_hmac?: OpaqueSignature;
+  identity_checksum?: OpaqueChecksum;
 }
 
 export interface StormShadowSnapshot {
@@ -198,8 +187,8 @@ export interface StormShadowSnapshot {
   post_cap: boolean;
   consecutive_count: number;
   window_count: number;
-  /** Composite comparison keys (key_id:digest) of the eligible signatures in
-   *  the rolling window — never the digest alone. */
+  /** Composite comparison keys (digests) of the eligible checksums in
+   *  the rolling window. */
   window: string[];
   tripped: boolean;
 }
@@ -264,7 +253,7 @@ export function shouldWriteStormShadowAudit(
 export class StormShadow {
   private segment = 0;
   private consecutiveCount = 0;
-  /** Composite comparison key (key_id:digest) of the last eligible signature. */
+  /** Comparison key (digest) of the last eligible identity checksum. */
   private lastEligibleSignature: string | null = null;
   private window: Array<{ signature: string; seq: number }> = [];
   private seq = 0;
@@ -298,20 +287,19 @@ export class StormShadow {
       this.tripped = false;
     }
 
-    // Candidate A gate: only REAL schema rejections with an opaque signature
-    // are eligible. A schemaRejection flag without a signature (fail-open
-    // classification fallback, e.g. strict project key unavailable) is NOT
-    // eligible. The internal comparison key is the unambiguous composite
-    // key_id:digest (algorithm fixed) — two signatures with the same digest
-    // but different key_ids NEVER merge.
+    // Candidate A gate: only REAL schema rejections with an opaque checksum
+    // are eligible. A schemaRejection flag without a checksum (fail-open
+    // classification fallback) is NOT eligible. The internal comparison key is
+    // the digest (algorithm fixed to "sha256") — two identities with the same
+    // digest are the same identity; different digests never merge.
     const eligible =
-      input.kind === "tool_execution_end" && input.schemaRejection === true && input.signature !== undefined;
+      input.kind === "tool_execution_end" && input.schemaRejection === true && input.checksum !== undefined;
     let signatureKey: string | undefined;
-    if (eligible && input.kind === "tool_execution_end" && input.signature) {
-      signatureKey = signatureComparisonKey(input.signature);
+    if (eligible && input.kind === "tool_execution_end" && input.checksum) {
+      signatureKey = signatureComparisonKey(input.checksum);
       if (this.lastEligibleSignature === null || signatureKey !== this.lastEligibleSignature) {
-        // Exact same-signature counting: a different signature (key_id or
-        // digest) starts a fresh streak (signatures never merge).
+        // Exact same-identity counting: a different checksum starts a fresh
+        // streak (identities never merge).
         this.consecutiveCount = 1;
       } else {
         this.consecutiveCount++;
@@ -350,7 +338,7 @@ export class StormShadow {
       would_abort_basis: crosses ? (consecutive > this.settings.capAfter ? "consecutive" : "rolling_window") : null,
       first_trip: firstTrip,
       already_tripped: alreadyTripped,
-      ...(input.kind === "tool_execution_end" && input.signature ? { signature_hmac: input.signature } : {}),
+      ...(input.kind === "tool_execution_end" && input.checksum ? { identity_checksum: input.checksum } : {}),
     };
   }
 
@@ -394,7 +382,7 @@ export function buildStormShadowAuditEvent(
     ...(observation.would_abort_basis ? { would_abort_basis: observation.would_abort_basis } : {}),
     first_trip: observation.first_trip,
     already_tripped: observation.already_tripped,
-    ...(observation.signature_hmac ? { signature_hmac: observation.signature_hmac } : {}),
+    ...(observation.identity_checksum ? { identity_checksum: observation.identity_checksum } : {}),
     ...(correlation.dispatchToolCallId ? { dispatch_tool_call_id: correlation.dispatchToolCallId } : {}),
     ...(correlation.dispatchRunId ? { dispatch_run_id: correlation.dispatchRunId } : {}),
     ...(correlation.taskIndex !== undefined ? { task_index: correlation.taskIndex } : {}),
@@ -409,8 +397,8 @@ export function buildStormShadowAuditEvent(
 /**
  * Deterministic replay for verification (STORM-SHADOW-EVIDENCE recomputability):
  * feeding the same PRE-PROJECTED event sequence reproduces the same verdict
- * sequence. Signatures are opaque inputs here — they must be rebuilt with the
- * same project audit HMAC (key_id + digest) as the original run.
+ * sequence. Checksums are opaque inputs here — they must be rebuilt with the
+ * same keyless audit checksum (digest) as the original run.
  */
 export function replayStormShadow(
   events: StormShadowEventInput[],

@@ -5,7 +5,7 @@
  * The ONLY production-supported branch of the authorized rule
  * storm/post-cap-schema-rejection-signature/v1 is enforced: the exact
  * consecutive branch. The trigger is the full composite predicate — the same
- * strict exact composite signature in the same segment with
+ * exact identity checksum in the same segment with
  * consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive'
  * — never would_abort / first_trip alone. Rolling-window trips NEVER enter
  * control (shadow-only). There is no total tool cap.
@@ -17,24 +17,23 @@
  * → emitWorkerRunDecision → requestGovernorTermination →
  * FirstWriterTermination — no direct abort / tryClaim / new promise.
  *
- * Strict key unavailable → the schema classifier returns a safe closed
- * eligibility reason (strict_key_unavailable), the shadow candidate is not
- * eligible, enforce never triggers, and at most one worker_run_enforce_event
- * degradation row is written per run. Enforce enabled but observeAfter !== 3
- * → exactly one unsupported_cap marker per run, never an abort.
+ * The identity is a keyless deterministic checksum (ADR 0027 C6): no key
+ * material, no strict-key eligibility prerequisite, no degradation branch —
+ * the same identity always produces the same digest in every process.
+ * Enforce enabled but observeAfter !== 3 → exactly one unsupported_cap
+ * marker per run, never an abort.
  *
  * Shadow rows stay mode=observe / counterfactual even when the consecutive
  * branch triggers; the governor's own schema_error_storm observer stays
  * observe-only and untouched.
  *
- * Real SDK runInProcess + faux provider: 4 consecutive same-signature schema
+ * Real SDK runInProcess + faux provider: 4 consecutive same-identity schema
  * rejections — the 1st-3rd do NOT abort, the 4th aborts with
  * failureType=schema_rejection_storm_enforced (unique owner
  * worker_run_governor, cleanup done, post-claim provider/tool starts 0);
  * rolling-only A,A,B,A,A completes normally; rolling first trip then a later
  * consecutive 4 still aborts; observeAfter=5 never aborts + one
- * unsupported_cap marker; strict-key-unsafe dir never aborts + one
- * degradation row + no ephemeral signature.
+ * unsupported_cap marker.
  */
 
 import assert from "node:assert/strict";
@@ -51,7 +50,7 @@ const S = await jiti.import(path.join(root, "extensions/dispatch/storm-shadow.ts
 const G = await jiti.import(path.join(root, "extensions/dispatch/worker-run-governor.ts"));
 const D = await jiti.import(path.join(root, "extensions/dispatch/index.ts"));
 const DT = await jiti.import(path.join(root, "extensions/dispatch/dispatch-trace.ts"));
-const AH = await jiti.import(path.join(root, "extensions/_shared/audit-hmac.ts"));
+const AH = await jiti.import(path.join(root, "extensions/_shared/audit-checksum.ts"));
 const TS = await jiti.import(path.join(root, "extensions/dispatch/terminal-state.ts"));
 
 let passed = 0;
@@ -112,9 +111,9 @@ const settings = {
   windowLimit: S.STORM_SHADOW_WINDOW_LIMIT,
 };
 
-// ── Opaque signatures (pre-projected exactly like the wiring builds them) ──
+// ── Opaque checksums (pre-projected exactly like the wiring builds them) ──
 const sig = (toolName, errorClass, fieldPath, normalized) =>
-  AH.auditHmacHexStrict(tempRoot, S.STORM_SHADOW_SIGNATURE_DOMAIN, JSON.stringify([toolName, errorClass, fieldPath, normalized]));
+  AH.auditChecksumHex(S.STORM_SHADOW_CHECKSUM_DOMAIN, JSON.stringify([toolName, errorClass, fieldPath, normalized]));
 const A = sig("read", "missing_required", "path", "schema validation: required property 'path' is missing");
 const B = sig("write", "missing_required", "path", "schema validation: required property 'path' is missing");
 // Same tool/class/path, different bounded normalized descriptors (the real
@@ -123,7 +122,7 @@ const A1 = sig("read", "missing_required", "must", "Validation failed for tool \
 const A2 = sig("read", "missing_required", "must", "Validation failed for tool \"read\": - path: must have required properties path Received arguments: { \"limit\": 5 }");
 
 // ── Pre-projected event factories (what the wiring feeds the state machine) ──
-const rej = (signature = A) => ({ kind: "tool_execution_end", isError: true, schemaRejection: true, signature });
+const rej = (checksum = A) => ({ kind: "tool_execution_end", isError: true, schemaRejection: true, checksum });
 const toolOk = () => ({ kind: "tool_execution_end", isError: false, schemaRejection: false });
 const visible = () => ({ kind: "assistant_response", hasVisibleText: true, completed: true, errorResponse: false, emptyVisibleRetry: false, toolUseOnly: false });
 
@@ -134,7 +133,7 @@ function run(events, extraSettings = settings) {
 }
 
 // The S4 enforce predicate — mirrors the wiring predicate exactly: the same
-// strict exact composite signature in the same segment with
+// strict exact composite identity in the same segment with
 // consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive'.
 // Never would_abort / first_trip alone; rolling-window trips never match.
 const enforcePredicate = (o) => o.consecutive_count === 4 && o.cap_after === 3 && o.would_abort_basis === "consecutive";
@@ -209,7 +208,7 @@ await check("1000 rotating-signature rejections and successes never match (no to
 console.log("\n[governor enforce method — switch matrix and additive decision]");
 
 const fullTrigger = (overrides = {}) => ({
-  signature: A,
+  checksum: A,
   segment: 0,
   consecutiveCount: 4,
   capAfter: 3,
@@ -286,7 +285,7 @@ await check("full trigger → abort decision with all additive fields and NO cou
   assert.equal(decision.budget_kind, "consecutive");
   assert.equal(decision.rule_id, "storm/post-cap-schema-rejection-signature/v1");
   assert.equal(decision.enforce_rule_version, "dispatch-storm-enforce/v1");
-  assert.deepEqual(decision.signature_hmac, A);
+  assert.deepEqual(decision.identity_checksum, A);
   assert.equal(decision.segment, 0);
   assert.equal(decision.action, "abort_session_return_bounded_partial");
   // The enforce method never re-applies/increments governor counters.
@@ -299,7 +298,7 @@ await check("full trigger → abort decision with all additive fields and NO cou
   assert.equal(row.failure_type, "schema_rejection_storm_enforced");
   assert.equal(row.rule_id, "storm/post-cap-schema-rejection-signature/v1");
   assert.equal(row.enforce_rule_version, "dispatch-storm-enforce/v1");
-  assert.deepEqual(row.signature_hmac, A);
+  assert.deepEqual(row.identity_checksum, A);
   assert.equal(row.segment, 0);
   assert.equal(row.count, 4);
   assert.equal(row.limit, 3);
@@ -313,22 +312,8 @@ await check("full trigger → abort decision with all additive fields and NO cou
   assert.equal(summary.terminal?.budget_kind, "consecutive");
   assert.equal(summary.terminal?.count, 4);
   assert.equal(summary.terminal?.limit, 3);
-  assert.deepEqual(summary.terminal?.signature_hmac, A);
+  assert.deepEqual(summary.terminal?.identity_checksum, A);
   assert.equal(summary.terminal?.segment, 0);
-});
-
-await check("degraded audit row (strict key unavailable) is a bounded worker_run_enforce_event projection", () => {
-  const g = new G.WorkerRunGovernor("enforce-degraded", G.DEFAULT_WORKER_RUN_GOVERNOR_SETTINGS);
-  const row = G.buildStormEnforceDegradedAuditEvent(g.snapshot(), 123, { dispatchRunId: "dtr-x" });
-  assert.equal(row.row_kind, "worker_run_enforce_event");
-  assert.equal(row.signal, "schema_rejection_storm_enforce_degraded");
-  assert.equal(row.mode, "observe");
-  assert.equal(row.termination_source, "none");
-  assert.equal(row.action, "audit_storm_enforce_degraded_strict_key_unavailable");
-  assert.equal(row.rule_id, "storm/post-cap-schema-rejection-signature/v1");
-  assert.equal(row.enforce_rule_version, "dispatch-storm-enforce/v1");
-  assert.equal(row.dispatch_run_id, "dtr-x");
-  assert.equal(g.terminalDecision, undefined, "degraded audit must never trigger termination");
 });
 
 await check("unsupported_cap marker row (observeAfter != 3) is a bounded worker_run_enforce_event projection", () => {
@@ -408,7 +393,7 @@ await check("the enforce call is gated on the run being genuinely live (seal gat
   // terminal run (sealed run-owned outcome or any owner claim).
   assert.match(
     region,
-    /if \(shadowObservation && schemaShadow\.signature && !runTerminalSealed && termination\.claim === undefined\) \{/,
+    /if \(shadowObservation && schemaShadow\.checksum && !runTerminalSealed && termination\.claim === undefined\) \{/,
     "enforce call must be gated on !runTerminalSealed && termination.claim === undefined",
   );
   // The gate sits in the same branch immediately before the enforce call — no
@@ -535,8 +520,8 @@ try {
     assert.equal(er.segment, 0);
     assert.equal(er.termination_source, "worker_run_governor");
     assert.equal(er.action, "abort_session_return_bounded_partial");
-    assert.match(er.signature_hmac?.digest ?? "", /^[0-9a-f]{64}$/);
-    assert.equal(er.signature_hmac?.key_id, rejections[0].signature_hmac?.key_id, "enforce signature must be the same strict project key as the shadow rows");
+    assert.match(er.identity_checksum?.digest ?? "", /^[0-9a-f]{64}$/);
+    assert.equal(er.identity_checksum?.digest, rejections[0].identity_checksum?.digest, "enforce checksum must be the same identity as the shadow rows");
     // The governor's own schema observer stayed observe-only and untouched.
     const govStorm = rows.filter((row) => row.signal === "schema_error_storm");
     assert.ok(govStorm.length >= 1 && govStorm.every((row) => row.mode === "observe"), "governor schema_error_storm stays observe-only");
@@ -625,44 +610,6 @@ try {
       process.env.HOME = prevHome;
       process.env.USERPROFILE = prevUserprofile;
       fs.rmSync(settingsHome, { recursive: true, force: true });
-    }
-  });
-
-  await check("real SDK in an unsafe dir (strict key unavailable): no abort, exactly one degradation row, no ephemeral signature", async () => {
-    const unsafeSdkRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dispatch-storm-enforce-unsafe-"));
-    fs.writeFileSync(path.join(unsafeSdkRoot, "ok.txt"), "hello storm enforce\n");
-    fs.mkdirSync(path.join(unsafeSdkRoot, ".pi-astack"), { mode: 0o700 });
-    fs.mkdirSync(path.join(unsafeSdkRoot, ".pi-astack", "llm-audit"), { mode: 0o755 });
-    try {
-      const run = { runId: "dtr-storm-enforce-unsafe", callId: "call-storm-enforce-unsafe", sessionId: "session-storm-enforce-unsafe" };
-      const { result, rows } = await runSdk([
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", {})], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage([Faux.fauxToolCall("read", { path: "ok.txt", limit: 5 })], { stopReason: "toolUse" }),
-        Faux.fauxAssistantMessage("final normal completion"),
-      ], run.runId, run.callId, run.sessionId, unsafeSdkRoot);
-      // Control flow is unaffected: the run completes normally even though the
-      // strict key is unavailable and every schema rejection failed open.
-      assert.equal(result.error, undefined, JSON.stringify(result.error));
-      assert.equal(result.failureType, undefined, JSON.stringify(result.failureType));
-      assert.equal(result.output, "final normal completion", JSON.stringify(result.output));
-      assert.equal(result.terminationClosure?.lifecycle_path, "normal", JSON.stringify(result.terminationClosure));
-      assert.equal(result.terminationClosure?.cleanup_done, true, JSON.stringify(result.terminationClosure));
-      // Exactly one degradation row, never an abort.
-      const degraded = rows.filter((row) => row.signal === "schema_rejection_storm_enforce_degraded");
-      assert.equal(degraded.length, 1, JSON.stringify(rows.map((r) => r.signal)));
-      assert.equal(degraded[0].row_kind, "worker_run_enforce_event");
-      assert.equal(degraded[0].action, "audit_storm_enforce_degraded_strict_key_unavailable");
-      assert.equal(rows.filter((row) => row.signal === "schema_rejection_storm_enforce").length, 0, "strict-key-unavailable must never abort");
-      // No ephemeral key ever reaches the audit; no shadow signature exists.
-      const serialized = JSON.stringify(rows);
-      assert.ok(!serialized.includes("ephemeral-"), "no ephemeral key_id may ever reach the audit");
-      const shadowRows = rows.filter((row) => row.signal === "storm_shadow");
-      assert.equal(shadowRows.filter((row) => row.signature_hmac).length, 0, "no shadow signature when strict key unavailable");
-    } finally {
-      fs.rmSync(unsafeSdkRoot, { recursive: true, force: true });
     }
   });
 

@@ -79,7 +79,7 @@ check("message_update aggregation is bounded and emits a dedicated summary row",
   }
 });
 
-check("summary schema contains only bounded counts, lengths, identity, completion, and HMAC metadata", () => {
+check("summary schema contains only bounded counts, lengths, identity, completion, and checksum metadata", () => {
   const summary = llmAuditSrc.match(/function streamSummaryRow[\s\S]{0,2600}?\n\}/)?.[0] ?? "";
   for (const field of [
     "event_type_counts", "type_counts", "delta_stats", "content_block_kind_counts",
@@ -88,8 +88,8 @@ check("summary schema contains only bounded counts, lengths, identity, completio
   ]) {
     if (!summary.includes(field)) throw new Error(`session stream summary missing ${field}`);
   }
-  if (!/algorithm:\s*stats\.hmac\.algorithm[\s\S]*key_id:\s*stats\.hmac\.keyId[\s\S]*digest:\s*stats\.hmac\.digestHex\(\)/.test(llmAuditSrc)) {
-    throw new Error("session stream summary must carry rolling HMAC algorithm/key_id/digest");
+  if (!/algorithm:\s*stats\.checksum\.algorithm[\s\S]*digest:\s*stats\.checksum\.digestHex\(\)/.test(llmAuditSrc)) {
+    throw new Error("session stream summary must carry rolling checksum algorithm/digest");
   }
   for (const forbidden of ["assistantMessageEvent", "partial", "request_body", "raw_response_text", "parsed_response"]) {
     if (summary.includes(forbidden)) throw new Error(`summary schema retained forbidden field ${forbidden}`);

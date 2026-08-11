@@ -13,14 +13,12 @@
  * (query, toolCallId), so the same event is reproducible while repeated
  * queries with different tool-call ids can land in different buckets.
  * The gate is deliberately key-less — it only decides whether a shadow
- * runs and never lands in the log, so sampling never triggers audit-key
- * creation.
+ * runs and never lands in the log, so sampling never creates key material.
  *
- * Privacy: the raw query is never logged — only a keyed HMAC digest
- * (auditHmacHex against the project-bound audit key under
- * `<projectRoot>/.pi-astack/llm-audit/`, 0700 dir / 0600 key file).
+ * Privacy: the raw query is never logged — only a deterministic keyless
+ * SHA-256 checksum (auditChecksumHex, domain-framed; no key material).
  * Snippets are never logged. By default (logUrls=false) result URLs are
- * logged only as HMAC digests (URL normalized BEFORE hashing) plus a
+ * logged only as checksum digests (URL normalized BEFORE hashing) plus a
  * hostname-domain overview; set webSearch.shadow.logUrls=true to log
  * strictly normalized URLs instead (userinfo, fragments and ALL query
  * parameters stripped — tokens can never reach the log). The hostname
@@ -29,9 +27,11 @@
  * normalized errorKind (+ a bare HTTP status number when available).
  * API keys / headers / full responses are never logged.
  *
- * Note: we deliberately do NOT describe these digests as "irreversible"
- * — they are keyed HMACs whose key material lives on this machine, so
- * the protection is key hygiene (per-project, mode-locked), not math.
+ * Note: these digests are plain SHA-256 checksums, NOT keyed HMACs — they
+ * are deterministic fingerprints for correlation, not privacy encryption.
+ * Low-entropy values (short queries, common URLs) may be recoverable by
+ * brute force; the protection is that the raw query / URL / call id are
+ * never persisted in the log at all.
  *
  * Cancellation: the shadow deliberately does NOT receive the caller's
  * signal — a main request that is cancelled after returning must not
@@ -47,21 +47,21 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { SearchBackend, SearchResult } from "./types";
-import { auditHmacHex } from "../_shared/audit-hmac";
+import { auditChecksumHex } from "../_shared/audit-checksum";
 import { ensureProjectGitignoredOnce, formatLocalIsoTimestamp } from "../_shared/runtime";
 
-export const SHADOW_SCHEMA_VERSION = 2;
+export const SHADOW_SCHEMA_VERSION = 3;
 export const DEFAULT_SHADOW_LOG_RELATIVE = path.join(".pi-astack", "web-search", "shadow.jsonl");
 /** Top-k used for the URL overlap metric. */
 export const SHADOW_OVERLAP_TOP_K = 10;
 
 const MAX_CONCURRENT_SHADOW_RUNS = 2;
 
-/** HMAC domains for auditHmacHex — separates correlation namespaces so a
- *  digest can never be cross-replayed between query/url/call-id. */
-const HMAC_DOMAIN_QUERY = "web-search-query";
-const HMAC_DOMAIN_URL = "web-search-url";
-const HMAC_DOMAIN_CALL_ID = "web-search-call-id";
+/** Checksum domains for auditChecksumHex — separates correlation namespaces
+ *  so a digest can never be cross-replayed between query/url/call-id. */
+const CHECKSUM_DOMAIN_QUERY = "web-search-query";
+const CHECKSUM_DOMAIN_URL = "web-search-url";
+const CHECKSUM_DOMAIN_CALL_ID = "web-search-call-id";
 
 export interface ShadowConfig {
   /** Shadow search backend provider name (must differ from main). */
@@ -71,7 +71,7 @@ export interface ShadowConfig {
   /** Absolute log path override; "" → <projectRoot>/DEFAULT_SHADOW_LOG_RELATIVE.
    *  Relative paths are rejected at settings load (fail closed to ""). */
   logPath: string;
-  /** Log normalized URLs (true) or URL HMAC digests + hostname-domain
+  /** Log normalized URLs (true) or URL checksum digests + hostname-domain
    *  overview (false, default). URL normalization strips userinfo,
    *  fragments and ALL query parameters; raw query + snippets are never
    *  logged either way. Hostname domains are a deliberate authority-
@@ -145,8 +145,8 @@ function domainList(urls: string[]): string[] {
  *  same call event always makes the same sampling decision (no RNG,
  *  reproducible A/B); repeated queries with different tool-call ids can
  *  fall into different buckets. Pure sha256, never persisted: this is a
- *  sampling gate, not a privacy record — persisted values are HMAC'd at
- *  write time (auditHash below), keeping key creation and sampling
+ *  sampling gate, not a privacy record — persisted values are checksummed
+ *  at write time (checksumHex below), keeping sampling and logging
  *  decoupled. */
 export function sampleFraction(query: string, callId: string): number {
   const hash = crypto.createHash("sha256")
@@ -164,20 +164,18 @@ export function shouldSampleShadow(query: string, callId: string, sampleRate: nu
   return sampleFraction(query, callId) < Math.min(1, sampleRate);
 }
 
-/** Keyed HMAC (project-bound audit key) for any value written to the
- *  shadow log — query, URLs, tool-call id. Returns the algorithm /
- *  key_id / digest triple so the log row is self-describing. The key
- *  material lives in <projectRoot>/.pi-astack/llm-audit/ (0700 dir /
- *  0600 key file); digests are only meaningful to the same project.
- *  Deliberately NOT described as "irreversible": with key material
- *  available the value can be recovered — the protection is key hygiene,
- *  not math. */
-export function auditHash(
-  projectRoot: string,
+/** Deterministic keyless checksum (plain SHA-256, domain-framed) for any
+ *  value written to the shadow log — query, URLs, tool-call id. Returns the
+ *  algorithm / digest so the log row is self-describing. No key material:
+ *  the same (domain, value) always produces the same digest in every
+ *  process. Deliberately NOT described as "irreversible": low-entropy
+ *  values may be recoverable by brute force — the protection is that the
+ *  raw value is never persisted in the log. */
+export function checksumHex(
   domain: string,
   value: string,
-): { algorithm: string; key_id: string; digest: string } {
-  return auditHmacHex(projectRoot, domain, value);
+): { algorithm: string; digest: string } {
+  return auditChecksumHex(domain, value);
 }
 
 // ── URL normalization + overlap ─────────────────────────────────
@@ -206,7 +204,7 @@ export function normalizeUrl(raw: string): string {
 }
 
 /** Strict normalization for anything that reaches the log (logUrls=true
- *  URLs AND the pre-HMAC normalization for hash mode): strips userinfo,
+ *  URLs AND the pre-checksum normalization for hash mode): strips userinfo,
  *  fragments and EVERY query parameter so tokens / credentials /
  *  tracking payloads can never be logged or baked into a digest that
  *  leaks query-string structure. */
@@ -249,8 +247,8 @@ const shadowLogChains = new Map<string, Promise<void>>();
 
 export interface ShadowRunInput {
   query: string;
-  /** Tool-call id of the web_search event (causal anchor). Logged as an
-   *  HMAC digest so a row can be correlated back to its trigger event
+  /** Tool-call id of the web_search event (causal anchor). Logged as a
+   *  checksum digest so a row can be correlated back to its trigger event
    *  without persisting the raw id. */
   callId: string;
   opts: { count?: number; freshness?: string; country?: string };
@@ -310,15 +308,16 @@ export async function runShadowSearch(input: ShadowRunInput): Promise<void> {
       : null;
     const overlap = bothOk ? topKOverlap(primaryUrls, shadowUrls) : null;
 
-    const queryHmac = auditHash(input.projectRoot, HMAC_DOMAIN_QUERY, input.query);
+    const queryChecksum = checksumHex(CHECKSUM_DOMAIN_QUERY, input.query);
     const row: Record<string, unknown> = {
       schemaVersion: SHADOW_SCHEMA_VERSION,
       timestamp: formatLocalIsoTimestamp(),
-      // Row-level HMAC metadata — all digests in this row share this key.
-      hmac: { algorithm: queryHmac.algorithm, key_id: queryHmac.key_id },
-      queryHash: queryHmac.digest,
-      // Causal anchor: HMAC of the web_search tool-call id.
-      callIdHash: auditHash(input.projectRoot, HMAC_DOMAIN_CALL_ID, input.callId).digest,
+      // Row-level checksum metadata — all digests in this row share the same
+      // keyless algorithm.
+      checksum: { algorithm: queryChecksum.algorithm },
+      queryHash: queryChecksum.digest,
+      // Causal anchor: checksum of the web_search tool-call id.
+      callIdHash: checksumHex(CHECKSUM_DOMAIN_CALL_ID, input.callId).digest,
       primaryProvider: input.primaryName,
       shadowProvider: input.shadow.name,
       opts: input.opts,
@@ -345,10 +344,10 @@ export async function runShadowSearch(input: ShadowRunInput): Promise<void> {
       // URL normalized BEFORE hashing (query params / userinfo / fragments
       // are stripped first so digests carry no query-string structure).
       row.primaryUrlHashes = primaryUrls.map(
-        (u) => auditHash(input.projectRoot, HMAC_DOMAIN_URL, normalizeUrlForLog(u)).digest,
+        (u) => checksumHex(CHECKSUM_DOMAIN_URL, normalizeUrlForLog(u)).digest,
       );
       row.shadowUrlHashes = shadowUrls.map(
-        (u) => auditHash(input.projectRoot, HMAC_DOMAIN_URL, normalizeUrlForLog(u)).digest,
+        (u) => checksumHex(CHECKSUM_DOMAIN_URL, normalizeUrlForLog(u)).digest,
       );
       // Hostname-domain overview for authority-source quality analysis —
       // never includes paths, queries, ports or fragments. Deliberate

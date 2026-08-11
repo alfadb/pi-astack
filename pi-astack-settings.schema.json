@@ -1752,7 +1752,7 @@
                     "enabled": { "type": "boolean", "default": true },
                     "observeAfter": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 3 },
                     "maxTrackedShapes": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 64 },
-                    "enforceConsecutiveExact": { "type": "boolean", "default": true, "description": "S4: enforce the production-supported exact consecutive branch of storm/post-cap-schema-rejection-signature/v1 (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive'). Rolling-window trips never enter control; there is no total tool cap. Only observeAfter===3 is a supported cap; any other cap is unsupported and never aborts." }
+                    "enforceConsecutiveExact": { "type": "boolean", "default": true, "description": "S4: enforce the production-supported exact consecutive branch of storm/post-cap-schema-rejection-signature/v1 (consecutive_count===4 && cap_after===3 && would_abort_basis==='consecutive'). The identity is a keyless deterministic checksum (no key material, no strict-key eligibility prerequisite). Rolling-window trips never enter control; there is no total tool cap. Only observeAfter===3 is a supported cap; any other cap is unsupported and never aborts." }
                   }
                 }
               }
@@ -1863,7 +1863,7 @@
 
         "shadow": {
           "type": "object",
-          "description": "Shadow A/B telemetry (opt-in, default OFF): a deterministic sample of web_search call events (keyed on query + tool-call id) also runs a second search backend in the background; one JSONL row per sampled call is appended to <projectRoot>/.pi-astack/web-search/shadow.jsonl. The main tool result is never affected by shadow failures. The log never contains the raw query, snippets or API keys: query, tool-call id and URLs are recorded as keyed HMAC digests (project-bound audit key under <projectRoot>/.pi-astack/llm-audit/) — these are NOT claimed to be irreversible; the protection is key hygiene. Result URLs are logged as HMAC digests with a hostname-domain overview by default (set logUrls=true to log strictly normalized URLs instead). The hostname domain list is a deliberate authority-analysis signal and may still reveal which sites are of interest. Shadow errors are reduced to a normalized errorKind (never the raw provider error text).",
+          "description": "Shadow A/B telemetry (opt-in, default OFF): a deterministic sample of web_search call events (keyed on query + tool-call id) also runs a second search backend in the background; one JSONL row per sampled call is appended to <projectRoot>/.pi-astack/web-search/shadow.jsonl. The main tool result is never affected by shadow failures. The log never contains the raw query, snippets or API keys: query, tool-call id and URLs are recorded as keyless checksum digests (SHA-256, domain-framed, no key material) — these are NOT claimed to be irreversible; low-entropy values may be recoverable by brute force, the protection is that the raw value is never persisted. Result URLs are logged as checksum digests with a hostname-domain overview by default (set logUrls=true to log strictly normalized URLs instead). The hostname domain list is a deliberate authority-analysis signal and may still reveal which sites are of interest. Shadow errors are reduced to a normalized errorKind (never the raw provider error text).",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
@@ -1892,7 +1892,7 @@
             },
             "logUrls": {
               "type": "boolean",
-              "description": "Log strictly normalized result URLs (true) or URL HMAC digests + hostname-domain overview (false, default). URL normalization strips userinfo, fragments and ALL query parameters so tokens can never reach the log. Raw query and snippets are never logged either way. Hostname domains are a deliberate authority-analysis signal and may still reveal site interests. Default: false.",
+              "description": "Log strictly normalized result URLs (true) or URL checksum digests + hostname-domain overview (false, default). URL normalization strips userinfo, fragments and ALL query parameters so tokens can never reach the log. Raw query and snippets are never logged either way. Hostname domains are a deliberate authority-analysis signal and may still reveal site interests. Default: false.",
               "default": false
             }
           }

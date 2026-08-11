@@ -582,9 +582,7 @@ await check("seal verifies stable snapshots without changing archive bytes", asy
   assert.equal(manifest.schema_version, "audit-seal-manifest/v2");
   assert.equal(manifest.canonical_root, root);
   assert.equal(manifest.entries[0].identity.ino, fs.statSync(archive).ino);
-  assert.equal(manifest.signature.algorithm, "hmac-sha256");
-  assert.match(manifest.signature.key_id, /^[0-9a-f]{24}$/);
-  assert.match(manifest.signature.digest, /^[0-9a-f]{64}$/);
+  assert(!Object.hasOwn(manifest, "signature"), "seal manifest must not carry a signature (keyless, ADR 0027 C6)");
   assert(!Object.hasOwn(manifest, "secret"));
 });
 
