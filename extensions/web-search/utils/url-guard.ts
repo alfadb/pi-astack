@@ -37,21 +37,25 @@ export class UrlGuardError extends Error {
 
 // ── IP range checks ─────────────────────────────────────────────
 
-/** Block 100.64.0.0/10 (CGNAT, RFC 6598) — covers 100.64..100.127 */
-function isCgnat(ip: string): boolean {
+/** Block 100.64.0.0/10 (CGNAT, RFC 6598) — covers 100.64..100.127.
+ *  Exported for offline unit tests (IP-literal classification needs no DNS). */
+export function isCgnat(ip: string): boolean {
   if (!ip.startsWith("100.")) return false;
   const second = parseInt(ip.split(".")[1] || "0", 10);
   return Number.isFinite(second) && second >= 64 && second <= 127;
 }
 
-/** Block 172.16.0.0/12 (RFC1918) — covers 172.16..172.31 */
-function isPrivate172(ip: string): boolean {
+/** Block 172.16.0.0/12 (RFC1918) — covers 172.16..172.31.
+ *  Exported for offline unit tests. */
+export function isPrivate172(ip: string): boolean {
   if (!ip.startsWith("172.")) return false;
   const second = parseInt(ip.split(".")[1] || "0", 10);
   return Number.isFinite(second) && second >= 16 && second <= 31;
 }
 
-function isPrivateIPv4(ip: string): boolean {
+/** RFC1918 / loopback / link-local / CGNAT / multicast / TEST-NET /
+ *  IETF-reserved IPv4 classification. Exported for offline unit tests. */
+export function isPrivateIPv4(ip: string): boolean {
   // Quick prefix matches first.
   if (ip.startsWith("0.")) return true;          // 0.0.0.0/8 — current network
   if (ip.startsWith("10.")) return true;         // RFC1918
@@ -73,7 +77,9 @@ function isPrivateIPv4(ip: string): boolean {
   return false;
 }
 
-function isPrivateIPv6(ip: string): boolean {
+/** IPv6 loopback / link-local / site-local / ULA / multicast /
+ *  IPv4-mapped classification. Exported for offline unit tests. */
+export function isPrivateIPv6(ip: string): boolean {
   const lc = ip.toLowerCase();
   if (lc === "::1" || lc === "::") return true;           // loopback / unspecified
   if (lc.startsWith("fe80:") || lc.startsWith("fe80::")) return true;  // link-local fe80::/10

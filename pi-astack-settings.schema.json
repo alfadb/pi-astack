@@ -1799,28 +1799,103 @@
 
     "webSearch": {
       "type": "object",
-      "description": "Web search + fetch tools (extensions/web-search/). Registers two pi tools — web_search and web_fetch — backed by a pluggable WebSearchProvider abstraction. Built-in provider: Brave. Future providers (Google CSE / Kagi / Bing / Serper / Tavily / Jina Reader / SearXNG) plug in via registry.ts switch-case (V1) and a public registerWebSearchProvider() hook (V2). Per ADR 0027 PR-A: these tools are exposed to sub-agents by default so L2 workers can read external environment.",
+      "description": "Web search + fetch tools (extensions/web-search/). Registers two pi tools — web_search and web_fetch — backed by a pluggable SearchBackend / FetchBackend split: webSearch.provider selects the search engine (built-in 'brave' or 'serper'), while web_fetch always uses the same local fetch backend with SSRF guard. Optional shadow A/B (webSearch.shadow) runs a deterministic sample of web_search call events against a second search backend for quality comparison. Future providers (Google CSE / Kagi / Bing / Tavily / Jina Reader / SearXNG) plug in via registry.ts switch-case (V1) and a public registerSearchBackend() hook (V2). Per ADR 0027 PR-A: these tools are exposed to sub-agents by default so L2 workers can read external environment.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
 
         "provider": {
           "type": "string",
-          "description": "Backend provider name. Built-in: 'brave'. V2 will accept names registered via registerWebSearchProvider(). Default: 'brave'.",
-          "enum": ["brave"],
+          "description": "Search backend provider name. Built-in: 'brave' (Brave Search API) or 'serper' (Google via Serper.dev). web_fetch always uses the same local fetch backend regardless of this setting. V2 will accept names registered via registerSearchBackend(). Default: 'brave'.",
+          "enum": ["brave", "serper"],
           "default": "brave"
+        },
+
+        "brave": {
+          "type": "object",
+          "description": "Brave-specific credentials. Never shared with other providers, so switching webSearch.provider can't shadow the wrong key. Fields fall back to the legacy webSearch.apiKey / webSearch.apiKeyEnv below.",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+            "apiKey": {
+              "type": "string",
+              "description": "Direct Brave API key, resolved with pi's config-value semantics ('!command' / '$VAR' / literal). Takes priority over brave.apiKeyEnv and the legacy webSearch.apiKey. Empty/unset falls back. Default: '' (unset).",
+              "default": ""
+            },
+            "apiKeyEnv": {
+              "type": "string",
+              "description": "Env var name to read the Brave API key from. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. Used only when brave.apiKey is unset.",
+              "default": "BRAVE_API_KEY"
+            }
+          }
+        },
+
+        "serper": {
+          "type": "object",
+          "description": "Serper.dev credentials (Google search via POST https://google.serper.dev/search, X-API-KEY auth). Provider-specific — never reads the legacy webSearch.apiKey/apiKeyEnv (those are Brave-only migration keys).",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+            "apiKey": {
+              "type": "string",
+              "description": "Direct Serper API key, resolved with pi's config-value semantics ('!command' / '$VAR' / literal). Takes priority over serper.apiKeyEnv. Empty/unset falls back to serper.apiKeyEnv. Default: '' (unset).",
+              "default": ""
+            },
+            "apiKeyEnv": {
+              "type": "string",
+              "description": "Env var name to read the Serper API key from. Default 'SERPER_API_KEY'. Used only when serper.apiKey is unset.",
+              "default": "SERPER_API_KEY"
+            }
+          }
         },
 
         "apiKey": {
           "type": "string",
-          "description": "Direct API key value, resolved with pi's config-value semantics: '!command' runs a shell command and uses its stdout (e.g. \"!jq -r --arg k brave '.[$k]' $HOME/.pi/secrets.json\"); '$VAR' / '${VAR}' interpolate env vars; anything else is a literal. Takes priority over apiKeyEnv, letting the key live in a single secrets file instead of an environment variable. Empty/unset falls back to apiKeyEnv. Default: '' (unset).",
+          "description": "LEGACY Brave API key (migration path): resolved with pi's config-value semantics ('!command' / '$VAR' / literal) and only read by the Brave backend. New configs should use webSearch.brave.apiKey. Superseded by brave.apiKey; empty/unset falls back to apiKeyEnv. Serper never reads this. Default: '' (unset).",
           "default": ""
         },
 
         "apiKeyEnv": {
           "type": "string",
-          "description": "Env var name to read API key from. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. When switching providers, set to that provider's expected key env name (e.g. 'KAGI_API_KEY'). Used only when apiKey is unset.",
+          "description": "LEGACY Brave key env var name. Superseded by brave.apiKeyEnv. Default 'BRAVE_API_KEY' for zero-migration compat with the existing brave-search skill. Used only when brave.apiKey is unset.",
           "default": "BRAVE_API_KEY"
+        },
+
+        "shadow": {
+          "type": "object",
+          "description": "Shadow A/B telemetry (opt-in, default OFF): a deterministic sample of web_search call events (keyed on query + tool-call id) also runs a second search backend in the background; one JSONL row per sampled call is appended to <projectRoot>/.pi-astack/web-search/shadow.jsonl. The main tool result is never affected by shadow failures. The log never contains the raw query, snippets or API keys: query, tool-call id and URLs are recorded as keyed HMAC digests (project-bound audit key under <projectRoot>/.pi-astack/llm-audit/) — these are NOT claimed to be irreversible; the protection is key hygiene. Result URLs are logged as HMAC digests with a hostname-domain overview by default (set logUrls=true to log strictly normalized URLs instead). The hostname domain list is a deliberate authority-analysis signal and may still reveal which sites are of interest. Shadow errors are reduced to a normalized errorKind (never the raw provider error text).",
+          "additionalProperties": false,
+          "properties": {
+            "_comment": { "type": "string" },
+            "enabled": {
+              "type": "boolean",
+              "description": "Master switch. Default: false.",
+              "default": false
+            },
+            "provider": {
+              "type": "string",
+              "description": "Shadow search backend provider name. Must differ from webSearch.provider; unknown/misconfigured names disable the shadow with a warning (never breaks the main tool). Default: 'serper'.",
+              "enum": ["brave", "serper"],
+              "default": "serper"
+            },
+            "sampleRate": {
+              "type": "number",
+              "description": "Deterministic per-call-event sampling rate 0..1, keyed on the query + tool-call id: the same event always makes the same sampling decision (no RNG), while repeated queries with different tool-call ids can fall in different buckets. 0 disables sampling. Default: 0.",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0
+            },
+            "logPath": {
+              "type": "string",
+              "description": "Absolute path override for the shadow log. MUST be absolute — a relative path is rejected at settings load and fails closed to '' (with a warning). Empty '' uses <projectRoot>/.pi-astack/web-search/shadow.jsonl. Default: ''.",
+              "default": ""
+            },
+            "logUrls": {
+              "type": "boolean",
+              "description": "Log strictly normalized result URLs (true) or URL HMAC digests + hostname-domain overview (false, default). URL normalization strips userinfo, fragments and ALL query parameters so tokens can never reach the log. Raw query and snippets are never logged either way. Hostname domains are a deliberate authority-analysis signal and may still reveal site interests. Default: false.",
+              "default": false
+            }
+          }
         },
 
         "defaultCount": {

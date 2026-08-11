@@ -51,6 +51,7 @@ status: active
 | `proposition.adr0040-p4-legacy-authority-retirement` | ADR0040 P4 legacy authority retirement | `blocked` | `separate_authorization_required` | 2026-07-24 | `critical` |
 | `proposition.adr0040-policy-stable-view-runtime-flip` | ADR0040 Policy stable-view runtime flip | `completed` | `authorized` | 2026-08-04 | `critical` |
 | `staging.hard-delete` | staging 硬删 | `blocked` | `separate_authorization_required` | 2026-07-24 | `high` |
+| `web-search.serper-shadow-ab` | web-search Serper shadow A/B | `dogfood` | `authorized` | 2026-08-25 | `medium` |
 <!-- transition-register-machine-mirror:end -->
 
 ## Canonical path 阶段门
@@ -84,6 +85,7 @@ status: active
 | O5 conf≥8 fallback 巡检 | 2026-07-08 审计登记 | 仍需持续确认 conf≥8 非指令 durable fallback 没有引入用户纠正或召回漏失。 | 审计窗口内无被用户纠正的 accepted corrections / recall misses，可移除 fallback 回 ADR 原文谓词。 | tier1_direct_write audit、O5 sunset 指标。 | 做一次窗口巡检并记录结论。 |
 | ADR 0035/0036/0037 slim+ingest | 2026-07-08 审计登记 | **runtime 实现已 ship**（生产 stage0 hybrid + stage2 LLM 精排；见 current-state Memory read path）。本面只跟踪 0035/0036/0037 **文档 slim + mechanism ingest 入 abrain**（同 ADR 0034 文档侧工作），仍未闭环——不得把“slim+ingest 未完成”读成“runtime 未实现”。 | 0035/0036/0037 文档 slim banner + mechanism ingest 完成或经 sediment-lane go/no-go 显式 defer；ingest 验收样本与回滚/staleness 边界落盘。 | ADR 0035/0036/0037、current-state Memory read path、ingest 指标。 | runtime 真相以代码/current-state 为准；单独规划文档 slim+ingest 批次，不阻塞检索 runtime。 |
 | outcome unknown 占比溯因 | 2026-07-08 审计登记；2026-07-22 RM-OUTCOME-001 | 已建立内容寻址 L1 `memory exposure -> action/outcome -> rejudge` evidence spine 与可重建 index。test/lint/build、明确 workflow/tool terminal result、git revert/rewrite、用户自然纠正是独立来源；unknown attribution 显式保留。普通 LLM self-report、footnote、exposure 与沉默不具独立权威。lifecycle proposal 按 slug 消费 attributed independent evidence；prompt-revision proposal 额外要求 index `proposal_id` 精确绑定稳定 proposal_id，普通无 proposal_id 的 outcome 安全 defer。历史人审行迁移为自治终态或 `defer_until_new_evidence`；不改 prompt、不建立 human/operator queue。 | 独立来源可稳定重放；unknown 不伪造 memory join；非独立信号不触发；prompt-revision 仅由匹配 proposal_id 的 attributed independent evidence 解锁；真实 production command、自治 rejudge 与机器可读 dossier 的 L1/index 一致。 | L1 outcome-evidence events、derived outcome-evidence-index、RM-OUTCOME-001 production dossier、prompt/lifecycle proposal smoke。 | 持续观察真实 unknown/corroborated 分布；lifecycle 仅由 attributed independent evidence 重开；prompt-revision 仅由 proposal-bound attributed independent evidence 重开；保留未来专用 producer 扩展点，不自动改 prompt。 |
+| web-search Serper shadow A/B | 2026-08-11 | `dogfood / authorized`；Brave 主 + Serper 10% shadow 已通过真实 API smoke（`smoke-web-search-live --dual`）；shadow 日志 HMAC 化（项目绑定 audit key）、默认路径自动 gitignore、report 聚合脚本可用；Brave 已从 legacy apiKey 迁到 brave.apiKey（legacy 兼容保留）。 | 累计 ≥400 组双侧 ok 真实查询；按技术文档/报错/中文/freshness 分层完成人工或下游任务成功评估；形成 Serper default / Brave default / 关闭 shadow 的明确决定并停止无限观察。 | `smoke-web-search-live.mjs`、`report-web-search-shadow.mjs`、runtime shadow path。 | 收集两周真实 shadow 数据并于 2026-08-25 决策。 |
 
 ## 已收口
 

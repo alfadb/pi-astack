@@ -1,7 +1,7 @@
 {
   "schema_version": "transition-register/v1",
   "register_id": "pi-astack-transition-register",
-  "updated": "2026-07-27",
+  "updated": "2026-08-11",
   "review_policy": {
     "cadence": "biweekly",
     "default_owner": "pi-astack-maintainers",
@@ -1213,6 +1213,36 @@
       "renewal_count": 0,
       "risk_class": "low",
       "next_action": "无触发不推进；触发即进入修复批次。"
+    },
+    {
+      "id": "web-search.serper-shadow-ab",
+      "partition": "web-search",
+      "title": "web-search Serper shadow A/B",
+      "human_section": "滞留需推进",
+      "register_class": "active",
+      "phase_status": "dogfood",
+      "authorization_status": "authorized",
+      "entered": "2026-08-11",
+      "review_by": "2026-08-25",
+      "current": "Brave 主 + Serper 10% shadow 已通过真实 API smoke（smoke-web-search-live --dual）；shadow 日志 HMAC 化（项目绑定 audit key）、默认路径自动 gitignore、report 聚合脚本可用；Brave 已从 legacy apiKey 迁到 brave.apiKey（legacy 兼容保留）。",
+      "exit": [
+        "累计 >=400 组双侧 ok 真实查询",
+        "按技术文档/报错/中文/freshness 分层完成人工或下游任务成功评估",
+        "形成 Serper default / Brave default / 关闭 shadow 的明确决定并停止无限观察"
+      ],
+      "evidence": [
+        "scripts/smoke-web-search-live.mjs",
+        "scripts/report-web-search-shadow.mjs",
+        "extensions/web-search/shadow.ts runtime shadow path"
+      ],
+      "owner": "web-search",
+      "consumer": [
+        "report script",
+        "provider decision"
+      ],
+      "renewal_count": 0,
+      "risk_class": "medium",
+      "next_action": "收集两周真实 shadow 数据并于 review_by 决策。"
     }
   ]
 }

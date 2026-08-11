@@ -1,20 +1,11 @@
-import type {
-  WebSearchProvider,
-  SearchOpts,
-  SearchResult,
-  FetchOpts,
-  FetchResult,
-} from "../types";
+import type { FetchBackend, FetchOpts, FetchResult } from "../types";
 import { htmlToMarkdown, extractTitle, truncateBytes } from "../utils/html-to-markdown";
-import { resolveSecret } from "../utils/secret";
 import {
-  assertUrlSafe,
   safeFetch,
   combineSignals,
   UrlGuardError,
 } from "../utils/url-guard";
 
-const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
 const DEFAULT_FETCH_MAX_BYTES = 50_000;
 const FETCH_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
@@ -25,114 +16,33 @@ const FETCH_USER_AGENT =
 const ABSOLUTE_MAX_RAW_BYTES = 5_000_000;
 
 /**
- * Brave Search API backend. Built-in default for the web-search
- * extension per ADR 0027 PR-A.
+ * Local web-fetch backend for web_fetch. Split out of the former
+ * monolithic BraveProvider: fetch is provider-independent — it is a
+ * local HTTP fetch with HTML→markdown extraction, not a Brave API call.
+ *
+ * `name` stays "brave" for output compatibility: web_fetch provenance
+ * ("Provider: brave") and details.provider are unchanged by the
+ * search/fetch split, so callers and tests keep seeing the same shape.
  *
  * Hardening from PR-A review (commit f4fc560 multi-LLM review):
- *   - search()/fetch() consume opts.signal (combined with timeout via
+ *   - fetch() consumes opts.signal (combined with timeout via
  *     AbortSignal.any) — caller cancel propagates to HTTP
  *   - fetch() routes through safeFetch (manual redirect + per-hop
  *     assertUrlSafe) — SSRF / DNS-rebinding closed
- *   - count clamp is integer-rounded — Brave API gets no fractional
  *   - body is streamed with cumulative byte limit (not response.text()
  *     reading the whole body unconditionally) — memory bound
  *   - content-type whitelist refuses binary/unknown types instead of
  *     producing mojibake from Buffer.toString("utf8")
  */
-export class BraveProvider implements WebSearchProvider {
+export class BraveFetchBackend implements FetchBackend {
   readonly name = "brave";
 
   constructor(
     private readonly opts: {
-      apiKey?: string;
-      apiKeyEnv: string;
-      defaultCount: number;
       timeoutMs: number;
       allowPrivateNetworks: boolean;
     },
   ) {}
-
-  private getApiKey(): string {
-    // Priority 1: webSearch.apiKey ("!command" / "$ENV" / literal) — lets
-    // the key live in a single secrets file instead of an env var.
-    if (this.opts.apiKey) {
-      const resolved = resolveSecret(this.opts.apiKey);
-      if (resolved) return resolved;
-      throw new Error(
-        `web-search/brave: webSearch.apiKey is set but resolved empty ` +
-        `(command produced no output, or referenced env var is missing): ` +
-        `${this.opts.apiKey}`,
-      );
-    }
-    // Priority 2: legacy env var (name from webSearch.apiKeyEnv).
-    const key = process.env[this.opts.apiKeyEnv];
-    if (!key) {
-      throw new Error(
-        `web-search/brave: no API key. Set webSearch.apiKey (e.g. ` +
-        `"!jq -r --arg k brave '.[$k]' $HOME/.pi/secrets.json") or the ` +
-        `${this.opts.apiKeyEnv} env var in ~/.pi/agent/pi-astack-settings.json. ` +
-        `Get a free Brave Search API key at ` +
-        `https://api-dashboard.search.brave.com/app/keys.`,
-      );
-    }
-    return key;
-  }
-
-  async search(query: string, opts?: SearchOpts): Promise<SearchResult[]> {
-    const apiKey = this.getApiKey();
-    // count is always Brave-bound: clamp to [1,20] and integer-round.
-    // Floor first to handle non-integer caller input (e.g. 5.7 → 5).
-    const rawCount = Math.floor(opts?.count ?? this.opts.defaultCount);
-    const count = Math.max(1, Math.min(rawCount || 1, 20));
-    const country = (opts?.country ?? "US").toUpperCase();
-    const signal = combineSignals([
-      opts?.signal,
-      AbortSignal.timeout(this.opts.timeoutMs),
-    ]);
-
-    const params = new URLSearchParams({
-      q: query,
-      count: String(count),
-      country,
-    });
-    if (opts?.freshness) params.append("freshness", opts.freshness);
-
-    const url = `${BRAVE_API_URL}?${params.toString()}`;
-    // Brave API endpoint is fixed and trusted — no need to route through
-    // safeFetch (which is for arbitrary user-provided URLs in fetch()).
-    const response = await globalThis.fetch(url, {
-      headers: {
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip",
-        "X-Subscription-Token": apiKey,
-      },
-      signal,
-    });
-
-    if (!response.ok) {
-      const errBody = await response.text().catch(() => "");
-      throw new Error(
-        `Brave Search API HTTP ${response.status} ${response.statusText}` +
-        (errBody ? ` — ${errBody.slice(0, 300)}` : ""),
-      );
-    }
-
-    const data = await response.json() as {
-      web?: { results?: Array<{ title?: string; url?: string; description?: string; age?: string }> };
-    };
-
-    const results: SearchResult[] = [];
-    for (const r of data.web?.results ?? []) {
-      if (results.length >= count) break;
-      results.push({
-        title: r.title ?? "",
-        url: r.url ?? "",
-        snippet: r.description ?? "",
-        ...(r.age ? { age: r.age } : {}),
-      });
-    }
-    return results;
-  }
 
   async fetch(url: string, opts?: FetchOpts): Promise<FetchResult> {
     const maxBytes = opts?.maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
