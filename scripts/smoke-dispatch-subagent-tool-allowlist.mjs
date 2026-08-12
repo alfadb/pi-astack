@@ -119,7 +119,7 @@ for (const name of DISABLED) {
   const verdict = dispatch.validateTools(`  ${name.toUpperCase()}  `);
   check(!verdict.ok, `validateTools denies ${name} case-insensitively`);
 }
-for (const name of ["dynamic_extension_tool", "lsp_diagnostics", "lsp_diagnosticz", "goal_set", "workflow_validate", "bash"]) {
+for (const name of ["dynamic_extension_tool", "lsp_diagnostics", "lsp_diagnosticz", "workflow_validate", "bash"]) {
   const verdict = dispatch.validateTools(name);
   check(verdict.ok, `validateTools defers non-disabled name ${name} to target registry`);
 }

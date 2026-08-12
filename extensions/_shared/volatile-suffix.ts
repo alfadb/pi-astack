@@ -3,13 +3,13 @@
  *
  * Anthropic prompt caching keys by PREFIX: the cache stays valid up to the
  * first byte that differs from the cached prompt. Any block whose content
- * changes per-turn (goal status, path-A memory recall) or per-minute (wall
+ * changes per-turn (path-A memory recall) or per-minute (wall
  * clock) must therefore sit AFTER every session-stable block, otherwise it
  * busts the cache for everything that follows it.
  *
  * The before_agent_start injectors run in extension load order (alphabetical
  * by directory), so a volatile injector cannot reorder itself relative to a
- * stable injector that loads later (e.g. `goal` < `memory` < `model-curator`
+ * stable injector that loads later (e.g. `memory` < `model-curator`
  * < `sediment` < `time-injector`). Instead, every volatile injector WRAPS its
  * block with the markers below, and the last-running injector
  * (`time-injector`) calls hoistVolatileSuffix to move all wrapped blocks to
@@ -57,7 +57,7 @@ export function wrapVolatile(block: string): string {
 /**
  * Move every volatile-wrapped block to the END of the prompt, preserving
  * their relative order; drop empty/orphan wrappers (e.g. left behind when a
- * stale goal block is stripped by its own injector). Idempotent: hoisting an
+ * stale volatile block is stripped by its own injector). Idempotent: hoisting an
  * already-hoisted prompt returns the same string. The caller (time-injector)
  * appends the time block AFTER this, so time stays strictly last.
  */

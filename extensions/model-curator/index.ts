@@ -325,7 +325,7 @@ function buildAvailableModelsBlock(
         "`modelCurator.tiers` in pi-astack-settings.json). Tier membership is " +
         "for LLM selection guidance and T0 dispatch planning — it is NOT a " +
         "runtime fallback chain. Business call points (memory, sediment, " +
-        "vision, workflow, goal, compaction, imagine) read their own per-role " +
+        "vision, workflow, compaction, imagine) read their own per-role " +
         "model fields, NOT this roster.",
     );
     lines.push("");

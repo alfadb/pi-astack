@@ -1,6 +1,6 @@
 ---
 name: planning-interview
-description: 模糊需求的决策访谈与可改计划落地。合并决策盘问、仓库文档对齐、长周期探索为一套无状态 SOP；事实自查，真正决策才问用户，共识后实施或挂 goal。适用于模糊新功能、架构/领域模型、高返工风险、相互依赖决策、跨会话大型任务。不适用于单点事实查询、已明确的小改动、已有完整 spec/验收标准的执行、普通局部 bugfix、用户明确要求立即执行且无关键未决策的任务。
+description: 模糊需求的决策访谈与可改计划落地。合并决策盘问、仓库文档对齐、长周期探索为一套无状态 SOP；事实自查，真正决策才问用户，共识后实施或挂 living plan。适用于模糊新功能、架构/领域模型、高返工风险、相互依赖决策、跨会话大型任务。不适用于单点事实查询、已明确的小改动、已有完整 spec/验收标准的执行、普通局部 bugfix、用户明确要求立即执行且无关键未决策的任务。
 metadata:
   version: "1.0"
   phase: "prompt-orchestration"
@@ -9,16 +9,16 @@ metadata:
 # Planning Interview（规划访谈）
 
 无状态 SOP：先分流，再（按需）访谈/写文档/挂 living plan，最后 handoff 到实施。
-**不创建**第二套 tracker、goal 状态机、checklist DB 或 issue ticket map。
+**不创建**第二套 tracker、checklist DB 或 issue ticket map。
 复用现有工具：`read`/`grep`/`bash`、`memory_search`/`abrain_get`/`memory_decide`、
-`prompt_user`、`goal_set(doc=...)`、`workflow_list`/`workflow_run`。
+`prompt_user`、`workflow_list`/`workflow_run`。
 
 核心原则：
 1. **小任务别盘问**——能直接做就做。
 2. **事实不问用户**——先查代码、环境、记忆、公网；只问真正的决策。
 3. **一次一个决策**——给推荐答案 + 简短理由；必要时 `prompt_user`。
 4. **共识前不执行**——用户可随时明确结束访谈并授权动手。
-5. **单一 living plan**——长任务只维护一份可改 markdown + `goal_set(doc=...)`。
+5. **单一 living plan**——长任务只维护一份可改 markdown。
 6. **遵循仓库既有约定**——发现 glossary/domain docs/ADR/RFC/spec 习惯再写入；不强制某路径。
 
 ---
@@ -32,7 +32,7 @@ metadata:
 | **跳过** | 单点事实、已明确小改动、完整 spec 可执行、普通局部 bugfix、用户明确立即执行且无关键未决策 | **不加载本流程**；直接查/做 |
 | **单会话访谈** | 模糊但可在本会话收敛；决策少、返工面可控 | Step 1–3 → 共识后实施或出短 spec |
 | **持久化共识** | 决策需留下文档（领域词表、ADR、RFC、验收 spec），供后续会话复用 | 访谈 + Step 4 写确认内容 |
-| **长周期探索** | 跨会话、多探针、边界未定、验收靠证据滚动 | 访谈关键决策 + Step 5 living plan + `goal_set` |
+| **长周期探索** | 跨会话、多探针、边界未定、验收靠证据滚动 | 访谈关键决策 + Step 5 living plan |
 
 不确定时偏向更轻路径。用户说"先别做/只要讨论/只要计划" → 允许停在计划，并在 handoff 标明。
 
@@ -102,7 +102,7 @@ metadata:
 
 ---
 
-## Step 5 — 长周期 living plan + goal
+## Step 5 — 长周期 living plan
 
 跨会话或需滚动探索时：
 
@@ -114,10 +114,9 @@ metadata:
    - **Unresolved decisions / current hypothesis**
    - **Next probe**：下一步最小验证
    - **Acceptance criteria / evidence**：怎样算完成、要什么外部证据
-3. 用 `goal_set({ doc: "<plan-path>" })` 挂上该文档（doc 与 objective 互斥；doc 必须已可读）。
-4. 真实事实或计划变化时**就地改 plan**，并用证据更新；不要另建 todo DB / DAG / issue map 当完成 SOT。
-5. 若仓库已有 issue tracker，可以**链接** ticket；**plan.md 仍是当前 goal 的 SOT**。
-6. 勾选完成必须有外部证据（测试输出、文件、git sha 等），不能靠自勾交差。
+3. 真实事实或计划变化时**就地改 plan**，并用证据更新；不要另建 todo DB / DAG / issue map 当完成 SOT。
+4. 若仓库已有 issue tracker，可以**链接** ticket；**plan.md 仍是当前计划的 SOT**。
+5. 勾选完成必须有外部证据（测试输出、文件、git sha 等），不能靠自勾交差。
 
 ---
 
@@ -144,7 +143,7 @@ metadata:
 |------|---------|
 | 小任务，共识已够 | **直接实施**（主会话派确定性子代理执行，审查结果） |
 | 需要可复用规范 | 产出/更新 **spec**（+ 必要 glossary/ADR），再实施或交还用户 |
-| 长任务 / 跨会话 | 更新 living plan + `goal_set(doc=...)`，写清 next probe 与验收 |
+| 长任务 / 跨会话 | 更新 living plan，写清 next probe 与验收 |
 | 命中固定流程 | `workflow_run` |
 | 用户只要计划/讨论 | 交付计划/共识摘要，**标明未实施**，停 |
 
@@ -161,7 +160,7 @@ Handoff 摘要（几行即可）：destination、已确认决策、显式假设�
 - 一次抛出长问卷
 - 共识前大范围改代码
 - 强制 `CONTEXT.md` / 固定 ADR 目录 / 复制外来 slash 流程
-- 新建 issue ticket map、DAG、todo DB、第二套 goal/checklist 状态
+- 新建 issue ticket map、DAG、todo DB、第二套 checklist 状态
 - 把 glossary 写成 spec，或把一切选择都写成 ADR
 - 无固定可复用 workflow 却去 `workflow_run`
 - 只写计划却不 handoff 实施（除非用户只要计划）
@@ -174,6 +173,6 @@ Handoff 摘要（几行即可）：destination、已确认决策、显式假设�
 2. Step 1 事实自查（代码/记忆/公网）
 3. Step 2 列决策队列（仅真决策）
 4. Step 3 一次一问，推荐 + 理由；关键用 `prompt_user`
-5. 需要时 Step 4 写已确认文档 / Step 5 living plan + `goal_set`
+5. 需要时 Step 4 写已确认文档 / Step 5 living plan
 6. 命中时 Step 6 `workflow_list`/`workflow_run`
-7. Step 7 handoff：实施 / spec / goal / workflow / 仅计划
+7. Step 7 handoff：实施 / spec / workflow / 仅计划

@@ -16,7 +16,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import { sanitizeForMemory } from "./sanitizer";
-import { isGoalContinuationText } from "../_shared/goal-continuation";
 import { auditStreamSimple } from "../_shared/llm-audit";
 import { packClassifierWindow, packedWindowToText, type PackedWindow } from "./context-packer";
 import { type ProvenanceClass } from "./validation";
@@ -381,16 +380,7 @@ export function deriveProvenance(
   for (const t of packed.turns) {
     if (!normWsForProvenance(t.text).includes(q)) continue;
     const r = t.role.toLowerCase();
-    // PR-7 provenance isolation (impl-plan §P1 hard-constraint 2a,
-    // INV-IMPLICIT-GROUND-TRUTH): a goal auto-continue message rides the
-    // USER role but its content is machine-composed (goal judge
-    // next_step). The `[pi-goal-continuation ...]` prefix is the only
-    // signal that survives into the packed transcript (event.source does
-    // not), so demote such turns to the assistant-origin bucket
-    // deterministically. Fail-closed: a user FORGING the prefix only
-    // demotes their own directive (R3' recall flag surfaces it).
-    if (r === "user" && isGoalContinuationText(t.text)) assistantHits++;
-    else if (r === "user") userHits++;
+    if (r === "user") userHits++;
     else if (r === "toolresult" || r === "bashexecution" || r === "tool" || r === "system") transcriptHits++;
     else if (r === "assistant") assistantHits++;
   }

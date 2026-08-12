@@ -428,7 +428,7 @@ function classifyToolResult(result: ToolResultRecord, call?: ToolCallRecord): { 
     return { kind: "workflow", action: { kind: "workflow_tool", tool_name: name, tool_call_id: result.id } };
   }
   const detailsKind = typeof result.details?.kind === "string" ? result.details.kind : "";
-  if (hasStructuredTerminalResult(result) && /^(?:dispatch_|goal_|workflow_|browser_|web_)/.test(`${name}:${detailsKind}`)) {
+  if (hasStructuredTerminalResult(result) && /^(?:dispatch_|workflow_|browser_|web_)/.test(`${name}:${detailsKind}`)) {
     return { kind: "tool", action: { kind: "structured_tool", tool_name: name, tool_call_id: result.id, details_kind: detailsKind || "unknown" } };
   }
   return undefined;

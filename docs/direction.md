@@ -54,7 +54,7 @@ L1(认知)与 L2(执行/swarm)各持**不可互相归约**的 invariant 集,不�
 用户在 L1/L2 中**不作** worker/reviewer/curator/hub/调度节点。合法角色仅:L1 隐式信号源 + L1 决策参谋接受方(ADR 0026);L2 主任务发起方(自然对话 + `prompt_user` 任务决策 + `vault_release` 授权)。拒绝的是"把用户踢出 loop 的自治长跑"(Devin/SWE-agent),**不是**拒绝后台并行。L2 整体对用户**必须可问责**:任何失败在 L1 当前 turn 内可见 / 可归因 / 可追问。
 
 ### INV-TELL-NOT-ASK(调用面自然语言优先,ADR 0033)
-用户与 LLM 永远用自然语言;工具调用由 LLM 决定。要求用户记忆/敲出 slash 命令是把机器接口成本转嫁给人 = INV-INVISIBILITY 在能力面的违反形态(slash 管理命令是过渡反模式)。能力面(goal/workflow/dispatch)**零确认弹窗、零 per-run 人肉点头**。三层归位:**结构层管不变量、认知层管判断、用户管意图**;确认弹窗是把"判断"错放进"意图"层。
+用户与 LLM 永远用自然语言;工具调用由 LLM 决定。要求用户记忆/敲出 slash 命令是把机器接口成本转嫁给人 = INV-INVISIBILITY 在能力面的违反形态(slash 管理命令是过渡反模式)。能力面(workflow/dispatch)**零确认弹窗、零 per-run 人肉点头**。三层归位:**结构层管不变量、认知层管判断、用户管意图**;确认弹窗是把"判断"错放进"意图"层。
 
 **2026-07-08 operator 边界补注（理由：单用户部署中用户兼任维护者，需区分用户角色与维护者逃生口）**:诊断/迁移类 slash 命令是维护者逃生口，不构成对用户角色的元工作；它们不得成为正常产品调用面，也不得要求用户以 slash 形式完成日常任务。每个此类 slash 必须在文档或 tool declaration 标注退役条件；无法标注退役条件者应退役。
 
@@ -117,7 +117,7 @@ L1(认知)与 L2(执行/swarm)各持**不可互相归约**的 invariant 集,不�
 5. classifier 推理质量持续退化(quote / alternative / self-critique rate 持续 <40% 或下降 ≥15pp 且改 prompt 数轮无改善)→ 该能力点降级 staging-only 或拆独立 ADR。
 6. **AI-Native 原则在某能力点反复证伪**(多轮 prompt 迭代仍达不到 baseline)→ 该点单独允许机械兜底(须说明已尝试轮数 + 系统性失败证据 + 局部范围 + 未来移除条件),**不全盘 walk-back 原则**。
 7. R6 删除的"准确率阈值 / 月度自动迭代 / 准确率 smoke"被实战证明确实必需 → 重新引入,但必须 framed 为"仅供参考指标"而非硬关卡。
-8. **goal/workflow/dispatch 能力面重新出现确认弹窗或 per-run 用户动作**(INV-TELL-NOT-ASK / INV-COST-NOT-A-GATE 被侵蚀--最可能形态:未来 PR 以"安全"为名复活机械门/人肉点头,ADR 0033 总纲被推翻)→ 立即按 README §5 升级。
+8. **workflow/dispatch 能力面重新出现确认弹窗或 per-run 用户动作**(INV-TELL-NOT-ASK / INV-COST-NOT-A-GATE 被侵蚀--最可能形态:未来 PR 以"安全"为名复活机械门/人肉点头,ADR 0033 总纲被推翻)→ 立即按 README §5 升级。
 
 9. **归档冷存储（`archived`）按 `kind`/领域分布严重失衡，或 resurrection rate 长期趋零而 corpus 持续膨胀**（自治遗忘策略偏盲、长尾被静默系统性流失的信号，ADR 0031）→ 回看 ADR 0031 基线，检查衰减是否偏盲。
 

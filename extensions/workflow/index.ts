@@ -11,9 +11,7 @@
  *   - No --yes gate. workflow_run performs deterministic validation as an
  *     internal machine gate; validation failure returns structured error and
  *     does not call the runner (N3).
- *   - workflow_run may be called from foreground main-session turns,
- *     including goal continuation turns. Only authority-creating goal tools
- *     are rejected in machine turns (PR-13).
+ *   - workflow_run may be called from foreground main-session turns.
  *   - workflow_run remains in dispatch's structural disabled set, so a stage
  *     cannot launch an indirect workflow. Read-only workflow tool names are
  *     otherwise subject to the target sub-agent registry like other tools.

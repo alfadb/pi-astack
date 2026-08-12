@@ -18,7 +18,7 @@ pi-astack 不是"一个记忆插件"，而是 **alfadb 在 pi 里的个人运行
 
 ## 2. 两层结构
 
-pi-astack 有两层：**substrate 层**是个人 pi 运行环境增强，覆盖模型路由、provider 护栏、通用工具、派发底座、工作流和宿主集成；**brain 层**是隐形自治第二大脑，覆盖长期记忆、证据、投影、自治遗忘、决策参与和主动纠错。隐形/自治类不变量只约束 brain 层；substrate 层遵循工程实用主义，只要不把用户重新变成大脑管理员、不绕过授权边界，就可以采用结构化协议、调试命令和 provider 补偿。已 ship 的 `web-search`、Context7、`vision`、`imagine`、goal/workflow、dispatch 等通用能力属于 substrate 层：它们增强 pi 的执行环境，并为 brain 层提供可调用底座，但本身不是第二大脑记忆本体（2026-07-08 定位补注理由：吸收运行实态，避免把所有通用能力误套隐形自治约束）。
+pi-astack 有两层：**substrate 层**是个人 pi 运行环境增强，覆盖模型路由、provider 护栏、通用工具、派发底座、工作流和宿主集成；**brain 层**是隐形自治第二大脑，覆盖长期记忆、证据、投影、自治遗忘、决策参与和主动纠错。隐形/自治类不变量只约束 brain 层；substrate 层遵循工程实用主义，只要不把用户重新变成大脑管理员、不绕过授权边界，就可以采用结构化协议、调试命令和 provider 补偿。已 ship 的 `web-search`、Context7、`vision`、`imagine`、workflow、dispatch 等通用能力属于 substrate 层：它们增强 pi 的执行环境，并为 brain 层提供可调用底座，但本身不是第二大脑记忆本体（2026-07-08 定位补注理由：吸收运行实态，避免把所有通用能力误套隐形自治约束）。
 
 ## 3. 第二大脑的产品哲学
 

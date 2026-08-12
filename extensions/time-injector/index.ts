@@ -170,7 +170,7 @@ export default function (pi: ExtensionAPI) {
     // a stale block in place (would carry an old minute).
     const cleaned = stripExistingBlock(current);
 
-    // Hoist every volatile-wrapped block (goal status, path-A memory recall)
+    // Hoist every volatile-wrapped block (path-A memory recall)
     // to the end so the session-stable prefix stays byte-identical across
     // turns. time-injector is the effective last injector, so it finalizes the
     // prefix-cache partition; the time block is appended strictly after the

@@ -2,7 +2,7 @@
 /**
  * Smoke: INV-TELL-NOT-ASK — capability surfaces carry NO confirmation gate.
  *
- * direction.md INV-TELL-NOT-ASK + 走偏信号 #8: the goal / dispatch / workflow
+ * direction.md INV-TELL-NOT-ASK + 走偏信号 #8: the dispatch / workflow
  * capability surfaces must have ZERO confirmation modal and ZERO per-run human
  * approval gate. Confirmation belongs to the "intent" layer (the user's natural
  * language), never bolted onto the "capability" layer as a [Y/N] gate. The ONLY
@@ -10,7 +10,7 @@
  * boundary, ADR 0014/0022) — which lives in the abrain extension, NOT here, and
  * is therefore intentionally excluded from the surfaces checked below.
  *
- * This is a REGRESSION GUARD. 走偏信号 #8 names "goal/workflow/dispatch 能力面
+ * This is a REGRESSION GUARD. 走偏信号 #8 names "workflow/dispatch 能力面
  * 重新出现确认弹窗" as a walk-back trigger that must escalate. The most likely
  * form is a future PR bolting a confirm modal / approval gate onto a tool
  * execute path "for safety". This smoke fails closed if that happens. It
@@ -39,11 +39,6 @@ function assert(cond, msg) {
 // silently passing on an empty file). vault_release is intentionally NOT here:
 // it is the one sanctioned data-egress Y/N gate.
 const SURFACES = [
-  {
-    name: "goal",
-    file: "extensions/goal/index.ts",
-    anchors: [/name:\s*["']goal_set["']/, /registerCommand\("goal"/],
-  },
   {
     name: "dispatch",
     file: "extensions/dispatch/index.ts",
@@ -86,12 +81,12 @@ for (const s of SURFACES) {
 }
 
 // Teeth check: guard against a future refactor silently emptying the lists.
-assert(SURFACES.length === 3, "all three capability surfaces enumerated");
+assert(SURFACES.length === 2, "both capability surfaces enumerated");
 assert(FORBIDDEN.length >= 6, "confirmation-primitive denylist is non-trivial");
 
 console.log("");
 if (failures === 0) {
-  console.log("✅ INV-TELL-NOT-ASK: no confirmation gate on goal/dispatch/workflow surfaces");
+  console.log("✅ INV-TELL-NOT-ASK: no confirmation gate on dispatch/workflow surfaces");
   process.exit(0);
 } else {
   console.log(`❌ ${failures} assertion(s) failed`);

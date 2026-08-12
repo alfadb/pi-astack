@@ -35,7 +35,6 @@ pi-astack 是一个 **local pi package** + 基于 `~/.abrain/` 的 ADR0039 event
 | `dispatch/` | `dispatch_agent`、`dispatch_parallel` | ✓ |
 | `edit-strip-empty/` | `edit` wrapper | ✓ |
 | `empty-visible-output-retry/` | `message_end` 空可见输出重试 hook | ✓ |
-| `goal/` | `goal_status/set/pause/resume/stop/clear`、`goal_check`；`/goal`；auto-continue（`goal.autoContinue`，default off）经 keyed detached queue + continuation ack，不阻塞 `agent_end` awaited 链 | ✓ |
 | `imagine/` | `imagine` | ✓ |
 | `llm-audit/` | hook（无 LLM tool/slash） | ✓ |
 | `memory/` | `memory_search/abrain_get/memory_list/memory_decide`、`memory_activity`；`/memory` | ✓ |

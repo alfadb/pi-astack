@@ -38,7 +38,6 @@ Slash commands may share the `~/.abrain` filesystem root, but **sharing paths do
 | `/rule` | Rule diagnostics | No canonical wait; inspection / explain / reload against rule substrate. |
 | `/memory` | Memory maintenance | No canonical write-barrier wait; migrate/lint/doctor operate on bound project + derived artifacts. |
 | `/sediment` | Sediment diagnostics | No canonical wait; status/dedupe maintenance (ordinary writes land on `agent_end`). |
-| `/goal` | Goal tracking | No canonical wait; local goal state. |
 | `/workflow` | Workflow control | No canonical wait; workflow runtime / env gates. |
 | `/compaction-tuner` | Compaction control | No canonical wait; reads `pi-astack-settings.json#compactionTuner`. |
 | `/curator-reload` | Model curator | No canonical wait; re-applies curated model routing. |
