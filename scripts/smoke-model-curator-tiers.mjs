@@ -29,6 +29,21 @@
  *    no size-only escalation — while the real 65536 output cap and the 2026-08-18
  *    routing window (both after the segment) survive the digit exclusion; escalation
  *    re-dispatches once with clarified scope and acceptance, never as a smaller task.
+ * 8. The tier roster renders each tier's configured description at runtime — the
+ *    flagship capability-threshold-before-vendor-diversity rule and the specialist
+ *    description are visible in the render block, not just in JSON. The live config
+ *    uses the `specialist` key (no `flagship_candidate`), its label contains no T0,
+ *    and the k3-256k hint is a paid temporary/on-demand alternate with no $0
+ *    subscription claim; the GLM hint requires a strict output contract when invoked.
+ * 9. Execution tier lock: live flagship is exactly [gpt-5.6-sol, claude-opus-5] —
+ *    deepseek-v4-flash and grok-4.5 are demoted to the `execution` tier
+ *    (label 'Execution routes — no general T0 judgment vote') whose description and
+ *    renderer caveat separate execution qualification from general T0 judgment
+ *    status (no general T0 independent votes, no standalone high-risk architecture
+ *    review); both hints state production replay did not qualify them for general
+ *    T0 judgment while Flash keeps PRIMARY DEFAULT execution-layer duty and Grok
+ *    keeps temporary rollback/escalation. The legacy `provisional` key still
+ *    renders the execution caveat (compat) but live uses `execution` only.
  */
 
 import { createRequire } from "node:module";
@@ -67,8 +82,21 @@ const fixtureSettings = {
     imageGen: { "alpha/image": "fixture image generation" },
     tiers: {
       frontier: { label: "T0+ — scarce frontier capability", models: ["beta/reviewer"] },
-      flagship: { label: "T0", models: ["alpha/executor", "beta/reviewer", "gamma/candidate"] },
-      flagship_candidate: { label: "T0 candidate", models: ["gamma/candidate"] },
+      flagship: {
+        label: "T0",
+        description: "T0 membership requires clearing the capability threshold FIRST — a vendor seat does not automatically grant T0.",
+        models: ["alpha/executor", "beta/reviewer", "gamma/candidate"],
+      },
+      execution: {
+        label: "Execution routes — no general T0 judgment vote",
+        description: "Execution qualification is separate from general T0 judgment status — no general T0 independent votes, no standalone high-risk architecture review; members remain fully usable for their hint-defined execution roles.",
+        models: ["alpha/executor"],
+      },
+      specialist: {
+        label: "Specialist candidates — explicit second-opinion only",
+        description: "Capability does not reach general T0 — explicit specialist/second-opinion voices only; not counted as independent votes; no standalone review.",
+        models: ["gamma/candidate"],
+      },
       standard: { label: "T1", models: ["alpha/executor"] },
       fast: { label: "T2", models: ["beta/reviewer"] },
     },
@@ -161,14 +189,23 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
     check("block contains '### Tier roster'", block.includes("### Tier roster"));
     check("block contains '**flagship**' roster entry", block.includes("**flagship**"));
     check("block contains '**frontier**' roster entry when configured", !tiers.frontier || block.includes("**frontier**"));
-    check("block contains '**flagship_candidate**' roster entry when configured", !tiers.flagship_candidate || block.includes("**flagship_candidate**"));
+    check("block contains '**specialist**' roster entry when configured", !tiers.specialist || block.includes("**specialist**"));
+    check("block contains '**execution**' roster entry when configured", !tiers.execution || block.includes("**execution**"));
     check("block contains '**standard**' roster entry", block.includes("**standard**"));
     check("block contains '**fast**' roster entry", block.includes("**fast**"));
     check("block contains at least one flagship model id", (tiers.flagship?.models ?? []).some((m) => block.includes(m)));
     check("block contains frontier caveat when configured",
       !tiers.frontier || block.includes("scarce capability ABOVE ordinary T0/flagship"));
-    check("block contains candidate caveat when configured",
-      !tiers.flagship_candidate || block.includes("do NOT count these as primary T0 voters"));
+    check("block renders the flagship description (capability threshold before vendor diversity)",
+      !tiers.flagship?.description || (block.includes("capability threshold") && block.includes("vendor seat")));
+    check("block renders the specialist description",
+      !tiers.specialist?.description || block.includes("explicit specialist/second-opinion voices only"));
+    check("block contains specialist caveat when configured",
+      !tiers.specialist || block.includes("do NOT count them as general T0 independent votes"));
+    check("block renders the execution description (no general T0 votes, no standalone high-risk review)",
+      !tiers.execution?.description || (block.includes("no general T0 independent votes") && block.includes("standalone high-risk architecture review")));
+    check("block contains execution caveat when configured",
+      !tiers.execution || block.includes("Execution caveat: execution qualification does NOT grant general T0 judgment status"));
     check("block contains the cross-vendor selection guidance",
       block.includes("two models from the same vendor"));
     const firstProviderTable = Math.min(
@@ -178,8 +215,10 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
       block.indexOf("### Tier roster") < firstProviderTable);
     check("frontier renders before flagship when present",
       !tiers.frontier || (block.indexOf("**frontier**") < block.indexOf("**flagship**")));
-    check("flagship_candidate renders between flagship and standard when present",
-      !tiers.flagship_candidate || (block.indexOf("**flagship**") < block.indexOf("**flagship_candidate**") && block.indexOf("**flagship_candidate**") < block.indexOf("**standard**")));
+    check("specialist renders between flagship and standard when present",
+      !tiers.specialist || (block.indexOf("**flagship**") < block.indexOf("**specialist**") && block.indexOf("**specialist**") < block.indexOf("**standard**")));
+    check("execution renders between flagship and specialist when present",
+      !tiers.execution || (block.indexOf("**flagship**") < block.indexOf("**execution**") && block.indexOf("**execution**") < block.indexOf("**specialist**")));
     check("hints still render (regression: per-model table)",
       block.includes("| model | reasoning | image-in | $/1M in | hint |"));
 
@@ -207,6 +246,34 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
       prompt.startsWith(ruleInjection));
     check("runtime authority terminates the appended curator snapshot",
       snapshot.trimEnd().endsWith(MODEL_ROUTING_RUNTIME_AUTHORITY));
+
+    // Legacy compat: a config still using the old `flagship_candidate` key must
+    // keep the specialist caveat rendered (the renderer accepts both key names).
+    {
+      const legacyTiers = {
+        ...tiers,
+        flagship_candidate: { label: "legacy candidate", models: ["gamma/candidate"] },
+      };
+      const legacyBlock = buildAvailableModelsBlock(reg, hints, curatedProviders, legacyTiers, fixtureSettings.modelCurator.imageGen);
+      check("legacy flagship_candidate key still renders the specialist caveat (compat)",
+        legacyBlock !== null &&
+          legacyBlock.includes("**flagship_candidate**") &&
+          legacyBlock.includes("do NOT count them as general T0 independent votes"));
+    }
+
+    // Legacy compat: a config still using the old `provisional` key must
+    // keep the execution caveat rendered (the renderer accepts both key names).
+    {
+      const legacyTiers = {
+        ...tiers,
+        provisional: { label: "legacy provisional", models: ["alpha/executor"] },
+      };
+      const legacyBlock = buildAvailableModelsBlock(reg, hints, curatedProviders, legacyTiers, fixtureSettings.modelCurator.imageGen);
+      check("legacy provisional key still renders the execution caveat (compat)",
+        legacyBlock !== null &&
+          legacyBlock.includes("**provisional**") &&
+          legacyBlock.includes("Execution caveat: execution qualification does NOT grant general T0 judgment status"));
+    }
   }
 }
 
@@ -228,6 +295,12 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
     typeof grokHint === "string" &&
       grokHint.includes("judgment-oriented tasks") &&
       grokHint.includes("independent review of completed task results or final diffs"));
+  check("live Grok hint separates execution qualification from general T0 judgment (production replay did not qualify it)",
+    typeof grokHint === "string" &&
+      grokHint.includes("Execution qualification does not grant general T0 judgment status") &&
+      grokHint.includes("production replay did not qualify it for general T0 judgment") &&
+      grokHint.includes("execution role unaffected") &&
+      !grokHint.includes("provisional pending production replay"));
 
   const liveProvidersForDeepseek = liveSettings.modelCurator?.providers ?? {};
   const deepseekKeep = liveProvidersForDeepseek.deepseek ?? [];
@@ -241,13 +314,41 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   check("live deepseek-v4-pro is absent from every tier",
     Object.values(liveTiers).every((tier) =>
       !Array.isArray(tier?.models) || !tier.models.includes("deepseek/deepseek-v4-pro")));
-  check("live flagship includes deepseek/deepseek-v4-flash",
-    (liveTiers.flagship?.models ?? []).includes("deepseek/deepseek-v4-flash"));
+  const flagshipModels = liveTiers.flagship?.models ?? [];
+  const executionModels = liveTiers.execution?.models ?? [];
+  check("live flagship is exactly [gpt-5.6-sol, claude-opus-5]",
+    flagshipModels.length === 2 &&
+      flagshipModels.includes("openai/gpt-5.6-sol") &&
+      flagshipModels.includes("anthropic/claude-opus-5"));
+  check("live flagship excludes deepseek/deepseek-v4-flash and xai/grok-4.5",
+    !flagshipModels.includes("deepseek/deepseek-v4-flash") &&
+      !flagshipModels.includes("xai/grok-4.5"));
+  check("live execution tier exists with label 'Execution routes — no general T0 judgment vote'",
+    typeof liveTiers.execution?.label === "string" &&
+      liveTiers.execution.label.includes("Execution routes") &&
+      liveTiers.execution.label.includes("no general T0 judgment vote"));
+  check("live provisional tier does not exist (renamed to execution)",
+    liveTiers.provisional === undefined);
+  check("live execution description separates execution qualification from general T0 judgment status",
+    typeof liveTiers.execution?.description === "string" &&
+      liveTiers.execution.description.includes("do NOT count as general T0 independent votes") &&
+      liveTiers.execution.description.includes("do NOT independently take on high-risk architecture reviews") &&
+      liveTiers.execution.description.includes("prompt-only production replay") &&
+      liveTiers.execution.description.includes("evidence bar"));
+  check("live execution contains deepseek-v4-flash and grok-4.5",
+    executionModels.includes("deepseek/deepseek-v4-flash") &&
+      executionModels.includes("xai/grok-4.5"));
+  check("live execution ranks between flagship and specialist",
+    Object.keys(liveTiers).indexOf("flagship") < Object.keys(liveTiers).indexOf("execution") &&
+      Object.keys(liveTiers).indexOf("execution") < Object.keys(liveTiers).indexOf("specialist"));
   check("live fast excludes deepseek/deepseek-v4-flash",
     !fastModels.includes("deepseek/deepseek-v4-flash"));
   check("live deepseek-v4-flash appears in exactly one tier",
     Object.values(liveTiers).filter((tier) =>
       Array.isArray(tier?.models) && tier.models.includes("deepseek/deepseek-v4-flash")).length === 1);
+  check("live xai/grok-4.5 appears in exactly one tier",
+    Object.values(liveTiers).filter((tier) =>
+      Array.isArray(tier?.models) && tier.models.includes("xai/grok-4.5")).length === 1);
 
   const flashHint = liveHints["deepseek/deepseek-v4-flash"];
   check("live deepseek-v4-flash hint is PRIMARY DEFAULT preferred execution layer",
@@ -272,6 +373,12 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
       flashHint.includes("Do not add this model to generic automatic model fallback") &&
       !flashHint.includes("manual/explicit invocation only") &&
       !flashHint.includes("no auto hot-path or execution fallback"));
+  check("live deepseek-v4-flash hint separates execution qualification from general T0 judgment (production replay did not qualify it)",
+    typeof flashHint === "string" &&
+      flashHint.includes("Execution qualification does not grant general T0 judgment status") &&
+      flashHint.includes("production replay did not qualify it for general T0 judgment") &&
+      flashHint.includes("execution role unaffected") &&
+      !flashHint.includes("provisional pending production replay"));
   // Flash task sizing is locked as the hint's self-contained segment from
   // "Task sizing" through "Output discipline:". The extracted segment must
   // carry the full semantic-not-numeric boundary semantics AND contain NO
@@ -348,7 +455,6 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   const opusHint = liveHints["anthropic/claude-opus-5"];
   const fableHint = liveHints["anthropic/claude-fable-5"];
   const frontierModels = liveTiers.frontier?.models ?? [];
-  const flagshipModels = liveTiers.flagship?.models ?? [];
   const rollbackModels = liveTiers.rollback?.models ?? [];
   check("live Opus 5 hint is Primary Anthropic T0 route",
     typeof opusHint === "string" && opusHint.includes("Primary Anthropic T0 route"));
@@ -394,13 +500,77 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   check("live hints cover kimi-coding/k3 and kimi-coding/k3-256k",
     typeof liveHints["kimi-coding/k3"] === "string" &&
       typeof liveHints["kimi-coding/k3-256k"] === "string");
-  check("live flagship includes kimi-coding/k3",
-    flagshipModels.includes("kimi-coding/k3"));
+  check("live flagship excludes kimi-coding/k3",
+    !flagshipModels.includes("kimi-coding/k3"));
   const standardModels = liveTiers.standard?.models ?? [];
+  const specialistModels = liveTiers.specialist?.models ?? [];
+  check("live rollback includes kimi-coding/k3",
+    rollbackModels.includes("kimi-coding/k3"));
   check("live rollback includes kimi-coding/k3-256k",
     rollbackModels.includes("kimi-coding/k3-256k"));
   check("live standard excludes kimi-coding/k3-256k",
     !standardModels.includes("kimi-coding/k3-256k"));
+  check("live specialist tier exists with non-empty models",
+    Array.isArray(specialistModels) && specialistModels.length > 0);
+  check("live specialist carries kimi-k2.7-code, MiniMax-M3, and glm-5.2",
+    specialistModels.includes("moonshotai/kimi-k2.7-code") &&
+      specialistModels.includes("minimax/MiniMax-M3") &&
+      specialistModels.includes("zai-coding-cn/glm-5.2"));
+  check("live flagship excludes the four demoted models",
+    !flagshipModels.includes("moonshotai/kimi-k2.7-code") &&
+      !flagshipModels.includes("minimax/MiniMax-M3") &&
+      !flagshipModels.includes("zai-coding-cn/glm-5.2") &&
+      !flagshipModels.includes("kimi-coding/k3"));
+  check("live specialist ranks between flagship and rollback",
+    Object.keys(liveTiers).indexOf("flagship") < Object.keys(liveTiers).indexOf("specialist") &&
+      Object.keys(liveTiers).indexOf("specialist") < Object.keys(liveTiers).indexOf("rollback"));
+  check("live flagship_candidate tier does not exist (renamed to specialist)",
+    liveTiers.flagship_candidate === undefined);
+  check("live specialist label contains no T0",
+    typeof liveTiers.specialist?.label === "string" &&
+      !liveTiers.specialist.label.includes("T0"));
+  check("live flagship description puts capability threshold before vendor diversity",
+    typeof liveTiers.flagship?.description === "string" &&
+      liveTiers.flagship.description.includes("capability threshold FIRST") &&
+      liveTiers.flagship.description.includes("vendor seat does not automatically grant T0"));
+  check("live specialist description forbids general T0 votes and standalone review",
+    typeof liveTiers.specialist?.description === "string" &&
+      liveTiers.specialist.description.includes("do NOT count them as independent T0 votes") &&
+      liveTiers.specialist.description.includes("do NOT use them for standalone review"));
+  const k27Hint = liveHints["moonshotai/kimi-k2.7-code"];
+  check("live kimi-k2.7-code hint is in-subscription second review, not a standalone reviewer",
+    typeof k27Hint === "string" &&
+      k27Hint.includes("second review") &&
+      k27Hint.includes("do not use as a standalone reviewer"));
+  const m3Hint = liveHints["minimax/MiniMax-M3"];
+  check("live MiniMax-M3 hint is explicit multimodal/long-context only, not an independent blind-review vote",
+    typeof m3Hint === "string" &&
+      m3Hint.includes("explicit invocation only") &&
+      m3Hint.includes("not counted as an independent blind-review vote"));
+  const glmHint = liveHints["zai-coding-cn/glm-5.2"];
+  check("live glm-5.2 hint is Chinese-requirements supplementary vote, not a standalone reviewer",
+    typeof glmHint === "string" &&
+      glmHint.includes("supplementary vote") &&
+      glmHint.includes("do not use as a standalone reviewer"));
+  check("live glm-5.2 hint requires a strict output contract when invoked",
+    typeof glmHint === "string" &&
+      glmHint.includes("When invoked") &&
+      glmHint.includes("require/enforce a strict output contract"));
+  const k3Hint = liveHints["kimi-coding/k3"];
+  check("live kimi-coding/k3 hint is paid temporary upgrade, same Moonshot family, not an independent vote",
+    typeof k3Hint === "string" &&
+      k3Hint.includes("Paid temporary upgrade") &&
+      k3Hint.includes("not counted as an independent vote"));
+  const k3256Hint = liveHints["kimi-coding/k3-256k"];
+  check("live k3-256k hint is paid temporary/on-demand alternate with no $0 subscription claim",
+    typeof k3256Hint === "string" &&
+      k3256Hint.includes("paid temporary") &&
+      !k3256Hint.includes("$0") &&
+      !k3256Hint.includes("subscription quota"));
+  check("live k3-256k hint shares the same base model as k3 (not an independent vote)",
+    typeof k3256Hint === "string" &&
+      k3256Hint.includes("Same underlying K3 model as kimi-coding/k3") &&
+      k3256Hint.includes("does not count as an independent vote"));
   check("live k3/k3-256k hints remain judgment-only and not preferred execution",
     ["kimi-coding/k3", "kimi-coding/k3-256k"].every((id) => {
       const hint = liveHints[id];

@@ -332,6 +332,12 @@ function buildAvailableModelsBlock(
     for (const [tierName, tier] of Object.entries(tiers)) {
       const label = tier.label?.trim() || tierName;
       lines.push(`- **${tierName}** (${label}) — ${tier.models.map((m) => `\`${m}\``).join(", ")}`);
+      // Render the tier's configured description verbatim so the operator's
+      // semantic intent (e.g. flagship's capability-threshold-before-vendor-
+      // diversity rule) is actually visible at runtime, not just in JSON.
+      if (tier.description?.trim()) {
+        lines.push(`  - ${tier.description.trim()}`);
+      }
       if (tierName === "frontier") {
         lines.push(
           "  - Frontier caveat: scarce capability ABOVE ordinary T0/flagship. " +
@@ -341,11 +347,26 @@ function buildAvailableModelsBlock(
             "fallback, background hot paths, or coding/execution.",
         );
       }
-      if (tierName === "flagship_candidate") {
+      // Specialist caveat fires for the current `specialist` key AND the
+      // legacy `flagship_candidate` key (compat: older configs keep the guard).
+      if (tierName === "specialist" || tierName === "flagship_candidate") {
         lines.push(
-          "  - Candidate caveat: do NOT count these as primary T0 voters in " +
-            "3-way blind audits; use them as supplementary 4–5 way " +
-            "architecture-diversity voices until their promotion gate closes.",
+          "  - Specialist caveat: explicit specialist/second-opinion voices — do NOT " +
+            "count them as general T0 independent votes and do NOT use them for " +
+            "standalone review; invoke explicitly as supplementary " +
+            "architecture-diversity / second-opinion voices.",
+        );
+      }
+      // Execution caveat fires for the current `execution` key AND the legacy
+      // `provisional` key (compat: older configs keep the guard). Execution
+      // qualification is separate from general T0 judgment status — no
+      // independent T0 vote, no standalone high-risk architecture review.
+      if (tierName === "execution" || tierName === "provisional") {
+        lines.push(
+          "  - Execution caveat: execution qualification does NOT grant general T0 " +
+            "judgment status — do NOT count as general T0 independent votes and do " +
+            "NOT use for standalone high-risk architecture review; these routes " +
+            "remain fully usable for their hint-defined execution roles.",
         );
       }
     }
