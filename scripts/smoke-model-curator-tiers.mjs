@@ -352,6 +352,23 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   const rollbackModels = liveTiers.rollback?.models ?? [];
   check("live Opus 5 hint is Primary Anthropic T0 route",
     typeof opusHint === "string" && opusHint.includes("Primary Anthropic T0 route"));
+  check("live Opus 5 hint is the preferred judgment route for complex frontend visual design",
+    typeof opusHint === "string" &&
+      opusHint.includes("Preferred judgment route for complex frontend visual design") &&
+      opusHint.includes("information architecture") &&
+      opusHint.includes("composition") &&
+      opusHint.includes("spacing/density") &&
+      opusHint.includes("interaction design") &&
+      opusHint.includes("screenshot/reference-based design critique"));
+  check("live Opus 5 hint stays judgment-only (no coding/log review/concrete implementation, no execution-layer claim)",
+    typeof opusHint === "string" &&
+      opusHint.includes("Use only for judgment-oriented tasks") &&
+      opusHint.includes("do not use for coding, log review, or concrete implementation") &&
+      !opusHint.includes("PRIMARY DEFAULT") &&
+      !opusHint.includes("preferred execution layer") &&
+      !opusHint.includes("Execution-capable"));
+  check("live Opus 5 hint does not claim SVG as a special or preferred capability",
+    typeof opusHint === "string" && !opusHint.includes("SVG"));
   check("live Fable hint is scarce frontier, not routine T0",
     typeof fableHint === "string" &&
       fableHint.includes("Scarce frontier (T0+)") &&
