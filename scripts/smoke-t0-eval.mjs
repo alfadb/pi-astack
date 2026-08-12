@@ -426,7 +426,12 @@ await check("buildUserProtocol/buildJudgeUserContent: protocol prefix is semanti
   assert.ok(!ev.includes('"claims": { "supported": []'), "user protocol must not duplicate the full JSON example");
   assert.ok(!ev.includes('"evaluator_index": 0'), "user protocol must not duplicate the full JSON example");
   // The compressed user protocol stays compact (the system prompt carries the example).
-  assert.ok(ev.length < 2500, `user protocol must stay compact, got ${ev.length} chars`);
+  // Budget: ANON_RULES (~650) + output-format/untrusted tail (~430) + evaluator stage
+  // definition incl. the mechanical-constraint HARD rules (~1570) ≈ 2650. The 2500
+  // bound predated the mechanical-constraint requirement (now asserted on the
+  // user-payload fallback itself); 2800 keeps the compactness guard with headroom
+  // while still failing loudly if the full JSON example (~1100 chars) is duplicated in.
+  assert.ok(ev.length < 2800, `user protocol must stay compact, got ${ev.length} chars`);
   // buildJudgeUserContent: protocol prefix + untrusted evidence section + feed.
   const feed = "## Task prompt\n\n...";
   const content = C.buildJudgeUserContent("evaluator", feed);

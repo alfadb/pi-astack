@@ -1405,15 +1405,14 @@ Hard rules:
 const STAGE_USER_PROTOCOLS = {
   evaluator: `Stage: evaluator (index 0|1). Evaluate the task prompt and each candidate answer.
 
-Per candidate: claims buckets supported|unsupported|contradicted|unverifiable; missed_critical_points; instruction_following full|partial|none|unresolved + notes; overall_correctness correct|partially_correct|incorrect|unresolved + confidence 0..1 + notes; noise_types closed set ONLY: fabrication, unsupported_claim, contradiction, irrelevance, repetition, verbosity, severity_overstatement, instruction_violation, other (use "other" only when nothing else fits); abstain true when unevaluable (no winner required).
+Per candidate: claims buckets supported|unsupported|contradicted|unverifiable; missed_critical_points; instruction_following full|partial|none|unresolved + notes; overall_correctness correct|partially_correct|incorrect|unresolved + confidence 0..1 + notes; noise_types closed set ONLY: fabrication, unsupported_claim, contradiction, irrelevance, repetition, verbosity, severity_overstatement, instruction_violation, other (use "other" only when nothing else fits); abstain true when unevaluable.
 
 Mechanical instruction constraints (HARD for instruction_following):
-- When the task prompt states checkable constraints — character/word limits (e.g. 500字以内), required item counts (e.g. 3-5条), fixed labels/choices (e.g. 三选一结论 / ACCEPT|REJECT / 签署|不签署), required sections/order, or other fixed output format — you MUST verify them against the candidate text itself.
+- When the task prompt states checkable constraints — character/word limits (500字以内), item counts (3-5条), fixed labels/choices (三选一结论 / ACCEPT|REJECT / 签署|不签署), sections/order, or other fixed formats — you MUST verify them against the candidate text itself.
 - instruction_following.notes MUST cite those checks with observed vs required values (e.g. "字数≈480/上限500; 理由条数=4/要求3-5; 结论标签=有"). Do NOT award rating=full from prose style/fluency alone if a mechanical constraint fails or was not checked.
-- If a required structure/label/count/limit is missing or violated, rating is at most partial; if the required answer form is absent entirely, rating=none.
+- If a required structure/label/count/limit is missing or violated → rating at most partial; if the required answer form is absent → rating=none.
 
-Also task_understanding {ok, confidence, summary, unresolved}.
-Top-level: schema_version=1, stage="evaluator", evaluator_index, episode_id, task_understanding, candidates[{candidate_id, claims, missed_critical_points, instruction_following, overall_correctness, noise_types, abstain, abstain_reason}], notes.`,
+Top-level: schema_version=1, stage="evaluator", evaluator_index, episode_id, task_understanding {ok, confidence, summary, unresolved}, candidates[{candidate_id, claims, missed_critical_points, instruction_following, overall_correctness, noise_types, abstain, abstain_reason}], notes.`,
   verifier: `Stage: verifier. Adversarially attack the evidence and bias of BOTH evaluations.
 
 Per attack: target evaluator_0|evaluator_1|candidate_<id>; issue; severity high|medium|low; evidence_weakness; bias_suspected (style-based identity guessing, adoption-as-correctness, anchoring, leniency, etc.); suggestion.
