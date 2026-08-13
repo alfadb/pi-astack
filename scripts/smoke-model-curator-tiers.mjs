@@ -15,8 +15,10 @@
  * 6. The live config recommends deepseek-v4-flash as PRIMARY DEFAULT preferred execution;
  *    Grok is temporary rollback/escalation for the trial window; flash remains a bounded
  *    mid-level execution route under precise specs + adversarial acceptance and must not
- *    enter generic automatic model fallback; deepseek-v4-pro is absent from live
- *    providers/hints/tiers; every other curated non-GPT model remains judgment-only.
+ *    enter generic automatic model fallback; deepseek-v4-pro is restored to live
+ *    providers/hints and the flagship tier as a T0/flagship judgment route (not
+ *    daily execution, automatic fallback, or background hot paths); every other
+ *    curated non-GPT model remains judgment-only.
  * 7. Flash task sizing is semantic, not numeric: the hint's self-contained segment from
  *    "Task sizing" through "Output discipline:" is extracted and must contain no ASCII
  *    digit at all (not just no legacy 80/30/10 thresholds) while locking the full
@@ -35,8 +37,8 @@
  *    uses the `specialist` key (no `flagship_candidate`), its label contains no T0,
  *    and the k3-256k hint is a paid temporary/on-demand alternate with no $0
  *    subscription claim; the GLM hint requires a strict output contract when invoked.
- * 9. Execution tier lock: live flagship is exactly [gpt-5.6-sol, claude-opus-5] —
- *    deepseek-v4-flash and grok-4.5 are demoted to the `execution` tier
+ * 9. Execution tier lock: live flagship is exactly [gpt-5.6-sol, claude-opus-5,
+ *    deepseek-v4-pro] — deepseek-v4-flash and grok-4.5 are demoted to the `execution` tier
  *    (label 'Execution routes — no general T0 judgment vote') whose description and
  *    renderer caveat separate execution qualification from general T0 judgment
  *    status (no general T0 independent votes, no standalone high-risk architecture
@@ -44,6 +46,15 @@
  *    T0 judgment while Flash keeps PRIMARY DEFAULT execution-layer duty and Grok
  *    keeps temporary rollback/escalation. The legacy `provisional` key still
  *    renders the execution caveat (compat) but live uses `execution` only.
+ * 10. deepseek-v4-pro shares the DeepSeek V4 family with the PRIMARY DEFAULT
+ *     execution route (deepseek-v4-flash): the Pro hint must not present Pro as
+ *     the sole independent reviewer of Flash-produced work (supplementary opinion
+ *     only; true adversarial acceptance must be cross-provider/architecture), and
+ *     a structural walk of the live settings must find deepseek-v4-pro in NO
+ *     automatic/background model call point (modelFallback, vision, memory,
+ *     sediment hot paths, compactionTuner, workflow default) — operator-only
+ *     disabled configs (e.g. sediment.constraintShadowCompiler) are not
+ *     automatic call points.
  */
 
 import { createRequire } from "node:module";
@@ -305,21 +316,23 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   const liveProvidersForDeepseek = liveSettings.modelCurator?.providers ?? {};
   const deepseekKeep = liveProvidersForDeepseek.deepseek ?? [];
   const fastModels = liveTiers.fast?.models ?? [];
-  check("live deepseek keep-list excludes deepseek-v4-pro",
-    !deepseekKeep.includes("deepseek-v4-pro"));
+  check("live deepseek keep-list includes deepseek-v4-pro",
+    deepseekKeep.includes("deepseek-v4-pro"));
   check("live deepseek keep-list includes deepseek-v4-flash",
     deepseekKeep.includes("deepseek-v4-flash"));
-  check("live hints exclude deepseek/deepseek-v4-pro",
-    liveHints["deepseek/deepseek-v4-pro"] === undefined);
-  check("live deepseek-v4-pro is absent from every tier",
-    Object.values(liveTiers).every((tier) =>
-      !Array.isArray(tier?.models) || !tier.models.includes("deepseek/deepseek-v4-pro")));
+  check("live hints include deepseek/deepseek-v4-pro",
+    typeof liveHints["deepseek/deepseek-v4-pro"] === "string");
   const flagshipModels = liveTiers.flagship?.models ?? [];
   const executionModels = liveTiers.execution?.models ?? [];
-  check("live flagship is exactly [gpt-5.6-sol, claude-opus-5]",
-    flagshipModels.length === 2 &&
+  check("live deepseek-v4-pro appears in flagship exactly once",
+    flagshipModels.includes("deepseek/deepseek-v4-pro") &&
+      Object.values(liveTiers).filter((tier) =>
+        Array.isArray(tier?.models) && tier.models.includes("deepseek/deepseek-v4-pro")).length === 1);
+  check("live flagship is exactly [gpt-5.6-sol, claude-opus-5, deepseek-v4-pro]",
+    flagshipModels.length === 3 &&
       flagshipModels.includes("openai/gpt-5.6-sol") &&
-      flagshipModels.includes("anthropic/claude-opus-5"));
+      flagshipModels.includes("anthropic/claude-opus-5") &&
+      flagshipModels.includes("deepseek/deepseek-v4-pro"));
   check("live flagship excludes deepseek/deepseek-v4-flash and xai/grok-4.5",
     !flagshipModels.includes("deepseek/deepseek-v4-flash") &&
       !flagshipModels.includes("xai/grok-4.5"));
@@ -349,6 +362,27 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   check("live xai/grok-4.5 appears in exactly one tier",
     Object.values(liveTiers).filter((tier) =>
       Array.isArray(tier?.models) && tier.models.includes("xai/grok-4.5")).length === 1);
+
+  const proHint = liveHints["deepseek/deepseek-v4-pro"];
+  check("live deepseek-v4-pro hint is a T0/flagship judgment route",
+    typeof proHint === "string" &&
+      proHint.includes("T0") &&
+      proHint.includes("flagship") &&
+      proHint.includes("independent review"));
+  check("live deepseek-v4-pro hint is not the sole independent reviewer of Flash output (same DeepSeek V4 family)",
+    typeof proHint === "string" &&
+      proHint.toLowerCase().includes("same deepseek v4 family") &&
+      proHint.includes("deepseek-v4-flash") &&
+      proHint.includes("sole independent reviewer") &&
+      proHint.includes("supplementary opinion") &&
+      proHint.includes("different provider/architecture"));
+  check("live deepseek-v4-pro hint is not daily execution, automatic fallback, or background hot path",
+    typeof proHint === "string" &&
+      proHint.includes("Use only for judgment-oriented tasks") &&
+      proHint.includes("do not use for coding, log review, or concrete implementation") &&
+      !proHint.includes("PRIMARY DEFAULT") &&
+      !proHint.includes("preferred execution layer") &&
+      !proHint.includes("Assign all routine rollbackable deterministic tasks"));
 
   const flashHint = liveHints["deepseek/deepseek-v4-flash"];
   check("live deepseek-v4-flash hint is PRIMARY DEFAULT preferred execution layer",
@@ -580,6 +614,68 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
         !hint.includes("PRIMARY DEFAULT") &&
         !hint.includes("preferred execution layer");
     }));
+}
+
+console.log("\n[5] live deepseek-v4-pro stays out of every automatic/background model call point");
+{
+  const pro = "deepseek/deepseek-v4-pro";
+  // Structural walk: collect every model-bearing leaf under a subtree. A leaf is
+  // model-bearing when its key ends in "Model"/"ModelRef" (string value) or it is
+  // a non-empty array of strings (model arrays — in the live settings every such
+  // array is a model list, e.g. fallbackModels/modelPreferences/summaryModels/
+  // reviewerProviders/modelAllowlist). skipKeys prunes operator-only subtrees that
+  // are not automatic call points (e.g. sediment.constraintShadowCompiler:
+  // auto-refresh disabled, explicit operator runs only).
+  function collectModelLeaves(node, key, out, skipKeys) {
+    if (skipKeys.has(key)) return out;
+    if (Array.isArray(node)) {
+      if (node.length > 0 && node.every((v) => typeof v === "string")) {
+        out.push({ key, values: node });
+      }
+      return out;
+    }
+    if (node && typeof node === "object") {
+      for (const [k, v] of Object.entries(node)) {
+        if (typeof v === "string") {
+          if (/Model(Ref)?$/.test(k)) out.push({ key: k, values: [v] });
+        } else {
+          collectModelLeaves(v, k, out, skipKeys);
+        }
+      }
+    }
+    return out;
+  }
+  const noPro = (leaves) => leaves.every((leaf) => !leaf.values.includes(pro));
+
+  const fallbackModels = liveSettings.modelFallback?.fallbackModels ?? [];
+  const visionPrefs = liveSettings.vision?.modelPreferences ?? [];
+  const summaryModels = liveSettings.compactionTuner?.summaryModels ?? [];
+  const workflowDefault = liveSettings.workflow?.defaultModel ?? "";
+  check("modelFallback.fallbackModels excludes deepseek-v4-pro",
+    !fallbackModels.includes(pro));
+  check("vision.modelPreferences excludes deepseek-v4-pro",
+    !visionPrefs.includes(pro));
+  check("compactionTuner.summaryModels excludes deepseek-v4-pro",
+    !summaryModels.includes(pro));
+  check("workflow.defaultModel is not deepseek-v4-pro",
+    workflowDefault !== pro);
+
+  const memoryLeaves = collectModelLeaves(liveSettings.memory ?? {}, "", [], new Set());
+  check("memory model fields (all *Model / model-array leaves) exclude deepseek-v4-pro",
+    memoryLeaves.length > 0 && noPro(memoryLeaves));
+
+  const sedimentLeaves = collectModelLeaves(
+    liveSettings.sediment ?? {}, "", [], new Set(["constraintShadowCompiler"]),
+  );
+  check("sediment automatic model fields exclude deepseek-v4-pro (operator-only constraintShadowCompiler skipped)",
+    sedimentLeaves.length > 0 && noPro(sedimentLeaves));
+
+  // Backstop: outside modelCurator, no model-bearing leaf anywhere may be Pro.
+  const outsideCurator = { ...liveSettings };
+  delete outsideCurator.modelCurator;
+  const outsideLeaves = collectModelLeaves(outsideCurator, "", [], new Set(["constraintShadowCompiler"]));
+  check("deepseek-v4-pro appears in no model-bearing leaf outside modelCurator",
+    outsideLeaves.length > 0 && noPro(outsideLeaves));
 }
 
 console.log("");

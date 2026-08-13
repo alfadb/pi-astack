@@ -61,9 +61,11 @@ metadata:
 - **模型分层 + 跨 provider 分散**（降低同源失效）：worker 是"检索+读+轻综合"角色，
   按 depth 选档，**别把最强模型浪费在初检上**——
   - `quick`：快省档（`claude-haiku-4-5` / `gpt-5.4-mini` / `deepseek-v4-flash`）；
-  - `standard`：中档（`deepseek-v4-pro` / `gpt-5.4` / `claude-sonnet-5`）；
-  - `deep`：中档做检索，把**常规 T0（`claude-opus-5` / `gpt-5.6-sol`）留给综合
-    与 Step 5 的 citation pass**；勿默认调用稀缺 frontier `claude-fable-5`（仅当常规 T0 明显不足且问题极复杂时才显式考虑）；
+  - `standard`：中档（`claude-sonnet-5` / `gpt-5.6-terra`）；
+  - `deep`：中档做检索，把**常规 T0（`claude-opus-5` / `gpt-5.6-sol` / `deepseek-v4-pro`）留给综合、
+    关键判断与 Step 5 的 citation pass**，不做普通 fan-out；Pro 与 Flash 同属 DeepSeek V4 家族且共享
+    Ollama Max 池，只在它的结构化架构/依赖/方法论专长真正匹配时才显式用 Pro，默认 citation pass
+    优先跨 provider 的 Opus/Sol；勿默认调用稀缺 frontier `claude-fable-5`（仅当常规 T0 明显不足且问题极复杂时才显式考虑）；
   - 同一轮内尽量轮换不同 provider。
 - worker tools 给 `web_search,web_fetch,memory_search,abrain_get,read`（worker 不能 mutate）；
 - worker prompt 用模板：见 [worker prompt 模板](references/worker-prompt.md)，逐个填入子问题。
