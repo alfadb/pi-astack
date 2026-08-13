@@ -13,7 +13,10 @@
  *    the snapshot is appended after already-composed rule injection content.
  * 5. The multi-vendor roster and per-model hints remain selectable/rendered.
  * 6. The live config recommends deepseek-v4-flash as PRIMARY DEFAULT preferred execution;
- *    Grok is temporary rollback/escalation for the trial window; flash remains a bounded
+ *    xai/grok-4.6 is a T0/flagship judgment route promoted 2026-08-13 on benchmark
+ *    evidence with production replay pending, and remains the temporary execution
+ *    escalation for Flash while the xai subscription expiry (2026-08-18) stays unrenewed;
+ *    flash remains a bounded
  *    mid-level execution route under precise specs + adversarial acceptance and must not
  *    enter generic automatic model fallback; deepseek-v4-pro is restored to live
  *    providers/hints and the flagship tier as a T0/flagship judgment route (not
@@ -38,14 +41,16 @@
  *    and the k3-256k hint is a paid temporary/on-demand alternate with no $0
  *    subscription claim; the GLM hint requires a strict output contract when invoked.
  * 9. Execution tier lock: live flagship is exactly [gpt-5.6-sol, claude-opus-5,
- *    deepseek-v4-pro] — deepseek-v4-flash and grok-4.5 are demoted to the `execution` tier
+ *    deepseek-v4-pro, xai/grok-4.6] — deepseek-v4-flash is demoted to the `execution` tier
  *    (label 'Execution routes — no general T0 judgment vote') whose description and
  *    renderer caveat separate execution qualification from general T0 judgment
  *    status (no general T0 independent votes, no standalone high-risk architecture
- *    review); both hints state production replay did not qualify them for general
- *    T0 judgment while Flash keeps PRIMARY DEFAULT execution-layer duty and Grok
- *    keeps temporary rollback/escalation. The legacy `provisional` key still
- *    renders the execution caveat (compat) but live uses `execution` only.
+ *    review); Flash's hint states production replay did not qualify it for general
+ *    T0 judgment while keeping PRIMARY DEFAULT execution-layer duty; grok-4.6's hint
+ *    records the 2026-08-13 benchmark-evidence promotion (production replay pending,
+ *    demote if missed) plus the temporary unrenewed-subscription caveat, and grok-4.5
+ *    is fully removed from providers, hints, and tiers. The legacy `provisional` key
+ *    still renders the execution caveat (compat) but live uses `execution` only.
  * 10. deepseek-v4-pro shares the DeepSeek V4 family with the PRIMARY DEFAULT
  *     execution route (deepseek-v4-flash): the Pro hint must not present Pro as
  *     the sole independent reviewer of Flash-produced work (supplementary opinion
@@ -288,30 +293,34 @@ console.log("\n[3] buildAvailableModelsBlock renders Tier roster BEFORE the per-
   }
 }
 
-console.log("\n[4] live responsibility hints recommend Flash primary execution, Grok trial rollback, and keep other non-GPT models judgment-only");
+console.log("\n[4] live responsibility hints: Flash primary execution, Grok 4.6 benchmark-evidence T0 promotion, and other non-GPT models judgment-only");
 {
   const liveHints = liveSettings.modelCurator?.hints ?? {};
   const liveTiers = liveSettings.modelCurator?.tiers ?? {};
-  const grokHint = liveHints["xai/grok-4.5"];
-  check("live Grok hint is temporary rollback/escalation for the Flash trial",
+  const grokHint = liveHints["xai/grok-4.6"];
+  check("live Grok 4.6 hint is a T0/flagship judgment route promoted on benchmark evidence",
     typeof grokHint === "string" &&
-      grokHint.includes("Temporary rollback / execution escalation") &&
-      grokHint.includes("window through 2026-08-18") &&
-      grokHint.includes("preferred execution layer (deepseek/deepseek-v4-flash)"));
-  check("live Grok hint is not PRIMARY DEFAULT during the trial",
+      grokHint.includes("T0/flagship judgment route") &&
+      grokHint.includes("2026-08-13") &&
+      grokHint.includes("AA Intelligence Index 61") &&
+      grokHint.includes("Artificial Analysis") &&
+      grokHint.includes("production replay pending"));
+  check("live Grok 4.6 hint is not PRIMARY DEFAULT preferred execution",
     typeof grokHint === "string" &&
-      grokHint.includes("Not PRIMARY DEFAULT / preferred execution layer during this trial") &&
-      !grokHint.startsWith("PRIMARY DEFAULT"));
-  check("live Grok hint retains judgment and independent-review responsibilities",
+      !grokHint.startsWith("PRIMARY DEFAULT") &&
+      grokHint.includes("not the default execution layer"));
+  check("live Grok 4.6 hint retains judgment and independent-review responsibilities",
     typeof grokHint === "string" &&
       grokHint.includes("judgment-oriented tasks") &&
       grokHint.includes("independent review of completed task results or final diffs"));
-  check("live Grok hint separates execution qualification from general T0 judgment (production replay did not qualify it)",
+  check("live Grok 4.6 hint keeps the temporary unrenewed-subscription caveat",
     typeof grokHint === "string" &&
-      grokHint.includes("Execution qualification does not grant general T0 judgment status") &&
-      grokHint.includes("production replay did not qualify it for general T0 judgment") &&
-      grokHint.includes("execution role unaffected") &&
-      !grokHint.includes("provisional pending production replay"));
+      grokHint.includes("2026-08-18") &&
+      grokHint.includes("subscription"));
+  check("live Grok 4.6 hint retains execution escalation for Flash while available",
+    typeof grokHint === "string" &&
+      grokHint.includes("deepseek/deepseek-v4-flash") &&
+      grokHint.includes("escalation"));
 
   const liveProvidersForDeepseek = liveSettings.modelCurator?.providers ?? {};
   const deepseekKeep = liveProvidersForDeepseek.deepseek ?? [];
@@ -328,11 +337,12 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
     flagshipModels.includes("deepseek/deepseek-v4-pro") &&
       Object.values(liveTiers).filter((tier) =>
         Array.isArray(tier?.models) && tier.models.includes("deepseek/deepseek-v4-pro")).length === 1);
-  check("live flagship is exactly [gpt-5.6-sol, claude-opus-5, deepseek-v4-pro]",
-    flagshipModels.length === 3 &&
+  check("live flagship is exactly [gpt-5.6-sol, claude-opus-5, deepseek-v4-pro, xai/grok-4.6]",
+    flagshipModels.length === 4 &&
       flagshipModels.includes("openai/gpt-5.6-sol") &&
       flagshipModels.includes("anthropic/claude-opus-5") &&
-      flagshipModels.includes("deepseek/deepseek-v4-pro"));
+      flagshipModels.includes("deepseek/deepseek-v4-pro") &&
+      flagshipModels.includes("xai/grok-4.6"));
   check("live flagship excludes deepseek/deepseek-v4-flash and xai/grok-4.5",
     !flagshipModels.includes("deepseek/deepseek-v4-flash") &&
       !flagshipModels.includes("xai/grok-4.5"));
@@ -344,13 +354,14 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
     liveTiers.provisional === undefined);
   check("live execution description separates execution qualification from general T0 judgment status",
     typeof liveTiers.execution?.description === "string" &&
-      liveTiers.execution.description.includes("do NOT count as general T0 independent votes") &&
-      liveTiers.execution.description.includes("do NOT independently take on high-risk architecture reviews") &&
+      liveTiers.execution.description.includes("does NOT count as a general T0 independent vote") &&
+      liveTiers.execution.description.includes("does NOT independently take on high-risk architecture reviews") &&
       liveTiers.execution.description.includes("prompt-only production replay") &&
       liveTiers.execution.description.includes("evidence bar"));
-  check("live execution contains deepseek-v4-flash and grok-4.5",
-    executionModels.includes("deepseek/deepseek-v4-flash") &&
-      executionModels.includes("xai/grok-4.5"));
+  check("live execution contains only deepseek-v4-flash (grok-4.5 fully removed)",
+    executionModels.length === 1 &&
+      executionModels.includes("deepseek/deepseek-v4-flash") &&
+      !executionModels.includes("xai/grok-4.5"));
   check("live execution ranks between flagship and specialist",
     Object.keys(liveTiers).indexOf("flagship") < Object.keys(liveTiers).indexOf("execution") &&
       Object.keys(liveTiers).indexOf("execution") < Object.keys(liveTiers).indexOf("specialist"));
@@ -359,9 +370,19 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
   check("live deepseek-v4-flash appears in exactly one tier",
     Object.values(liveTiers).filter((tier) =>
       Array.isArray(tier?.models) && tier.models.includes("deepseek/deepseek-v4-flash")).length === 1);
-  check("live xai/grok-4.5 appears in exactly one tier",
+  check("live xai/grok-4.5 appears in no tier (fully removed)",
     Object.values(liveTiers).filter((tier) =>
-      Array.isArray(tier?.models) && tier.models.includes("xai/grok-4.5")).length === 1);
+      Array.isArray(tier?.models) && tier.models.includes("xai/grok-4.5")).length === 0);
+  check("live xai/grok-4.6 appears in exactly one tier (flagship)",
+    flagshipModels.includes("xai/grok-4.6") &&
+      Object.values(liveTiers).filter((tier) =>
+        Array.isArray(tier?.models) && tier.models.includes("xai/grok-4.6")).length === 1);
+  check("live xai keep-list is exactly [grok-4.6] (grok-4.5 removed)",
+    (liveProvidersForDeepseek["xai"] ?? []).length === 1 &&
+      (liveProvidersForDeepseek["xai"] ?? []).includes("grok-4.6") &&
+      !(liveProvidersForDeepseek["xai"] ?? []).includes("grok-4.5"));
+  check("live hints no longer carry xai/grok-4.5",
+    liveHints["xai/grok-4.5"] === undefined);
 
   const proHint = liveHints["deepseek/deepseek-v4-pro"];
   check("live deepseek-v4-pro hint is a T0/flagship judgment route",
@@ -470,13 +491,13 @@ console.log("\n[4] live responsibility hints recommend Flash primary execution, 
       flashHint.includes("re-dispatch once with clarified scope and acceptance at most") &&
       !flashHint.includes("re-dispatch once as a smaller task at most") &&
       flashHint.includes("output truncation, schema-error storm, or timeout") &&
-      flashHint.includes("xai/grok-4.5") &&
+      flashHint.includes("xai/grok-4.6") &&
       flashHint.includes("GPT-5.6 execution route"));
 
   const otherNonGptHints = Object.entries(liveHints).filter(
     ([model]) =>
       !model.startsWith("openai/") &&
-      model !== "xai/grok-4.5" &&
+      model !== "xai/grok-4.6" &&
       model !== "deepseek/deepseek-v4-flash",
   );
   check("every other curated non-GPT model remains judgment-only",
