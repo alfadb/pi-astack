@@ -1,7 +1,9 @@
 ---
 doc_type: adr
-status: accepted
+status: archived
 ---
+
+> 🗄️ **已归档（2026-08-13）**：goal 扩展已移除（commit 2f55dc9，2026-08-12）。INV-TELL-NOT-ASK 调用面原则仍在 docs/direction.md 生效。
 
 # ADR 0033 - 自然语言优先的调用面 + 文档驱动 goal（修订 ADR 0032 权威闸）
 

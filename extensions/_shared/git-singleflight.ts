@@ -1,6 +1,6 @@
 /**
  * Cross-extension single-flight serializer for git operations that share
- * a repository (PR-1 / P0.6a of docs/audits/2026-06-10-goal-workflow-impl-plan.md;
+ * a repository (PR-1 / P0.6a of docs/archive/2026-06-10-goal-workflow-impl-plan.md (archived);
  * ADR 0027 C2' singleFlight constraint).
  *
  * Closes the KNOWN GAP documented in extensions/abrain/git-sync.ts since

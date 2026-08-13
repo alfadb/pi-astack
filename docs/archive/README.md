@@ -18,5 +18,12 @@ Archived originals：
 - [directory-layout-pre-2026-05-15.md](./directory-layout-pre-2026-05-15.md)
 - [migration/](./migration/)
 - [../adr/archive/](../adr/archive/) — fully historical ADR originals
+- [../adr/archive/0032-goal-runtime-and-declarative-workflow.md](../adr/archive/0032-goal-runtime-and-declarative-workflow.md) — goal 续行运行时 + 声明式 Workflow 编排（workflow 部分 rationale 已 ingest 入 abrain）
+- [../adr/archive/0033-natural-language-first-invocation-and-doc-driven-goal.md](../adr/archive/0033-natural-language-first-invocation-and-doc-driven-goal.md) — 自然语言调用面 + 文档驱动 goal
+- [2026-06-10-goal-workflow-impl-plan.md](./2026-06-10-goal-workflow-impl-plan.md) — goal/workflow 实施计划（PR-1~PR-13 全部交付）
+- [2026-06-20-goal-complete-design.md](./2026-06-20-goal-complete-design.md) — goal 完整设计（G1-G6 决议）
+- [2026-06-20-goal-v1-spike-plan.md](./2026-06-20-goal-v1-spike-plan.md) — goal v1 spike dogfood 账本
+- [2026-06-20-goal-v2-plan.md](./2026-06-20-goal-v2-plan.md) — goal v2 实现计划账本
+- [2026-06-20-living-plan-ledger-v1-impl-draft.md](./2026-06-20-living-plan-ledger-v1-impl-draft.md) — 活账本 v1 草案（部分被 complete-design 取代）
 
 Rule: 如果 archive 与 current docs 冲突，以 current docs 和代码实现为准。

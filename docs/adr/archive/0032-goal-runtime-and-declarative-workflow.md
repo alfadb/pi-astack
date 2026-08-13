@@ -1,7 +1,9 @@
 ---
 doc_type: adr
-status: accepted
+status: archived
 ---
+
+> 🗄️ **已归档（2026-08-13）**：goal 扩展已移除（commit 2f55dc9，2026-08-12）。Workflow 编排部分仍 live：rationale 已由 ADR 0034 ingest lane 分解入 abrain（10 条 typed entry），能力面见 docs/current-state.md。
 
 # ADR 0032 — Goal 续行运行时 + 声明式 Workflow 编排（实验通道）
 

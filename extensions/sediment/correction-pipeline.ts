@@ -42,7 +42,7 @@ function isRateLimitError(msg: string): boolean {
 // ── Types ─────────────────────────────────────────────────────────────
 
 /** Tier-1 routing predicate (ADR 0028 v1.1 R2', O5-converged form per
- *  docs/audits/2026-06-10-goal-workflow-impl-plan.md PR-2 + PR-A3):
+ *  docs/archive/2026-06-10-goal-workflow-impl-plan.md (archived) PR-2 + PR-A3):
  *
  *    signal_found ∧ typing=durable ∧ provenance==='user-expressed'
  *    ∧ (is_directive ∨ (confidence ≥ 8 ∧ no update target))
