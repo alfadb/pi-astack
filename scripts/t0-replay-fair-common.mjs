@@ -35,27 +35,63 @@ import path from "node:path";
 import {
   sha256Hex,
   asRecord,
+  assertSafeEpisodeId,
   callJudge,
   parseJsonOutput,
   validateSchema,
-  attemptCost,
   summarizeCosts,
+  summarizeFailedOutput,
   sleep,
+  ATTEMPT_LEDGER_VERSION,
+  ATTEMPT_LEDGER_CONTRACT_ID,
+  validateAttemptLedgerV2,
+  episodeMetaSetParity,
+  validateProducerInventory,
 } from "./t0-eval-common.mjs";
 import {
   STRONG_REFERENCE_MODELS,
   SPECIALIST_MODELS,
   REPLAY_JUDGE_MODELS,
+  ALLOWED_JOIN_CONFIDENCES,
+  bodyMetaSlotMapComplete,
+  outputsSelfContained,
+  joinConfidenceAllowed,
+  evaluateHardGates,
 } from "./t0-replay-build.mjs";
 
-export { STRONG_REFERENCE_MODELS, SPECIALIST_MODELS, REPLAY_JUDGE_MODELS };
-
-// TRUNCATED_MARKER lives on episode-build; keep a local copy so this module
-// does not pull the heavy episode builder just for a string constant.
-const TRUNCATED_MARKER = "[truncated]";
+export {
+  STRONG_REFERENCE_MODELS,
+  SPECIALIST_MODELS,
+  REPLAY_JUDGE_MODELS,
+  ALLOWED_JOIN_CONFIDENCES,
+  bodyMetaSlotMapComplete,
+  outputsSelfContained,
+  joinConfidenceAllowed,
+  evaluateHardGates,
+  ATTEMPT_LEDGER_VERSION,
+};
 
 export const FAIR_SELECT_SCHEMA_VERSION = 1;
 export const CLASSIFIER_SCHEMA_VERSION = 1;
+/**
+ * Classifier result/checkpoint contract version. Bumped whenever the
+ * checkpoint `final` state contract changes (e.g. the explicit
+ * `classification_status` field). Bound into classifierProtocolHash() so a
+ * contract change invalidates every old checkpoint/manifest — old finals
+ * without `classification_status` are never resumed or admitted.
+ * Deliberately independent of ATTEMPT_LEDGER_VERSION (ledger identity).
+ *
+ * v2 (2026-08): checkpoint lifecycle is fail-closed. An EXISTING checkpoint
+ * is never a cache miss and never overwritten: malformed / unknown / stale /
+ * identity-mismatch / body-invalid checkpoints AND valid `failed`
+ * (diagnostic) checkpoints throw before any invoker/provider call;
+ * `--no-resume` with an existing checkpoint throws instead of overwriting;
+ * saves are atomic create-if-absent (the race loser is rejected). v1
+ * checkpoints (written when failed checkpoints were re-called + overwritten
+ * and when `--no-resume` silently replaced files) are stale under v2 and
+ * fail closed.
+ */
+export const CLASSIFIER_RESULT_CONTRACT_VERSION = 2;
 export const CLASSIFIER_DEFAULT_JUDGES = ["openai/gpt-5.6-sol", "anthropic/claude-opus-5"];
 /** Default self-judge exclusion set: replay-eval five roles, deduped. */
 export const DEFAULT_DOWNSTREAM_JUDGES = [...REPLAY_JUDGE_MODELS];
@@ -64,8 +100,19 @@ export const CLASSIFIER_DEFAULT_TIMEOUT_MS = 600_000;
 export const CLASSIFIER_DEFAULT_CONCURRENCY = 2;
 export const CLASSIFIER_DEFAULT_THINKING = "medium";
 
-/** Builder-verified join confidences accepted by fair selection. */
-export const ALLOWED_JOIN_CONFIDENCES = Object.freeze(["exact", "heuristic"]);
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const key of Object.keys(value).sort()) out[key] = canonicalJson(value[key]);
+    return out;
+  }
+  return value;
+}
+
+function jsonSemanticEqual(a, b) {
+  return JSON.stringify(canonicalJson(a)) === JSON.stringify(canonicalJson(b));
+}
 
 /**
  * Classifier system prompt — identity-free, tool-free, judgment only.
@@ -138,6 +185,7 @@ export const FINAL_CLASSIFICATION_SCHEMA = {
   required: [
     "episode_id",
     "stage",
+    "classification_status",
     "replayable",
     "reasons",
     "confidence",
@@ -154,6 +202,12 @@ export const FINAL_CLASSIFICATION_SCHEMA = {
   properties: {
     episode_id: { type: "string" },
     stage: { type: "string" },
+    // Explicit state contract: completed = mechanical exclude or a legal
+    // dual-judge merge (incl. semantic non-replayable / disagreement);
+    // failed = at least one judge produced no valid judgment (preflight /
+    // auth / http / timeout / truncation / schema / content). Never inferred
+    // from reasons.
+    classification_status: { type: "string", enum: ["completed", "failed"] },
     replayable: { type: "boolean" },
     reasons: { type: "array", items: { type: "string" } },
     confidence: { type: "number" },
@@ -219,9 +273,13 @@ export function classifierProtocolHash({
   userProtocol = CLASSIFIER_USER_PROTOCOL,
   schemaVersion = CLASSIFIER_SCHEMA_VERSION,
   schema = CLASSIFIER_OUTPUT_SCHEMA,
+  resultContractVersion = CLASSIFIER_RESULT_CONTRACT_VERSION,
 } = {}) {
   return sha256Hex(JSON.stringify({
     schema_version: schemaVersion,
+    ledger_version: ATTEMPT_LEDGER_VERSION,
+    ledger_contract_id: ATTEMPT_LEDGER_CONTRACT_ID,
+    result_contract_version: resultContractVersion,
     system: systemPrompt,
     user_protocol: userProtocol,
     output_schema: schema,
@@ -292,107 +350,66 @@ export function requireDownstreamJudges(models, { label = "downstream-judges" } 
 
 // ── meta loading ──────────────────────────────────────────────────────────
 
-export function loadMeta(metaPath) {
+/**
+ * Read the episodes.meta.jsonl sidecar.
+ *
+ * `strict` (default false) is the fail-closed corpus mode used by the fair
+ * selector and the production dossiers: any non-empty line that fails
+ * JSON.parse, any non-object record, any missing/invalid episode_id, any
+ * episode_id with leading/trailing whitespace and any duplicate episode_id
+ * throws with the path + 1-based line number (duplicate errors also name
+ * the id). In strict mode an episode_id must be a non-empty string that is
+ * unchanged by trim() — blank and whitespace-padded ids are rejected (a
+ * "ep-x " id is a different identity than "ep-x" and would silently split
+ * the corpus). The default permissive mode keeps skipping malformed /
+ * unusable lines exactly as before.
+ */
+export function loadMeta(metaPath, { strict = false } = {}) {
   if (!fs.existsSync(metaPath)) throw new Error(`meta sidecar not found: ${metaPath}`);
   const records = [];
-  for (const line of fs.readFileSync(metaPath, "utf8").split("\n")) {
+  const seenIds = new Set();
+  const lines = fs.readFileSync(metaPath, "utf8").split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
     if (!line.trim()) continue;
+    const lineNo = i + 1;
+    let row;
     try {
-      const row = JSON.parse(line);
-      if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-    } catch {
-      /* skip malformed lines */
+      row = JSON.parse(line);
+    } catch (err) {
+      if (strict) {
+        throw new Error(`episodes.meta.jsonl ${metaPath}:${lineNo}: invalid JSON: ${err.message}`);
+      }
+      continue;
     }
+    if (strict) {
+      if (!asRecord(row)) {
+        throw new Error(`episodes.meta.jsonl ${metaPath}:${lineNo}: record is not a JSON object`);
+      }
+      if (typeof row.episode_id !== "string" || !row.episode_id.trim()) {
+        throw new Error(`episodes.meta.jsonl ${metaPath}:${lineNo}: missing or invalid episode_id`);
+      }
+      if (row.episode_id !== row.episode_id.trim()) {
+        throw new Error(`episodes.meta.jsonl ${metaPath}:${lineNo}: episode_id must have no leading/trailing whitespace (got ${JSON.stringify(row.episode_id)})`);
+      }
+      if (seenIds.has(row.episode_id)) {
+        throw new Error(`episodes.meta.jsonl ${metaPath}: duplicate episode_id ${row.episode_id} (line ${lineNo})`);
+      }
+      seenIds.add(row.episode_id);
+    } else if (!(row && typeof row === "object" && typeof row.episode_id === "string")) {
+      continue;
+    }
+    records.push(row);
   }
   return records;
 }
 
-// ── body/meta 1:1 mapping ─────────────────────────────────────────────────
-
-/**
- * Body slots and in_body meta slots must form a complete one-to-one map by
- * slot_id: same size, same ids, no orphans either side, no duplicate ids.
- */
-export function bodyMetaSlotMapComplete(episode, meta) {
-  if (!meta || !Array.isArray(episode?.slots) || !Array.isArray(meta?.slots)) {
-    return { ok: false, reason: "slot_arrays_missing" };
-  }
-  const bodySlots = episode.slots;
-  const metaInBody = meta.slots.filter((s) => s && s.in_body === true);
-  if (bodySlots.length === 0) return { ok: false, reason: "body_empty" };
-  if (bodySlots.length !== metaInBody.length) {
-    return { ok: false, reason: "slot_count_mismatch", body: bodySlots.length, meta_in_body: metaInBody.length };
-  }
-  const bodyIds = bodySlots.map((s) => s?.slot_id);
-  const metaIds = metaInBody.map((s) => s?.slot_id);
-  if (bodyIds.some((id) => typeof id !== "string" || !id)) return { ok: false, reason: "body_slot_id_invalid" };
-  if (metaIds.some((id) => typeof id !== "string" || !id)) return { ok: false, reason: "meta_slot_id_invalid" };
-  if (new Set(bodyIds).size !== bodyIds.length) return { ok: false, reason: "body_slot_id_duplicate" };
-  if (new Set(metaIds).size !== metaIds.length) return { ok: false, reason: "meta_slot_id_duplicate" };
-  const metaSet = new Set(metaIds);
-  for (const id of bodyIds) {
-    if (!metaSet.has(id)) return { ok: false, reason: "body_slot_missing_in_meta", slot_id: id };
-  }
-  const bodySet = new Set(bodyIds);
-  for (const id of metaIds) {
-    if (!bodySet.has(id)) return { ok: false, reason: "meta_slot_missing_in_body", slot_id: id };
-  }
-  return { ok: true };
-}
-
-export function outputsSelfContained(episode) {
-  if ((episode.missing_evidence ?? []).length > 0) return false;
-  if (!Array.isArray(episode.slots) || episode.slots.length === 0) return false;
-  return episode.slots.every((s) =>
-    typeof s?.output === "string"
-    && s.output.length > 0
-    && !s.output.startsWith(TRUNCATED_MARKER));
-}
-
-export function joinConfidenceAllowed(join) {
-  return ALLOWED_JOIN_CONFIDENCES.includes(join);
-}
-
 // ── hard structural selection ─────────────────────────────────────────────
-
-/**
- * Evaluate hard structural gates for one episode. Returns
- * { ok, reasons[], models, map, join_confidence }. reasons is empty when ok.
- *
- * Note: judgeModels here are DOWNSTREAM judges (self-candidate exclusion),
- * not classifier models.
- */
-export function evaluateHardGates(episode, meta, {
-  strongRefs = STRONG_REFERENCE_MODELS,
-  specialists = SPECIALIST_MODELS,
-  downstreamJudges = DEFAULT_DOWNSTREAM_JUDGES,
-} = {}) {
-  const reasons = [];
-  if (!meta) reasons.push("meta_missing");
-  if (!joinConfidenceAllowed(episode?.join_confidence)) reasons.push("join_not_allowed");
-  // tools must be strict JSON null — empty string / missing / "none" all fail.
-  if (episode?.tools !== null) reasons.push("tools_not_null");
-  if (!outputsSelfContained(episode)) reasons.push("not_self_contained");
-
-  const map = bodyMetaSlotMapComplete(episode, meta);
-  if (!map.ok) reasons.push("body_meta_slot_map_incomplete");
-
-  const models = (meta?.slots ?? []).filter((s) => s.in_body === true).map((s) => s.model);
-  const strongSet = new Set(strongRefs);
-  const specSet = new Set(specialists);
-  const judgeSet = new Set(downstreamJudges);
-  if (!models.some((m) => strongSet.has(m))) reasons.push("no_strong_reference");
-  if (!models.some((m) => specSet.has(m))) reasons.push("no_specialist");
-  if (models.some((m) => judgeSet.has(m))) reasons.push("contains_judge_model");
-
-  return {
-    ok: reasons.length === 0,
-    reasons,
-    models,
-    map,
-    join_confidence: episode?.join_confidence ?? null,
-  };
-}
+//
+// The pure gate helpers (bodyMetaSlotMapComplete / outputsSelfContained /
+// joinConfidenceAllowed / evaluateHardGates) live in t0-replay-build.mjs and
+// are imported + re-exported above — the fair selector and the replay build's
+// eligibility resolver share ONE rule set and can never drift apart.
 
 /**
  * Scan all source episodes through hard gates. Returns candidates that pass
@@ -441,7 +458,8 @@ export function selectHardCandidates(episodes, metaById, {
   passed.sort((a, b) => {
     const tier = (b.exact ? 1 : 0) - (a.exact ? 1 : 0);
     if (tier !== 0) return tier;
-    return a.episode.episode_id.localeCompare(b.episode.episode_id);
+    const x = a.episode.episode_id, y = b.episode.episode_id;
+    return x < y ? -1 : x > y ? 1 : 0;
   });
   const limited = limit !== undefined && Number.isFinite(limit) ? passed.slice(0, limit) : passed;
   return {
@@ -452,6 +470,701 @@ export function selectHardCandidates(episodes, metaById, {
     hard_pass_count: passed.length,
     join_tier,
   };
+}
+
+// ── fair manifest provenance validation ───────────────────────────────────
+//
+// Pure, read-only, no invoker / credentials / provider requests. Verifies a
+// canonical `selection.json` is the COMPLETE product of the real classifier
+// selector over the real corpus + its own checkpoints-fair/*.json — a
+// hand-written or derived two-line manifest cannot pass. Works on any
+// fixture temp dir (paths are parameters, never hardcoded production paths).
+
+/**
+ * Validate a fair selection manifest against the real corpus + the
+ * selector's own checkpoints (canonical `selection.json` same-dir
+ * `checkpoints-fair/*.json`). Returns { ok, errors: string[] } — errors is
+ * empty when the manifest is a genuine full classifier-selector product.
+ *
+ * Checks (all fail-closed, no warn-only):
+ *   - strict top-level identity: kind/schema_version constants, classify===true,
+ *     hard_only===false, limit===null, protocol_hash === current
+ *     classifierProtocolHash(), judge_models === classifier_models (both the
+ *     checkpoints' actual dual-judge identity), downstream_judges === the
+ *     downstreamJudges the fresh scan used, thinking === checkpoint thinking
+ *   - classifications: length === hard candidates, episode_id unique and in
+ *     the selector's hard-candidate order; every row deep-compared to its
+ *     checkpoint final (stage / replayable / reasons / confidence / cost /
+ *     cost_source / cost_breakdown / from_checkpoint) plus the
+ *     checkpoint-final-only fields (flags / has_unknown_cost / known_total /
+ *     attempts) and the checkpoint body (judgments / attempt_log per the
+ *     real llm/mechanical schema)
+ *   - selected: the COMPLETE expected rows rebuilt from hard.candidates +
+ *     checkpoint finals per the real selector construction and sort (exact
+ *     first, confidence desc, episode_id asc) — every row deepEqual, and
+ *     episode_ids in the same order (reverse / reasons / confidence / tools /
+ *     models / join forgery all rejected)
+ *   - excluded: the full expected array (fresh hard exclusions in corpus
+ *     order + non-replayable classification rows in hard-candidate order)
+ *     deepEqual, including order and every selector-emitted field
+ *   - counts: every selector-emitted count (source / hard_pass /
+ *     hard_pass_limited / classified / replayable / excluded /
+ *     data_insufficient / join_hard_pass / join_selected) rebuilt and
+ *     compared; extra/missing/forged values rejected
+ *   - exclusion_distribution: rebuilt from the fresh hard distribution +
+ *     non-replayable classification reasons per the selector's exact rule;
+ *     deepEqual, extra keys rejected
+ *   - checkpoint body: llm stage requires the real schema's judgments /
+ *     attempt_log present and consistent with final/identity; mechanical per
+ *     the real schema. No cryptographic signature is claimed — but a
+ *     hand-written manifest without forging every complete checkpoint cannot
+ *     pass.
+ */
+
+/**
+ * Checkpoint-body consistency per the real classifier schema, recomputed from
+ * the SAME pure functions the producer uses (never hand-written approximations):
+ *   - llm: mergeDualJudgments(cp.judgments) must reproduce the final's
+ *     replayable/reasons/confidence/flags/disagreement; summarizeClassifierCosts
+ *     (cp.attempt_log) must reproduce cost/cost_source/cost_breakdown/
+ *     has_unknown_cost/known_total; attempts = sum of each judge log length;
+ *     every new-format ledger attempt must carry a unique request_id.
+ *   - mechanical: mechanicalExclude(real episode.prompt) must equal
+ *     cp.mechanical and the final's mechanical; attempts=0, cost ledger empty.
+ * Returns string[] of errors (empty when consistent).
+ * Exported for offline structural tests of real failed checkpoints.
+ *
+ * `seenRequestIds` (optional) is a caller-owned Set shared across MULTIPLE
+ * checkpoints: when provided, request_id uniqueness is enforced across the
+ * whole set (one validateFairManifestProvenance invocation passes a single
+ * global set so a request_id reused by two checkpoints fails closed). When
+ * absent, a fresh local Set keeps the standalone per-checkpoint uniqueness
+ * semantics unchanged.
+ */
+export function validateCheckpointBody(cp, f, { id, judgeModels, prompt, seenRequestIds = null }) {
+  const errors = [];
+  const stage = f.stage;
+  const expectedKeys = [...judgeModels].sort();
+  if (stage === "llm") {
+    const judgments = cp.judgments;
+    const attemptLog = cp.attempt_log;
+    if (!asRecord(judgments)) errors.push("llm checkpoint must carry a judgments object");
+    if (!asRecord(attemptLog)) errors.push("llm checkpoint must carry an attempt_log object");
+    if (asRecord(judgments)) {
+      if (JSON.stringify(Object.keys(judgments).sort()) !== JSON.stringify(expectedKeys)) {
+        errors.push(`llm checkpoint judgments keys ${JSON.stringify(Object.keys(judgments).sort())} != judge models ${JSON.stringify(expectedKeys)}`);
+      }
+    }
+    if (asRecord(attemptLog)) {
+      if (JSON.stringify(Object.keys(attemptLog).sort()) !== JSON.stringify(expectedKeys)) {
+        errors.push(`llm checkpoint attempt_log keys ${JSON.stringify(Object.keys(attemptLog).sort())} != judge models ${JSON.stringify(expectedKeys)}`);
+      }
+      for (const [model, log] of Object.entries(attemptLog)) {
+        if (!Array.isArray(log)) errors.push(`llm checkpoint attempt_log.${model} must be an array`);
+      }
+    }
+    if (!jsonSemanticEqual(f.attempt_log ?? null, attemptLog ?? null)) {
+      errors.push("checkpoint final attempt_log must equal the checkpoint attempt_log");
+    }
+    // New-format ledger identity via the SHARED v2 validator: every attempt
+    // entry must carry a non-empty request_id unique across the whole
+    // checkpoint (or across the caller-provided global set when one is
+    // passed), the model_ref that actually made the request, the
+    // classifier operation (`t0_replay_fair_classify`) and a null-or-64-hex
+    // accepted_output_hash, with cost/source recomputed from the real usage
+    // via attemptCost(model_ref, usage) — a forged cost/source, a missing /
+    // duplicated request_id, a sync-renamed model_ref or a foreign
+    // operation fails closed here.
+    const seenIds = seenRequestIds ?? new Set();
+    for (const [model, log] of Object.entries(attemptLog ?? {})) {
+      if (!Array.isArray(log)) continue;
+      const ledgerCheck = validateAttemptLedgerV2(log, {
+        modelRef: model,
+        expectedOperation: "t0_replay_fair_classify",
+        seenIds,
+        label: `llm checkpoint attempt_log.${model}`,
+      });
+      for (const e of ledgerCheck.errors) errors.push(e);
+      // Family accepted-output semantics: ok=true entries bind a 64-hex hash
+      // of the accepted judgment, ok=false entries bind null; the judgment
+      // stored for a judge is non-null IFF that judge's ledger ends in a
+      // success whose hash equals sha256(JSON.stringify(judgment)) — and a
+      // null judgment means the log has NO success entry at all (a
+      // completed checkpoint therefore always has two real successes; a
+      // failed checkpoint can never fake one by relabelling fields).
+      const judgment = asRecord(judgments) ? judgments[model] : null;
+      for (const [i, entry] of log.entries()) {
+        const at = `llm checkpoint attempt_log.${model}[${i}]`;
+        if (entry?.ok === true && typeof entry.accepted_output_hash !== "string") {
+          errors.push(`${at}.accepted_output_hash must be a non-null 64-hex sha256 when ok=true, got ${JSON.stringify(entry.accepted_output_hash)}`);
+        } else if (entry?.ok === false && entry.accepted_output_hash !== null) {
+          errors.push(`${at}.accepted_output_hash must be null when ok=false, got ${JSON.stringify(entry.accepted_output_hash)}`);
+        }
+      }
+      if (judgment !== null && judgment !== undefined) {
+        const last = log.length > 0 ? log[log.length - 1] : null;
+        const normalizedForHash = normalizeClassifierJudgment(judgment);
+        const expectedHash = normalizedForHash.ok
+          ? sha256Hex(JSON.stringify(normalizedForHash.judgment))
+          : sha256Hex(JSON.stringify(judgment));
+        if (!last || last.ok !== true) {
+          errors.push(`llm checkpoint judge ${model}: judgment is non-null but the ledger has no success entry (the last entry must be the accepted success)`);
+        } else if (last.accepted_output_hash !== expectedHash) {
+          errors.push(`llm checkpoint judge ${model}: accepted output hash ${JSON.stringify(last.accepted_output_hash)} != sha256(JSON.stringify(judgment)) ${expectedHash} (a relabelled judgment can never pass)`);
+        }
+        for (const entry of log) {
+          if (entry?.ok === true && entry.accepted_output_hash !== expectedHash) {
+            errors.push(`llm checkpoint judge ${model}: ok=true entry hash ${JSON.stringify(entry.accepted_output_hash)} != sha256(JSON.stringify(judgment)) ${expectedHash}`);
+          }
+        }
+      } else if (log.some((e) => e?.ok === true)) {
+        errors.push(`llm checkpoint judge ${model}: judgment is null but the ledger contains a success entry (a null judgment can never claim a success)`);
+      }
+    }
+    // Cost/attempts recomputed from the real ledger via the producer's own
+    // pure helpers — the checkpoint final must be exactly reproducible.
+    const costSummary = summarizeClassifierCosts(attemptLog ?? {});
+    if (f.cost !== costSummary.cost) errors.push(`checkpoint final cost ${f.cost} != summarizeClassifierCosts ${costSummary.cost}`);
+    if (f.cost_source !== costSummary.cost_source) errors.push(`checkpoint final cost_source ${f.cost_source} != summarizeClassifierCosts ${costSummary.cost_source}`);
+    if (!jsonSemanticEqual(f.cost_breakdown ?? null, costSummary.cost_breakdown ?? null)) {
+      errors.push("checkpoint final cost_breakdown != summarizeClassifierCosts cost_breakdown");
+    }
+    if (f.has_unknown_cost !== costSummary.has_unknown) errors.push(`checkpoint final has_unknown_cost ${f.has_unknown_cost} != summarizeClassifierCosts ${costSummary.has_unknown}`);
+    if (f.known_total !== costSummary.known_total) errors.push(`checkpoint final known_total ${f.known_total} != summarizeClassifierCosts ${costSummary.known_total}`);
+    const attempts = Object.values(attemptLog ?? {}).reduce((s, log) => s + (Array.isArray(log) ? log.length : 0), 0);
+    if (f.attempts !== attempts) errors.push(`checkpoint final attempts ${f.attempts} != sum of judge log lengths ${attempts}`);
+    // ── explicit state contract: branch on classification_status, never
+    // inferred from reasons. completed = legal dual-judge merge (both
+    // judgments valid, final carries merged flags/disagreement/judgments);
+    // failed = at least one judge produced no valid judgment (partial
+    // success judgment retained as the non-null slot, final carries NO
+    // merged flags/disagreement/judgments).
+    const status = f.classification_status;
+    const [j0, j1] = judgeModels;
+    if (status === "completed") {
+      if (asRecord(judgments) && asRecord(judgments[j0]) && asRecord(judgments[j1])) {
+        // Every stored judgment must re-pass the producer's own normalizer.
+        const n0 = normalizeClassifierJudgment(judgments[j0]);
+        const n1 = normalizeClassifierJudgment(judgments[j1]);
+        if (!n0.ok) errors.push(`completed checkpoint judge ${j0} judgment invalid: ${n0.errors.join("; ")}`);
+        if (!n1.ok) errors.push(`completed checkpoint judge ${j1} judgment invalid: ${n1.errors.join("; ")}`);
+        const merged = mergeDualJudgments(
+          { ok: true, judgment: judgments[j0] },
+          { ok: true, judgment: judgments[j1] },
+          { judge0: j0, judge1: j1 },
+        );
+        if (f.replayable !== merged.replayable) errors.push(`checkpoint final replayable ${f.replayable} != mergeDualJudgments ${merged.replayable}`);
+        if (JSON.stringify(f.reasons) !== JSON.stringify(merged.reasons)) errors.push("checkpoint final reasons != mergeDualJudgments reasons");
+        if (f.confidence !== merged.confidence) errors.push(`checkpoint final confidence ${f.confidence} != mergeDualJudgments ${merged.confidence}`);
+        if (!jsonSemanticEqual(f.flags ?? null, merged.flags ?? null)) errors.push("checkpoint final flags != mergeDualJudgments flags");
+        if (f.disagreement !== merged.disagreement) errors.push(`checkpoint final disagreement ${f.disagreement} != mergeDualJudgments ${merged.disagreement}`);
+        if (!jsonSemanticEqual(f.judgments, judgments)) {
+          errors.push("checkpoint final judgments must equal the checkpoint judgments");
+        }
+      } else {
+        errors.push("completed llm checkpoint requires both judge judgments");
+      }
+    } else if (status === "failed") {
+      // Real failed checkpoint: at least one judge slot is null (the judge
+      // produced no valid judgment); any non-null slot is a partial success
+      // judgment and must re-pass the producer's own normalizer.
+      const vals = Object.values(judgments ?? {});
+      if (vals.length === 0) {
+        errors.push("failed checkpoint must carry a judgments object with one slot per judge");
+      } else if (!vals.some((j) => j === null)) {
+        errors.push("failed checkpoint must have at least one null judgment (two non-null judgments cannot be failed)");
+      }
+      for (const [model, j] of Object.entries(judgments ?? {})) {
+        if (j === null) continue;
+        const n = normalizeClassifierJudgment(j);
+        if (!n.ok) errors.push(`failed checkpoint judge ${model} partial judgment invalid: ${n.errors.join("; ")}`);
+      }
+      // The failed final must NOT carry merged flags/disagreement/judgments.
+      if (f.flags !== null && f.flags !== undefined) errors.push("failed checkpoint final flags must be null");
+      if (f.disagreement !== null && f.disagreement !== undefined) errors.push("failed checkpoint final disagreement must be null");
+      if (f.judgments !== null && f.judgments !== undefined) errors.push("failed checkpoint final judgments must be null");
+    } else {
+      errors.push(`llm checkpoint classification_status must be completed|failed, got ${JSON.stringify(status)}`);
+    }
+  } else if (stage === "mechanical") {
+    if (cp.judgments !== null && cp.judgments !== undefined) errors.push("mechanical checkpoint judgments must be absent/null");
+    if (cp.attempt_log !== null && cp.attempt_log !== undefined) errors.push("mechanical checkpoint attempt_log must be absent/null");
+    if (!asRecord(cp.mechanical)) errors.push("mechanical checkpoint must carry a mechanical object");
+    if (!jsonSemanticEqual(f.mechanical ?? null, cp.mechanical ?? null)) {
+      errors.push("checkpoint final mechanical must equal the checkpoint mechanical");
+    }
+    // Re-run the real mechanical gate on the real prompt — the checkpoint
+    // must be exactly reproducible from the corpus.
+    const mech = mechanicalExclude(prompt);
+    if (!jsonSemanticEqual(cp.mechanical ?? null, mech)) {
+      errors.push("checkpoint mechanical must equal mechanicalExclude(real prompt)");
+    }
+    if (f.flags !== null && f.flags !== undefined) errors.push("mechanical checkpoint final flags must be null");
+    if (f.attempts !== 0) errors.push(`mechanical checkpoint final attempts must be 0, got ${f.attempts}`);
+    if (f.cost !== 0) errors.push(`mechanical checkpoint final cost must be 0, got ${f.cost}`);
+    if (f.cost_source !== null) errors.push(`mechanical checkpoint final cost_source must be null, got ${JSON.stringify(f.cost_source)}`);
+    if (f.has_unknown_cost !== false) errors.push("mechanical checkpoint final has_unknown_cost must be false");
+    if (f.known_total !== 0) errors.push(`mechanical checkpoint final known_total must be 0, got ${f.known_total}`);
+  } else {
+    errors.push(`unknown classification stage ${JSON.stringify(stage)}`);
+  }
+  return errors;
+}
+
+export function validateFairManifestProvenance({
+  manifest,
+  episodes,
+  metaById,
+  checkpointDir,
+  checkpointById,
+  exclusions,
+  stats,
+  strongRefs = STRONG_REFERENCE_MODELS,
+  specialists = SPECIALIST_MODELS,
+  downstreamJudges = DEFAULT_DOWNSTREAM_JUDGES,
+} = {}) {
+  const errors = [];
+  const fail = (msg) => errors.push(msg);
+  if (!asRecord(manifest)) return { ok: false, errors: ["manifest must be a JSON object"] };
+
+  // ── producer inventory (fail-closed at the entry) ─────────────────────
+  // The four-file dataset (episodes/meta/exclusions/stats) is an ATOMIC
+  // input/relocation unit: the corpus, its meta sidecar, the terminal
+  // exclusions and the build stats must form one consistent producer
+  // inventory BEFORE any manifest-specific check. exclusions + stats are
+  // REQUIRED — missing them is a hard error, never a skip. This replaces the
+  // old missing_meta-only parity check: orphan meta is only legal as the
+  // below-min terminal set recorded in exclusions + stats (an arbitrary
+  // orphan — meta without a below-min exclusion, or a below-min exclusion
+  // without meta — fails closed here).
+  if (exclusions === undefined || stats === undefined) {
+    fail("validateFairManifestProvenance requires exclusions + stats (the producer inventory)");
+  } else {
+    const inv = validateProducerInventory({ episodes, meta: metaById, exclusions, stats });
+    for (const e of inv.errors) fail(e);
+  }
+
+  // ── strict top-level key set: exactly the real selector output keys ────
+  // (buildManifest + t0-replay-select payload). Any extra top-level key is
+  // rejected; generated_at/episodes/meta/concurrency are non-semantic but
+  // must exist with the right type.
+  const TOP_LEVEL_KEYS = [
+    "schema_version", "kind", "generated_at", "protocol_hash", "thinking",
+    "judge_models", "classifier_models", "downstream_judges", "classify",
+    "counts", "exclusion_distribution", "cost", "selected", "excluded",
+    "classifications", "episodes", "meta", "limit", "concurrency",
+    "hard_only", "episode_ids",
+  ];
+  for (const key of Object.keys(manifest)) {
+    if (!TOP_LEVEL_KEYS.includes(key)) fail(`manifest top-level key ${JSON.stringify(key)} is not a selector-emitted key`);
+  }
+  for (const key of TOP_LEVEL_KEYS) {
+    if (!(key in manifest)) fail(`manifest top-level key ${JSON.stringify(key)} is missing`);
+  }
+  if (typeof manifest.generated_at !== "string" || !Number.isFinite(Date.parse(manifest.generated_at))) {
+    fail("manifest generated_at must be an ISO timestamp string");
+  }
+  if (typeof manifest.episodes !== "string" || typeof manifest.meta !== "string") {
+    fail("manifest episodes/meta must be path strings");
+  }
+  if (!Number.isInteger(manifest.concurrency) || manifest.concurrency < 1) {
+    fail("manifest concurrency must be a positive integer");
+  }
+
+  // ── strict top-level identity ──────────────────────────────────────────
+  if (manifest.kind !== "prompt_only_replay_selection") {
+    fail(`manifest kind must be "prompt_only_replay_selection", got ${JSON.stringify(manifest.kind)}`);
+  }
+  if (manifest.schema_version !== FAIR_SELECT_SCHEMA_VERSION) {
+    fail(`manifest schema_version must be ${FAIR_SELECT_SCHEMA_VERSION}, got ${JSON.stringify(manifest.schema_version)}`);
+  }
+  if (manifest.classify !== true) fail(`manifest classify must be true, got ${JSON.stringify(manifest.classify)}`);
+  if (manifest.hard_only !== false) fail(`manifest hard_only must be false, got ${JSON.stringify(manifest.hard_only)}`);
+  if (manifest.limit !== null && manifest.limit !== undefined) fail(`manifest limit must be null (full production manifest), got ${JSON.stringify(manifest.limit)}`);
+  if (manifest.protocol_hash !== classifierProtocolHash()) {
+    fail("manifest protocol_hash does not match the current classifier protocol (stale manifest)");
+  }
+  // judge_models === classifier_models (the selector emits both from the same
+  // dual-judge list); both must be exactly two distinct models and equal the
+  // checkpoints' actual judge identity.
+  const judgeModels = Array.isArray(manifest.classifier_models) ? manifest.classifier_models : null;
+  if (!Array.isArray(manifest.judge_models)) fail("manifest judge_models must be an array");
+  if (JSON.stringify(manifest.judge_models ?? null) !== JSON.stringify(judgeModels)) {
+    fail("manifest judge_models must equal classifier_models");
+  }
+  try {
+    requireExactlyTwoDistinctJudges(judgeModels, { label: "manifest classifier_models" });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  // downstream_judges must equal the downstreamJudges the fresh scan used
+  // (the selector normalizes through requireDownstreamJudges: 1..5 distinct).
+  let downstream = null;
+  try {
+    downstream = requireDownstreamJudges(
+      Array.isArray(downstreamJudges) && downstreamJudges.length ? downstreamJudges : DEFAULT_DOWNSTREAM_JUDGES,
+      { label: "downstream-judges" },
+    );
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+  if (downstream && JSON.stringify(manifest.downstream_judges ?? null) !== JSON.stringify(downstream)) {
+    fail(`manifest downstream_judges ${JSON.stringify(manifest.downstream_judges)} != scan downstream ${JSON.stringify(downstream)}`);
+  }
+  const thinking = manifest.thinking ?? null;
+
+  const hard = selectHardCandidates(episodes, metaById, {
+    limit: undefined,
+    strongRefs,
+    specialists,
+    downstreamJudges: downstream ?? DEFAULT_DOWNSTREAM_JUDGES,
+  });
+  const hardIds = new Set(hard.candidates.map((c) => c.episode.episode_id));
+
+  const selectedArr = Array.isArray(manifest.selected) ? manifest.selected : [];
+  const excludedArr = Array.isArray(manifest.excluded) ? manifest.excluded : [];
+  const classificationsArr = Array.isArray(manifest.classifications) ? manifest.classifications : [];
+  const episodeIds = Array.isArray(manifest.episode_ids) ? manifest.episode_ids : [];
+  if (checkpointById !== undefined) {
+    if (!(checkpointById instanceof Map)) {
+      fail("checkpointById must be a Map when provided");
+    } else {
+      const expectedIds = classificationsArr.map((c) => c?.episode_id).filter((id) => typeof id === "string");
+      if (checkpointById.size !== expectedIds.length) {
+        fail(`checkpointById size ${checkpointById.size} != classifications.length ${expectedIds.length} (exact coverage required)`);
+      }
+      for (const id of expectedIds) {
+        if (!checkpointById.has(id)) fail(`checkpointById is missing classification ${id}`);
+      }
+      for (const id of checkpointById.keys()) {
+        if (!expectedIds.includes(id)) fail(`checkpointById has extra classification ${String(id)}`);
+      }
+    }
+  } else if (checkpointDir) {
+    // Directory-mode provenance: the leaf's DIRECT `.json` files must be
+    // EXACTLY the classifications' ids (extra/missing `.json` files and
+    // non-regular/symlink `.json` entries fail closed; archive subdirectories
+    // and non-json auxiliary items are ignored) — the same exact-direct-json
+    // closure loadExactJsonMap enforces on the build consumption side, so
+    // selector publish and build consume the same inventory contract.
+    const expectedNames = classificationsArr
+      .map((c) => (typeof c?.episode_id === "string" ? `${c.episode_id}.json` : null))
+      .filter((n) => n !== null)
+      .sort();
+    let actualNames = [];
+    let readFailed = false;
+    try {
+      for (const entry of fs.readdirSync(checkpointDir, { withFileTypes: true })) {
+        if (!entry.name.endsWith(".json")) continue; // non-json auxiliary / archive subdirs ignored
+        if (!entry.isFile()) {
+          fail(`checkpointDir ${checkpointDir}: ${entry.name} is not a regular file (non-regular/symlink checkpoint entries fail closed)`);
+          continue;
+        }
+        actualNames.push(entry.name);
+      }
+    } catch (err) {
+      readFailed = true;
+      fail(`checkpointDir ${checkpointDir} cannot be read: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (!readFailed) {
+      actualNames.sort();
+      if (JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
+        fail(`checkpointDir ${checkpointDir}: direct .json inventory must exactly cover the manifest classifications (got ${JSON.stringify(actualNames)}, expected ${JSON.stringify(expectedNames)})`);
+      }
+    }
+  }
+
+  // ── classifications: length, uniqueness, selector order ─────────────────
+  if (classificationsArr.length !== hard.candidates.length) {
+    fail(`classifications.length ${classificationsArr.length} != hard candidates ${hard.candidates.length}`);
+  }
+  const classIds = new Set();
+  for (let i = 0; i < classificationsArr.length; i++) {
+    const c = classificationsArr[i];
+    const id = c?.episode_id;
+    if (typeof id !== "string") {
+      fail(`classifications[${i}]: missing episode_id`);
+      continue;
+    }
+    if (classIds.has(id)) fail(`classifications: duplicate episode_id ${id}`);
+    classIds.add(id);
+    const expectedId = hard.candidates[i]?.episode.episode_id;
+    if (id !== expectedId) {
+      fail(`classifications[${i}].episode_id ${JSON.stringify(id)} != selector order ${JSON.stringify(expectedId)}`);
+    }
+  }
+
+  // ── per-classification checkpoint provenance + body ─────────────────────
+  // request_id uniqueness is enforced ACROSS the whole manifest: one global
+  // set is shared by every checkpoint's ledger validation, so a request_id
+  // reused by two checkpoints fails closed (each checkpoint alone stays
+  // locally unique via the same set).
+  const globalSeenRequestIds = new Set();
+  const episodesById = new Map(episodes.map((e) => [e.episode_id, e]));
+  const finalsById = new Map(); // episode_id -> validated checkpoint final
+  const fromCheckpointById = new Map(); // episode_id -> classification row from_checkpoint (this run's source)
+  for (const c of classificationsArr) {
+    const id = c?.episode_id;
+    if (typeof id !== "string") continue;
+    const episode = episodesById.get(id);
+    if (!episode) {
+      fail(`classification ${id}: episode missing from corpus`);
+      continue;
+    }
+    const cpFile = checkpointDir ? path.join(checkpointDir, `${id}.json`) : `${id}.json`;
+    let cp;
+    if (checkpointById !== undefined) {
+      if (!(checkpointById instanceof Map) || !checkpointById.has(id)) {
+        fail(`classification ${id}: checkpoint missing from checkpointById`);
+        continue;
+      }
+      cp = checkpointById.get(id);
+    } else {
+      if (!fs.existsSync(cpFile)) {
+        fail(`classification ${id}: checkpoint missing (${cpFile})`);
+        continue;
+      }
+      try {
+        cp = JSON.parse(fs.readFileSync(cpFile, "utf8"));
+      } catch {
+        fail(`classification ${id}: checkpoint is not valid JSON`);
+        continue;
+      }
+    }
+    if (!asRecord(cp) || !asRecord(cp.final)) {
+      fail(`classification ${id}: checkpoint has no final record`);
+      continue;
+    }
+    // Ledger-format binding: only checkpoints written under the CURRENT
+    // ATTEMPT_LEDGER_VERSION are admissible — old checkpoints (no request_id
+    // identity in their attempt logs) must never mix into a new manifest.
+    if (cp.ledger_version !== ATTEMPT_LEDGER_VERSION) {
+      fail(`classification ${id}: checkpoint ledger_version ${JSON.stringify(cp.ledger_version)} != current ${ATTEMPT_LEDGER_VERSION} (stale checkpoint)`);
+      continue;
+    }
+    const pHash = promptHash(episode.prompt);
+    const finalCheck = validateFinalClassification(cp.final, {
+      prompt_hash: pHash,
+      protocol_hash: classifierProtocolHash(),
+      judge_models: judgeModels,
+      thinking,
+      episode_id: id,
+    });
+    if (!finalCheck.ok) {
+      fail(`classification ${id}: checkpoint final invalid (${finalCheck.errors.join("; ")})`);
+      continue;
+    }
+    // Fail-closed state contract: ONLY completed checkpoints may enter the
+    // finals rebuild. A failed checkpoint (any judge without a valid
+    // judgment) is a diagnostic artifact — it must never be admitted into
+    // selected/excluded/counts, and a manifest built over it is rejected.
+    if (cp.final.classification_status !== "completed") {
+      fail(`classification ${id}: checkpoint classification_status must be completed (failed checkpoints never enter finals rebuild), got ${JSON.stringify(cp.final.classification_status)}`);
+      continue;
+    }
+    if (cp.prompt_hash !== pHash) fail(`classification ${id}: checkpoint prompt_hash does not match the real episode prompt`);
+    if (cp.protocol_hash !== classifierProtocolHash()) fail(`classification ${id}: checkpoint protocol_hash is stale`);
+    if (JSON.stringify(cp.judge_models ?? null) !== JSON.stringify(judgeModels)) fail(`classification ${id}: checkpoint judge_models != manifest classifier_models`);
+    if (cp.thinking !== thinking) fail(`classification ${id}: checkpoint thinking != manifest thinking`);
+    const f = cp.final;
+    // Manifest row vs checkpoint final (the fields the manifest row carries).
+    // from_checkpoint is the SOURCE of this run (true on a legal resume), NOT
+    // a checkpoint-final field — the stored final always records the original
+    // run (false). The row must be a boolean; selected/excluded rows must
+    // carry the SAME value as the classification row.
+    if (typeof c.from_checkpoint !== "boolean") fail(`classification ${id}: from_checkpoint must be a boolean, got ${JSON.stringify(c.from_checkpoint)}`);
+    if (c.stage !== f.stage) fail(`classification ${id}: stage ${JSON.stringify(c.stage)} != checkpoint final ${JSON.stringify(f.stage)}`);
+    if (c.replayable !== f.replayable) fail(`classification ${id}: replayable ${c.replayable} != checkpoint final ${f.replayable}`);
+    if (JSON.stringify(c.reasons) !== JSON.stringify(f.reasons)) fail(`classification ${id}: reasons differ from checkpoint final`);
+    if (c.confidence !== f.confidence) fail(`classification ${id}: confidence ${c.confidence} != checkpoint final ${f.confidence}`);
+    if (c.join_confidence !== null) fail(`classification ${id}: join_confidence must be null (the checkpoint final carries no join field), got ${JSON.stringify(c.join_confidence)}`);
+    if (c.cost !== f.cost) fail(`classification ${id}: cost ${c.cost} != checkpoint final ${f.cost}`);
+    if (c.cost_source !== f.cost_source) fail(`classification ${id}: cost_source ${c.cost_source} != checkpoint final ${f.cost_source}`);
+    if (!jsonSemanticEqual(c.cost_breakdown ?? null, f.cost_breakdown ?? null)) fail(`classification ${id}: cost_breakdown differs from checkpoint final`);
+    // Classification row key closure: exactly the 10 selector-emitted keys.
+    const expectedRowKeys = ["episode_id", "stage", "replayable", "reasons", "confidence", "join_confidence", "cost", "cost_source", "cost_breakdown", "from_checkpoint"];
+    for (const key of Object.keys(c)) {
+      if (!expectedRowKeys.includes(key)) fail(`classification ${id}: ${JSON.stringify(key)} is not a selector-emitted classification field`);
+    }
+    for (const key of expectedRowKeys) {
+      if (!(key in c)) fail(`classification ${id}: classification row is missing ${JSON.stringify(key)}`);
+    }
+    // Checkpoint-final-only fields (not in the manifest row).
+    if (typeof f.has_unknown_cost !== "boolean") fail(`classification ${id}: checkpoint final has_unknown_cost must be a boolean`);
+    if (typeof f.known_total !== "number" || !Number.isFinite(f.known_total)) fail(`classification ${id}: checkpoint final known_total must be a number`);
+    if (typeof f.attempts !== "number" || !Number.isFinite(f.attempts)) fail(`classification ${id}: checkpoint final attempts must be a number`);
+    if (typeof f.cost === "number" && f.known_total !== f.cost) fail(`classification ${id}: checkpoint final known_total ${f.known_total} != cost ${f.cost}`);
+    // Checkpoint body per the real schema (judgments/attempt_log for llm,
+    // mechanical object for mechanical) — recomputed from the producer's own
+    // pure functions (mergeDualJudgments / summarizeClassifierCosts /
+    // mechanicalExclude), never hand-written approximations.
+    for (const e of validateCheckpointBody(cp, f, { id, judgeModels, prompt: episode.prompt, seenRequestIds: globalSeenRequestIds })) {
+      fail(`classification ${id}: ${e}`);
+    }
+    finalsById.set(id, f);
+    fromCheckpointById.set(id, c.from_checkpoint === true);
+  }
+
+  // ── selected: rebuild the COMPLETE expected rows from hard.candidates +
+  // checkpoint finals via the SAME shared row construction the producer uses
+  // (buildSelectedRow + compareSelectedRows) — the validator never
+  // hand-writes an approximate row. from_checkpoint comes from the
+  // classification row (this run's source), not the stored final.
+  const expectedSelected = [];
+  for (const candidate of hard.candidates) {
+    const id = candidate.episode.episode_id;
+    const f = finalsById.get(id);
+    if (!f) continue; // checkpoint already failed above
+    if (f.replayable !== true) continue;
+    expectedSelected.push(buildSelectedRow(candidate, {
+      ...f,
+      from_checkpoint: fromCheckpointById.get(id) === true,
+    }));
+  }
+  expectedSelected.sort(compareSelectedRows);
+  if (selectedArr.length !== expectedSelected.length) {
+    fail(`selected.length ${selectedArr.length} != expected ${expectedSelected.length}`);
+  }
+  for (const s of selectedArr) {
+    if (!hardIds.has(s?.episode_id)) fail(`selected ${s?.episode_id} is not a hard-pass episode`);
+  }
+  for (let i = 0; i < expectedSelected.length; i++) {
+    const exp = expectedSelected[i];
+    const got = selectedArr[i];
+    if (!asRecord(got)) {
+      fail(`selected[${i}] must be an object`);
+      continue;
+    }
+    for (const key of Object.keys(exp)) {
+      if (!jsonSemanticEqual(got[key], exp[key])) {
+        fail(`selected[${i}].${key} ${JSON.stringify(got[key])} != selector construction ${JSON.stringify(exp[key])}`);
+      }
+    }
+    for (const key of Object.keys(got)) {
+      if (!(key in exp)) fail(`selected[${i}].${key} is not a selector-emitted field`);
+    }
+  }
+  if (episodeIds.length !== expectedSelected.length) fail(`episode_ids.length ${episodeIds.length} != expected selected ${expectedSelected.length}`);
+  for (let i = 0; i < expectedSelected.length; i++) {
+    if (episodeIds[i] !== expectedSelected[i].episode_id) {
+      fail(`episode_ids[${i}] ${JSON.stringify(episodeIds[i])} != expected selected order ${JSON.stringify(expectedSelected[i].episode_id)}`);
+    }
+  }
+
+  // ── excluded: rebuild the FULL expected array (hard exclusions in corpus
+  // order + non-replayable classification rows in hard-candidate order) ───
+  const expectedExcluded = hard.excluded.map((e) => ({
+    episode_id: e.episode_id,
+    stage: "hard",
+    reasons: e.reasons,
+    join_confidence: e.join_confidence,
+  }));
+  for (const candidate of hard.candidates) {
+    const id = candidate.episode.episode_id;
+    const f = finalsById.get(id);
+    if (!f) continue;
+    if (f.replayable === true) continue;
+    expectedExcluded.push(buildExcludedRow(candidate, {
+      ...f,
+      from_checkpoint: fromCheckpointById.get(id) === true,
+    }));
+  }
+  if (excludedArr.length !== expectedExcluded.length) {
+    fail(`excluded.length ${excludedArr.length} != expected ${expectedExcluded.length}`);
+  }
+  for (let i = 0; i < expectedExcluded.length; i++) {
+    const exp = expectedExcluded[i];
+    const got = excludedArr[i];
+    if (!asRecord(got)) {
+      fail(`excluded[${i}] must be an object`);
+      continue;
+    }
+    for (const key of Object.keys(exp)) {
+      if (!jsonSemanticEqual(got[key], exp[key])) {
+        fail(`excluded[${i}].${key} ${JSON.stringify(got[key])} != selector construction ${JSON.stringify(exp[key])}`);
+      }
+    }
+    for (const key of Object.keys(got)) {
+      if (!(key in exp)) fail(`excluded[${i}].${key} is not a selector-emitted field`);
+    }
+  }
+
+  // ── counts: rebuild every selector-emitted count and compare ───────────
+  const expectedCounts = {
+    source: episodes.length,
+    hard_pass: hard.hard_pass_count,
+    hard_pass_limited: hard.candidates.length,
+    classified: classificationsArr.length,
+    replayable: expectedSelected.length,
+    excluded: expectedExcluded.length,
+    data_insufficient: expectedSelected.length < 2,
+    join_hard_pass: { ...hard.join_tier },
+    join_selected: { exact: 0, heuristic: 0 },
+  };
+  for (const s of expectedSelected) {
+    if (s.join_confidence === "exact") expectedCounts.join_selected.exact += 1;
+    else if (s.join_confidence === "heuristic") expectedCounts.join_selected.heuristic += 1;
+  }
+  const counts = asRecord(manifest.counts) ? manifest.counts : {};
+  for (const key of Object.keys(expectedCounts)) {
+    if (JSON.stringify(counts[key]) !== JSON.stringify(expectedCounts[key])) {
+      fail(`counts.${key} ${JSON.stringify(counts[key])} != selector output ${JSON.stringify(expectedCounts[key])}`);
+    }
+  }
+  for (const key of Object.keys(counts)) {
+    if (!(key in expectedCounts)) fail(`counts.${key} is not a selector-emitted count`);
+  }
+
+  // ── top-level cost: deterministically rebuilt from the classification
+  // finals via the SAME pure helper the producer uses (buildManifestCostSummary)
+  // and deep-compared — a forged/derived cost summary cannot pass. ──────────
+  const expectedCostBreakdown = emptyCostBreakdown();
+  let expectedKnownTotal = 0;
+  let expectedHasUnknown = false;
+  for (const f of finalsById.values()) {
+    accumulateCostBreakdown(expectedCostBreakdown, f);
+    if (typeof f.known_total === "number") expectedKnownTotal += f.known_total;
+    else if (typeof f.cost === "number") expectedKnownTotal += f.cost;
+    if (f.has_unknown_cost === true || f.cost === null) expectedHasUnknown = true;
+  }
+  const expectedCost = buildManifestCostSummary({
+    cost_breakdown: expectedCostBreakdown,
+    known_total: expectedKnownTotal,
+    has_unknown_cost: expectedHasUnknown,
+  });
+  if (!jsonSemanticEqual(manifest.cost ?? null, expectedCost)) {
+    fail(`manifest cost does not match the classification finals (expected ${JSON.stringify(expectedCost)})`);
+  }
+
+  // ── exclusion_distribution: rebuild from the fresh hard distribution +
+  // non-replayable classification reasons per the selector's exact rule ───
+  const expectedDist = { ...hard.distribution };
+  for (const candidate of hard.candidates) {
+    const id = candidate.episode.episode_id;
+    const f = finalsById.get(id);
+    if (!f) continue;
+    if (f.replayable === true) continue;
+    const stage = f.stage === "mechanical" ? "mechanical" : "llm";
+    for (const reason of f.reasons ?? []) {
+      const key = reason.startsWith("mechanical_") || reason.startsWith("dual_judge_")
+        || reason.startsWith("either_") || reason.startsWith("judge_")
+        ? reason
+        : `${stage}_excluded`;
+      expectedDist[key] = (expectedDist[key] ?? 0) + 1;
+    }
+    expectedDist[`${stage}_total`] = (expectedDist[`${stage}_total`] ?? 0) + 1;
+  }
+  const dist = asRecord(manifest.exclusion_distribution) ? manifest.exclusion_distribution : {};
+  for (const key of Object.keys(expectedDist)) {
+    if (dist[key] !== expectedDist[key]) {
+      fail(`exclusion_distribution.${key} ${dist[key]} != selector output ${expectedDist[key]}`);
+    }
+  }
+  for (const key of Object.keys(dist)) {
+    if (!(key in expectedDist)) fail(`exclusion_distribution.${key} is not a selector-emitted key`);
+  }
+
+  return { ok: errors.length === 0, errors };
 }
 
 // ── mechanical hard exclude ───────────────────────────────────────────────
@@ -688,11 +1401,128 @@ export function accumulateCostBreakdown(into, part) {
   return into;
 }
 
+// ── shared manifest row construction (producer + validator use ONE code path) ─
+//
+// The real selector (selectFairReplayEpisodes / buildManifest) and the
+// provenance validator (validateFairManifestProvenance) build every manifest
+// row from these SAME helpers — the validator never hand-writes an
+// approximate row, so producer and validator can never drift apart.
+
+/**
+ * Classification manifest row — the fixed strict 10-key set emitted by the
+ * real selector: episode_id, stage, replayable, reasons, confidence,
+ * join_confidence, cost, cost_source, cost_breakdown, from_checkpoint.
+ * join_confidence is null (the checkpoint final carries no join field; the
+ * selector emits join only on selected/excluded rows).
+ */
+export function buildClassificationRow(final, { join_confidence = null } = {}) {
+  return {
+    episode_id: final.episode_id,
+    stage: final.stage,
+    replayable: final.replayable,
+    reasons: final.reasons,
+    confidence: final.confidence,
+    join_confidence: join_confidence ?? null,
+    cost: final.cost,
+    cost_source: final.cost_source ?? null,
+    cost_breakdown: final.cost_breakdown ?? null,
+    from_checkpoint: final.from_checkpoint === true,
+  };
+}
+
+/** Selected row — the real selector's exact construction. */
+export function buildSelectedRow(candidate, final) {
+  return {
+    episode_id: candidate.episode.episode_id,
+    models: candidate.models,
+    join_confidence: candidate.join_confidence,
+    tools: candidate.episode.tools,
+    stage: final.stage,
+    replayable: true,
+    confidence: final.confidence,
+    reasons: final.reasons,
+    flags: final.flags ?? null,
+    cost: final.cost,
+    cost_source: final.cost_source,
+    cost_breakdown: final.cost_breakdown,
+    from_checkpoint: final.from_checkpoint === true,
+  };
+}
+
+/** Non-hard excluded row (llm/mechanical classification exclusion). */
+export function buildExcludedRow(candidate, final) {
+  const stage = final.stage === "mechanical" ? "mechanical" : "llm";
+  return {
+    episode_id: candidate.episode.episode_id,
+    stage,
+    reasons: final.reasons,
+    join_confidence: candidate.join_confidence,
+    confidence: final.confidence,
+    flags: final.flags ?? null,
+    cost: final.cost,
+    cost_source: final.cost_source,
+    from_checkpoint: final.from_checkpoint === true,
+  };
+}
+
+/** Selected sort: exact join first, then confidence desc, then episode_id asc. */
+export function compareSelectedRows(a, b) {
+  const ae = a.join_confidence === "exact" ? 1 : 0;
+  const be = b.join_confidence === "exact" ? 1 : 0;
+  if (be !== ae) return be - ae;
+  const ac = typeof a.confidence === "number" ? a.confidence : 0;
+  const bc = typeof b.confidence === "number" ? b.confidence : 0;
+  if (bc !== ac) return bc - ac;
+  return a.episode_id < b.episode_id ? -1 : a.episode_id > b.episode_id ? 1 : 0;
+}
+
+/**
+ * Top-level manifest `cost` summary — deterministic from the accumulated
+ * classification cost_breakdown + known_total + has_unknown_cost. Shared by
+ * the producer (buildManifest) and the validator (which rebuilds it from the
+ * classification finals and deep-compares).
+ */
+export function buildManifestCostSummary({ cost_breakdown, known_total, has_unknown_cost }) {
+  const sources = [];
+  if ((cost_breakdown.provider ?? 0) > 0) sources.push("provider");
+  if ((cost_breakdown.estimated ?? 0) > 0) sources.push("estimated");
+  if ((cost_breakdown.unknown ?? 0) > 0 || has_unknown_cost) sources.push("unknown");
+  let cost_source = null;
+  if (sources.length === 1) cost_source = sources[0];
+  else if (sources.length > 1) cost_source = "mixed";
+  return {
+    // Numeric total only when every attempt cost is known; otherwise null
+    // so callers never treat unknown as 0.
+    total: has_unknown_cost ? null : known_total,
+    known_total,
+    has_unknown: has_unknown_cost,
+    currency: "USD",
+    source: cost_source,
+    breakdown: {
+      provider: cost_breakdown.provider ?? 0,
+      estimated: cost_breakdown.estimated ?? 0,
+      unknown: cost_breakdown.unknown ?? 0,
+    },
+    note: "classifier costs via summarizeCosts; provider/estimated/unknown breakdown; unknown never coerced into a fake zero total",
+  };
+}
+
 // ── single-judge LLM call ─────────────────────────────────────────────────
 
 /**
  * One classifier judge call with bounded content retry. The judge sees ONLY
  * the anonymous prompt (no tools beyond structured-output submit tool).
+ *
+ * Provider-call accounting: the actual request entries in each
+ * `callJudge(maxRetries:0)` result's `attempt_log` are the SOLE provider-call
+ * fact (0 or 1 per call). Each real entry keeps its request_id/usage/cost/
+ * cost_source/error_class; the classifier layer attaches the parse/schema/
+ * normalization outcome to the SAME entry — it never creates a new entry that
+ * drops request_id. Pre-request failures (invalid ref / model not found /
+ * auth — callJudge returns an empty ledger) return immediately with
+ * attempts=0 and an empty attempt_log: the failure is deterministic, so
+ * corrective/transport retries cannot help, and it is NOT a provider request
+ * / unknown-cost attempt.
  */
 export async function runClassifierJudge(invoker, modelRef, prompt, {
   maxRetries = CLASSIFIER_DEFAULT_MAX_RETRIES,
@@ -717,66 +1547,86 @@ export async function runClassifierJudge(invoker, modelRef, prompt, {
       tool,
       reasoning: thinking,
     });
-    const costInfo = attemptCost(modelRef, result.usage);
-    let parsed = result.structured && result.parsed ? result.parsed : null;
-    if (!parsed && result.ok && typeof result.text === "string") {
-      const extracted = parseJsonOutput(result.text);
-      parsed = extracted.parsed;
-    }
-    if (!result.ok || !parsed) {
-      const err = result.error ?? "unparseable classifier output";
-      attemptLog.push({
-        attempt,
+    // Pre-request failure (invalid ref / model not found / auth): NO actual
+    // provider request was made (empty ledger). The failure is deterministic
+    // — retrying cannot help — so return immediately with attempts=0 and an
+    // empty ledger (no fake unknown entries, no meaningless corrective retry).
+    if (result.attempt_log.length === 0) {
+      return {
         ok: false,
-        error: err,
-        error_class: result.errorClass ?? "content",
-        usage: result.usage,
-        cost: costInfo.cost,
-        cost_source: costInfo.source ?? "unknown",
-      });
-      lastError = err;
-      if (result.errorClass === "transport") {
-        if (attempt < maxRetries) await sleep(2_000 * 2 ** attempt + Math.floor(Math.random() * 500));
+        modelRef,
+        error: result.error ?? "pre-request failure",
+        judgment: null,
+        attempts: 0,
+        attempt_log: [],
+        cost: null,
+        cost_source: null,
+        cost_breakdown: emptyCostBreakdown(),
+      };
+    }
+    // The actual request entries in result.attempt_log are the SOLE
+    // provider-call fact (0 or 1 with maxRetries:0). Each keeps its
+    // request_id/usage/cost/cost_source/error_class; the classifier layer
+    // attaches the parse/schema/normalization outcome to the SAME entry.
+    for (const entry of result.attempt_log) {
+      let parsed = result.structured && result.parsed ? result.parsed : null;
+      if (!parsed && entry.ok && typeof result.text === "string") {
+        const extracted = parseJsonOutput(result.text);
+        parsed = extracted.parsed;
+      }
+      if (!entry.ok || !parsed) {
+        const err = entry.error ?? "unparseable classifier output";
+        attemptLog.push({
+          ...entry,
+          ok: false,
+          error: err,
+          error_class: entry.error_class ?? "content",
+          raw_output: summarizeFailedOutput(result),
+        });
+        lastError = err;
+        if (entry.error_class === "transport") {
+          if (attempt < maxRetries) await sleep(2_000 * 2 ** attempt + Math.floor(Math.random() * 500));
+          continue;
+        }
+        contentFailed = true;
         continue;
       }
-      contentFailed = true;
-      continue;
-    }
-    const normalized = normalizeClassifierJudgment(parsed);
-    if (!normalized.ok) {
+      const normalized = normalizeClassifierJudgment(parsed);
+      if (!normalized.ok) {
+        attemptLog.push({
+          ...entry,
+          ok: false,
+          error: normalized.errors.join("; "),
+          error_class: "content",
+          raw_output: summarizeFailedOutput(result),
+        });
+        lastError = normalized.errors.join("; ");
+        contentFailed = true;
+        continue;
+      }
       attemptLog.push({
-        attempt,
-        ok: false,
-        error: normalized.errors.join("; "),
-        error_class: "content",
-        usage: result.usage,
-        cost: costInfo.cost,
-        cost_source: costInfo.source ?? "unknown",
+        ...entry,
+        ok: true,
+        error: null,
+        error_class: null,
+        // The accepted output hash binds this request to the semantic
+        // judgment that was actually accepted (sha256 of the normalized
+        // judgment) — a relabelled/forged judgment can never pass the
+        // family validator's hash equality.
+        accepted_output_hash: sha256Hex(JSON.stringify(normalized.judgment)),
       });
-      lastError = normalized.errors.join("; ");
-      contentFailed = true;
-      continue;
+      const costSummary = summarizeCosts(attemptLog);
+      return {
+        ok: true,
+        modelRef,
+        judgment: normalized.judgment,
+        attempts: attemptLog.length,
+        attempt_log: attemptLog,
+        cost: costSummary.cost,
+        cost_source: costSummary.cost_source,
+        cost_breakdown: costSummary.cost_breakdown,
+      };
     }
-    attemptLog.push({
-      attempt,
-      ok: true,
-      error: null,
-      error_class: null,
-      usage: result.usage,
-      cost: costInfo.cost,
-      cost_source: costInfo.source ?? "unknown",
-    });
-    const costSummary = summarizeCosts(attemptLog);
-    return {
-      ok: true,
-      modelRef,
-      judgment: normalized.judgment,
-      attempts: attemptLog.length,
-      attempt_log: attemptLog,
-      cost: costSummary.cost,
-      cost_source: costSummary.cost_source,
-      cost_breakdown: costSummary.cost_breakdown,
-    };
   }
   const costSummary = summarizeCosts(attemptLog);
   return {
@@ -794,8 +1644,27 @@ export async function runClassifierJudge(invoker, modelRef, prompt, {
 
 // ── checkpoint ────────────────────────────────────────────────────────────
 
+/**
+ * Checkpoint ROOT → LEAF helper: the classifier checkpoint leaf directory
+ * under a checkpoint ROOT. Every checkpoint read/write resolves through this
+ * single helper (classifierCheckpointPath), so the root/leaf split can never
+ * drift: the ROOT is the directory the selector owns (--checkpoint-dir or the
+ * derived same-dir `checkpoints-fair`), the LEAF is `root/checkpoints` and
+ * holds the `<episode_id>.json` files directly. Provenance consumers
+ * (validateFairManifestProvenance / publishSelectionManifest) take the LEAF
+ * as their checkpointDir parameter — never the root.
+ */
+export function classifierCheckpointDir(outputDir) {
+  return path.join(outputDir, "checkpoints");
+}
+
 export function classifierCheckpointPath(outputDir, episodeId) {
-  return path.join(outputDir, "checkpoints", `${episodeId}.json`);
+  // The episode id becomes a filename component — the safe-id contract is
+  // enforced here so a traversal id (`../`, path separators, NUL, "." / "..")
+  // can never escape the checkpoint leaf; every read/write routes through this
+  // function and is rejected BEFORE any file is created or touched.
+  assertSafeEpisodeId(episodeId, { label: "classifierCheckpointPath episode_id" });
+  return path.join(classifierCheckpointDir(outputDir), `${episodeId}.json`);
 }
 
 /**
@@ -833,28 +1702,89 @@ export function validateFinalClassification(final, {
   return { ok: errors.length === 0, errors };
 }
 
+/**
+ * lstat probe for the checkpoint lifecycle: the DIRECT target is stat'ed
+ * (never followed), so a symlink — including a broken one — is an EXISTING
+ * entry, never a cache miss. ENOENT is the ONLY "missing" signal; any other
+ * stat error fails closed (an unreadable checkpoint entry must never be
+ * treated as absent and never overwritten). Returns { existing: false } or
+ * { existing: true, isFile, isSymbolicLink }.
+ */
+function probeCheckpointEntry(file) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (err) {
+    if (err && err.code === "ENOENT") return { existing: false };
+    throw new Error(
+      `t0-replay-fair: cannot stat checkpoint ${file}: ${err instanceof Error ? err.message : String(err)} `
+      + "(fail-closed: an unreadable checkpoint entry is never a cache miss and is never overwritten)",
+    );
+  }
+  return { existing: true, isFile: st.isFile(), isSymbolicLink: st.isSymbolicLink() };
+}
+
 export function loadClassifierCheckpoint(outputDir, episodeId, {
   prompt_hash,
   protocol_hash,
   judge_models,
   thinking,
+  prompt,
   schema_version = FAIR_SELECT_SCHEMA_VERSION,
+  seenRequestIds = null,
 }) {
   const file = classifierCheckpointPath(outputDir, episodeId);
-  if (!fs.existsSync(file)) return null;
+  // Fail-closed lifecycle: an EXISTING checkpoint is never a cache miss and
+  // never silently overwritten. Anything that is not a valid `completed`
+  // checkpoint under the CURRENT contract throws a clear error BEFORE any
+  // invoker/provider call — the recorded facts/cost on disk are never
+  // ignored and never duplicated by a re-call.
+  const refuse = (why) => {
+    throw new Error(
+      `t0-replay-fair: existing checkpoint ${file} (episode ${episodeId}) is ${why} — `
+      + `it is NOT a cache miss and will NOT be overwritten. Archive/move the checkpoint `
+      + `out of the active directory (preserving the recorded facts/cost) or use a fresh checkpoint dir before re-running.`,
+    );
+  };
+  // lstat the DIRECT target: ENOENT is the only cache miss; any other stat
+  // error fails closed above. An existing entry must be a REGULAR file — a
+  // symlink (including broken), directory or any other non-regular entry is
+  // refused BEFORE any read (readFileSync would follow the link; such an
+  // entry must never be resumable, never a cache miss, never overwritten).
+  const probe = probeCheckpointEntry(file);
+  if (!probe.existing) return null;
+  if (!probe.isFile) {
+    return refuse(probe.isSymbolicLink ? "a symlink (not a regular file — checkpoint links are never followed)" : "not a regular file");
+  }
   let cp;
   try {
     cp = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch {
-    return null;
+  } catch (err) {
+    return refuse(`malformed (invalid JSON: ${err.message})`);
   }
-  if (!asRecord(cp)) return null;
-  if (cp.schema_version !== schema_version) return null;
-  if (cp.episode_id !== episodeId) return null;
-  if (cp.prompt_hash !== prompt_hash) return null;
-  if (cp.protocol_hash !== protocol_hash) return null;
-  if (JSON.stringify(cp.judge_models ?? null) !== JSON.stringify(judge_models)) return null;
-  if (cp.thinking !== thinking) return null;
+  if (!asRecord(cp)) return refuse("not a JSON object");
+  // Ledger-format binding: only checkpoints written under the CURRENT
+  // ATTEMPT_LEDGER_VERSION are resumable — old checkpoints (no request_id
+  // identity in their attempt logs) must never mix into a new run.
+  if (cp.ledger_version !== ATTEMPT_LEDGER_VERSION) {
+    return refuse(`stale (ledger_version ${JSON.stringify(cp.ledger_version)} != current ${ATTEMPT_LEDGER_VERSION})`);
+  }
+  if (cp.schema_version !== schema_version) {
+    return refuse(`stale (schema_version ${JSON.stringify(cp.schema_version)} != current ${schema_version})`);
+  }
+  if (cp.episode_id !== episodeId) {
+    return refuse(`identity mismatch (checkpoint episode_id ${JSON.stringify(cp.episode_id)} != ${JSON.stringify(episodeId)})`);
+  }
+  if (cp.prompt_hash !== prompt_hash) return refuse("identity mismatch (prompt_hash does not match the real episode prompt)");
+  if (cp.protocol_hash !== protocol_hash) {
+    return refuse("stale (protocol_hash does not match the current classifier protocol — contract bump or protocol drift)");
+  }
+  if (JSON.stringify(cp.judge_models ?? null) !== JSON.stringify(judge_models)) {
+    return refuse(`identity mismatch (judge_models ${JSON.stringify(cp.judge_models)} != current ${JSON.stringify(judge_models)})`);
+  }
+  if (cp.thinking !== thinking) {
+    return refuse(`identity mismatch (thinking ${JSON.stringify(cp.thinking)} != current ${JSON.stringify(thinking)})`);
+  }
   const finalCheck = validateFinalClassification(cp.final, {
     prompt_hash,
     protocol_hash,
@@ -863,14 +1793,243 @@ export function loadClassifierCheckpoint(outputDir, episodeId, {
     episode_id: episodeId,
     schema_version,
   });
-  if (!finalCheck.ok) return null;
+  if (!finalCheck.ok) {
+    return refuse(`body invalid (checkpoint final fails validation: ${finalCheck.errors.slice(0, 5).join("; ")})`);
+  }
+  // FULL body validation before any resume: the checkpoint must be
+  // recomputable from the real request ledger (shared v2 validator per judge
+  // with the real modelRef + checkpoint-wide unique request_ids) AND from the
+  // real prompt (mechanicalExclude recompute). A fake v2 checkpoint —
+  // missing/duplicate request_id, forged cost/source, attempts mismatch —
+  // is never resumed. seenRequestIds (optional) is a caller-owned Set shared
+  // across MULTIPLE checkpoints: when provided, request_id uniqueness is
+  // enforced across the whole set (a request_id reused by two checkpoints
+  // fails closed); when absent, the standalone per-checkpoint semantics are
+  // unchanged.
+  const bodyErrors = validateCheckpointBody(cp, cp.final, {
+    id: episodeId,
+    judgeModels: judge_models,
+    prompt,
+    seenRequestIds,
+  });
+  if (bodyErrors.length > 0) {
+    return refuse(`body invalid (fails the recomputable classifier body contract: ${bodyErrors.slice(0, 5).join("; ")})`);
+  }
+  // State contract: ONLY completed checkpoints are resumable. A failed
+  // checkpoint (any judge without a valid judgment) is a terminal DIAGNOSTIC
+  // artifact — it is never resumed and never overwritten, and the judges are
+  // never re-called (that would duplicate paid facts).
+  if (cp.final.classification_status !== "completed") {
+    return refuse(
+      `a ${JSON.stringify(cp.final.classification_status)} diagnostic checkpoint (not resumable, not overwritable) — `
+      + "a failed classification is diagnostic-only evidence; re-calling the judges would duplicate paid facts",
+    );
+  }
   return cp;
 }
 
-export function saveClassifierCheckpoint(outputDir, episodeId, payload) {
-  const file = classifierCheckpointPath(outputDir, episodeId);
+/**
+ * Pure read-only preflight of the classifier checkpoint state for THIS run's
+ * hard candidates — computed with the SAME episodeIds / limit / strongRefs /
+ * specialists / downstreamJudges / judgeModels / thinking the real selector
+ * (selectFairReplayEpisodes) will use. For every hard candidate under
+ * outputDir:
+ *   - resume=true: loadClassifierCheckpoint — a missing checkpoint (cache
+ *     miss) and a valid `completed` checkpoint are allowed; a failed /
+ *     malformed / stale / identity-mismatched / body-invalid checkpoint
+ *     throws (the SAME fail-closed lifecycle the classifier itself uses).
+ *   - resume=false: ANY existing checkpoint throws (--no-resume must never
+ *     wipe recorded paid facts).
+ * No writes, no invoker, no provider calls — callers run this AFTER the full
+ * producer inventory passes and BEFORE makeJudgeInvoker, so a bad checkpoint
+ * for candidate B is discovered before candidate A sends any paid request.
+ * Legal checkpoints may be re-read freely (no caching needed). Returns
+ * { candidates, resumable } for callers that want the hard-candidate list /
+ * resumable count without re-running the gates.
+ */
+export function preflightClassifierCheckpoints(episodes, metaById, {
+  episodeIds = null,
+  limit = undefined,
+  outputDir,
+  resume = true,
+  judgeModels = CLASSIFIER_DEFAULT_JUDGES,
+  thinking = CLASSIFIER_DEFAULT_THINKING,
+  strongRefs = STRONG_REFERENCE_MODELS,
+  specialists = SPECIALIST_MODELS,
+  downstreamJudges = DEFAULT_DOWNSTREAM_JUDGES,
+} = {}) {
+  const protocol_hash = classifierProtocolHash();
+  const judges = requireExactlyTwoDistinctJudges(judgeModels, { label: "classifier-models" });
+  const downstream = requireDownstreamJudges(
+    Array.isArray(downstreamJudges) && downstreamJudges.length
+      ? downstreamJudges
+      : DEFAULT_DOWNSTREAM_JUDGES,
+    { label: "downstream-judges" },
+  );
+  const hard = selectHardCandidates(episodes, metaById, {
+    episodeIds,
+    limit,
+    strongRefs,
+    specialists,
+    downstreamJudges: downstream,
+  });
+  // Full unfiltered runs (no --episode filter and limit===undefined) own the
+  // whole active leaf: BEFORE reading any checkpoint, the leaf's direct
+  // `.json` entries must be regular files and each existing name must belong
+  // to this run's expected hard-candidate names (a subset is legal — missing
+  // candidates are cache misses; an EXTRA `.json` or a non-regular/symlink
+  // entry fails closed, exactly like the selector's publish/provenance
+  // inventory). Archive subdirectories and non-json auxiliary items are
+  // ignored. Filtered runs (--episode/--limit) skip the subset restriction:
+  // a target-recovery run must tolerate non-target checkpoints in the leaf
+  // (the per-candidate load still validates every existing target cp).
+  const unfiltered = (episodeIds === null || episodeIds === undefined || episodeIds.length === 0)
+    && limit === undefined;
+  if (unfiltered) {
+    const leaf = classifierCheckpointDir(outputDir);
+    if (fs.existsSync(leaf)) {
+      const expectedNames = new Set(hard.candidates.map((c) => `${c.episode.episode_id}.json`));
+      for (const entry of fs.readdirSync(leaf, { withFileTypes: true })) {
+        if (!entry.name.endsWith(".json")) continue; // archive dirs / non-json auxiliary ignored
+        if (!entry.isFile()) {
+          throw new Error(
+            `t0-replay-fair: checkpoint leaf ${leaf}: ${entry.name} is not a regular file `
+            + "(non-regular/symlink checkpoint entries fail closed on a full unfiltered run)",
+          );
+        }
+        if (!expectedNames.has(entry.name)) {
+          throw new Error(
+            `t0-replay-fair: checkpoint leaf ${leaf}: ${entry.name} is not a hard candidate of this run `
+            + "(extra checkpoint entries fail closed on a full unfiltered run; archive/move it out of the active directory)",
+          );
+        }
+      }
+    }
+  }
+  // request_id uniqueness is enforced ACROSS every existing target
+  // checkpoint of this run: one global Set is shared by all
+  // loadClassifierCheckpoint body validations, so a request_id reused by two
+  // checkpoints fails closed here — BEFORE any invoker/provider call.
+  const globalSeenRequestIds = new Set();
+  let resumable = 0;
+  for (const candidate of hard.candidates) {
+    const episodeId = candidate.episode.episode_id;
+    const pHash = promptHash(candidate.episode.prompt);
+    if (!resume) {
+      const existing = classifierCheckpointPath(outputDir, episodeId);
+      // lstat existence semantics: ANY entry at the target — including a
+      // broken symlink or directory — is an existing checkpoint that
+      // --no-resume refuses to overwrite; ENOENT alone is a fresh slot.
+      if (probeCheckpointEntry(existing).existing) {
+        throw new Error(
+          `t0-replay-fair: --no-resume refuses to overwrite existing checkpoint ${existing} (episode ${episodeId}). `
+          + "Paid classifier facts must never be wiped by --no-resume — archive/move the checkpoint out of the active directory (preserving the facts) or use a fresh checkpoint dir.",
+        );
+      }
+    } else {
+      const cp = loadClassifierCheckpoint(outputDir, episodeId, {
+        prompt_hash: pHash,
+        protocol_hash,
+        judge_models: judges,
+        thinking,
+        prompt: candidate.episode.prompt,
+        seenRequestIds: globalSeenRequestIds,
+      });
+      if (cp && asRecord(cp.final)) resumable += 1;
+    }
+  }
+  return { candidates: hard.candidates, resumable };
+}
+
+/**
+ * Best-effort directory fsync after the create-if-absent publish (the link
+ * itself is atomic; the dir fsync makes the new directory entry durable).
+ * Some platforms/filesystems refuse directory fsync — best-effort only.
+ */
+function fsyncDir(dir) {
+  let dfd = null;
+  try {
+    dfd = fs.openSync(dir, "r");
+    fs.fsyncSync(dfd);
+  } catch {
+    /* best-effort: directory fsync is not supported everywhere */
+  } finally {
+    if (dfd !== null) {
+      try { fs.closeSync(dfd); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * Same-directory atomic CREATE-IF-ABSENT publish: write the full content to
+ * a unique same-dir temp file, open/write/flush/fsync/close, then LINK the
+ * temp onto the target. link() is atomic and fails with EEXIST when the
+ * target already exists, so the race loser is rejected and an existing
+ * checkpoint (with its recorded paid facts) is NEVER overwritten. The temp
+ * is ALWAYS cleaned up (finally); a crash mid-write never leaves a partial
+ * file at the canonical path (only a fully-fsynced file is ever linked).
+ */
+function publishCheckpointAtomic(file, text) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`);
+  const dir = path.dirname(file);
+  const tmp = path.join(dir, `.${path.basename(file)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  let fd = null;
+  try {
+    fd = fs.openSync(tmp, "wx");
+    fs.writeFileSync(fd, text, "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    // Atomic create-if-absent: EEXIST → the race loser is rejected, the
+    // existing checkpoint (and the facts it records) is never replaced.
+    fs.linkSync(tmp, file);
+    fs.unlinkSync(tmp);
+    fsyncDir(dir);
+  } catch (err) {
+    if (err && err.code === "EEXIST") {
+      throw new Error(
+        `saveClassifierCheckpoint: refusing to overwrite existing checkpoint ${file} — atomic create-if-absent `
+        + "(a concurrent writer or an earlier save already published it; recorded facts are never replaced). "
+        + "Archive/move the checkpoint out of the active directory (preserving the facts) or use a fresh checkpoint dir.",
+      );
+    }
+    throw err;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* ignore */ }
+    }
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+export function saveClassifierCheckpoint(outputDir, episodeId, payload, { prompt = null } = {}) {
+  // Write-time self-assert: the body about to be written must satisfy the
+  // SAME pure contract loadClassifierCheckpoint / validateFairManifestProvenance
+  // enforce — recomputed from the REAL prompt (mechanicalExclude recompute),
+  // the REAL judge models and the REAL request ledger (per-judge
+  // validateAttemptLedgerV2 + dual-judge merge + cost/attempts rebuild). A
+  // producer bug is never persisted; mechanical checkpoints pass through the
+  // same mechanical branch of the contract. This is the pure contract check,
+  // never a write-then-reload approximation. It runs BEFORE the atomic
+  // publish, so a refused save never creates or touches any file.
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    throw new Error(`saveClassifierCheckpoint: ${episodeId} — the real prompt is required for the write-time body self-validation`);
+  }
+  const bodyErrors = validateCheckpointBody(payload, payload?.final, {
+    id: episodeId,
+    judgeModels: Array.isArray(payload?.judge_models) ? payload.judge_models : [],
+    prompt,
+  });
+  if (bodyErrors.length > 0) {
+    throw new Error(
+      `saveClassifierCheckpoint: refusing to write a checkpoint that fails the classifier body contract (${bodyErrors.length}): ${bodyErrors.slice(0, 5).join("; ")}`,
+    );
+  }
+  const file = classifierCheckpointPath(outputDir, episodeId);
+  publishCheckpointAtomic(file, `${JSON.stringify({
+    ledger_version: ATTEMPT_LEDGER_VERSION,
+    ...payload,
+  }, null, 2)}\n`);
   return file;
 }
 
@@ -879,6 +2038,7 @@ export function saveClassifierCheckpoint(outputDir, episodeId, payload) {
 function buildFinalRecord({
   episodeId,
   stage,
+  classification_status,
   replayable,
   reasons,
   confidence,
@@ -894,6 +2054,7 @@ function buildFinalRecord({
     schema_version: FAIR_SELECT_SCHEMA_VERSION,
     episode_id: episodeId,
     stage,
+    classification_status,
     replayable,
     reasons,
     confidence,
@@ -932,15 +2093,36 @@ export async function classifyCandidate(invoker, candidate, {
   const episodeId = episode.episode_id;
   const pHash = promptHash(episode.prompt);
 
-  if (outputDir && resume) {
-    const cp = loadClassifierCheckpoint(outputDir, episodeId, {
-      prompt_hash: pHash,
-      protocol_hash,
-      judge_models: judges,
-      thinking,
-    });
-    if (cp && asRecord(cp.final)) {
-      return { ...cp.final, from_checkpoint: true, checkpoint: cp };
+  if (outputDir) {
+    if (!resume) {
+      // --no-resume must NEVER wipe existing paid facts: an existing
+      // checkpoint (valid or invalid) is refused BEFORE any invoker/provider
+      // call — re-classifying would duplicate paid judge calls and
+      // overwriting would erase the recorded cost/request_ids. lstat
+      // existence semantics: ANY entry at the target — including a broken
+      // symlink or directory — is existing; ENOENT alone is a fresh slot.
+      const existing = classifierCheckpointPath(outputDir, episodeId);
+      if (probeCheckpointEntry(existing).existing) {
+        throw new Error(
+          `t0-replay-fair: --no-resume refuses to overwrite existing checkpoint ${existing} (episode ${episodeId}). `
+          + "Paid classifier facts must never be wiped by --no-resume — archive/move the checkpoint out of the active directory (preserving the facts) or use a fresh checkpoint dir.",
+        );
+      }
+    } else {
+      // resume: a valid `completed` checkpoint under the CURRENT contract is
+      // a 0-call hit. Any EXISTING checkpoint that is malformed / stale /
+      // identity-mismatched / body-invalid / a valid `failed` diagnostic
+      // throws BEFORE any invoker/provider call — never a cache miss.
+      const cp = loadClassifierCheckpoint(outputDir, episodeId, {
+        prompt_hash: pHash,
+        protocol_hash,
+        judge_models: judges,
+        thinking,
+        prompt: episode.prompt,
+      });
+      if (cp && asRecord(cp.final)) {
+        return { ...cp.final, from_checkpoint: true, checkpoint: cp };
+      }
     }
   }
 
@@ -956,6 +2138,7 @@ export async function classifyCandidate(invoker, candidate, {
     const final = buildFinalRecord({
       episodeId,
       stage: "mechanical",
+      classification_status: "completed",
       replayable: false,
       reasons: mechanical.reasons,
       confidence: 1,
@@ -978,7 +2161,7 @@ export async function classifyCandidate(invoker, candidate, {
         mechanical,
         final,
         saved_at: new Date().toISOString(),
-      });
+      }, { prompt: episode.prompt });
     }
     return final;
   }
@@ -1008,6 +2191,7 @@ export async function classifyCandidate(invoker, candidate, {
     const final = buildFinalRecord({
       episodeId,
       stage: "llm",
+      classification_status: "failed",
       replayable: false,
       reasons: ["judge_call_failed", ...normed.flatMap((n) => n.errors ?? [])],
       confidence: 0,
@@ -1020,6 +2204,11 @@ export async function classifyCandidate(invoker, candidate, {
       extra: {
         mechanical,
         attempt_log,
+        // A failed final carries NO merged flags/disagreement/judgments —
+        // the partial success judgment(s) live in the checkpoint body only.
+        flags: null,
+        disagreement: null,
+        judgments: null,
       },
     });
     if (outputDir) {
@@ -1035,7 +2224,7 @@ export async function classifyCandidate(invoker, candidate, {
         attempt_log,
         final,
         saved_at: new Date().toISOString(),
-      });
+      }, { prompt: episode.prompt });
     }
     return final;
   }
@@ -1048,6 +2237,7 @@ export async function classifyCandidate(invoker, candidate, {
   const final = buildFinalRecord({
     episodeId,
     stage: "llm",
+    classification_status: "completed",
     replayable: merged.replayable === true,
     reasons: merged.reasons,
     confidence: merged.confidence,
@@ -1082,7 +2272,7 @@ export async function classifyCandidate(invoker, candidate, {
       cost_breakdown: final.cost_breakdown,
       final,
       saved_at: new Date().toISOString(),
-    });
+    }, { prompt: episode.prompt });
   }
   return final;
 }
@@ -1194,7 +2384,7 @@ export async function selectFairReplayEpisodes(episodes, metaById, {
     throw new Error("selectFairReplayEpisodes: invoker is required when classify=true");
   }
 
-  if (outputDir) fs.mkdirSync(path.join(outputDir, "checkpoints"), { recursive: true });
+  if (outputDir) fs.mkdirSync(classifierCheckpointDir(outputDir), { recursive: true });
 
   const results = await mapPool(hard.candidates, concurrency, async (candidate) => {
     if (!quiet) {
@@ -1211,6 +2401,24 @@ export async function selectFairReplayEpisodes(episodes, metaById, {
     });
   });
 
+  // Fail-closed state gate: every hard candidate classification must be
+  // completed (checkpoints already saved above). Any failed classification
+  // aborts the whole selection with a clear error — a failed episode must
+  // never be silently dropped as an ordinary exclusion, and a partial
+  // manifest must never be returned. hard-only (classify=false) is
+  // unaffected.
+  const failedResults = results
+    .map((r, i) => ({ r, candidate: hard.candidates[i] }))
+    .filter(({ r }) => r.classification_status !== "completed");
+  if (failedResults.length > 0) {
+    const summary = failedResults
+      .map(({ r, candidate }) => `${candidate.episode.episode_id}: ${(r.reasons ?? []).join("; ")}`)
+      .join(" | ");
+    throw new Error(
+      `selectFairReplayEpisodes: ${failedResults.length} classification(s) failed (fail-closed; no partial manifest): ${summary}`,
+    );
+  }
+
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     const candidate = hard.candidates[i];
@@ -1221,34 +2429,10 @@ export async function selectFairReplayEpisodes(episodes, metaById, {
     if (r.has_unknown_cost === true || r.cost === null) has_unknown_cost = true;
     classifications.push(r);
     if (r.replayable === true) {
-      selected.push({
-        episode_id: candidate.episode.episode_id,
-        models: candidate.models,
-        join_confidence: candidate.join_confidence,
-        tools: candidate.episode.tools,
-        stage: r.stage,
-        replayable: true,
-        confidence: r.confidence,
-        reasons: r.reasons,
-        flags: r.flags ?? null,
-        cost: r.cost,
-        cost_source: r.cost_source,
-        cost_breakdown: r.cost_breakdown,
-        from_checkpoint: r.from_checkpoint === true,
-      });
+      selected.push(buildSelectedRow(candidate, r));
     } else {
       const stage = r.stage === "mechanical" ? "mechanical" : "llm";
-      excluded.push({
-        episode_id: candidate.episode.episode_id,
-        stage,
-        reasons: r.reasons,
-        join_confidence: candidate.join_confidence,
-        confidence: r.confidence,
-        flags: r.flags ?? null,
-        cost: r.cost,
-        cost_source: r.cost_source,
-        from_checkpoint: r.from_checkpoint === true,
-      });
+      excluded.push(buildExcludedRow(candidate, r));
       for (const reason of r.reasons) {
         const key = reason.startsWith("mechanical_") || reason.startsWith("dual_judge_")
           || reason.startsWith("either_") || reason.startsWith("judge_")
@@ -1261,15 +2445,7 @@ export async function selectFairReplayEpisodes(episodes, metaById, {
   }
 
   // Final stratification: exact join first, then classifier confidence desc.
-  selected.sort((a, b) => {
-    const ae = a.join_confidence === "exact" ? 1 : 0;
-    const be = b.join_confidence === "exact" ? 1 : 0;
-    if (be !== ae) return be - ae;
-    const ac = typeof a.confidence === "number" ? a.confidence : 0;
-    const bc = typeof b.confidence === "number" ? b.confidence : 0;
-    if (bc !== ac) return bc - ac;
-    return a.episode_id.localeCompare(b.episode_id);
-  });
+  selected.sort(compareSelectedRows);
 
   return buildManifest({
     episodes,
@@ -1309,13 +2485,7 @@ function buildManifest({
   classify,
   data_insufficient,
 }) {
-  const sources = [];
-  if ((cost_breakdown.provider ?? 0) > 0) sources.push("provider");
-  if ((cost_breakdown.estimated ?? 0) > 0) sources.push("estimated");
-  if ((cost_breakdown.unknown ?? 0) > 0 || has_unknown_cost) sources.push("unknown");
-  let cost_source = null;
-  if (sources.length === 1) cost_source = sources[0];
-  else if (sources.length > 1) cost_source = "mixed";
+  const cost = buildManifestCostSummary({ cost_breakdown, known_total, has_unknown_cost });
 
   const join_selected = { exact: 0, heuristic: 0 };
   for (const s of selected) {
@@ -1345,34 +2515,9 @@ function buildManifest({
       join_selected,
     },
     exclusion_distribution,
-    cost: {
-      // Numeric total only when every attempt cost is known; otherwise null
-      // so callers never treat unknown as 0.
-      total: has_unknown_cost ? null : known_total,
-      known_total,
-      has_unknown: has_unknown_cost,
-      currency: "USD",
-      source: cost_source,
-      breakdown: {
-        provider: cost_breakdown.provider ?? 0,
-        estimated: cost_breakdown.estimated ?? 0,
-        unknown: cost_breakdown.unknown ?? 0,
-      },
-      note: "classifier costs via summarizeCosts; provider/estimated/unknown breakdown; unknown never coerced into a fake zero total",
-    },
+    cost,
     selected,
     excluded,
-    classifications: classifications.map((c) => ({
-      episode_id: c.episode_id,
-      stage: c.stage,
-      replayable: c.replayable,
-      reasons: c.reasons,
-      confidence: c.confidence,
-      join_confidence: c.join_confidence ?? null,
-      cost: c.cost,
-      cost_source: c.cost_source ?? null,
-      cost_breakdown: c.cost_breakdown ?? null,
-      from_checkpoint: c.from_checkpoint === true,
-    })),
+    classifications: classifications.map((c) => buildClassificationRow(c)),
   };
 }

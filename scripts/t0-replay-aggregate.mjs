@@ -7,106 +7,174 @@
  *
  *   - replay.slots: per-model replay vs historical candidate slots (from the
  *     replay sidecar's source.kind)
- *   - replay.calls: replay call attempts/cost/failures (from the replay
- *     sidecar's replay.attempt_log) — the replay build's own spend, separate
- *     from the judge spend
+ *   - replay.calls: replay call attempts/cost/failures recomputed from the
+ *     verified attempt_log ledgers (ternary known_cost / cost_complete /
+ *     cost) — the replay build's own spend, separate from the judge spend
  *   - replay.source_episodes: source episode -> replay episode mapping
  *
- * The existing 48-episode production record is NEVER touched: this command
- * reads only the replay dataset + replay eval output.
+ * Corpus input is ONLY a committed replay dataset via `--dataset <dir>`:
+ * bare --episodes/--meta paths are rejected. Eval input is a committed
+ * replay eval generation bound to the same dataset generation id.
  *
  * Usage:
- *   node scripts/t0-replay-aggregate.mjs [options]
+ *   node scripts/t0-replay-aggregate.mjs --dataset <committed-replay-dir> [options]
  *
  * Options:
- *   --episodes <path>   replay episodes.jsonl (default:
- *                       ~/.pi/.pi-astack/t0-replay/episodes.jsonl)
- *   --meta <path>       replay episodes.meta.jsonl sidecar (default: same dir)
+ *   --dataset <dir>     committed replay dataset directory (default:
+ *                       ~/.pi/.pi-astack/t0-replay)
  *   --eval <dir>        evaluation output dir (default:
  *                       ~/.pi/.pi-astack/t0-replay-eval)
  *   --output <path>     aggregate output file (default: <eval>/aggregate.json)
  *   --quiet             suppress per-model lines
  */
 
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { parseCli, loadEpisodes, writeJsonFile } from "./t0-eval-common.mjs";
+import {
+  loadCommittedEvalGeneration,
+  writeJsonFile,
+  resolveJudgeModels,
+  REPLAY_EVAL_JUDGE_MODELS_CSV,
+} from "./t0-eval-common.mjs";
 import { aggregate } from "./t0-eval-aggregate.mjs";
-import { REPLAY_SCHEMA_VERSION } from "./t0-replay-build.mjs";
+import {
+  REPLAY_SCHEMA_VERSION,
+  loadCommittedReplayDataset,
+  summarizeReplayCallsFromMeta,
+} from "./t0-replay-build.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function parseArgs(argv) {
-  const args = parseCli(argv);
+/**
+ * Pure arg normalizer for t0-replay-aggregate (no I/O, no process.exit) —
+ * the single authority the CLI and offline smoke tests share.
+ *
+ * Contract:
+ *   - `--dataset <dir>` is the ONLY corpus input (default may remain);
+ *   - `--episodes` / `--meta` and their `=` forms are REJECTED;
+ *   - value-less / duplicate `--dataset` / `--eval` / `--output` fail closed;
+ *   - `--eval` / `--output` / `--quiet` retained.
+ */
+export function normalizeReplayAggregateArgs(argv) {
+  if (!Array.isArray(argv)) {
+    throw new Error("normalizeReplayAggregateArgs: argv must be an array");
+  }
+  let datasetDir = null;
+  let evalDir = null;
+  let output = null;
+  let quiet = false;
+  let quietSeen = false;
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (token.startsWith("--dataset=")) {
+      throw new Error("t0-replay-aggregate rejects --dataset=<dir> (use --dataset <dir>)");
+    }
+    if (token.startsWith("--episodes=")) {
+      throw new Error("t0-replay-aggregate rejects --episodes=<path> (the corpus is ONLY the committed replay dataset via --dataset)");
+    }
+    if (token.startsWith("--meta=")) {
+      throw new Error("t0-replay-aggregate rejects --meta=<path> (the corpus is ONLY the committed replay dataset via --dataset)");
+    }
+    if (token.startsWith("--eval=")) {
+      throw new Error("t0-replay-aggregate rejects --eval=<dir> (use --eval <dir>)");
+    }
+    if (token.startsWith("--output=")) {
+      throw new Error("t0-replay-aggregate rejects --output=<path> (use --output <path>)");
+    }
+    if (token === "--dataset") {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        throw new Error("--dataset requires a directory path");
+      }
+      if (datasetDir !== null) {
+        throw new Error("--dataset must be specified exactly once");
+      }
+      datasetDir = path.resolve(next);
+      i++;
+      continue;
+    }
+    if (token === "--episodes") {
+      throw new Error("t0-replay-aggregate rejects --episodes (the corpus is ONLY the committed replay dataset via --dataset)");
+    }
+    if (token === "--meta") {
+      throw new Error("t0-replay-aggregate rejects --meta (the corpus is ONLY the committed replay dataset via --dataset)");
+    }
+    if (token === "--eval") {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        throw new Error("--eval requires a directory path");
+      }
+      if (evalDir !== null) {
+        throw new Error("--eval must be specified exactly once");
+      }
+      evalDir = path.resolve(next);
+      i++;
+      continue;
+    }
+    if (token === "--output") {
+      const next = argv[i + 1];
+      if (next === undefined || next.startsWith("--")) {
+        throw new Error("--output requires a path");
+      }
+      if (output !== null) {
+        throw new Error("--output must be specified exactly once");
+      }
+      output = path.resolve(next);
+      i++;
+      continue;
+    }
+    if (token === "--quiet") {
+      if (quietSeen) {
+        throw new Error("--quiet must be specified at most once");
+      }
+      quietSeen = true;
+      quiet = true;
+      continue;
+    }
+    throw new Error(`t0-replay-aggregate: unknown argument ${JSON.stringify(token)}`);
+  }
   const home = path.resolve(process.env.HOME || os.homedir());
-  const episodesPath = args.episodes ? path.resolve(args.episodes) : path.join(home, ".pi", ".pi-astack", "t0-replay", "episodes.jsonl");
-  const metaPath = args.meta ? path.resolve(args.meta) : path.join(path.dirname(episodesPath), "episodes.meta.jsonl");
-  const evalDir = args.eval ? path.resolve(args.eval) : path.join(home, ".pi", ".pi-astack", "t0-replay-eval");
+  const resolvedDataset = datasetDir ?? path.join(home, ".pi", ".pi-astack", "t0-replay");
+  const resolvedEval = evalDir ?? path.join(home, ".pi", ".pi-astack", "t0-replay-eval");
   return {
-    episodesPath,
-    metaPath,
-    evalDir,
-    output: args.output ? path.resolve(args.output) : path.join(evalDir, "aggregate.json"),
-    quiet: args.quiet === true,
+    datasetDir: resolvedDataset,
+    evalDir: resolvedEval,
+    output: output ?? path.join(resolvedEval, "aggregate.json"),
+    quiet,
   };
 }
 
-function loadMeta(metaPath) {
-  if (!fs.existsSync(metaPath)) throw new Error(`meta sidecar not found: ${metaPath}`);
-  const records = [];
-  for (const line of fs.readFileSync(metaPath, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-    } catch {
-      /* skip malformed lines */
-    }
-  }
-  return records;
-}
-
-function loadEvalRecords(evalDir) {
-  const records = [];
-  const evalSub = path.join(evalDir, "eval");
-  if (fs.existsSync(evalSub)) {
-    for (const name of fs.readdirSync(evalSub)) {
-      if (!name.endsWith(".json")) continue;
-      try {
-        const row = JSON.parse(fs.readFileSync(path.join(evalSub, name), "utf8"));
-        if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-      } catch {
-        /* skip */
-      }
-    }
-  }
-  if (records.length > 0) return records;
-  const indexFile = path.join(evalDir, "eval-index.jsonl");
-  if (fs.existsSync(indexFile)) {
-    for (const line of fs.readFileSync(indexFile, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const row = JSON.parse(line);
-        if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-      } catch {
-        /* skip */
-      }
-    }
-  }
-  return records;
+/**
+ * Load the full per-episode replay evaluation records — the ONLY evidence
+ * the CLI accepts. Reuses the shared fail-closed committed generation loader
+ * (loadCommittedEvalGeneration) bound to the committed replay dataset
+ * generation id + fixed replay judge roles: a missing summary.json returns
+ * null; a present ordinary (non-replay) generation, wrong generation id, or
+ * markerless dir is rejected. ONLY manifest-listed records are read.
+ */
+export function loadCommittedReplayEvalGeneration(evalDir, episodes, {
+  expectedReplayDatasetGenerationId = null,
+  expectedJudgeModels = null,
+} = {}) {
+  const committed = loadCommittedEvalGeneration(evalDir, {
+    episodes,
+    expectedReplayDatasetGenerationId,
+    expectedJudgeModels,
+    expectedGenerationKind: "replay",
+  });
+  return committed;
 }
 
 /**
  * Replay-specific reporting from the replay sidecar: per-model replay vs
- * historical slots, replay call attempts/cost/failures, and the source
- * episode mapping.
+ * historical slots, replay call attempts/cost/failures recomputed from
+ * verified attempt_log ledgers (ternary known_cost/cost_complete/cost),
+ * and the source episode mapping.
  */
 export function replayReport(metaRecords) {
   const slots = {}; // model -> { replay: n, historical: n }
-  const calls = { total: 0, ok: 0, failed: 0, attempts: 0, cost: 0, cost_source: null, by_model: {} };
   const sourceEpisodes = [];
   let historyExcluded = false;
   let experimentMode = null;
@@ -128,29 +196,11 @@ export function replayReport(metaRecords) {
       const m = slots[model] ?? { replay: 0, historical: 0 };
       if (slot.in_body === true) m[kind]++;
       slots[model] = m;
-      const r = slot.replay;
-      if (!r) continue;
-      calls.total++;
-      if (slot.in_body === true) calls.ok++;
-      else calls.failed++;
-      calls.attempts += typeof r.attempts === "number" ? r.attempts : 0;
-      calls.cost += typeof r.cost === "number" ? r.cost : 0;
-      const cm = calls.by_model[model] ?? { total: 0, ok: 0, failed: 0, attempts: 0, cost: 0 };
-      cm.total++;
-      if (slot.in_body === true) cm.ok++;
-      else cm.failed++;
-      cm.attempts += typeof r.attempts === "number" ? r.attempts : 0;
-      cm.cost += typeof r.cost === "number" ? r.cost : 0;
-      calls.by_model[model] = cm;
     }
   }
-  const costSources = new Set();
-  for (const meta of metaRecords) {
-    for (const slot of meta.slots ?? []) {
-      if (typeof slot.replay?.cost_source === "string") costSources.add(slot.replay.cost_source);
-    }
-  }
-  calls.cost_source = costSources.size === 0 ? null : costSources.size === 1 ? [...costSources][0] : "mixed";
+  // Shared pure helper: recompute from attempt_log ledgers only — never
+  // trust r.cost / r.attempts aggregates. Slot-level r.cost is untouched.
+  const calls = summarizeReplayCallsFromMeta(metaRecords);
   return {
     slots,
     calls,
@@ -242,13 +292,43 @@ export function pairedCurrentOnlyReport(metaRecords, evalRecords, episodes, base
   };
 }
 
-function main() {
-  const options = parseArgs(process.argv.slice(2));
-  const episodes = loadEpisodes(options.episodesPath);
-  const metaRecords = loadMeta(options.metaPath);
-  const evalRecords = loadEvalRecords(options.evalDir);
+async function main() {
+  let options;
+  try {
+    options = normalizeReplayAggregateArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`t0-replay-aggregate: ${err.message}`);
+    process.exit(2);
+  }
+  // Committed corpus only — never bare-read episodes/meta/stats.
+  const loaded = await loadCommittedReplayDataset(options.datasetDir);
+  if (loaded === null) {
+    console.error(`t0-replay-aggregate: no committed replay dataset found in ${options.datasetDir} (dataset.commit.json missing — public files without a commit marker are never evidence)`);
+    process.exit(2);
+  }
+  const { episodes, meta: metaRecords, generationId } = loaded;
+  if (!Array.isArray(episodes) || episodes.length === 0) {
+    console.error(`t0-replay-aggregate: committed replay dataset has zero body episodes in ${options.datasetDir}`);
+    process.exit(2);
+  }
+  const expectedJudgeModels = resolveJudgeModels(REPLAY_EVAL_JUDGE_MODELS_CSV);
+  let committedEval;
+  try {
+    committedEval = loadCommittedReplayEvalGeneration(options.evalDir, episodes, {
+      expectedReplayDatasetGenerationId: generationId,
+      expectedJudgeModels,
+    });
+  } catch (err) {
+    console.error(`t0-replay-aggregate: ${err.message}`);
+    process.exit(2);
+  }
+  if (committedEval === null) {
+    console.error(`t0-replay-aggregate: no committed evaluation generation found in ${options.evalDir} (summary.json missing — eval records without a commit marker are never evidence)`);
+    process.exit(2);
+  }
+  const evalRecords = committedEval.records;
   if (evalRecords.length === 0) {
-    console.error(`t0-replay-aggregate: no evaluation records found in ${options.evalDir}`);
+    console.error(`t0-replay-aggregate: committed generation has zero evaluation records in ${options.evalDir}`);
     process.exit(2);
   }
   const base = aggregate(evalRecords, episodes, metaRecords);
@@ -256,6 +336,8 @@ function main() {
   const result = {
     ...base,
     replay_schema_version: REPLAY_SCHEMA_VERSION,
+    replay_dataset_generation_id: generationId,
+    eval_generation_id: committedEval.summary.generation_id,
     replay,
   };
   const isCurrentOnly = replay.history_excluded === true
@@ -278,7 +360,11 @@ function main() {
       console.log(`  ${m.model}: slots=${m.candidate_slots} (replay=${r.replay}, historical=${r.historical}) correct=${c.correct} partial=${c.partially_correct} incorrect=${c.incorrect} unresolved=${c.unresolved} unsupported=${m.claims.unsupported} contradicted=${m.claims.contradicted} unique=${m.unique_valid_contribution} net+=${m.counterfactual_net_value.positive}`);
     }
     const calls = result.replay.calls;
-    console.log(`replay calls: ${calls.total} (ok=${calls.ok}, failed=${calls.failed}, attempts=${calls.attempts}), cost=$${calls.cost.toFixed(4)} (${calls.cost_source ?? "n/a"})`);
+    // Never call .toFixed on a null cost — print known / incomplete explicitly.
+    const costLine = calls.cost_complete
+      ? `cost=$${Number(calls.known_cost).toFixed(4)} (${calls.cost_source ?? "n/a"})`
+      : `cost=incomplete known=$${Number(calls.known_cost).toFixed(4)} unknown_attempts=${calls.unknown_attempts} (${calls.cost_source ?? "n/a"})`;
+    console.log(`replay calls: ${calls.total} (ok=${calls.ok}, failed=${calls.failed}, attempts=${calls.attempts}), ${costLine}`);
     if (result.paired_current_only) {
       const p = result.paired_current_only;
       console.log(`paired current-only: n=${p.paired_n} unpaired=${p.unpaired_n} family_overlap=${p.family_overlap.present} (${p.family_overlap.families.join(",") || "none"})`);
@@ -298,5 +384,8 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  main().catch((err) => {
+    console.error(`t0-replay-aggregate failed: ${err.message}`);
+    process.exit(1);
+  });
 }

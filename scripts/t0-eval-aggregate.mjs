@@ -35,7 +35,6 @@
  *   --quiet             suppress per-model lines
  */
 
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,13 +43,59 @@ import {
   EVAL_SCHEMA_VERSION,
   parseCli,
   loadEpisodes,
+  loadMetaStrict,
+  assertProducerBodyEpisodes,
+  loadCommittedEvalGeneration,
   writeJsonFile,
   normalizeNoiseType,
 } from "./t0-eval-common.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
+  // Strict raw-argv gate BEFORE any parseCli / default resolution: known
+  // `--flag=value` forms, unknown flags, positional tokens, repeated flags,
+  // value-less value flags and quiet-with-value are ALL rejected — a
+  // malformed argv can never silently fall back to the production defaults
+  // (e.g. `--eval=/tmp/e` must fail before any read/write, never read the
+  // default ~/.pi/.pi-astack/t0-eval). Legal space-form flags are unchanged.
+  const KNOWN_FLAGS = new Set(["episodes", "meta", "eval", "output", "quiet"]);
+  const VALUE_FLAGS = new Set(["episodes", "meta", "eval", "output"]);
+  const seen = new Set();
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    if (typeof token !== "string" || !token.startsWith("--")) {
+      throw new Error(`t0-eval-aggregate rejects positional/unknown argument ${JSON.stringify(token)}`);
+    }
+    const eq = token.indexOf("=");
+    if (eq !== -1) {
+      const name = token.slice(2, eq);
+      if (KNOWN_FLAGS.has(name)) {
+        throw new Error(`t0-eval-aggregate rejects --${name}=… (use --${name} <value>)`);
+      }
+      throw new Error(`t0-eval-aggregate rejects unknown flag ${JSON.stringify(token)}`);
+    }
+    const name = token.slice(2);
+    if (!KNOWN_FLAGS.has(name)) {
+      throw new Error(`t0-eval-aggregate rejects unknown flag --${name}`);
+    }
+    if (seen.has(name)) {
+      throw new Error(`t0-eval-aggregate rejects repeated flag --${name}`);
+    }
+    seen.add(name);
+    if (VALUE_FLAGS.has(name)) {
+      const next = argv[i + 1];
+      if (next === undefined || (typeof next === "string" && next.startsWith("--"))) {
+        throw new Error(`t0-eval-aggregate: --${name} requires a value`);
+      }
+      i++;
+    } else if (name === "quiet") {
+      const next = argv[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        throw new Error("t0-eval-aggregate: --quiet does not take a value");
+      }
+    }
+  }
   const args = parseCli(argv);
   const home = path.resolve(process.env.HOME || os.homedir());
   const episodesPath = args.episodes ? path.resolve(args.episodes) : path.join(home, ".pi", ".pi-astack", "t0-episodes", "episodes.jsonl");
@@ -65,52 +110,28 @@ function parseArgs(argv) {
   };
 }
 
-function loadMeta(metaPath) {
-  if (!fs.existsSync(metaPath)) throw new Error(`meta sidecar not found: ${metaPath}`);
-  const records = [];
-  for (const line of fs.readFileSync(metaPath, "utf8").split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const row = JSON.parse(line);
-      if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-    } catch {
-      /* skip malformed lines */
-    }
+/**
+ * Load the full per-episode evaluation records for aggregation — the ONLY
+ * evidence the CLI accepts. Reuses the shared fail-closed committed
+ * generation loader (loadCommittedEvalGeneration): a missing summary.json
+ * (no committed generation) returns null; a present manifest is strict
+ * (closed key sets, record bytes/hashes, records_digest, index, totals,
+ * cross-record request_id uniqueness) and ONLY manifest-listed records are
+ * read. The eval-index.jsonl summary-only fallback is GONE — an index is
+ * not capability/cost evidence, and a bare raw scan is never evidence.
+ */
+export function loadEvalRecords(evalDir, episodes) {
+  // Normal aggregate: ONLY a t0_eval_generation commit is evidence. A replay
+  // generation (kind t0_replay_eval_generation) is rejected via the kind gate
+  // even when the corpus digests happen to match.
+  const committed = loadCommittedEvalGeneration(evalDir, {
+    episodes,
+    expectedGenerationKind: "normal",
+  });
+  if (committed && committed.summary?.kind !== "t0_eval_generation") {
+    throw new Error(`loadEvalRecords: expected summary.kind "t0_eval_generation", got ${JSON.stringify(committed.summary?.kind)}`);
   }
-  return records;
-}
-
-function loadEvalRecords(evalDir) {
-  const records = [];
-  // Primary source: the full per-episode records (with stages). The index is
-  // a summary and may be clobbered by a later resume run on a subset.
-  const evalSub = path.join(evalDir, "eval");
-  if (fs.existsSync(evalSub)) {
-    for (const name of fs.readdirSync(evalSub)) {
-      if (!name.endsWith(".json")) continue;
-      try {
-        const row = JSON.parse(fs.readFileSync(path.join(evalSub, name), "utf8"));
-        if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-      } catch {
-        /* skip */
-      }
-    }
-  }
-  if (records.length > 0) return records;
-  // Fallback: index entries (summary-only, no stages) when eval/ is absent.
-  const indexFile = path.join(evalDir, "eval-index.jsonl");
-  if (fs.existsSync(indexFile)) {
-    for (const line of fs.readFileSync(indexFile, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const row = JSON.parse(line);
-        if (row && typeof row === "object" && typeof row.episode_id === "string") records.push(row);
-      } catch {
-        /* skip */
-      }
-    }
-  }
-  return records;
+  return committed ? committed.records : null;
 }
 
 /** Count availability slots from the given meta records. */
@@ -154,7 +175,10 @@ export function aggregate(evalRecords, episodes, metaRecords) {
       slotToCandidate.set(`${ep.episode_id}\0${slot.slot_id}`, slot.model_id);
     }
   }
-  // Map candidate_id -> real model per episode from the sidecar.
+  // Map candidate_id -> real model per episode from the sidecar. The strict
+  // meta loader guarantees every body slot maps to an in_body meta slot with
+  // a model; an evaluated candidate that still has no mapping is a hard error
+  // below (never silently dropped).
   const candidateToModel = new Map(); // `${episodeId}\0${candidateId}` -> model
   for (const meta of metaRecords) {
     for (const slot of meta.slots ?? []) {
@@ -207,7 +231,17 @@ export function aggregate(evalRecords, episodes, metaRecords) {
   for (const rec of evalRecords) {
     const episodeId = rec.episode_id;
     const stages = rec.stages ?? {};
-    const modelOf = (candidateId) => candidateToModel.get(`${episodeId}\0${candidateId}`);
+    // Fail-closed identity mapping: an evaluated candidate with no model
+    // mapping is a hard error — it must never be silently dropped from the
+    // capability aggregates (a missing/duplicate meta mapping would silently
+    // shrink the evidence).
+    const modelOf = (candidateId) => {
+      const model = candidateToModel.get(`${episodeId}\0${candidateId}`);
+      if (!model) {
+        throw new Error(`aggregate: evaluated candidate ${JSON.stringify(candidateId)} of episode ${episodeId} has no model mapping (missing/duplicate meta slot mapping)`);
+      }
+      return model;
+    };
 
     // Evaluators: correctness + claims + noise per candidate. candidate_slots
     // counts each real candidate once per episode (distinct across evaluators).
@@ -217,7 +251,6 @@ export function aggregate(evalRecords, episodes, metaRecords) {
       if (!stage?.ok || !stage.data) continue;
       for (const cand of stage.data.candidates ?? []) {
         const model = modelOf(cand.candidate_id);
-        if (!model) continue;
         const agg = getModel(model);
         agg.episodes.add(episodeId);
         let set = distinctByModel.get(model);
@@ -249,7 +282,6 @@ export function aggregate(evalRecords, episodes, metaRecords) {
     if (adj?.ok && adj.data) {
       for (const v of adj.data.verdicts ?? []) {
         const model = modelOf(v.candidate_id);
-        if (!model) continue;
         const agg = getModel(model);
         agg.verdicts[v.verdict] = (agg.verdicts[v.verdict] ?? 0) + 1;
         if (v.verdict === "unresolved") agg.unresolved_verdicts++;
@@ -260,7 +292,7 @@ export function aggregate(evalRecords, episodes, metaRecords) {
         const models = new Set();
         for (const v of adj.data.verdicts ?? []) {
           const model = modelOf(v.candidate_id);
-          if (model) models.add(model);
+          models.add(model);
         }
         for (const model of models) {
           getModel(model).judge_disagreement[disagreement] = (getModel(model).judge_disagreement[disagreement] ?? 0) + 1;
@@ -273,7 +305,6 @@ export function aggregate(evalRecords, episodes, metaRecords) {
     if (cf?.ok && cf.data) {
       for (const c of cf.data.per_candidate ?? []) {
         const model = modelOf(c.candidate_id);
-        if (!model) continue;
         const agg = getModel(model);
         // Structured contribution: only exists=true counts.
         if (c.unique_valid_contribution?.exists === true) agg.unique_valid_contribution++;
@@ -315,13 +346,36 @@ export function aggregate(evalRecords, episodes, metaRecords) {
   };
 }
 
-function main() {
+async function main() {
   const options = parseArgs(process.argv.slice(2));
-  const episodes = loadEpisodes(options.episodesPath);
-  const metaRecords = loadMeta(options.metaPath);
-  const evalRecords = loadEvalRecords(options.evalDir);
+  // Strict corpus: the aggregate must never accept a record for an episode
+  // that is not a real, well-formed body of the loaded corpus.
+  const episodes = loadEpisodes(options.episodesPath, { strict: true });
+  // Normal aggregate never consumes a replay-mode corpus — those require the
+  // committed-replay aggregate path (t0-replay-aggregate --dataset).
+  const replayIds = episodes
+    .filter((e) => e?.dataset_mode === "replay")
+    .map((e) => e.episode_id);
+  if (replayIds.length > 0) {
+    console.error(
+      `t0-eval-aggregate: normal --episodes corpus contains dataset_mode=replay episode(s) ${JSON.stringify(replayIds.slice(0, 8))}${replayIds.length > 8 ? ` (+${replayIds.length - 8} more)` : ""}; use t0-replay-aggregate --dataset for replay evaluation`,
+    );
+    process.exit(2);
+  }
+  // Normal-corpus body gate: the corpus must be ONE valid producer body
+  // episode set (exact own key closure, unified legal dataset_mode, producer
+  // id shapes, per-slot contract) BEFORE any meta read / eval generation
+  // load — a malformed or drifted body fails closed before identity material
+  // or records are ever touched.
+  assertProducerBodyEpisodes(episodes);
+  const metaRecords = loadMetaStrict(options.metaPath, episodes);
+  const evalRecords = loadEvalRecords(options.evalDir, episodes);
+  if (evalRecords === null) {
+    console.error(`t0-eval-aggregate: no committed evaluation generation found in ${options.evalDir} (summary.json missing — eval records without a commit marker are never evidence)`);
+    process.exit(2);
+  }
   if (evalRecords.length === 0) {
-    console.error(`t0-eval-aggregate: no evaluation records found in ${options.evalDir}`);
+    console.error(`t0-eval-aggregate: committed generation has zero evaluation records in ${options.evalDir}`);
     process.exit(2);
   }
   const result = aggregate(evalRecords, episodes, metaRecords);
@@ -338,5 +392,8 @@ function main() {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main();
+  main().catch((err) => {
+    console.error(`t0-eval-aggregate failed: ${err.message}`);
+    process.exit(1);
+  });
 }
